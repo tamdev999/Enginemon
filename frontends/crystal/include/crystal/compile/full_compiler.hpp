@@ -1,0 +1,430 @@
+#pragma once
+// crystal/compile/full_compiler.hpp
+// Full-game Crystal ROM → EMON package compiler
+//
+// Architecture:
+//   [serial] load + validate ROM
+//            walk canonical Crystal tables
+//            discover complete content set
+//            assign stable semantic IDs
+//            resolve source symbols/refs once
+//
+//   [serial typed script pipeline] process all scripts through:
+//            TypedScriptDecoder → CrystalCFG → SemanticLegalizer → legality gate
+//            Build production CompiledGameData from actual discovered content
+//            Link all scripts through SemanticLinker
+//            Fail hard on any decode/CFG/legality/link error
+//
+//   [parallel worker pool] compile independent maps/assets
+//                          shared assets acquired through get-or-compute cache
+//
+//   [serial linker] collect results
+//                   resolve refs
+//                   validate completeness
+//                   dedup
+//                   sort by stable ID
+//
+//   [serial writer] emit EMON TOC/CRC
+//
+// Guarantees:
+// - No manual reduced map list
+// - No runtime ROM access
+// - No omitted content
+// - Stable IDs assigned before parallel work
+// - Deterministic byte-identical EMON regardless of worker order
+// - All scripts validated through typed pipeline (no Op_Raw degradation)
+
+#include "crystal/rom/loader.hpp"
+#include "crystal/rom/profile.hpp"
+#include "crystal/extract/map_extractor.hpp"
+#include "crystal/extract/tileset_extractor.hpp"
+#include "crystal/extract/sprite_extractor.hpp"
+#include "crystal/extract/font_extractor.hpp"
+#include "crystal/script/semantic_linker.hpp"
+#include "crystal/output/native_package.hpp"
+#include "engine/build/thread_pool.hpp"
+#include "engine/build/asset_cache.hpp"
+#include "engine/build/build_stats.hpp"
+#include "engine/build/package_cache.hpp"
+#include "engine/scripting/semantic_ir.hpp"
+
+#include <atomic>
+#include <filesystem>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+// Forward declarations for typed script pipeline
+namespace crystal {
+class TypedScriptDecoder;
+class ScriptDecoder;
+class CFGBuilder;
+class SemanticLegalizer;
+class LegalityGate;
+class ElevatorRegistry;
+class TrainerRegistry;
+class PokeMailRegistry;
+class TextRegistry;
+class StdScriptsTable;
+class NativeCallRegistry;
+class RamAddressRegistry;
+class SymbolMap;
+}
+
+namespace crystal {
+
+// Compiler version for cache compatibility
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.0.0";
+constexpr uint32_t EMON_FORMAT_VERSION = 2;
+
+//=============================================================================
+// DISCOVERED CONTENT
+// Complete set of all content found in ROM, with stable IDs assigned
+//=============================================================================
+
+// MapIdRef for fixed-point discovery (group, map index pair)
+struct MapIdRef {
+    uint8_t group;
+    uint8_t map;
+    
+    bool operator<(const MapIdRef& other) const {
+        if (group != other.group) return group < other.group;
+        return map < other.map;
+    }
+    
+    bool operator==(const MapIdRef& other) const {
+        return group == other.group && map == other.map;
+    }
+    
+    // Pack to uint16_t for quick lookup
+    uint16_t packed() const { return (group << 8) | map; }
+    static MapIdRef from_packed(uint16_t v) { return {static_cast<uint8_t>(v >> 8), static_cast<uint8_t>(v & 0xFF)}; }
+};
+
+struct DiscoveredMap {
+    std::string map_id;
+    uint8_t group;
+    uint8_t index;
+};
+
+struct DiscoveredTileset {
+    std::string tileset_id;
+    uint8_t tileset_index;
+};
+
+struct DiscoveredSprite {
+    std::string sprite_id;
+    uint8_t sprite_index;
+    bool is_player;
+};
+
+struct DiscoveredContent {
+    std::vector<DiscoveredMap> maps;
+    std::vector<DiscoveredTileset> tilesets;
+    std::vector<DiscoveredSprite> sprites;
+    
+    // Lookup maps (ID → index in vectors)
+    std::unordered_map<std::string, size_t> map_index;
+    std::unordered_map<std::string, size_t> tileset_index;
+    std::unordered_map<std::string, size_t> sprite_index;
+    
+    // Scripts discovered during map compilation (address → ID)
+    std::unordered_map<uint32_t, std::string> script_address_to_id;
+    std::mutex script_mutex;  // Protects script_address_to_id
+};
+
+//=============================================================================
+// COMPILED RESULTS
+// Results collected from parallel jobs, ready for linking
+//=============================================================================
+
+struct CompiledMapResult {
+    std::string map_id;
+    ExtractedMap map;
+    // NOTE: Scripts are no longer stored here - they go through the typed pipeline
+    bool success;
+    std::string error;
+};
+
+//=============================================================================
+// SCRIPT ADDRESS TRACKING
+// For typed script pipeline
+//=============================================================================
+
+struct ScriptAddressInfo {
+    uint32_t rom_address;
+    std::string script_id;
+    enginemon::MapId owning_map;  // MAP_NONE for StdScripts
+};
+
+struct LinkerInput {
+    std::vector<CompiledMapResult> maps;
+    std::mutex maps_mutex;
+    
+    std::vector<std::string> errors;
+    std::mutex errors_mutex;
+    
+    void add_map(CompiledMapResult&& result) {
+        std::lock_guard<std::mutex> lock(maps_mutex);
+        maps.push_back(std::move(result));
+    }
+    
+    void add_error(const std::string& error) {
+        std::lock_guard<std::mutex> lock(errors_mutex);
+        errors.push_back(error);
+    }
+};
+
+//=============================================================================
+// COMPILER CONFIG
+//=============================================================================
+
+struct FullCompilerConfig {
+    // Worker count (0 = auto-detect)
+    size_t worker_count = 0;
+    
+    // Time of day for palette rendering
+    TimeOfDay tileset_time_of_day = TimeOfDay::Day;
+    
+    // Enable persistent package cache
+    bool use_package_cache = true;
+    
+    // Package cache directory (empty = default)
+    std::filesystem::path cache_dir;
+    
+    // Emit address comments in generated Lua (for debugging)
+    bool emit_address_comments = false;
+    
+    // Compute options hash for cache identity
+    std::string compute_options_hash() const;
+};
+
+//=============================================================================
+// VALIDATION RESULTS
+//=============================================================================
+
+struct CompilerValidationError {
+    enum class Type {
+        MissingWarpDestination,
+        MissingConnectionDestination,
+        MissingScript,
+        MissingSprite,
+        MissingTileset,
+        MissingFont,
+        DuplicateId,
+        Other
+    };
+    
+    Type type;
+    std::string source;      // e.g., map_id or script_id
+    std::string reference;   // What was missing
+    std::string message;
+};
+
+struct CompilerValidationResult {
+    bool success = true;
+    std::vector<CompilerValidationError> errors;
+    std::vector<std::string> warnings;
+};
+
+//=============================================================================
+// FULL GAME COMPILER
+//=============================================================================
+
+class FullGameCompiler {
+public:
+    FullGameCompiler(const RomData& rom, const ExtractionProfile& profile);
+    ~FullGameCompiler();
+    
+    // Compile ROM to package file
+    // Returns true on success
+    bool compile(const std::filesystem::path& output_path, 
+                 const FullCompilerConfig& config = {});
+    
+    // Get build statistics
+    const enginemon::build::BuildStats& stats() const { return stats_; }
+    
+    // Get validation result
+    const CompilerValidationResult& validation() const { return validation_; }
+    
+    // Get linked corpus result (valid after compile())
+    const LinkedCorpus& linked_corpus() const { return linked_corpus_; }
+    
+    // Get compiled game data (valid after compile())
+    const CompiledGameData& compiled_game_data() const { return compiled_game_data_; }
+
+private:
+    const RomData& rom_;
+    const ExtractionProfile& profile_;
+    
+    // Extractors (thread-safe for read access to ROM)
+    std::unique_ptr<MapExtractor> map_extractor_;
+    std::unique_ptr<TilesetExtractor> tileset_extractor_;
+    std::unique_ptr<SpriteExtractor> sprite_extractor_;
+    std::unique_ptr<FontExtractor> font_extractor_;
+    
+    // Shared asset cache
+    std::unique_ptr<enginemon::build::AssetCache> asset_cache_;
+    
+    // Thread pool
+    std::unique_ptr<enginemon::build::ThreadPool> thread_pool_;
+    
+    // Persistent package cache
+    std::unique_ptr<enginemon::build::PackageCache> package_cache_;
+    
+    // Build state
+    DiscoveredContent content_;
+    LinkerInput linker_input_;
+    
+    // Typed script pipeline components (owned, serial usage only)
+    std::unique_ptr<SymbolMap> symbols_;
+    std::unique_ptr<TypedScriptDecoder> typed_decoder_;
+    std::unique_ptr<ScriptDecoder> script_decoder_;  // For text decoding
+    std::unique_ptr<StdScriptsTable> std_scripts_;
+    std::unique_ptr<NativeCallRegistry> native_registry_;
+    std::unique_ptr<RamAddressRegistry> ram_registry_;
+    std::unique_ptr<ElevatorRegistry> elevator_registry_;
+    std::unique_ptr<TrainerRegistry> trainer_registry_;
+    std::unique_ptr<PokeMailRegistry> pokemail_registry_;
+    std::unique_ptr<TextRegistry> text_registry_;
+    std::unique_ptr<CFGBuilder> cfg_builder_;
+    std::unique_ptr<SemanticLegalizer> legalizer_;
+    std::unique_ptr<LegalityGate> legality_gate_;
+    std::unique_ptr<SemanticLinker> semantic_linker_;
+    
+    // Production compiled game data (built from actual discovered content)
+    CompiledGameData compiled_game_data_;
+    
+    // Linked corpus result
+    LinkedCorpus linked_corpus_;
+    
+    // Collected script IRs for linking
+    std::vector<enginemon::SemanticScriptIR> map_root_irs_;
+    std::vector<enginemon::SemanticScriptIR> std_script_irs_;
+    
+    enginemon::build::BuildStats stats_;
+    CompilerValidationResult validation_;
+    
+    //=========================================================================
+    // PHASE 1: Discovery (serial)
+    //=========================================================================
+    
+    // Discover all content from ROM tables
+    bool discover_content();
+    
+    // Walk map group tables to find all maps
+    void discover_all_maps();
+    
+    // Discover tilesets referenced by maps
+    void discover_tilesets();
+    
+    // Discover sprites referenced by maps
+    void discover_sprites();
+    
+    //=========================================================================
+    // PHASE 2: Typed Script Pipeline (serial)
+    // Process all scripts through the full typed pipeline
+    //=========================================================================
+    
+    // Initialize typed script pipeline components
+    bool init_typed_pipeline();
+    
+    // Build production CompiledGameData from actual discovered content
+    void build_production_game_data();
+    
+    // Collect all script addresses from discovered maps
+    void collect_script_addresses(std::set<uint32_t>& map_root_addresses,
+                                   std::map<uint32_t, enginemon::MapId>& address_to_map);
+    
+    // Process a single script through Stages 1-5 (decode → CFG → lower → legality)
+    // Returns nullopt on hard failure (compile fails)
+    std::optional<enginemon::SemanticScriptIR> process_script_typed(
+        uint32_t rom_address,
+        const std::string& script_id);
+    
+    // Process all map-root scripts through typed pipeline
+    bool process_map_root_scripts(const std::set<uint32_t>& addresses,
+                                   const std::map<uint32_t, enginemon::MapId>& address_to_map);
+    
+    // Process all StdScript bodies through typed pipeline  
+    bool process_std_scripts();
+    
+    // Finalize registries after script processing (elevator, etc.)
+    void finalize_registries();
+    
+    // Link all scripts through SemanticLinker
+    bool link_scripts(const std::map<uint32_t, enginemon::MapId>& address_to_map);
+    
+    //=========================================================================
+    // PHASE 3: Parallel Asset Compilation
+    //=========================================================================
+    
+    // Submit all compilation jobs to thread pool
+    void submit_compilation_jobs(const FullCompilerConfig& config);
+    
+    // Individual job functions (run on worker threads)
+    CompiledMapResult compile_map_job(const DiscoveredMap& map_info,
+                                       const FullCompilerConfig& config);
+    
+    // Get or compute cached tileset
+    enginemon::build::AssetResult<ExtractedTileset> get_tileset(const std::string& tileset_id);
+    
+    // Get or compute cached sprite
+    enginemon::build::AssetResult<RuntimeSprite> get_sprite(const std::string& sprite_id);
+    
+    // Get or compute cached font
+    enginemon::build::AssetResult<FontAtlas> get_font();
+    
+    // Get or compute cached OBJ palettes
+    enginemon::build::AssetResult<SpriteObjPalettes> get_obj_palettes();
+    
+    //=========================================================================
+    // PHASE 4: Linking (serial)
+    //=========================================================================
+    
+    // Collect and link all results
+    bool link_results(PackageWriter& writer);
+    
+    // Validate all cross-references
+    CompilerValidationResult validate_references();
+    
+    // Sort results by stable ID for deterministic output
+    void sort_by_stable_id();
+    
+    //=========================================================================
+    // PHASE 5: Serialization (serial)
+    //=========================================================================
+    
+    // Write deterministic package
+    bool write_package(const std::filesystem::path& output_path, PackageWriter& writer);
+    
+    //=========================================================================
+    // Helpers
+    //=========================================================================
+    
+    // Make globally unique script ID
+    static std::string make_global_script_id(const std::string& map_id, 
+                                              const std::string& local_id);
+    
+    // Build identity for cache
+    enginemon::build::BuildIdentity make_build_identity(const FullCompilerConfig& config) const;
+};
+
+//=============================================================================
+// PUBLIC MAP DISCOVERY API
+// Fixed-point reachable map discovery for use by compiler and tests
+//=============================================================================
+
+// Discover all reachable maps via fixed-point algorithm:
+//   seed maps → extract → follow warps/connections → follow script map refs → repeat
+// Returns sorted vector of (group, map) references for all discoverable maps.
+std::vector<MapIdRef> discover_reachable_maps(
+    const RomData& rom,
+    const ExtractionProfile& profile,
+    MapExtractor& extractor);
+
+} // namespace crystal
