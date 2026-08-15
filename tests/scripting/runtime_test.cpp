@@ -485,6 +485,7 @@ TEST(newbarktown_teacher_default_branch) {
     // Create runtime FIRST, then reset flag state on it
     LuaRuntime runtime;
     flag_api::reset_test_state(&runtime);
+    
     runtime.set_error_handler([](const std::string& error, const std::string& tb) {
         std::cerr << "Script error: " << error << "\n" << tb << "\n";
     });
@@ -546,11 +547,11 @@ TEST(newbarktown_teacher_first_branch) {
         lua_code.replace(pos, 13, "             ");
     }
     
-    // Create runtime, then reset and set the FIRST flag to true
+    // Create runtime FIRST, then reset and set the FIRST flag to true
     LuaRuntime runtime;
     flag_api::reset_test_state(&runtime);
     flag_api::set_test_flag(&runtime, checked_flags[0], true);
-
+    
     runtime.set_error_handler([](const std::string& error, const std::string& tb) {
         std::cerr << "Script error: " << error << "\n" << tb << "\n";
     });
@@ -610,11 +611,11 @@ TEST(newbarktown_teacher_second_branch) {
         lua_code.replace(pos, 13, "             ");
     }
     
-    // Create runtime, then reset and set the SECOND flag to true
+    // Create runtime FIRST, then reset and set the SECOND flag to true
     LuaRuntime runtime;
     flag_api::reset_test_state(&runtime);
     flag_api::set_test_flag(&runtime, checked_flags[1], true);
-
+    
     runtime.set_error_handler([](const std::string& error, const std::string& tb) {
         std::cerr << "Script error: " << error << "\n" << tb << "\n";
     });
@@ -674,11 +675,11 @@ TEST(newbarktown_teacher_third_branch) {
         lua_code.replace(pos, 13, "             ");
     }
     
-    // Create runtime, then reset and set the THIRD flag to true (EVENT_GOT_A_POKEMON_FROM_ELM)
+    // Create runtime FIRST, then reset and set the THIRD flag to true (EVENT_GOT_A_POKEMON_FROM_ELM)
     LuaRuntime runtime;
     flag_api::reset_test_state(&runtime);
     flag_api::set_test_flag(&runtime, checked_flags[2], true);
-
+    
     runtime.set_error_handler([](const std::string& error, const std::string& tb) {
         std::cerr << "Script error: " << error << "\n" << tb << "\n";
     });
@@ -912,9 +913,6 @@ TEST(movement_world_state_changes) {
     auto initial = world_api::get_actor_state(&runtime, 2);
     ASSERT_EQ(initial.x, 5);
     ASSERT_EQ(initial.y, 5);
-    runtime.set_error_handler([](const std::string& error, const std::string& tb) {
-        std::cerr << "Script error: " << error << "\n" << tb << "\n";
-    });
     
     // Execute script that moves actor 2 left by 4 tiles
     std::string script_code = R"(
@@ -985,9 +983,9 @@ end
 
 TEST(movement_combined_steps_and_turns) {
     // Test a combined sequence: move left, turn down, move down
-    // Test a combined sequence: move left, turn down, move down
+    
     LuaRuntime runtime;
-
+    
     world_api::reset_world_state(&runtime);
     world_api::set_actor_pos(&runtime, 2, 10, 10);
     world_api::set_actor_facing(&runtime, 2, "up");
@@ -1026,9 +1024,9 @@ end
 
 TEST(movement_player_movement) {
     // Test that player movement works (actor_id = 0 is player)
-    // Test that player movement works (actor_id = 0 is player)
+    
     LuaRuntime runtime;
-
+    
     world_api::reset_world_state(&runtime);
     // Player starts at (5, 5) by default from reset_world_state
     
@@ -1292,15 +1290,15 @@ TEST(async_movement_batched_table) {
 TEST(async_movement_lua_yields) {
     // Test that Lua script yields when async movement is enabled
     // and remains yielded during movement
-    // and remains yielded during movement
+    
     LuaRuntime runtime;
-
-    world_api::reset_world_state(&runtime);
-    world_api::set_actor_pos(&runtime, 2, 10, 10);
-    world_api::set_async_movement(&runtime, true);  // Enable async mode
     runtime.set_error_handler([](const std::string& error, const std::string& tb) {
         std::cerr << "Script error: " << error << "\n" << tb << "\n";
     });
+    
+    world_api::reset_world_state(&runtime);
+    world_api::set_actor_pos(&runtime, 2, 10, 10);
+    world_api::set_async_movement(&runtime, true);  // Enable async mode
     
     std::string script_code = R"(
 async_yield_test = {}
@@ -1331,9 +1329,9 @@ end
 TEST(async_movement_position_not_jumped) {
     // Critical test: verify position does NOT jump to final state immediately
     // This is the core difference from sync mode
-    // This is the core difference from sync mode
+    
     LuaRuntime runtime;
-
+    
     world_api::reset_world_state(&runtime);
     world_api::set_actor_pos(&runtime, 2, 10, 10);
     world_api::set_async_movement(&runtime, true);
@@ -1371,15 +1369,15 @@ end
 TEST(async_movement_resumes_after_complete) {
     // Test that script resumes after movement completes
     // Requires ticking the movement manager and then resuming the script
-    // Requires ticking the movement manager and then resuming the script
+    
     LuaRuntime runtime;
-
-    world_api::reset_world_state(&runtime);
-    world_api::set_actor_pos(&runtime, 2, 10, 10);
-    world_api::set_async_movement(&runtime, true);
     runtime.set_error_handler([](const std::string& error, const std::string& tb) {
         std::cerr << "Script error: " << error << "\n" << tb << "\n";
     });
+    
+    world_api::reset_world_state(&runtime);
+    world_api::set_actor_pos(&runtime, 2, 10, 10);
+    world_api::set_async_movement(&runtime, true);
     
     // Track if face_actor was called (proves script continued past movement)
     bool face_called = false;
@@ -5059,6 +5057,137 @@ end
 }
 
 //=============================================================================
+// WORLD_API STUB ISOLATION TEST
+//
+// Proves that world_api stub state (actors, player, movement_calls, 
+// movement_manager, async_movement_enabled) is per-runtime.
+// State must be owned by LuaRuntime::StubServices, NOT global maps.
+//=============================================================================
+
+TEST(world_api_stub_isolation) {
+    // Two independent runtimes
+    LuaRuntime runtimeA;
+    LuaRuntime runtimeB;
+    
+    // Reset both to known state
+    world_api::reset_world_state(&runtimeA);
+    world_api::reset_world_state(&runtimeB);
+    
+    // Set DIFFERENT actor state in each runtime
+    world_api::set_actor_pos(&runtimeA, 2, 10, 20);
+    world_api::set_actor_facing(&runtimeA, 2, "left");
+    world_api::set_actor_pos(&runtimeA, 0, 5, 5);  // Player A
+    
+    world_api::set_actor_pos(&runtimeB, 2, 100, 200);
+    world_api::set_actor_facing(&runtimeB, 2, "right");
+    world_api::set_actor_pos(&runtimeB, 0, 50, 50);  // Player B
+    
+    // Verify actor isolation
+    auto actorA = world_api::get_actor_state(&runtimeA, 2);
+    auto actorB = world_api::get_actor_state(&runtimeB, 2);
+    ASSERT_EQ(actorA.x, 10);
+    ASSERT_EQ(actorA.y, 20);
+    ASSERT_STR_EQ(actorA.facing.c_str(), "left");
+    ASSERT_EQ(actorB.x, 100);
+    ASSERT_EQ(actorB.y, 200);
+    ASSERT_STR_EQ(actorB.facing.c_str(), "right");
+    
+    // Verify player isolation
+    auto playerA = world_api::get_actor_state(&runtimeA, 0);
+    auto playerB = world_api::get_actor_state(&runtimeB, 0);
+    ASSERT_EQ(playerA.x, 5);
+    ASSERT_EQ(playerB.x, 50);
+    
+    // Test movement_calls isolation
+    runtimeA.execute_string(R"(
+test_a = {}
+function test_a.main(ctx)
+    ctx.world:move_actor(2, {left=3})
+    ctx.world:face_actor(2, "up")
+end
+)", "testA");
+    runtimeA.start_script("test_a");
+    
+    auto& callsA = world_api::get_movement_calls(&runtimeA);
+    auto& callsB = world_api::get_movement_calls(&runtimeB);
+    
+    ASSERT_TRUE(callsA.size() >= 2);  // move_table + face
+    ASSERT_EQ(callsB.size(), 0u);     // Runtime B has no movement calls
+    
+    // Test async_movement_enabled isolation
+    world_api::set_async_movement(&runtimeA, true);
+    ASSERT_TRUE(world_api::is_async_movement_enabled(&runtimeA));
+    ASSERT_FALSE(world_api::is_async_movement_enabled(&runtimeB));
+    
+    // Test movement_manager isolation
+    auto& mmA = world_api::get_movement_manager(&runtimeA);
+    auto& mmB = world_api::get_movement_manager(&runtimeB);
+    ASSERT_TRUE(&mmA != &mmB);  // Different instances
+    
+    std::cout << "  [world_api stub state is per-runtime]\n";
+    std::cout << "  [Actor A: (" << actorA.x << "," << actorA.y << ") Actor B: (" << actorB.x << "," << actorB.y << ")]\n";
+    std::cout << "  [Movement calls A: " << callsA.size() << ", B: " << callsB.size() << "]\n";
+}
+
+//=============================================================================
+// FLAG_API STUB ISOLATION TEST
+//
+// Proves that flag_api stub state (flags, vars, flag_calls) is per-runtime.
+// State must be owned by LuaRuntime::StubServices, NOT global maps.
+//=============================================================================
+
+TEST(flag_api_stub_isolation) {
+    // Two independent runtimes
+    LuaRuntime runtimeA;
+    LuaRuntime runtimeB;
+    
+    // Reset both to known state
+    flag_api::reset_test_state(&runtimeA);
+    flag_api::reset_test_state(&runtimeB);
+    
+    // Set DIFFERENT flag state in each runtime
+    flag_api::set_test_flag(&runtimeA, 100, true);
+    flag_api::set_test_flag(&runtimeA, 101, false);
+    
+    flag_api::set_test_flag(&runtimeB, 100, false);
+    flag_api::set_test_flag(&runtimeB, 200, true);
+    
+    // Verify flag isolation
+    ASSERT_TRUE(flag_api::get_test_flag(&runtimeA, 100));
+    ASSERT_FALSE(flag_api::get_test_flag(&runtimeA, 101));
+    ASSERT_FALSE(flag_api::get_test_flag(&runtimeA, 200));  // Not set in A
+    
+    ASSERT_FALSE(flag_api::get_test_flag(&runtimeB, 100));
+    ASSERT_FALSE(flag_api::get_test_flag(&runtimeB, 101));  // Not set in B
+    ASSERT_TRUE(flag_api::get_test_flag(&runtimeB, 200));
+    
+    // Test flag_calls isolation via script execution
+    runtimeA.execute_string(R"(
+test_a = {}
+function test_a.main(ctx)
+    ctx.flags:set(500)
+    ctx.flags:check(501)
+    ctx.flags:clear(502)
+end
+)", "testA");
+    runtimeA.start_script("test_a");
+    
+    auto& callsA = flag_api::get_flag_calls(&runtimeA);
+    auto& callsB = flag_api::get_flag_calls(&runtimeB);
+    
+    ASSERT_EQ(callsA.size(), 3u);  // set, check, clear
+    ASSERT_EQ(callsB.size(), 0u);  // Runtime B has no flag calls
+    
+    // Verify flag changes from script went to correct runtime
+    ASSERT_TRUE(flag_api::get_test_flag(&runtimeA, 500));   // Set by script A
+    ASSERT_FALSE(flag_api::get_test_flag(&runtimeB, 500));  // NOT set in B
+    
+    std::cout << "  [flag_api stub state is per-runtime]\n";
+    std::cout << "  [Flag 100: A=" << flag_api::get_test_flag(&runtimeA, 100) << ", B=" << flag_api::get_test_flag(&runtimeB, 100) << "]\n";
+    std::cout << "  [Flag calls A: " << callsA.size() << ", B: " << callsB.size() << "]\n";
+}
+
+//=============================================================================
 // PACKAGE CONTEXT ISOLATION TEST
 // 
 // Proves that PackageContext (tileset cache, sprite cache) is per-instance.
@@ -5664,6 +5793,8 @@ int main(int argc, char* argv[]) {
     RUN_TEST(field_context_new_runtime_starts_clean);
     RUN_TEST(field_context_runtime_isolation_actor);
     RUN_TEST(field_context_runtime_isolation_encounter);
+    RUN_TEST(world_api_stub_isolation);  // Proves world_api stub state is per-runtime
+    RUN_TEST(flag_api_stub_isolation);   // Proves flag_api stub state is per-runtime
     RUN_TEST(package_context_isolation);  // Proves PackageContext is per-instance, not global
     RUN_TEST(presentation_hook_isolation);  // Proves PresentationHooks are per-instance, not global
     RUN_TEST(field_context_strength_active_persists_across_scripts);
