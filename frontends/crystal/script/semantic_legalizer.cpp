@@ -1873,6 +1873,8 @@ RuleResult rule_special(LoweringContext& ctx) {
         constexpr uint16_t GBCHECK_CGB = 2;     // Color Game Boy (Crystal's native platform)
         // Stubbed Mobile Adapter operations (Batch 6: frontend-absorbed no-ops)
         constexpr uint16_t SPECIAL_STUBBED_TRAINER_RANKINGS_HEALINGS = 157;
+        // Mobile Adapter status check (Batch 7: frontend-absorbed constant result)
+        constexpr uint16_t SPECIAL_CHECK_MOBILE_ADAPTER_STATUS = 160;
         
         switch (p->special_id) {
             // =================================================================
@@ -2072,6 +2074,52 @@ RuleResult rule_special(LoweringContext& ctx) {
                 enginemon::Sem_SetVar op;
                 op.var = enginemon::VarId{0};  // wScriptVar
                 op.source = enginemon::VarValueSource::literal(GBCHECK_CGB);
+                r.instructions.push_back(make_inst(std::move(op)));
+                return r;
+            }
+            
+            case SPECIAL_CHECK_MOBILE_ADAPTER_STATUS: {
+                // CheckMobileAdapterStatusSpecial - frontend-absorbed at compile time
+                // Source: pokecrystal/mobile/mobile_41.asm CheckMobileAdapterStatusSpecial
+                //
+                // SOURCE IMPLEMENTATION:
+                //   CheckMobileAdapterStatusSpecial: ; unused
+                //       ; this routine calls CheckMobileAdapterStatus
+                //       ; in the Japanese version
+                //       xor a                   ; A = 0
+                //       ld [wScriptVar], a      ; wScriptVar = 0
+                //       ret
+                //
+                // ABSORPTION PROOF:
+                // International Crystal stubbed the Mobile Adapter check. The Japanese
+                // version actually queried Mobile Adapter hardware status. Since the
+                // Mobile Adapter was never released outside Japan, the stub returns
+                // FALSE (0) unconditionally.
+                //
+                // All 7 corpus call sites consume the result via iffalse/iftrue:
+                //   - CeruleanPokecenter1F: iftrue .mobile (NOT taken)
+                //   - EcruteakPokecenter1F: iftrue .mobile (NOT taken)
+                //   - FastShipCabins_SW_SSW_NW: iftrue .mobile (NOT taken)
+                //   - Pokecenter2F (Trade): iffalse .NoMobile (TAKEN)
+                //   - Pokecenter2F (Battle): iffalse .NoMobile (TAKEN)
+                //   - Route40: iftrue .mobile (NOT taken)
+                //   - SaffronPokecenter1F: iftrue .mobile (NOT taken)
+                //
+                // SEMANTIC LOWERING:
+                // Set wScriptVar to 0 directly. No hardware query survives into
+                // native runtime. The subsequent conditional branch will evaluate
+                // correctly based on this constant result.
+                //
+                // This is structurally equivalent to constant folding:
+                //   source: special CheckMobileAdapterStatusSpecial → iffalse/iftrue
+                //   native: setval 0 → iffalse/iftrue
+                // The branch condition is preserved; only the stubbed query is eliminated.
+                //
+                // NOTE: This is NOT a zero-instruction absorption. The result (0) must
+                // be explicitly written because subsequent conditionals depend on it.
+                enginemon::Sem_SetVar op;
+                op.var = enginemon::VarId{0};  // wScriptVar
+                op.source = enginemon::VarValueSource::literal(0);  // FALSE / Mobile not present
                 r.instructions.push_back(make_inst(std::move(op)));
                 return r;
             }

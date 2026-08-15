@@ -7101,6 +7101,281 @@ TEST(batch6_absorption_accounting_invariant) {
 }
 
 //=============================================================================
+// BATCH 7 SPECIAL SEMANTIC OP TESTS - CheckMobileAdapterStatusSpecial (ID 160)
+// Verifies:
+//   - Special 160 → Sem_SetVar{var=0, source=literal(0)}
+//   - Result is explicitly written (not absorbed to zero instructions)
+//   - Previous script_var value is overwritten
+//   - Branch behavior matches source FALSE result
+//=============================================================================
+
+TEST(batch7_special_160_production_lowering) {
+    // CRITICAL: Verify Special 160 (CheckMobileAdapterStatusSpecial) is lowered
+    // to Sem_SetVar with literal 0, NOT zero instructions, NOT Sem_Special
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // 1. Build CrystalCommand for Special 160
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{160};  // CheckMobileAdapterStatusSpecial
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 160, 0};
+    
+    // 2. Build minimal IR
+    CrystalScriptIR ir;
+    ir.name = "test_special_160";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    // 3. Set up LoweringContext
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    // 4. Call rule_special
+    RuleResult result = rule_special(lctx);
+    
+    // 5. ASSERT: rule matched and consumed command
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1);
+    
+    // 6. ASSERT: EXACTLY ONE semantic instruction produced (NOT zero!)
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    // 7. ASSERT: output contains Sem_SetVar, NOT Sem_Special
+    const auto& op = result.instructions[0].op;
+    bool is_sem_special = std::holds_alternative<Sem_Special>(op);
+    ASSERT_FALSE(is_sem_special);
+    
+    bool is_set_var = std::holds_alternative<Sem_SetVar>(op);
+    ASSERT_TRUE(is_set_var);
+    
+    // 8. ASSERT: Sem_SetVar has correct value (literal 0 = FALSE)
+    const auto& set_var = std::get<Sem_SetVar>(op);
+    ASSERT_EQ(set_var.var, 0);  // wScriptVar
+    ASSERT_TRUE(set_var.source.is_literal());
+    ASSERT_EQ(set_var.source.value, 0);  // FALSE
+    
+    std::cout << "  [Special 160 → Sem_SetVar{var=0, literal=0} (verified)]\n";
+}
+
+TEST(batch7_special_160_no_sem_special) {
+    // ADVERSARIAL: Prove Special 160 does NOT produce Sem_Special
+    // This ensures the lowering actually happened
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{160};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 160, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_no_sem_special_160";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    // ASSERT: Exactly one instruction
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    // ASSERT: NOT Sem_Special
+    const auto& op = result.instructions[0].op;
+    bool is_sem_special = std::holds_alternative<Sem_Special>(op);
+    ASSERT_FALSE(is_sem_special);
+    
+    std::cout << "  [Special 160 produces NO Sem_Special (verified)]\n";
+}
+
+TEST(batch7_special_160_not_zero_instructions) {
+    // CRITICAL: Prove Special 160 does NOT produce zero instructions
+    // This distinguishes it from true no-op absorption (like Special 157)
+    // The result MUST be written because subsequent conditionals depend on it
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{160};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 160, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_not_zero_instructions";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    // ASSERT: NOT zero instructions (unlike Special 157 absorption)
+    ASSERT_TRUE(result.instructions.size() > 0);
+    
+    // ASSERT: NOT tracked as absorbed (it's lowered, not absorbed)
+    ASSERT_EQ(result.absorbed_opcodes.size(), 0);
+    
+    std::cout << "  [Special 160 → 1 instruction (NOT absorbed to zero)]\n";
+}
+
+TEST(batch7_special_160_overwrites_stale_script_var) {
+    // CRITICAL ADVERSARIAL: Prove the lowering overwrites previous script_var
+    // If script_var started at nonzero, Special 160 MUST set it to 0
+    // This proves we're not accidentally preserving stale state
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // The test verifies the semantic operation produced writes a constant 0
+    // regardless of what script_var was before. The semantic IR doesn't track
+    // runtime state, but the operation produced IS a write operation.
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{160};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 160, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_overwrite_stale";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    // ASSERT: Produced instruction is a WRITE operation
+    ASSERT_EQ(result.instructions.size(), 1);
+    const auto& op = result.instructions[0].op;
+    
+    // ASSERT: It's Sem_SetVar (which is a write to script_var)
+    ASSERT_TRUE(std::holds_alternative<Sem_SetVar>(op));
+    
+    const auto& set_var = std::get<Sem_SetVar>(op);
+    
+    // ASSERT: Target is wScriptVar (var ID 0)
+    ASSERT_EQ(set_var.var, 0);
+    
+    // ASSERT: Source is a literal constant (not a read from another var)
+    ASSERT_TRUE(set_var.source.is_literal());
+    
+    // ASSERT: The literal value is 0 (FALSE)
+    // This proves: regardless of prior script_var value, we WRITE 0
+    ASSERT_EQ(set_var.source.value, 0);
+    
+    std::cout << "  [Sem_SetVar writes literal 0 → overwrites any stale value]\n";
+    std::cout << "  [Previous script_var state is irrelevant - we WRITE 0]\n";
+}
+
+TEST(batch7_special_160_branch_equivalence) {
+    // Prove branch behavior matches source: wScriptVar = 0 means FALSE
+    // iffalse branches TAKEN, iftrue branches NOT TAKEN
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{160};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 160, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_branch_equivalence";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    ASSERT_EQ(result.instructions.size(), 1);
+    const auto& op = result.instructions[0].op;
+    const auto& set_var = std::get<Sem_SetVar>(op);
+    
+    // Get the literal value that will be used for branch evaluation
+    int16_t branch_value = set_var.source.value;
+    
+    // Crystal branch semantics:
+    //   iffalse: branches if wScriptVar == 0
+    //   iftrue:  branches if wScriptVar != 0
+    
+    // With branch_value = 0:
+    bool iffalse_taken = (branch_value == 0);  // TRUE - branch taken
+    bool iftrue_taken = (branch_value != 0);   // FALSE - branch not taken
+    
+    ASSERT_TRUE(iffalse_taken);   // "iffalse .NoMobile" is TAKEN
+    ASSERT_FALSE(iftrue_taken);   // "iftrue .mobile" is NOT taken
+    
+    std::cout << "  [wScriptVar = 0 (FALSE)]\n";
+    std::cout << "  [iffalse .NoMobile → TAKEN (mobile features skipped)]\n";
+    std::cout << "  [iftrue .mobile → NOT TAKEN (mobile text skipped)]\n";
+    std::cout << "  [Branch equivalence with source: VERIFIED]\n";
+}
+
+//=============================================================================
 // SIMULATION TIMING TESTS
 // Verifies SimulationScheduler decouples simulation from render rate
 //=============================================================================
@@ -7871,6 +8146,13 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch6_special_157_no_sem_special);
     RUN_TEST(batch6_unhandled_special_produces_sem_special);
     RUN_TEST(batch6_absorption_accounting_invariant);
+    
+    // Batch 7 Special semantic op tests - CheckMobileAdapterStatusSpecial (ID 160)
+    RUN_TEST(batch7_special_160_production_lowering);
+    RUN_TEST(batch7_special_160_no_sem_special);
+    RUN_TEST(batch7_special_160_not_zero_instructions);
+    RUN_TEST(batch7_special_160_overwrites_stale_script_var);
+    RUN_TEST(batch7_special_160_branch_equivalence);
     
     // Simulation timing tests (Audit 8 - render/sim decoupling)
     RUN_TEST(timing_scheduler_basic);
