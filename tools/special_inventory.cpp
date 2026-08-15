@@ -116,6 +116,7 @@ int main(int argc, char* argv[]) {
     size_t show_balance_overlay_count = 0;
     size_t check_party_pokerus_count = 0;
     size_t gameboy_check_absorbed_count = 0;  // Absorbed as Sem_SetVar
+    size_t stubbed_noop_absorbed_count = 0;    // Absorbed no-ops (produce no instructions)
     
     // Process each script
     for (uint32_t addr : all_addresses) {

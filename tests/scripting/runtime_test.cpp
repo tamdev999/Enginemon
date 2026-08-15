@@ -6878,6 +6878,229 @@ TEST(batch5_check_pokerus_script_result) {
 }
 
 //=============================================================================
+// BATCH 6 SPECIAL SEMANTIC OP TESTS - StubbedTrainerRankings_Healings (ID 157)
+// Verifies:
+//   - Special 157 → frontend-absorbed no-op (zero semantic instructions)
+//   - Source command fully accounted via absorbed_opcodes
+//   - Unknown/unhandled specials still produce Sem_Special (negative control)
+//=============================================================================
+
+TEST(batch6_special_157_production_absorption) {
+    // CRITICAL: Verify Special 157 (StubbedTrainerRankings_Healings) is absorbed
+    // Should consume command but produce ZERO semantic instructions
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // 1. Build CrystalCommand for Special 157
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{157};  // StubbedTrainerRankings_Healings
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 157, 0};
+    
+    // 2. Build minimal IR
+    CrystalScriptIR ir;
+    ir.name = "test_special_157";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    // 3. Set up LoweringContext
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    // 4. Call rule_special
+    RuleResult result = rule_special(lctx);
+    
+    // 5. ASSERT: rule matched and consumed command
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1);
+    
+    // 6. ASSERT: ZERO semantic instructions produced (true absorption)
+    ASSERT_EQ(result.instructions.size(), 0);
+    
+    // 7. ASSERT: opcode tracked in absorbed_opcodes (accounting proof)
+    ASSERT_EQ(result.absorbed_opcodes.size(), 1);
+    ASSERT_EQ(result.absorbed_opcodes[0], 0x0F);  // special opcode
+    
+    std::cout << "  [Special 157 → ABSORBED (0 instructions, 1 absorbed_opcode)]\n";
+}
+
+TEST(batch6_special_157_no_sem_special) {
+    // ADVERSARIAL: Prove Special 157 does NOT produce Sem_Special
+    // A silently dropped command would produce Sem_Special in fallback
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Build command
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{157};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 157, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_no_sem_special_157";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    // ASSERT: No instructions means no Sem_Special
+    ASSERT_EQ(result.instructions.size(), 0);
+    
+    // Double-check: if any instructions exist, none should be Sem_Special
+    for (const auto& inst : result.instructions) {
+        bool is_sem_special = std::holds_alternative<Sem_Special>(inst.op);
+        ASSERT_FALSE(is_sem_special);
+    }
+    
+    std::cout << "  [Special 157 produces NO Sem_Special (verified)]\n";
+}
+
+TEST(batch6_unhandled_special_produces_sem_special) {
+    // NEGATIVE CONTROL: Prove unhandled specials still produce Sem_Special
+    // This distinguishes intentional absorption from accidental dropping
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Use Special 1 (SetBitsForLinkTradeRequest) which is NOT lowered
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{1};  // Unhandled link protocol special
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 1, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_unhandled_special";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    // ASSERT: Rule matched and consumed
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1);
+    
+    // ASSERT: Produced exactly 1 instruction (NOT zero like absorption)
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    // ASSERT: That instruction IS Sem_Special (fallback path)
+    const auto& op = result.instructions[0].op;
+    bool is_sem_special = std::holds_alternative<Sem_Special>(op);
+    ASSERT_TRUE(is_sem_special);
+    
+    const auto& sem_special = std::get<Sem_Special>(op);
+    ASSERT_EQ(sem_special.special_id, 1);
+    
+    // ASSERT: No absorbed_opcodes (this was lowered, not absorbed)
+    ASSERT_EQ(result.absorbed_opcodes.size(), 0);
+    
+    std::cout << "  [Unhandled Special 1 → Sem_Special (fallback verified)]\n";
+    std::cout << "  [Distinguishes absorption from accidental dropping]\n";
+}
+
+TEST(batch6_absorption_accounting_invariant) {
+    // CRITICAL: Verify the accounting invariant holds for absorbed commands
+    // total_commands = commands_lowered + commands_unlowered + commands_absorbed
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Build a script with ONE Special 157 command
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{157};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 157, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_accounting";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    // Build CFG
+    CrystalCFG cfg;
+    cfg.script_name = "test_accounting";
+    cfg.entry_address = 0;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    
+    // Run through full legalizer
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    
+    // ASSERT: Success
+    ASSERT_TRUE(result.success);
+    
+    // ASSERT: Accounting invariant
+    // commands_consumed = 1 (we processed 1 command)
+    // commands_lowered = 0 (absorption produces no instructions)
+    // commands_unlowered = 0 (no failures)
+    // commands_absorbed = 1 (Special 157 absorbed)
+    ASSERT_EQ(result.commands_consumed, 1);
+    ASSERT_EQ(result.commands_lowered, 0);
+    ASSERT_EQ(result.commands_unlowered, 0);
+    ASSERT_EQ(result.commands_absorbed, 1);
+    
+    // Verify invariant: consumed = lowered + unlowered + absorbed
+    size_t accounted = result.commands_lowered + result.commands_unlowered + result.commands_absorbed;
+    ASSERT_EQ(result.commands_consumed, accounted);
+    
+    // Verify absorbed_by_opcode tracking
+    ASSERT_EQ(result.absorbed_by_opcode.count(0x0F), 1);
+    ASSERT_EQ(result.absorbed_by_opcode.at(0x0F), 1);
+    
+    std::cout << "  [Accounting: consumed=1, lowered=0, unlowered=0, absorbed=1]\n";
+    std::cout << "  [Invariant: 1 = 0 + 0 + 1 ✓]\n";
+}
+
+//=============================================================================
 // SIMULATION TIMING TESTS
 // Verifies SimulationScheduler decouples simulation from render rate
 //=============================================================================
@@ -7642,6 +7865,12 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch5_no_sem_special_for_78_102);
     RUN_TEST(batch5_gameboy_check_absorption_proof);
     RUN_TEST(batch5_check_pokerus_script_result);
+    
+    // Batch 6 Special semantic op tests - StubbedTrainerRankings_Healings (ID 157)
+    RUN_TEST(batch6_special_157_production_absorption);
+    RUN_TEST(batch6_special_157_no_sem_special);
+    RUN_TEST(batch6_unhandled_special_produces_sem_special);
+    RUN_TEST(batch6_absorption_accounting_invariant);
     
     // Simulation timing tests (Audit 8 - render/sim decoupling)
     RUN_TEST(timing_scheduler_basic);

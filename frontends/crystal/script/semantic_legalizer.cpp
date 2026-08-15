@@ -1871,6 +1871,8 @@ RuleResult rule_special(LoweringContext& ctx) {
         // constexpr uint16_t GBCHECK_GB = 0;   // Original Game Boy
         // constexpr uint16_t GBCHECK_SGB = 1;  // Super Game Boy
         constexpr uint16_t GBCHECK_CGB = 2;     // Color Game Boy (Crystal's native platform)
+        // Stubbed Mobile Adapter operations (Batch 6: frontend-absorbed no-ops)
+        constexpr uint16_t SPECIAL_STUBBED_TRAINER_RANKINGS_HEALINGS = 157;
         
         switch (p->special_id) {
             // =================================================================
@@ -2108,6 +2110,36 @@ RuleResult rule_special(LoweringContext& ctx) {
                 enginemon::Sem_ShowBalanceOverlay op;
                 op.contents = enginemon::BalanceContent::Money;
                 r.instructions.push_back(make_inst(std::move(op)));
+                return r;
+            }
+            
+            // =================================================================
+            // STUBBED NO-OP OPERATIONS (Batch 6: frontend-absorbed)
+            // =================================================================
+            // These are Mobile Adapter features that were stubbed out for
+            // localized (non-Japanese) Crystal releases. The source implementation
+            // is a single `ret` instruction - immediate return with zero effects.
+            // Absorption produces zero semantic instructions.
+            
+            case SPECIAL_STUBBED_TRAINER_RANKINGS_HEALINGS: {
+                // StubbedTrainerRankings_Healings - complete no-op
+                // Source: mobile/mobile_41.asm (suiCune reference)
+                // Implementation: `ret` as first instruction (immediate unconditional return)
+                // All code after `ret` is unreachable dead code from removed Mobile Adapter.
+                //
+                // ABSORPTION PROOF:
+                // - No inputs read
+                // - No outputs written
+                // - No script result (wScriptVar not modified)
+                // - No persistent state mutation
+                // - No transient state mutation
+                // - No wait/timing
+                // - No UI/audio/world effects
+                //
+                // SEMANTIC LOWERING:
+                // Produce zero semantic instructions. Track as absorbed.
+                // Source command is consumed and fully accounted for.
+                r.absorbed_opcodes.push_back(cmd->opcode());
                 return r;
             }
             
