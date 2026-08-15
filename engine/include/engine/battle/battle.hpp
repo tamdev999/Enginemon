@@ -283,8 +283,9 @@ private:
     BattleAction opponent_action_;
     uint8_t run_attempts_ = 0;
     
-    // RNG
-    std::mt19937 rng_;
+    // NOTE: When battle system is implemented, RNG must be consumed from
+    // GameState::rng to maintain deterministic save/restore.
+    // Do NOT add std::mt19937 rng_ here - it violates Audit 7 determinism.
     
     // Callbacks
     MessageCallback on_message_;

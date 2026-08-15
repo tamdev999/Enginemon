@@ -9,6 +9,7 @@
 #include "engine/core/game_loop.hpp"
 #include <functional>
 #include <numeric>
+#include <stdexcept>
 
 namespace enginemon {
 
@@ -534,8 +535,65 @@ void HeadlessGameLoop::reset() {
     movement_manager_.cancel_all();
     active_coroutine_ = 0;
     active_script_id_.clear();
-    fallback_rng_state_ = 12345;
     // Note: game_state_ pointer is NOT reset - caller owns that
+}
+
+//=============================================================================
+// NPC STATE SNAPSHOT/RESTORE
+// For deterministic save/load
+//=============================================================================
+
+void HeadlessGameLoop::snapshot_npc_states(const std::string& map_id) {
+    if (!game_state_) return;
+    
+    std::vector<NpcSaveState> states;
+    states.reserve(npcs_.size());
+    
+    for (const auto& npc : npcs_) {
+        NpcSaveState save;
+        save.id = npc.id;
+        save.x = npc.x;
+        save.y = npc.y;
+        save.facing = npc.facing;
+        save.is_moving = npc.is_moving;
+        save.idle_timer = npc.idle_timer;
+        save.target_x = npc.target_x;
+        save.target_y = npc.target_y;
+        save.move_progress = npc.move_progress;
+        save.frozen = npc.frozen;
+        save.visible = npc.visible;
+        states.push_back(save);
+    }
+    
+    game_state_->npc_states[map_id] = std::move(states);
+}
+
+void HeadlessGameLoop::restore_npc_states(const std::string& map_id) {
+    if (!game_state_) return;
+    
+    auto it = game_state_->npc_states.find(map_id);
+    if (it == game_state_->npc_states.end()) return;
+    
+    const auto& saved_states = it->second;
+    
+    for (auto& npc : npcs_) {
+        // Find matching saved state by ID
+        for (const auto& save : saved_states) {
+            if (save.id == npc.id) {
+                npc.x = save.x;
+                npc.y = save.y;
+                npc.facing = save.facing;
+                npc.is_moving = save.is_moving;
+                npc.idle_timer = save.idle_timer;
+                npc.target_x = save.target_x;
+                npc.target_y = save.target_y;
+                npc.move_progress = save.move_progress;
+                npc.frozen = save.frozen;
+                npc.visible = save.visible;
+                break;
+            }
+        }
+    }
 }
 
 //=============================================================================
@@ -545,25 +603,20 @@ void HeadlessGameLoop::reset() {
 //=============================================================================
 
 // Get next random value from the canonical gameplay RNG
-// Uses GameState::rng if available, otherwise falls back to internal state
+// REQUIRES game_state_ to be set - no fallback RNG
 uint32_t HeadlessGameLoop::next_random() {
-    if (game_state_) {
-        // Use the canonical GameState RNG (saved/restored with game)
-        return game_state_->rng.next();
-    } else {
-        // Fallback for tests that don't provide GameState
-        // WARNING: This path breaks save/load determinism
-        fallback_rng_state_ = fallback_rng_state_ * 1664525 + 1013904223;
-        return fallback_rng_state_;
+    if (!game_state_) {
+        // This is a programming error - gameplay simulation requires GameState
+        throw std::runtime_error("HeadlessGameLoop::next_random() called without GameState");
     }
+    return game_state_->rng.next();
 }
 
 void HeadlessGameLoop::set_rng_seed(uint32_t seed) {
-    if (game_state_) {
-        game_state_->rng.set_seed(seed);
-    } else {
-        fallback_rng_state_ = seed;
+    if (!game_state_) {
+        throw std::runtime_error("HeadlessGameLoop::set_rng_seed() called without GameState");
     }
+    game_state_->rng.set_seed(seed);
 }
 
 void HeadlessGameLoop::freeze_npc(uint16_t npc_id) {

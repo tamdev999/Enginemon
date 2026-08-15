@@ -314,8 +314,22 @@ public:
     GameState* game_state() { return game_state_; }
     const GameState* game_state() const { return game_state_; }
     
-    // Set RNG seed (convenience - sets GameState's RNG if available, else internal fallback)
+    // Set RNG seed - REQUIRES GameState to be set
+    // Throws if no GameState is available (no fallback RNG)
     void set_rng_seed(uint32_t seed);
+    
+    //=========================================================================
+    // NPC STATE SNAPSHOT/RESTORE
+    // For deterministic save/load
+    //=========================================================================
+    
+    // Snapshot current NPC states into GameState
+    // Must be called before serializing GameState
+    void snapshot_npc_states(const std::string& map_id);
+    
+    // Restore NPC states from GameState
+    // Must be called after loading a map and before simulation resumes
+    void restore_npc_states(const std::string& map_id);
     
     //=========================================================================
     // NPC AUTONOMOUS MOVEMENT
@@ -367,18 +381,14 @@ private:
     
     // Game state (not owned - receives pointer from caller)
     // Used for RNG and other gameplay state
+    // REQUIRED for gameplay simulation - no fallback RNG
     GameState* game_state_ = nullptr;
-    
-    // Fallback RNG for tests that don't provide GameState
-    // WARNING: This exists only for backward compatibility with tests
-    // Production code should always set_game_state()
-    uint32_t fallback_rng_state_ = 12345;
     
     //=========================================================================
     // INTERNAL HELPERS
     //=========================================================================
     
-    // RNG helper (simple LCG for determinism)
+    // RNG helper - REQUIRES game_state_ to be set
     uint32_t next_random();
     
     // Handle movement input (updates facing, checks collision, starts movement)

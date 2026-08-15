@@ -73,6 +73,26 @@ struct RngState {
 };
 
 //=============================================================================
+// NPC SAVE STATE
+// Per-NPC runtime state that affects gameplay determinism
+// Must be saved/restored for deterministic simulation resume
+//=============================================================================
+
+struct NpcSaveState {
+    uint16_t id = 0;            // Object local ID (1-indexed)
+    int32_t x = 0;              // Current tile position
+    int32_t y = 0;
+    Direction facing = Direction::Down;
+    bool is_moving = false;
+    int32_t idle_timer = 0;     // Frames until next movement attempt - CRITICAL for determinism
+    int32_t target_x = 0;       // Movement target X (during move)
+    int32_t target_y = 0;       // Movement target Y
+    int32_t move_progress = 0;  // Ticks into current movement
+    bool frozen = false;        // Script is interacting with this NPC
+    bool visible = true;        // Visibility state
+};
+
+//=============================================================================
 // GAME STATE
 // Complete saveable state
 //=============================================================================
@@ -92,6 +112,10 @@ struct GameState {
     
     // RNG
     RngState rng;
+    
+    // NPC states per map (map_id -> NPC states)
+    // This captures all gameplay-relevant NPC runtime state for deterministic resume
+    std::unordered_map<std::string, std::vector<NpcSaveState>> npc_states;
     
     // Playtime (frames or seconds)
     uint64_t playtime_frames = 0;

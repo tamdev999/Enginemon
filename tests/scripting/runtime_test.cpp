@@ -4211,6 +4211,9 @@ TEST(npc_idle_timer_countdown) {
 TEST(npc_frozen_blocks_movement) {
     // Test that frozen NPCs don't move
     HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(12345);
+    loop.set_game_state(&game_state);
     
     RuntimeMap rtmap;
     rtmap.width = 10;
@@ -4238,7 +4241,6 @@ TEST(npc_frozen_blocks_movement) {
     loop.add_npc(npc);
     
     loop.spawn_player(8, 8, enginemon::Direction::Down);
-    loop.set_rng_seed(12345);
     
     // Tick multiple times
     for (int i = 0; i < 100; i++) {
@@ -4259,6 +4261,9 @@ TEST(npc_frozen_blocks_movement) {
 TEST(npc_standing_never_moves) {
     // Test that NPCs with Standing behavior never move
     HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(12345);
+    loop.set_game_state(&game_state);
     
     RuntimeMap rtmap;
     rtmap.width = 10;
@@ -4282,7 +4287,6 @@ TEST(npc_standing_never_moves) {
     loop.add_npc(npc);
     
     loop.spawn_player(8, 8, enginemon::Direction::Down);
-    loop.set_rng_seed(12345);
     
     // Tick many times
     for (int i = 0; i < 200; i++) {
@@ -4302,6 +4306,9 @@ TEST(npc_standing_never_moves) {
 TEST(npc_spin_changes_facing) {
     // Test that spin behavior changes facing but not position
     HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(12345);
+    loop.set_game_state(&game_state);
     
     RuntimeMap rtmap;
     rtmap.width = 10;
@@ -4354,6 +4361,9 @@ TEST(npc_spin_changes_facing) {
 TEST(npc_walk_changes_position) {
     // Test that walk behavior eventually changes position
     HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(42);  // AUDIT 7: Use GameState RNG
+    loop.set_game_state(&game_state);
     
     RuntimeMap rtmap;
     rtmap.width = 10;
@@ -4381,7 +4391,7 @@ TEST(npc_walk_changes_position) {
     loop.add_npc(npc);
     
     loop.spawn_player(8, 8, enginemon::Direction::Down);
-    loop.set_rng_seed(42);  // Use seed that leads to movement
+    // RNG already seeded via GameState above
     
     // Tick until position changes
     bool position_changed = false;
@@ -4404,6 +4414,9 @@ TEST(npc_walk_changes_position) {
 TEST(npc_respects_radius_bounds) {
     // Test that NPC respects movement radius
     HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(99999);  // AUDIT 7: Use GameState RNG
+    loop.set_game_state(&game_state);
     
     RuntimeMap rtmap;
     rtmap.width = 20;
@@ -4431,7 +4444,7 @@ TEST(npc_respects_radius_bounds) {
     loop.add_npc(npc);
     
     loop.spawn_player(0, 0, enginemon::Direction::Down);
-    loop.set_rng_seed(99999);
+    // RNG already seeded via GameState above
     
     // Tick many times
     for (int i = 0; i < 2000; i++) {
@@ -4456,6 +4469,9 @@ TEST(npc_respects_radius_bounds) {
 TEST(npc_collision_with_player) {
     // Test that NPC cannot move into player's tile
     HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(0);  // AUDIT 7: Use GameState RNG
+    loop.set_game_state(&game_state);
     
     RuntimeMap rtmap;
     rtmap.width = 10;
@@ -4484,7 +4500,7 @@ TEST(npc_collision_with_player) {
     
     // Place player directly below NPC
     loop.spawn_player(5, 6, enginemon::Direction::Up);
-    loop.set_rng_seed(0);  // Seed that would try to move down
+    // RNG already seeded via GameState above
     
     // The NPC should never end up at player position
     for (int i = 0; i < 500; i++) {
@@ -4499,6 +4515,9 @@ TEST(npc_collision_with_player) {
 TEST(npc_walk_up_down_direction) {
     // Test that WALK_UP_DOWN only moves vertically
     HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(54321);  // AUDIT 7: Use GameState RNG
+    loop.set_game_state(&game_state);
     
     RuntimeMap rtmap;
     rtmap.width = 10;
@@ -4526,7 +4545,7 @@ TEST(npc_walk_up_down_direction) {
     loop.add_npc(npc);
     
     loop.spawn_player(0, 0, enginemon::Direction::Down);
-    loop.set_rng_seed(54321);
+    // RNG already seeded via GameState above
     
     // Track all positions
     bool ever_moved_x = false;
@@ -4657,104 +4676,148 @@ TEST(npc_rng_determinism_via_gamestate) {
 }
 
 TEST(npc_rng_save_restore_determinism) {
-    // AUDIT 7: Proves save/load restores deterministic RNG stream
-    // seed → consume N random values → save → consume M → restore → reconsume M → must match
+    // AUDIT 7 STRONG TEST: Proves save/load restores deterministic NPC simulation
+    // seed → initialize NPCs → advance until nontrivial state → snapshot → advance N
+    // → record behavior → restore → advance N → must match exactly
     //
-    // Note: This tests RNG state persistence, not full NPC state persistence.
-    // Full NPC state (position, idle_timer, etc.) would require additional save data.
+    // This tests FULL simulation state restoration, not just RNG.
     
+    HeadlessGameLoop loop;
     GameState game_state;
-    game_state.rng.set_seed(0xCAFEBABE);
     
-    // Consume some RNG (simulating gameplay)
+    RuntimeMap rtmap;
+    rtmap.width = 20;
+    rtmap.height = 20;
+    rtmap.blocks.resize(400, 0x01);
+    
+    loop.load_map(rtmap);
+    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
+        return 0x01;  // All walkable
+    });
+    
+    // Add NPC with random walk behavior
+    NpcState npc;
+    npc.id = 1;
+    npc.x = 10;
+    npc.y = 10;
+    npc.facing = enginemon::Direction::Down;
+    npc.behavior = NpcMovementBehavior::RandomWalkXY;
+    npc.idle_timer = 1;  // Ready immediately
+    npc.radius_x = 5;
+    npc.radius_y = 5;
+    npc.init_x = 10;
+    npc.init_y = 10;
+    npc.visible = true;
+    npc.frozen = false;
+    loop.add_npc(npc);
+    
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    
+    // Initialize RNG via GameState
+    game_state.rng.set_seed(0xCAFEBABE);
+    game_state.player.current_map_id = "test_map";
+    loop.set_game_state(&game_state);
+    
+    // Run until nontrivial NPC state exists (NPC has moved or idle_timer has changed)
     for (int i = 0; i < 100; i++) {
-        game_state.rng.next();
+        loop.tick();
     }
     
-    // Save the GameState (which includes RNG state)
+    // Snapshot NPC states into GameState
+    loop.snapshot_npc_states("test_map");
+    
+    // Verify snapshot captured nontrivial state
+    ASSERT_TRUE(game_state.npc_states.count("test_map") > 0);
+    ASSERT_EQ(game_state.npc_states["test_map"].size(), 1);
+    
+    // Record NPC state at save point
+    const NpcState* npc_at_save = loop.get_npc(1);
+    int32_t save_x = npc_at_save->x;
+    int32_t save_y = npc_at_save->y;
+    int32_t save_idle = npc_at_save->idle_timer;
+    
+    // Save the full GameState (RNG + NPC states)
     std::vector<uint8_t> saved_bytes = game_state.serialize();
     
-    // Record the next M random values
-    std::vector<uint32_t> values_after_save;
-    for (int i = 0; i < 50; i++) {
-        values_after_save.push_back(game_state.rng.next());
+    // Run N more ticks and record positions
+    constexpr int N_TICKS = 200;
+    std::vector<std::tuple<int32_t, int32_t, Direction, int32_t>> future_states;
+    for (int i = 0; i < N_TICKS; i++) {
+        loop.tick();
+        if (i % 20 == 0) {
+            const NpcState* n = loop.get_npc(1);
+            future_states.push_back({n->x, n->y, n->facing, n->idle_timer});
+        }
     }
     
-    // Restore the saved state
+    // Restore from save
     GameState restored_state = GameState::deserialize(saved_bytes);
     
-    // Generate same M values from restored state
-    std::vector<uint32_t> values_after_restore;
-    for (int i = 0; i < 50; i++) {
-        values_after_restore.push_back(restored_state.rng.next());
+    // Verify NPC state was serialized/deserialized
+    ASSERT_TRUE(restored_state.npc_states.count("test_map") > 0);
+    ASSERT_EQ(restored_state.npc_states["test_map"].size(), 1);
+    ASSERT_EQ(restored_state.npc_states["test_map"][0].id, 1);
+    ASSERT_EQ(restored_state.npc_states["test_map"][0].x, save_x);
+    ASSERT_EQ(restored_state.npc_states["test_map"][0].y, save_y);
+    ASSERT_EQ(restored_state.npc_states["test_map"][0].idle_timer, save_idle);
+    
+    // Create fresh loop with restored state
+    HeadlessGameLoop loop2;
+    loop2.load_map(rtmap);
+    loop2.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
+        return 0x01;
+    });
+    
+    // Add NPC with same config (immutable properties come from map definition)
+    NpcState npc2;
+    npc2.id = 1;
+    npc2.x = 10;  // Will be overwritten by restore
+    npc2.y = 10;
+    npc2.facing = enginemon::Direction::Down;
+    npc2.behavior = NpcMovementBehavior::RandomWalkXY;
+    npc2.idle_timer = 1;  // Will be overwritten by restore
+    npc2.radius_x = 5;
+    npc2.radius_y = 5;
+    npc2.init_x = 10;
+    npc2.init_y = 10;
+    npc2.visible = true;
+    npc2.frozen = false;
+    loop2.add_npc(npc2);
+    
+    loop2.spawn_player(0, 0, enginemon::Direction::Down);
+    loop2.set_game_state(&restored_state);
+    
+    // Restore NPC states from GameState
+    loop2.restore_npc_states("test_map");
+    
+    // Verify NPC state was restored
+    const NpcState* restored_npc = loop2.get_npc(1);
+    ASSERT_EQ(restored_npc->x, save_x);
+    ASSERT_EQ(restored_npc->y, save_y);
+    ASSERT_EQ(restored_npc->idle_timer, save_idle);
+    
+    // Run same N ticks and record positions
+    std::vector<std::tuple<int32_t, int32_t, Direction, int32_t>> restored_future_states;
+    for (int i = 0; i < N_TICKS; i++) {
+        loop2.tick();
+        if (i % 20 == 0) {
+            const NpcState* n = loop2.get_npc(1);
+            restored_future_states.push_back({n->x, n->y, n->facing, n->idle_timer});
+        }
     }
     
     // Must match exactly
-    ASSERT_EQ(values_after_save.size(), values_after_restore.size());
-    for (size_t i = 0; i < values_after_save.size(); i++) {
-        ASSERT_EQ(values_after_save[i], values_after_restore[i]);
+    ASSERT_EQ(future_states.size(), restored_future_states.size());
+    for (size_t i = 0; i < future_states.size(); i++) {
+        ASSERT_EQ(std::get<0>(future_states[i]), std::get<0>(restored_future_states[i]));
+        ASSERT_EQ(std::get<1>(future_states[i]), std::get<1>(restored_future_states[i]));
+        ASSERT_EQ(static_cast<int>(std::get<2>(future_states[i])), 
+                  static_cast<int>(std::get<2>(restored_future_states[i])));
+        ASSERT_EQ(std::get<3>(future_states[i]), std::get<3>(restored_future_states[i]));
     }
     
-    // Now verify NPC movement uses this restored RNG stream
-    // Create two loops with same restored RNG state
-    auto run_npc_sim = [](GameState& gs) -> std::vector<std::pair<int32_t, int32_t>> {
-        HeadlessGameLoop loop;
-        
-        RuntimeMap rtmap;
-        rtmap.width = 20;
-        rtmap.height = 20;
-        rtmap.blocks.resize(400, 0x01);
-        
-        loop.load_map(rtmap);
-        loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-            return 0x01;  // All walkable
-        });
-        
-        NpcState npc;
-        npc.id = 1;
-        npc.x = 10;
-        npc.y = 10;
-        npc.facing = enginemon::Direction::Down;
-        npc.behavior = NpcMovementBehavior::RandomWalkXY;
-        npc.idle_timer = 1;  // Ready immediately
-        npc.radius_x = 5;
-        npc.radius_y = 5;
-        npc.init_x = 10;
-        npc.init_y = 10;
-        npc.visible = true;
-        npc.frozen = false;
-        loop.add_npc(npc);
-        
-        loop.spawn_player(0, 0, enginemon::Direction::Down);
-        loop.set_game_state(&gs);
-        
-        std::vector<std::pair<int32_t, int32_t>> positions;
-        for (int frame = 0; frame < 200; frame++) {
-            loop.tick();
-            if (frame % 20 == 0) {
-                const NpcState* n = loop.get_npc(1);
-                positions.push_back({n->x, n->y});
-            }
-        }
-        return positions;
-    };
-    
-    // Create two fresh GameState objects from the same save
-    GameState gs1 = GameState::deserialize(saved_bytes);
-    GameState gs2 = GameState::deserialize(saved_bytes);
-    
-    auto positions1 = run_npc_sim(gs1);
-    auto positions2 = run_npc_sim(gs2);
-    
-    // Must match because they started with identical RNG state
-    ASSERT_EQ(positions1.size(), positions2.size());
-    for (size_t i = 0; i < positions1.size(); i++) {
-        ASSERT_EQ(positions1[i].first, positions2[i].first);
-        ASSERT_EQ(positions1[i].second, positions2[i].second);
-    }
-    
-    std::cout << "  [Save/load restores deterministic RNG stream]\n";
-    std::cout << "  [Two loops with restored RNG produce identical NPC movement]\n";
+    std::cout << "  [Full NPC simulation state saved/restored]\n";
+    std::cout << "  [Post-restore NPC behavior matches original exactly]\n";
 }
 
 //=============================================================================
