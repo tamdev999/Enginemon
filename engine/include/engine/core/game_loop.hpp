@@ -10,6 +10,7 @@
 // Reference: Gen2Recomped OverworldController.lua handleInput/update/interact
 
 #include "engine/core/types.hpp"
+#include "engine/core/game_state.hpp"
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/collision.hpp"
 #include "engine/world/interaction.hpp"
@@ -303,13 +304,24 @@ public:
     void reset();
     
     //=========================================================================
+    // GAME STATE INTEGRATION
+    // HeadlessGameLoop does not own gameplay state - it receives it
+    //=========================================================================
+    
+    // Set the GameState for RNG and other gameplay state
+    // HeadlessGameLoop does NOT own this - caller maintains ownership
+    void set_game_state(GameState* state) { game_state_ = state; }
+    GameState* game_state() { return game_state_; }
+    const GameState* game_state() const { return game_state_; }
+    
+    // Set RNG seed (convenience - sets GameState's RNG if available, else internal fallback)
+    void set_rng_seed(uint32_t seed);
+    
+    //=========================================================================
     // NPC AUTONOMOUS MOVEMENT
     // Reference: pokecrystal/engine/overworld/map_objects.asm
     // Reference: Gen2Recomped/src/world/NPC.lua
     //=========================================================================
-    
-    // Set RNG seed for deterministic NPC movement
-    void set_rng_seed(uint32_t seed);
     
     // Get/set NPC frozen state (for script interaction)
     void freeze_npc(uint16_t npc_id);
@@ -353,8 +365,14 @@ private:
     InteractionCallback on_interaction_;
     MovementCallback on_movement_complete_;
     
-    // RNG for NPC movement (deterministic)
-    uint32_t rng_state_ = 12345;
+    // Game state (not owned - receives pointer from caller)
+    // Used for RNG and other gameplay state
+    GameState* game_state_ = nullptr;
+    
+    // Fallback RNG for tests that don't provide GameState
+    // WARNING: This exists only for backward compatibility with tests
+    // Production code should always set_game_state()
+    uint32_t fallback_rng_state_ = 12345;
     
     //=========================================================================
     // INTERNAL HELPERS

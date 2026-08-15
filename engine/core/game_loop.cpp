@@ -534,7 +534,8 @@ void HeadlessGameLoop::reset() {
     movement_manager_.cancel_all();
     active_coroutine_ = 0;
     active_script_id_.clear();
-    rng_state_ = 12345;
+    fallback_rng_state_ = 12345;
+    // Note: game_state_ pointer is NOT reset - caller owns that
 }
 
 //=============================================================================
@@ -543,15 +544,26 @@ void HeadlessGameLoop::reset() {
 // Reference: Gen2Recomped/src/world/NPC.lua
 //=============================================================================
 
-// Simple LCG for deterministic RNG
+// Get next random value from the canonical gameplay RNG
+// Uses GameState::rng if available, otherwise falls back to internal state
 uint32_t HeadlessGameLoop::next_random() {
-    // LCG parameters from Numerical Recipes
-    rng_state_ = rng_state_ * 1664525 + 1013904223;
-    return rng_state_;
+    if (game_state_) {
+        // Use the canonical GameState RNG (saved/restored with game)
+        return game_state_->rng.next();
+    } else {
+        // Fallback for tests that don't provide GameState
+        // WARNING: This path breaks save/load determinism
+        fallback_rng_state_ = fallback_rng_state_ * 1664525 + 1013904223;
+        return fallback_rng_state_;
+    }
 }
 
 void HeadlessGameLoop::set_rng_seed(uint32_t seed) {
-    rng_state_ = seed;
+    if (game_state_) {
+        game_state_->rng.set_seed(seed);
+    } else {
+        fallback_rng_state_ = seed;
+    }
 }
 
 void HeadlessGameLoop::freeze_npc(uint16_t npc_id) {

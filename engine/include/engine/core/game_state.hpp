@@ -56,6 +56,20 @@ struct WarpMemory {
 struct RngState {
     uint64_t seed = 0;
     uint64_t state = 0;             // Current generator state
+    
+    // Initialize with seed
+    void set_seed(uint64_t s) {
+        seed = s;
+        state = s;
+    }
+    
+    // Generate next random value (LCG)
+    // Uses same parameters as pokecrystal for compatibility
+    uint32_t next() {
+        // LCG parameters from Numerical Recipes (same as original HeadlessGameLoop)
+        state = state * 1664525 + 1013904223;
+        return static_cast<uint32_t>(state);
+    }
 };
 
 //=============================================================================

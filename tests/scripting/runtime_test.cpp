@@ -4579,6 +4579,184 @@ TEST(newbark_npc_behaviors_extracted) {
     std::cout << "  [New Bark NPC behaviors: Teacher=spin_slow, Fisher=walk_y, Rival=standing_right]\n";
 }
 
+TEST(npc_rng_determinism_via_gamestate) {
+    // AUDIT 7: Proves same GameState RNG seed → same NPC movement sequence
+    // This validates that NPC movement uses the canonical GameState::rng
+    
+    auto run_simulation = [](uint32_t seed) -> std::vector<std::pair<int32_t, int32_t>> {
+        HeadlessGameLoop loop;
+        GameState game_state;
+        
+        RuntimeMap rtmap;
+        rtmap.width = 20;
+        rtmap.height = 20;
+        rtmap.blocks.resize(400, 0x01);
+        
+        loop.load_map(rtmap);
+        loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
+            return 0x01;  // All walkable
+        });
+        
+        NpcState npc;
+        npc.id = 1;
+        npc.x = 10;
+        npc.y = 10;
+        npc.facing = enginemon::Direction::Down;
+        npc.behavior = NpcMovementBehavior::RandomWalkXY;
+        npc.idle_timer = 1;  // Ready to move immediately
+        npc.radius_x = 5;
+        npc.radius_y = 5;
+        npc.init_x = 10;
+        npc.init_y = 10;
+        npc.visible = true;
+        npc.frozen = false;
+        loop.add_npc(npc);
+        
+        loop.spawn_player(0, 0, enginemon::Direction::Down);  // Far from NPC
+        
+        // Set seed via GameState (the canonical path)
+        game_state.rng.set_seed(seed);
+        loop.set_game_state(&game_state);
+        
+        // Record NPC positions at key frames
+        std::vector<std::pair<int32_t, int32_t>> positions;
+        for (int frame = 0; frame < 500; frame++) {
+            loop.tick();
+            if (frame % 50 == 0) {  // Sample every 50 frames
+                const NpcState* n = loop.get_npc(1);
+                positions.push_back({n->x, n->y});
+            }
+        }
+        return positions;
+    };
+    
+    // Run twice with same seed
+    auto run1 = run_simulation(0xDEADBEEF);
+    auto run2 = run_simulation(0xDEADBEEF);
+    
+    // Must match exactly
+    ASSERT_EQ(run1.size(), run2.size());
+    for (size_t i = 0; i < run1.size(); i++) {
+        ASSERT_EQ(run1[i].first, run2[i].first);
+        ASSERT_EQ(run1[i].second, run2[i].second);
+    }
+    
+    // Run with different seed must diverge (unless extremely unlucky)
+    auto run3 = run_simulation(0x12345678);
+    bool diverged = false;
+    for (size_t i = 0; i < run1.size(); i++) {
+        if (run1[i].first != run3[i].first || run1[i].second != run3[i].second) {
+            diverged = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(diverged);
+    
+    std::cout << "  [Same GameState RNG seed → identical NPC movement sequence]\n";
+    std::cout << "  [Different seed → diverging sequence]\n";
+}
+
+TEST(npc_rng_save_restore_determinism) {
+    // AUDIT 7: Proves save/load restores deterministic RNG stream
+    // seed → consume N random values → save → consume M → restore → reconsume M → must match
+    //
+    // Note: This tests RNG state persistence, not full NPC state persistence.
+    // Full NPC state (position, idle_timer, etc.) would require additional save data.
+    
+    GameState game_state;
+    game_state.rng.set_seed(0xCAFEBABE);
+    
+    // Consume some RNG (simulating gameplay)
+    for (int i = 0; i < 100; i++) {
+        game_state.rng.next();
+    }
+    
+    // Save the GameState (which includes RNG state)
+    std::vector<uint8_t> saved_bytes = game_state.serialize();
+    
+    // Record the next M random values
+    std::vector<uint32_t> values_after_save;
+    for (int i = 0; i < 50; i++) {
+        values_after_save.push_back(game_state.rng.next());
+    }
+    
+    // Restore the saved state
+    GameState restored_state = GameState::deserialize(saved_bytes);
+    
+    // Generate same M values from restored state
+    std::vector<uint32_t> values_after_restore;
+    for (int i = 0; i < 50; i++) {
+        values_after_restore.push_back(restored_state.rng.next());
+    }
+    
+    // Must match exactly
+    ASSERT_EQ(values_after_save.size(), values_after_restore.size());
+    for (size_t i = 0; i < values_after_save.size(); i++) {
+        ASSERT_EQ(values_after_save[i], values_after_restore[i]);
+    }
+    
+    // Now verify NPC movement uses this restored RNG stream
+    // Create two loops with same restored RNG state
+    auto run_npc_sim = [](GameState& gs) -> std::vector<std::pair<int32_t, int32_t>> {
+        HeadlessGameLoop loop;
+        
+        RuntimeMap rtmap;
+        rtmap.width = 20;
+        rtmap.height = 20;
+        rtmap.blocks.resize(400, 0x01);
+        
+        loop.load_map(rtmap);
+        loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
+            return 0x01;  // All walkable
+        });
+        
+        NpcState npc;
+        npc.id = 1;
+        npc.x = 10;
+        npc.y = 10;
+        npc.facing = enginemon::Direction::Down;
+        npc.behavior = NpcMovementBehavior::RandomWalkXY;
+        npc.idle_timer = 1;  // Ready immediately
+        npc.radius_x = 5;
+        npc.radius_y = 5;
+        npc.init_x = 10;
+        npc.init_y = 10;
+        npc.visible = true;
+        npc.frozen = false;
+        loop.add_npc(npc);
+        
+        loop.spawn_player(0, 0, enginemon::Direction::Down);
+        loop.set_game_state(&gs);
+        
+        std::vector<std::pair<int32_t, int32_t>> positions;
+        for (int frame = 0; frame < 200; frame++) {
+            loop.tick();
+            if (frame % 20 == 0) {
+                const NpcState* n = loop.get_npc(1);
+                positions.push_back({n->x, n->y});
+            }
+        }
+        return positions;
+    };
+    
+    // Create two fresh GameState objects from the same save
+    GameState gs1 = GameState::deserialize(saved_bytes);
+    GameState gs2 = GameState::deserialize(saved_bytes);
+    
+    auto positions1 = run_npc_sim(gs1);
+    auto positions2 = run_npc_sim(gs2);
+    
+    // Must match because they started with identical RNG state
+    ASSERT_EQ(positions1.size(), positions2.size());
+    for (size_t i = 0; i < positions1.size(); i++) {
+        ASSERT_EQ(positions1[i].first, positions2[i].first);
+        ASSERT_EQ(positions1[i].second, positions2[i].second);
+    }
+    
+    std::cout << "  [Save/load restores deterministic RNG stream]\n";
+    std::cout << "  [Two loops with restored RNG produce identical NPC movement]\n";
+}
+
 //=============================================================================
 // FIELD-MOVE CONTEXT LIFECYCLE TESTS
 // Verify ScriptExecutionContext operations for Strength, Rock Smash
@@ -5770,6 +5948,10 @@ int main(int argc, char* argv[]) {
     RUN_TEST(npc_collision_with_player);
     RUN_TEST(npc_walk_up_down_direction);
     RUN_TEST(newbark_npc_behaviors_extracted);
+    
+    // RNG ownership tests (Audit 7)
+    RUN_TEST(npc_rng_determinism_via_gamestate);
+    RUN_TEST(npc_rng_save_restore_determinism);
     
     // Field-move context lifecycle tests
     RUN_TEST(field_context_strength_available_establishes_actor);
