@@ -495,6 +495,30 @@ struct Sem_GiveEgg { SpeciesId species; uint8_t level; };
 // =============================================================================
 struct Sem_HealParty {};
 
+// =============================================================================
+// Sem_CheckPartyPokerus - Check for active Pokérus infection in party
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/events/pokerus/check_pokerus.asm:
+//
+// Behavior:
+//   - Iterates ALL party members (no egg exclusion)
+//   - Checks if any member has ACTIVE Pokérus infection
+//   - Active infection = days remaining counter > 0 (lower nibble of Pokérus byte)
+//   - Does NOT check strain history (upper nibble)
+//   - Does NOT distinguish cured/immune from never-infected
+//
+// Script result:
+//   - Sets script_var to 1 (TRUE) if any party member has active infection
+//   - Sets script_var to 0 (FALSE) if no active infections
+//
+// Side effects:
+//   - NONE - pure read-only query
+//
+// This is a Gen2+ concept. Gen1 frontends will not emit this operation.
+// Gen3+ frontends may emit it if Pokérus is present in that game.
+// =============================================================================
+struct Sem_CheckPartyPokerus {};
+
 struct Sem_CheckPokemon { SpeciesId species; };  // Sets result
 
 // --- Movement/Object ---
@@ -708,7 +732,7 @@ using SemanticOp = std::variant<
     Sem_GiveCoins, Sem_TakeCoins, Sem_CheckCoins,
     
     // Party/Pokemon
-    Sem_GivePokemon, Sem_GiveEgg, Sem_HealParty, Sem_CheckPokemon,
+    Sem_GivePokemon, Sem_GiveEgg, Sem_HealParty, Sem_CheckPartyPokerus, Sem_CheckPokemon,
     
     // Movement/Object
     Sem_ApplyMovement, Sem_FacePlayer, Sem_FaceObject, Sem_TurnObject,

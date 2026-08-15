@@ -973,6 +973,14 @@ Support:
 
 Simulation must remain independent of all presentation timing.
 
+### Presentation Freedom
+
+Enginemon presentation is not constrained to Crystal's original viewport or display model. Native renderers may provide survey/zoomed world views, connected-map rendering, perspective/2.5D camera transforms, alternate palette presentation, widescreen/native UI layouts, LCD/GBC display simulation, color grading, and other shader-driven effects without altering authoritative gameplay semantics.
+
+Shader customization, including KLang-authored effects where supported, belongs to the presentation/material pipeline. Shader programs must not become authoritative gameplay logic.
+
+Camera projection, viewport aspect ratio, postprocessing, palette presentation, and UI layout are presentation policy. They must remain separable from map topology, battle state, script semantics, and deterministic simulation.
+
 ---
 
 ## Audio Architecture
@@ -1371,6 +1379,147 @@ one bounded task
 
 Do not advance because an implementation agent says "all tests pass."
 Architecture conformity must be independently checked.
+
+---
+
+## Multiplayer Compatibility and Determinism
+
+Multiplayer operates on the frozen composed game definition, not merely on locally meaningful numeric semantic IDs.
+
+Two peers may only exchange semantic resource references when both sides agree on resource identity.
+
+### Composition Compatibility
+
+Numeric semantic IDs are local implementation identities and are not assumed to match between independently composed installations.
+
+Before a multiplayer session begins, peers must establish compatibility through one or both of:
+- frozen composition/content hash agreement
+- stable authoring/resource keys resolved into each peer's local semantic IDs
+
+For strict synchronized simulation, the preferred default is:
+```
+same frozen composition → same composition hash → session allowed
+```
+
+Do not serialize/transmit a local SpeciesId, ItemId, BehaviorId, etc. and assume the same integer has the same meaning on another independently composed runtime.
+
+Cross-composition multiplayer, if supported later, requires an explicit semantic compatibility/mapping layer.
+
+### Cross-Machine Determinism
+
+Deterministic RNG alone is not sufficient for synchronized multiplayer.
+
+All gameplay-authoritative calculations used by input-synchronized simulation must produce identical results across supported machines.
+
+Prefer deterministic integer/fixed-point arithmetic for gameplay mechanics where practical.
+
+Gameplay-authoritative state transitions must not depend on:
+- CPU floating-point implementation differences
+- SIMD reassociation
+- compiler fast-math behavior
+- renderer/GPU calculations
+- platform-specific transcendental results
+
+Floating point may be used freely for presentation where its result cannot affect simulation.
+
+If gameplay floating-point is ever introduced, its cross-platform determinism contract must be explicitly proven before it participates in synchronized multiplayer.
+
+### Network Session Simulation Rate
+
+A synchronized multiplayer session uses one agreed simulation cadence.
+
+Local rendering remains independent, but simulation fast-forward is not independently selectable by each peer.
+
+| Clock | Ownership |
+|-------|-----------|
+| rendering | independent per client |
+| audio | local policy |
+| simulation tick rate | session-authoritative |
+| RTC | synchronized/defined by session policy where gameplay-relevant |
+
+Normal 1× / 2× / 4× / 8× local fast-forward must either:
+- be disabled during synchronized multiplayer
+- or change only through an agreed session-wide control
+
+A client must never advance authoritative simulation faster than its peers merely because local fast-forward was enabled.
+
+### Network Battle Reuse Condition
+
+Native multiplayer battles reuse the same BattleState and mechanics implementation as local battles.
+
+This is valid because vanilla Gen 2 battle input is discrete/turn-based and can be synchronized as semantic player decisions.
+
+```
+synchronized BattleState
++ deterministic mechanics
++ deterministic GameState RNG
++ ordered player decisions
+→ identical battle result
+```
+
+Do not create a parallel network battle engine.
+
+If a future frontend/mod introduces timing-sensitive or real-time battle mechanics, its synchronization model must be explicitly extended rather than assuming the vanilla turn-based protocol remains sufficient.
+
+---
+
+## Palette Resources and Modding
+
+Palette customization uses the normal semantic resource/mod composition system.
+
+```
+PaletteId → PaletteDefinition → MaterialDefinition / indexed asset reference
+```
+
+Mods may:
+- replace palettes
+- add palettes
+- patch palette bindings
+- animate/select palettes
+- define richer palettes than the source frontend
+
+### Source Constraints Are Not Runtime Limits
+
+Pokémon Crystal may emit source-faithful small indexed palettes, but Enginemon must not encode Crystal's palette size/count as a universal runtime limit.
+
+A future frontend or mod may define:
+- more palette entries
+- more palette rows
+- richer native color precision
+- animated palette resources
+- event/time-driven palette selection
+
+without changing indexed pixel data.
+
+### GPU Palette Validation
+
+The GPU indexed-palette path must use the actual compiled PaletteDefinition capacity rather than assuming Crystal's original fixed palette dimensions.
+
+At package/mod validation time:
+- indexed texel range
+- palette entry count
+- material palette binding
+- GPU palette resource capacity
+
+must agree.
+
+A mod defining an 8-color or larger palette must either be supported correctly by the active renderer path or rejected explicitly during validation.
+
+Silent truncation/wrapping/misrendering is not acceptable.
+
+### Palette Authoring
+
+Human-facing formats such as:
+- paletted PNG
+- .gpl
+- .pal
+- other editor formats
+
+are authoring/compiler inputs only.
+
+They compile into native PaletteDefinitions before runtime.
+
+No authoring palette format is parsed by the runtime.
 
 ---
 

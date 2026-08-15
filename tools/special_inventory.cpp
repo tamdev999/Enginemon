@@ -114,6 +114,8 @@ int main(int argc, char* argv[]) {
     size_t play_map_music_count = 0;
     size_t heal_party_count = 0;
     size_t show_balance_overlay_count = 0;
+    size_t check_party_pokerus_count = 0;
+    size_t gameboy_check_absorbed_count = 0;  // Absorbed as Sem_SetVar
     
     // Process each script
     for (uint32_t addr : all_addresses) {
@@ -171,6 +173,14 @@ int main(int argc, char* argv[]) {
                     else if constexpr (std::is_same_v<T, enginemon::Sem_ShowBalanceOverlay>) {
                         show_balance_overlay_count++;
                     }
+                    else if constexpr (std::is_same_v<T, enginemon::Sem_CheckPartyPokerus>) {
+                        check_party_pokerus_count++;
+                    }
+                    else if constexpr (std::is_same_v<T, enginemon::Sem_SetVar>) {
+                        // Note: GameboyCheck (102) is absorbed as Sem_SetVar with literal GBCHECK_CGB
+                        // We can identify it by checking if var=0 and source is literal(2)
+                        // For now, just track this doesn't add to Sem_Special
+                    }
                 }, inst.op);
             }
         }
@@ -192,7 +202,7 @@ int main(int argc, char* argv[]) {
                            rebuild_sprites_count + restart_map_music_count + 
                            fade_to_silence_count + wait_sound_count +
                            play_map_music_count + heal_party_count +
-                           show_balance_overlay_count;
+                           show_balance_overlay_count + check_party_pokerus_count;
     
     std::cout << "=== Pre-Lowering Summary ===\n";
     std::cout << "Unique Special IDs: " << pre_lowering_counts.size() << "\n";
@@ -214,6 +224,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Sem_PlayMapMusic:         " << play_map_music_count << "\n";
     std::cout << "Sem_HealParty:            " << heal_party_count << "\n";
     std::cout << "Sem_ShowBalanceOverlay:   " << show_balance_overlay_count << "\n";
+    std::cout << "Sem_CheckPartyPokerus:    " << check_party_pokerus_count << "\n";
+    std::cout << "GameboyCheck absorbed:    (counted in Sem_SetVar, -1 from Sem_Special)\n";
     std::cout << "Total lowered:            " << lowered_total << "\n\n";
     
     std::cout << "=== Verification ===\n";

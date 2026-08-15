@@ -1860,10 +1860,17 @@ RuleResult rule_special(LoweringContext& ctx) {
         constexpr uint16_t SPECIAL_SET_PLAYER_PALETTE = 152;
         // Party/Pokemon
         constexpr uint16_t SPECIAL_HEAL_PARTY = 27;     // Batch 3: HealParty
+        constexpr uint16_t SPECIAL_CHECK_POKERUS = 78;  // Batch 5: CheckPokerus
         // Currency balance overlays (Batch 4)
         constexpr uint16_t SPECIAL_DISPLAY_COIN_CASE_BALANCE = 79;    // Coins only
         constexpr uint16_t SPECIAL_DISPLAY_MONEY_AND_COIN_BALANCE = 80; // Money + Coins
         constexpr uint16_t SPECIAL_PLACE_MONEY_TOP_RIGHT = 81;        // Money only
+        // Platform check (Batch 5: frontend-absorbed)
+        constexpr uint16_t SPECIAL_GAMEBOY_CHECK = 102;
+        // Result constants for GameboyCheck (source values for documentation)
+        // constexpr uint16_t GBCHECK_GB = 0;   // Original Game Boy
+        // constexpr uint16_t GBCHECK_SGB = 1;  // Super Game Boy
+        constexpr uint16_t GBCHECK_CGB = 2;     // Color Game Boy (Crystal's native platform)
         
         switch (p->special_id) {
             // =================================================================
@@ -2019,6 +2026,51 @@ RuleResult rule_special(LoweringContext& ctx) {
                 //   - Does NOT modify wScriptVar (no script result)
                 // See Sem_HealParty documentation in semantic_ir.hpp
                 r.instructions.push_back(make_inst(enginemon::Sem_HealParty{}));
+                return r;
+            }
+            
+            case SPECIAL_CHECK_POKERUS: {
+                // CheckPokerus - check for active Pokérus infection in party
+                // Source: pokecrystal/engine/events/pokerus/check_pokerus.asm
+                // Contract:
+                //   - Iterates ALL party members (no egg exclusion)
+                //   - Checks lower nibble of PokerusStatus (days remaining counter)
+                //   - Returns carry (TRUE) if ANY member has active infection
+                //   - Does NOT check upper nibble (strain history)
+                //   - Pure read-only query, no side effects
+                // Sets wScriptVar: 1=has active infection, 0=no active infection
+                // See Sem_CheckPartyPokerus documentation in semantic_ir.hpp
+                r.instructions.push_back(make_inst(enginemon::Sem_CheckPartyPokerus{}));
+                return r;
+            }
+            
+            case SPECIAL_GAMEBOY_CHECK: {
+                // GameboyCheck - frontend-absorbed at compile time
+                // Source: pokecrystal/engine/events/specials.asm GameboyCheck
+                // Call site: GoldenrodDeptStore5F.asm Carrie NPC (ONLY call in corpus)
+                // Comment: "This is a dummy check from Gold/Silver"
+                //
+                // ABSORPTION PROOF:
+                // Crystal is a CGB-only game. The GameboyCheck Special returns
+                // GBCHECK_CGB (2) on all real Crystal hardware. The subsequent
+                // ifnotequal GBCHECK_CGB branch is never taken on original hardware.
+                //
+                // The non-CGB branch shows "Mystery Gift requires Game Boy Color"
+                // which is dead code - Crystal physically cannot run on non-CGB.
+                //
+                // SEMANTIC LOWERING:
+                // Set wScriptVar to GBCHECK_CGB (2) directly. No hardware query
+                // survives into native runtime. The subsequent conditional branch
+                // will evaluate correctly based on this constant result.
+                //
+                // This is structurally equivalent to constant folding:
+                //   source: special GameboyCheck → ifnotequal GBCHECK_CGB, .dead
+                //   native: setval GBCHECK_CGB → ifnotequal GBCHECK_CGB, .dead
+                // The branch condition is preserved; only the hardware query is eliminated.
+                enginemon::Sem_SetVar op;
+                op.var = enginemon::VarId{0};  // wScriptVar
+                op.source = enginemon::VarValueSource::literal(GBCHECK_CGB);
+                r.instructions.push_back(make_inst(std::move(op)));
                 return r;
             }
             
