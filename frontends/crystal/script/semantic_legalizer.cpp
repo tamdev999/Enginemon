@@ -1851,6 +1851,8 @@ RuleResult rule_special(LoweringContext& ctx) {
         constexpr uint16_t SPECIAL_REFRESH_SPRITES = 158;
         constexpr uint16_t SPECIAL_LOAD_MAP_PALETTES = 164;
         // Audio
+        constexpr uint16_t SPECIAL_WAIT_SFX = 59;       // Batch 2: WaitSFX
+        constexpr uint16_t SPECIAL_PLAY_MAP_MUSIC = 60; // Batch 2: PlayMapMusic
         constexpr uint16_t SPECIAL_RESTART_MAP_MUSIC = 61;
         constexpr uint16_t SPECIAL_FADE_OUT_MUSIC = 106;
         // Unclassified in Batch 1 (need context tracking)
@@ -1905,6 +1907,24 @@ RuleResult rule_special(LoweringContext& ctx) {
             // AUDIO OPERATIONS
             // =================================================================
             
+            case SPECIAL_WAIT_SFX: {
+                // WaitSFX - polls channels 5-8 until all SFX complete
+                // Semantic equivalent to waitsfx opcode (0x99)
+                // Contract: suspend script progression until currently active SFX completion
+                // Source: pokecrystal/home/audio.asm WaitSFX
+                r.instructions.push_back(make_inst(enginemon::Sem_WaitSound{}));
+                return r;
+            }
+            case SPECIAL_PLAY_MAP_MUSIC: {
+                // PlayMapMusic - queries map music (with special handling for surf/contest),
+                // stops current music, plays the appropriate map music
+                // Semantic equivalent to playmapmusic opcode (0x8B)
+                // Contract: synchronize/play the music appropriate to current world/map state
+                // Distinct from RestartMapMusic which just restarts stored wMapMusic
+                // Source: pokecrystal/home/audio.asm PlayMapMusic
+                r.instructions.push_back(make_inst(enginemon::Sem_PlayMapMusic{}));
+                return r;
+            }
             case SPECIAL_RESTART_MAP_MUSIC: {
                 // Restarts stored wMapMusic without querying map
                 // Distinct from PlayMapMusic which queries and may update
