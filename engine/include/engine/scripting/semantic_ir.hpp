@@ -418,7 +418,41 @@ struct Sem_GivePokemon {
     std::string ot_name;
 };
 struct Sem_GiveEgg { SpeciesId species; uint8_t level; };
+
+// =============================================================================
+// Sem_HealParty - Heal all eligible party members
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/pokemon/health.asm (HealParty):
+//
+// Behavior:
+//   - Iterates through all party slots
+//   - SKIPS eggs (cp EGG / jr z, .next)
+//   - For each non-egg member:
+//     1. Restore HP to max (revives fainted Pokemon)
+//     2. Clear all status conditions (poison, burn, sleep, freeze, paralyze)
+//     3. Restore all move PP to maximum (preserving PP Up investment)
+//
+// PP restoration (from Gen2Recomped):
+//   max_pp = base_pp + (base_pp / 5) * pp_ups
+//   Each PP Up adds 20% of base PP to the maximum.
+//   PP Up investment (0-3 per move) is PRESERVED, not modified.
+//
+// What is NOT modified:
+//   - DVs, Stat Exp, Level, Experience
+//   - Friendship/Happiness
+//   - Held items
+//   - Pokérus status
+//   - Met info (location, level, time)
+//   - Egg status/cycles (eggs are skipped entirely)
+//
+// Script result:
+//   - Does NOT modify wScriptVar
+//   - Produces no script result value
+//
+// This is a generic engine concept usable across Gen 1/2/3 frontends.
+// =============================================================================
 struct Sem_HealParty {};
+
 struct Sem_CheckPokemon { SpeciesId species; };  // Sets result
 
 // --- Movement/Object ---

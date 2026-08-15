@@ -1858,6 +1858,8 @@ RuleResult rule_special(LoweringContext& ctx) {
         // Unclassified in Batch 1 (need context tracking)
         constexpr uint16_t SPECIAL_PLAY_SLOW_CRY = 95;
         constexpr uint16_t SPECIAL_SET_PLAYER_PALETTE = 152;
+        // Party/Pokemon
+        constexpr uint16_t SPECIAL_HEAL_PARTY = 27;     // Batch 3: HealParty
         
         switch (p->special_id) {
             // =================================================================
@@ -1996,6 +1998,23 @@ RuleResult rule_special(LoweringContext& ctx) {
                 enginemon::Sem_SyncPalettes op;
                 op.wait_frames = 0;
                 r.instructions.push_back(make_inst(std::move(op)));
+                return r;
+            }
+            
+            // =================================================================
+            // PARTY/POKEMON OPERATIONS
+            // =================================================================
+            
+            case SPECIAL_HEAL_PARTY: {
+                // HealParty - heals all non-egg party members
+                // Source: pokecrystal/engine/pokemon/health.asm
+                // Contract:
+                //   - Skips eggs (cp EGG / jr z, .next)
+                //   - For non-eggs: restore HP to max, clear status, restore PP
+                //   - PP restoration preserves PP Up investment
+                //   - Does NOT modify wScriptVar (no script result)
+                // See Sem_HealParty documentation in semantic_ir.hpp
+                r.instructions.push_back(make_inst(enginemon::Sem_HealParty{}));
                 return r;
             }
             

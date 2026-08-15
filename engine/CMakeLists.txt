@@ -25,6 +25,10 @@ add_library(enginemon_engine STATIC
     # Input system
     input/input_system.cpp
     
+    # Party/Pokemon management
+    party/party.cpp
+    party/pokemon.cpp
+    
     # Scripting (Lua orchestration)
     scripting/lua_runtime.cpp
     scripting/api_bindings.cpp
