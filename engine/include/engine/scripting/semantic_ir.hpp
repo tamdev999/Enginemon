@@ -370,6 +370,48 @@ struct Sem_FacePlayerAndShowText { SemanticTextSequence sequence; }; // jumptext
 struct Sem_WaitButton {};
 struct Sem_YesNo {};                    // Sets result to true/false
 struct Sem_Choice { std::vector<std::string> options; };
+
+// =============================================================================
+// Sem_ShowBalanceOverlay - Display player currency balance as UI overlay
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/menus/menu_2.asm:
+//   - DisplayCoinCaseBalance (Special 79): coins only
+//   - DisplayMoneyAndCoinBalance (Special 80): money and coins
+//   - PlaceMoneyTopRight (Special 81): money only
+//
+// Semantic contract:
+//   Display the requested player currency balance as a transient/persistent-until-
+//   overdrawn UI overlay according to native UI policy.
+//
+// Behavior:
+//   - Fire-and-return presentation operation
+//   - No script result (does NOT modify wScriptVar)
+//   - No gameplay-state mutation
+//   - No input wait (overlay appears immediately, script continues)
+//   - No menu-stack transition
+//   - Layout/placement is content-determined (renderer policy)
+//
+// What is NOT encoded:
+//   - Crystal Special IDs (79, 80, 81)
+//   - pokecrystal routine names
+//   - VRAM coordinates / window addresses
+//   - wMoney / wCoins RAM addresses
+//   - Crystal tilemap addresses
+//   - MENU_BACKUP_TILES flag (dead code in source)
+//
+// This is a generic engine concept - future frontends/mods may use different
+// currency systems but the presentation semantic remains the same.
+// =============================================================================
+enum class BalanceContent : uint8_t {
+    Money,          // Money only (e.g., shop transactions)
+    Coins,          // Coins only (e.g., Game Corner)
+    MoneyAndCoins,  // Both displayed (e.g., prize exchange)
+};
+
+struct Sem_ShowBalanceOverlay {
+    BalanceContent contents;
+};
+
 // Text argument preparation (semantic replacement for getXXXname commands)
 // Consolidated into a single type to reduce variant size
 struct Sem_PrepareTextArg {
@@ -658,6 +700,7 @@ using SemanticOp = std::variant<
     Sem_OpenText, Sem_CloseText, Sem_ShowText, Sem_ShowTextAndEnd,
     Sem_FacePlayerAndShowText, Sem_WaitButton, Sem_YesNo, Sem_Choice,
     Sem_PrepareTextArg,  // Consolidated text argument preparation
+    Sem_ShowBalanceOverlay,  // Currency balance display overlay
     
     // Inventory
     Sem_GiveItem, Sem_TakeItem, Sem_CheckItem, Sem_GiveItemVerbose,

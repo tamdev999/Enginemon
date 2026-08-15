@@ -1860,6 +1860,10 @@ RuleResult rule_special(LoweringContext& ctx) {
         constexpr uint16_t SPECIAL_SET_PLAYER_PALETTE = 152;
         // Party/Pokemon
         constexpr uint16_t SPECIAL_HEAL_PARTY = 27;     // Batch 3: HealParty
+        // Currency balance overlays (Batch 4)
+        constexpr uint16_t SPECIAL_DISPLAY_COIN_CASE_BALANCE = 79;    // Coins only
+        constexpr uint16_t SPECIAL_DISPLAY_MONEY_AND_COIN_BALANCE = 80; // Money + Coins
+        constexpr uint16_t SPECIAL_PLACE_MONEY_TOP_RIGHT = 81;        // Money only
         
         switch (p->special_id) {
             // =================================================================
@@ -2015,6 +2019,43 @@ RuleResult rule_special(LoweringContext& ctx) {
                 //   - Does NOT modify wScriptVar (no script result)
                 // See Sem_HealParty documentation in semantic_ir.hpp
                 r.instructions.push_back(make_inst(enginemon::Sem_HealParty{}));
+                return r;
+            }
+            
+            // =================================================================
+            // CURRENCY BALANCE OVERLAY OPERATIONS (Batch 4)
+            // =================================================================
+            // Fire-and-return presentation operations:
+            //   - No script result (do NOT modify wScriptVar)
+            //   - No gameplay-state mutation
+            //   - No input wait (overlay appears immediately)
+            //   - No menu-stack transition
+            // Layout determined by content type (renderer policy).
+            // Source: pokecrystal/engine/menus/menu_2.asm
+            
+            case SPECIAL_DISPLAY_COIN_CASE_BALANCE: {
+                // DisplayCoinCaseBalance - shows coins only
+                // Source: engine/menus/menu_2.asm DisplayCoinCaseBalance
+                enginemon::Sem_ShowBalanceOverlay op;
+                op.contents = enginemon::BalanceContent::Coins;
+                r.instructions.push_back(make_inst(std::move(op)));
+                return r;
+            }
+            case SPECIAL_DISPLAY_MONEY_AND_COIN_BALANCE: {
+                // DisplayMoneyAndCoinBalance - shows both money and coins
+                // Source: engine/menus/menu_2.asm DisplayMoneyAndCoinBalance
+                enginemon::Sem_ShowBalanceOverlay op;
+                op.contents = enginemon::BalanceContent::MoneyAndCoins;
+                r.instructions.push_back(make_inst(std::move(op)));
+                return r;
+            }
+            case SPECIAL_PLACE_MONEY_TOP_RIGHT: {
+                // PlaceMoneyTopRight - shows money only
+                // Source: engine/menus/menu_2.asm PlaceMoneyTopRight
+                // NOTE: MENU_BACKUP_TILES flag in header is dead code (never honored)
+                enginemon::Sem_ShowBalanceOverlay op;
+                op.contents = enginemon::BalanceContent::Money;
+                r.instructions.push_back(make_inst(std::move(op)));
                 return r;
             }
             

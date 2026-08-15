@@ -113,6 +113,7 @@ int main(int argc, char* argv[]) {
     size_t wait_sound_count = 0;
     size_t play_map_music_count = 0;
     size_t heal_party_count = 0;
+    size_t show_balance_overlay_count = 0;
     
     // Process each script
     for (uint32_t addr : all_addresses) {
@@ -167,6 +168,9 @@ int main(int argc, char* argv[]) {
                     else if constexpr (std::is_same_v<T, enginemon::Sem_HealParty>) {
                         heal_party_count++;
                     }
+                    else if constexpr (std::is_same_v<T, enginemon::Sem_ShowBalanceOverlay>) {
+                        show_balance_overlay_count++;
+                    }
                 }, inst.op);
             }
         }
@@ -187,7 +191,8 @@ int main(int argc, char* argv[]) {
                            refresh_player_sprite_count + sync_sprites_count +
                            rebuild_sprites_count + restart_map_music_count + 
                            fade_to_silence_count + wait_sound_count +
-                           play_map_music_count + heal_party_count;
+                           play_map_music_count + heal_party_count +
+                           show_balance_overlay_count;
     
     std::cout << "=== Pre-Lowering Summary ===\n";
     std::cout << "Unique Special IDs: " << pre_lowering_counts.size() << "\n";
@@ -208,6 +213,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Sem_WaitSound:            " << wait_sound_count << "\n";
     std::cout << "Sem_PlayMapMusic:         " << play_map_music_count << "\n";
     std::cout << "Sem_HealParty:            " << heal_party_count << "\n";
+    std::cout << "Sem_ShowBalanceOverlay:   " << show_balance_overlay_count << "\n";
     std::cout << "Total lowered:            " << lowered_total << "\n\n";
     
     std::cout << "=== Verification ===\n";
