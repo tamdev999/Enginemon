@@ -26,6 +26,7 @@
 #include "engine/world/world_manager.hpp"
 #include "engine/core/game_loop.hpp"
 #include "engine/core/game_state.hpp"
+#include "engine/core/timing.hpp"
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
 
@@ -34,6 +35,7 @@
 #include <filesystem>
 #include <set>
 #include <unordered_map>
+#include <chrono>
 
 using namespace enginemon;
 
@@ -707,7 +709,13 @@ int main(int argc, char* argv[]) {
     auto& hooks = lua_runtime.get_presentation_hooks();
     
     hooks.text = [&dialog_state, &dialog_open_frame, &frame_counter, &textbox_renderer_ptr](const std::string& text) {
-        dialog_state.open(text);
+        // Legacy string callback - convert to semantic sequence
+        // This creates a simple sequence: Text(content), Done
+        RuntimeTextSequence seq;
+        seq.elements.push_back(RuntimeTextElement::make_text(text));
+        seq.elements.push_back(RuntimeTextElement::make_done());
+        
+        dialog_state.open_with_sequence(seq);
         dialog_open_frame = frame_counter;
         if (textbox_renderer_ptr && textbox_renderer_ptr->font_atlas()) {
             textbox_renderer_ptr->parse_text_pages(dialog_state);
@@ -906,11 +914,28 @@ int main(int argc, char* argv[]) {
     
     //=========================================================================
     // STEP 7: Main render loop
+    //
+    // TIMING ARCHITECTURE (Audit 8 fix):
+    //   Simulation runs at fixed 60 Hz regardless of render rate.
+    //   VSync/VRR/uncapped rendering does not affect gameplay speed.
+    //   Simulation is deterministic: same inputs + same ticks = same results.
     //=========================================================================
     
     InputSystem input;
     bool running = true;
     float camera_x = 0, camera_y = 0;
+    
+    // Fixed-timestep simulation scheduler (60 Hz)
+    SimulationScheduler sim_scheduler(TICK_60HZ);
+    
+    // Helper to get monotonic time in nanoseconds
+    auto get_time_ns = []() -> int64_t {
+        using namespace std::chrono;
+        return duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+    };
+    
+    // Initialize scheduler with current time
+    sim_scheduler.reset(get_time_ns());
     
     while (running) {
         PlatformEvent event = platform.poll_events(input);
@@ -928,34 +953,46 @@ int main(int argc, char* argv[]) {
             textbox_renderer.update_viewport(platform.width(), platform.height());
             platform.clear_resize_flag();
         }
-
+        
         //=====================================================================
-        // Input handling - route through HeadlessGameLoop
+        // Fixed-timestep simulation
+        // Run simulation ticks based on elapsed time, not render rate.
+        // This ensures deterministic gameplay regardless of VSync/FPS.
         //=====================================================================
         
-        frame_counter++;
+        int64_t current_time_ns = get_time_ns();
+        SchedulerTickResult tick_schedule = sim_scheduler.update(current_time_ns);
         
-        if (dialog_state.is_open && dialog_state.waiting_for_input) {
-            // Dialog is open - A-button advances/closes based on text state
-            bool can_advance = (frame_counter > dialog_open_frame);
+        // Process simulation ticks (may be 0, 1, or more per render frame)
+        for (int32_t tick_i = 0; tick_i < tick_schedule.ticks_to_run; ++tick_i) {
+            //=================================================================
+            // Input handling - route through HeadlessGameLoop
+            // Input is sampled once per simulation tick
+            //=================================================================
             
-            if (can_advance && input.snapshot().was_pressed(InputButton::A)) {
-                bool more_text = dialog_state.advance_page();
+            frame_counter++;
+            
+            if (dialog_state.is_open && dialog_state.waiting_for_input) {
+                // Dialog is open - A-button advances/closes based on text state
+                bool can_advance = (frame_counter > dialog_open_frame);
                 
-                if (!more_text) {
-                    // No more pages - resume script which will call close_text
-                    ScriptState script_state = lua_runtime.get_state(game_loop.active_coroutine());
-                    if (script_state == ScriptState::Yielded) {
-                        game_loop.resume_script();
+                if (can_advance && input.snapshot().was_pressed(InputButton::A)) {
+                    bool more_text = dialog_state.advance_page();
+                    
+                    if (!more_text) {
+                        // No more pages - resume script which will call close_text
+                        ScriptState script_state = lua_runtime.get_state(game_loop.active_coroutine());
+                        if (script_state == ScriptState::Yielded) {
+                            game_loop.resume_script();
+                        }
                     }
                 }
+                // Block all other input while dialog is open
             }
-            // Block all other input while dialog is open
-        }
-        else if (!game_loop.is_input_locked()) {
-            InputAction action = InputAction::None;
-            
-            // A-button (Space/Z key for interaction) - check FIRST with was_pressed
+            else if (!game_loop.is_input_locked()) {
+                InputAction action = InputAction::None;
+                
+                // A-button (Space/Z key for interaction) - check FIRST with was_pressed
             if (input.snapshot().was_pressed(InputButton::A)) {
                 action = InputAction::Interact;
             }
@@ -1290,8 +1327,12 @@ int main(int argc, char* argv[]) {
             } // end if (movement_complete)
         } // end if (player_moving)
         
+        } // end for (tick_i) - simulation tick loop
+        
         //=====================================================================
         // Calculate visual position for rendering
+        // This runs once per render frame, after all simulation ticks.
+        // Uses interpolation_alpha from scheduler for smooth rendering.
         //=====================================================================
         
         float player_walk_progress = player_moving ? 

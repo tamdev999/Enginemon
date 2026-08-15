@@ -8,6 +8,7 @@ add_library(enginemon_engine STATIC
     core/types.cpp
     core/game_loop.cpp
     core/game_state.cpp
+    core/timing.cpp
     
     # Package loading (runtime side of compiler/runtime boundary)
     package/package_reader.cpp

@@ -12,6 +12,7 @@
 #include "engine/world/world_manager.hpp"
 #include "engine/core/game_loop.hpp"
 #include "engine/core/game_state.hpp"
+#include "engine/core/timing.hpp"
 #include "engine/input/input_system.hpp"
 #include "crystal/rom/loader.hpp"
 #include "crystal/output/native_package.hpp"
@@ -5825,6 +5826,164 @@ TEST(batch1_no_crystal_ids_in_ops) {
 }
 
 //=============================================================================
+// SIMULATION TIMING TESTS
+// Verifies SimulationScheduler decouples simulation from render rate
+//=============================================================================
+
+TEST(timing_scheduler_basic) {
+    // Basic scheduler creation and initial state
+    SimulationScheduler scheduler(TICK_60HZ);
+    ASSERT_EQ(scheduler.tick_duration_ns(), TICK_60HZ);
+    ASSERT_EQ(scheduler.total_ticks(), 0);
+    ASSERT_EQ(scheduler.accumulator_ns(), 0);
+    
+    std::cout << "  [SimulationScheduler created with 60Hz tick rate]\n";
+}
+
+TEST(timing_scheduler_advance) {
+    // Test advance() with controlled deltas
+    SimulationScheduler scheduler(TICK_60HZ);  // ~16.67ms per tick
+    
+    // Advance by exactly one tick duration - should produce 1 tick
+    auto result = scheduler.advance(TICK_60HZ);
+    ASSERT_EQ(result.ticks_to_run, 1);
+    ASSERT_EQ(scheduler.total_ticks(), 1);
+    
+    // Advance by half a tick - should produce 0 ticks
+    result = scheduler.advance(TICK_60HZ / 2);
+    ASSERT_EQ(result.ticks_to_run, 0);
+    
+    // Advance by another half - now should produce 1 tick (accumulated)
+    result = scheduler.advance(TICK_60HZ / 2);
+    ASSERT_EQ(result.ticks_to_run, 1);
+    ASSERT_EQ(scheduler.total_ticks(), 2);
+    
+    std::cout << "  [advance() accumulates time correctly]\n";
+}
+
+TEST(timing_60hz_rendering_produces_consistent_ticks) {
+    // Simulate 60Hz rendering (1 render frame = 1 simulation tick)
+    SimulationScheduler scheduler(TICK_60HZ);
+    
+    int64_t elapsed = 0;
+    int total_ticks = 0;
+    
+    // 60 frames at 60Hz = 1 second
+    for (int frame = 0; frame < 60; ++frame) {
+        elapsed += TICK_60HZ;
+        auto result = scheduler.advance(TICK_60HZ);
+        total_ticks += result.ticks_to_run;
+    }
+    
+    ASSERT_EQ(total_ticks, 60);
+    ASSERT_EQ(scheduler.total_ticks(), 60);
+    
+    std::cout << "  [60Hz rendering → 60 ticks per second]\n";
+}
+
+TEST(timing_144hz_rendering_produces_same_ticks) {
+    // Simulate 144Hz rendering (~6.94ms per frame)
+    // Should still produce ~60 simulation ticks per second
+    SimulationScheduler scheduler(TICK_60HZ);
+    
+    constexpr int64_t FRAME_144HZ = 1'000'000'000 / 144;  // ~6.94ms
+    int total_ticks = 0;
+    
+    // 144 render frames at 144Hz = 1 second elapsed
+    for (int frame = 0; frame < 144; ++frame) {
+        auto result = scheduler.advance(FRAME_144HZ);
+        total_ticks += result.ticks_to_run;
+    }
+    
+    // Should produce approximately 60 ticks (±1 due to rounding)
+    ASSERT_TRUE(total_ticks >= 59 && total_ticks <= 61);
+    
+    std::cout << "  [144Hz rendering → ~60 simulation ticks (got " << total_ticks << ")]\n";
+}
+
+TEST(timing_irregular_frames_same_result) {
+    // Simulate irregular/variable frame times
+    // Total elapsed time = 500ms, delivered in irregular chunks (avoiding death spiral cap)
+    SimulationScheduler scheduler(TICK_60HZ);
+    
+    // Irregular frame times (sum = 500ms = 500,000,000 ns)
+    // Keeping all frames under max_ticks_per_update * tick_duration to avoid capping
+    std::vector<int64_t> frame_times = {
+        20'000'000,  // 20ms
+        5'000'000,   // 5ms
+        30'000'000,  // 30ms
+        10'000'000,  // 10ms
+        15'000'000,  // 15ms
+        25'000'000,  // 25ms
+        8'000'000,   // 8ms
+        12'000'000,  // 12ms
+        50'000'000,  // 50ms
+        7'000'000,   // 7ms
+        18'000'000,  // 18ms
+        100'000'000, // 100ms
+        100'000'000, // 100ms
+        100'000'000  // 100ms (total = 500ms)
+    };
+    
+    int total_ticks = 0;
+    for (int64_t dt : frame_times) {
+        auto result = scheduler.advance(dt);
+        total_ticks += result.ticks_to_run;
+    }
+    
+    // 500ms at 60Hz = 30 ticks
+    ASSERT_TRUE(total_ticks >= 28 && total_ticks <= 32);
+    
+    std::cout << "  [Irregular frame times → " << total_ticks << " ticks for 500ms]\n";
+}
+
+TEST(timing_equivalent_elapsed_same_tick_count) {
+    // The key test: equivalent total elapsed time produces same tick count
+    // regardless of how it's delivered (60Hz, 144Hz, or irregular)
+    
+    SimulationScheduler sched_60hz(TICK_60HZ);
+    SimulationScheduler sched_144hz(TICK_60HZ);
+    SimulationScheduler sched_irregular(TICK_60HZ);
+    
+    // Use 500ms total to avoid any capping issues
+    constexpr int64_t HALF_SECOND = 500'000'000;
+    constexpr int64_t FRAME_60HZ = 1'000'000'000 / 60;  // ~16.67ms
+    constexpr int64_t FRAME_144HZ = 1'000'000'000 / 144;  // ~6.94ms
+    
+    int ticks_60hz = 0;
+    int ticks_144hz = 0;
+    int ticks_irregular = 0;
+    
+    // Simulate 30 frames at 60Hz (500ms)
+    for (int i = 0; i < 30; ++i) {
+        ticks_60hz += sched_60hz.advance(FRAME_60HZ).ticks_to_run;
+    }
+    
+    // Simulate 72 frames at 144Hz (same 500ms total elapsed time)
+    for (int i = 0; i < 72; ++i) {
+        ticks_144hz += sched_144hz.advance(FRAME_144HZ).ticks_to_run;
+    }
+    
+    // Simulate irregular (same 500ms total elapsed time)
+    std::vector<int64_t> times = {
+        50'000'000, 75'000'000, 40'000'000, 60'000'000, 100'000'000,
+        25'000'000, 35'000'000, 15'000'000, 50'000'000, 50'000'000
+    };
+    for (int64_t dt : times) {
+        ticks_irregular += sched_irregular.advance(dt).ticks_to_run;
+    }
+    
+    // All three should produce ~30 ticks (±1 for rounding)
+    ASSERT_TRUE(ticks_60hz >= 29 && ticks_60hz <= 31);
+    ASSERT_TRUE(ticks_144hz >= 29 && ticks_144hz <= 31);
+    ASSERT_TRUE(ticks_irregular >= 29 && ticks_irregular <= 31);
+    
+    std::cout << "  [60Hz=" << ticks_60hz << ", 144Hz=" << ticks_144hz 
+              << ", irregular=" << ticks_irregular << " ticks for 500ms]\n";
+    std::cout << "  [Simulation cadence independent of render rate ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -6050,6 +6209,14 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch1_sprite_ops_distinct);
     RUN_TEST(batch1_audio_ops_distinct);
     RUN_TEST(batch1_no_crystal_ids_in_ops);
+    
+    // Simulation timing tests (Audit 8 - render/sim decoupling)
+    RUN_TEST(timing_scheduler_basic);
+    RUN_TEST(timing_scheduler_advance);
+    RUN_TEST(timing_60hz_rendering_produces_consistent_ticks);
+    RUN_TEST(timing_144hz_rendering_produces_same_ticks);
+    RUN_TEST(timing_irregular_frames_same_result);
+    RUN_TEST(timing_equivalent_elapsed_same_tick_count);
     
     // Summary
     std::cout << "\n=== Results ===\n";

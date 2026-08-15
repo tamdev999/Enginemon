@@ -1,8 +1,11 @@
 // runtime/render/textbox_renderer.cpp
-// Crystal-authentic textbox renderer implementation
+// Native textbox renderer implementation
 //
-// Uses extracted Crystal font atlas and charmap for authentic presentation.
-// Supports multi-page text flow with Crystal control characters.
+// Uses compiled FontDefinition from EMON package for rendering.
+// Supports multi-page text flow with semantic control operations.
+//
+// NOTE: This file contains ZERO Crystal-specific encoding knowledge.
+// Text arrives as semantic NativeTextSequence with UTF-8 strings.
 
 #include "render/textbox_renderer.hpp"
 #include "render/vulkan_bootstrap.hpp"
@@ -20,36 +23,80 @@
 namespace enginemon {
 
 //=============================================================================
+// Helper to extract a single UTF-8 character from a string
+// Returns the character and advances the pointer
+//=============================================================================
+static std::string extract_utf8_char(const char*& p, const char* end) {
+    if (p >= end) return "";
+    
+    unsigned char ch = static_cast<unsigned char>(*p);
+    size_t len = 1;
+    
+    // Determine UTF-8 sequence length
+    if ((ch & 0x80) == 0) {
+        len = 1;  // ASCII
+    } else if ((ch & 0xE0) == 0xC0) {
+        len = 2;  // 2-byte sequence
+    } else if ((ch & 0xF0) == 0xE0) {
+        len = 3;  // 3-byte sequence
+    } else if ((ch & 0xF8) == 0xF0) {
+        len = 4;  // 4-byte sequence
+    }
+    
+    // Check we have enough bytes
+    if (p + len > end) {
+        len = 1;  // Truncated, just take one byte
+    }
+    
+    std::string result(p, len);
+    p += len;
+    return result;
+}
+
+
+//=============================================================================
+// NativeTextSequence::from_runtime
+// Converts RuntimeTextSequence to NativeTextSequence
+//=============================================================================
+NativeTextSequence NativeTextSequence::from_runtime(const RuntimeTextSequence& seq) {
+    NativeTextSequence result;
+    for (const auto& elem : seq.elements) {
+        NativeTextElement native;
+        switch (elem.op) {
+            case RuntimeTextOp::Text:
+                native.control = TextControl::None;
+                native.text = elem.text;
+                break;
+            case RuntimeTextOp::Line:
+                native.control = TextControl::Line;
+                break;
+            case RuntimeTextOp::Next:
+                native.control = TextControl::Next;
+                break;
+            case RuntimeTextOp::Para:
+                native.control = TextControl::Para;
+                break;
+            case RuntimeTextOp::Cont:
+            case RuntimeTextOp::Scroll:
+                native.control = TextControl::Cont;
+                break;
+            case RuntimeTextOp::Done:
+                native.control = TextControl::Done;
+                break;
+            case RuntimeTextOp::Prompt:
+                native.control = TextControl::Prompt;
+                break;
+        }
+        result.elements.push_back(native);
+    }
+    return result;
+}
+
+//=============================================================================
 // RuntimeFontAtlas::from_package_data
 // Parses serialized font atlas data from the EMON package
-//
-// Serialization format (from native_package.cpp add_font_atlas):
-//   atlas_width (u32)
-//   atlas_height (u32)
-//   pixel_count (u32)
-//   pixels[pixel_count] (u32 RGBA32 each)
-//   glyph_uv_count (u32)
-//   glyph_uvs[glyph_uv_count] (4 floats each: u0, v0, u1, v1)
-//   charmap_count (u32)
-//   charmap[charmap_count]:
-//     crystal_code (u8)
-//     glyph_index (u16)
-//     is_control (u8)
-//     control_name_len (u16)
-//     control_name[control_name_len] (chars)
-//     utf8_char_len (u16)
-//     utf8_char[utf8_char_len] (chars)
-//   border_top_left (u16)
-//   border_top (u16)
-//   border_top_right (u16)
-//   border_left (u16)
-//   border_bottom_left (u16)
-//   border_bottom_right (u16)
-//   space_glyph (u16)
-//   cursor_glyph (u16)
+// Builds UTF-8 → GlyphId lookup (no Crystal charmap in runtime)
 //=============================================================================
-
-// Helper to read little-endian values from byte stream
 template<typename T>
 static T read_le(const uint8_t*& ptr) {
     T value = 0;
@@ -59,7 +106,6 @@ static T read_le(const uint8_t*& ptr) {
     return value;
 }
 
-// Helper to read float (assumes IEEE 754)
 static float read_float_le(const uint8_t*& ptr) {
     uint32_t bits = read_le<uint32_t>(ptr);
     float value;
@@ -67,8 +113,9 @@ static float read_float_le(const uint8_t*& ptr) {
     return value;
 }
 
+
 bool RuntimeFontAtlas::from_package_data(const std::vector<uint8_t>& data, RuntimeFontAtlas& atlas) {
-    if (data.size() < 16) return false;  // Minimum header size
+    if (data.size() < 16) return false;
     
     const uint8_t* ptr = data.data();
     const uint8_t* end = data.data() + data.size();
@@ -99,52 +146,36 @@ bool RuntimeFontAtlas::from_package_data(const std::vector<uint8_t>& data, Runti
         atlas.glyph_uvs[i].v1 = read_float_le(ptr);
     }
     
-    // Read charmap
+    // Read charmap and build UTF-8 → GlyphId lookup
     if (ptr + 4 > end) return false;
     uint32_t charmap_count = read_le<uint32_t>(ptr);
     
-    atlas.code_to_glyph.clear();
-    atlas.code_to_control.clear();
+    atlas.utf8_to_glyph.clear();
     
     for (uint32_t i = 0; i < charmap_count; ++i) {
         if (ptr + 4 > end) return false;
         
-        uint8_t crystal_code = *ptr++;
+        // Skip crystal_code - we don't use it in runtime
+        ptr++;  // uint8_t crystal_code
         uint16_t glyph_index = read_le<uint16_t>(ptr);
         uint8_t is_control = *ptr++;
         
-        // Read control_name
+        // Skip control_name
         if (ptr + 2 > end) return false;
         uint16_t control_name_len = read_le<uint16_t>(ptr);
         if (ptr + control_name_len > end) return false;
-        std::string control_name(reinterpret_cast<const char*>(ptr), control_name_len);
         ptr += control_name_len;
         
-        // Read utf8_char (skip, not needed for runtime)
+        // Read utf8_char - THIS is what we use for lookup
         if (ptr + 2 > end) return false;
         uint16_t utf8_len = read_le<uint16_t>(ptr);
         if (ptr + utf8_len > end) return false;
-        ptr += utf8_len;
         
-        // Add to lookup maps
-        atlas.code_to_glyph[crystal_code] = glyph_index;
-        
-        if (is_control) {
-            // Map control name to TextControl enum
-            TextControl ctrl = TextControl::None;
-            if (control_name == "LINE") ctrl = TextControl::Line;
-            else if (control_name == "NEXT") ctrl = TextControl::Next;
-            else if (control_name == "PARA") ctrl = TextControl::Para;
-            else if (control_name == "CONT") ctrl = TextControl::Cont;
-            else if (control_name == "SCROLL") ctrl = TextControl::Cont;  // SCROLL same as CONT
-            else if (control_name == "DONE") ctrl = TextControl::Done;
-            else if (control_name == "PROMPT") ctrl = TextControl::Prompt;
-            else if (control_name == "TERMINATOR" || control_name == "@") ctrl = TextControl::Terminator;
-            
-            if (ctrl != TextControl::None) {
-                atlas.code_to_control[crystal_code] = ctrl;
-            }
+        if (!is_control && utf8_len > 0) {
+            std::string utf8_char(reinterpret_cast<const char*>(ptr), utf8_len);
+            atlas.utf8_to_glyph[utf8_char] = glyph_index;
         }
+        ptr += utf8_len;
     }
     
     // Read special glyph indices
@@ -158,9 +189,13 @@ bool RuntimeFontAtlas::from_package_data(const std::vector<uint8_t>& data, Runti
     atlas.space_glyph = read_le<uint16_t>(ptr);
     atlas.cursor_glyph = read_le<uint16_t>(ptr);
     
-    atlas.font_id = "crystal_main";
+    // Ensure space is in the lookup
+    atlas.utf8_to_glyph[" "] = atlas.space_glyph;
+    
+    atlas.font_id = "main_font";
     return true;
 }
+
 
 TextboxRenderer::TextboxRenderer() = default;
 TextboxRenderer::~TextboxRenderer() { destroy(); }
@@ -183,7 +218,6 @@ bool TextboxRenderer::initialize(VulkanBootstrap& vk, const TextboxRendererConfi
     physical_device_ = vk.physical_device();
     config_ = config;
     
-    // Don't create font texture yet - wait for load_font_atlas()
     if (!create_pipeline(vk)) return false;
     if (!ensure_buffers(vk, 2048, 3072)) return false;
     
@@ -226,6 +260,7 @@ uint32_t TextboxRenderer::find_memory_type(uint32_t type_filter, VkMemoryPropert
     }
     return 0;
 }
+
 
 VkShaderModule TextboxRenderer::create_shader_module(const uint32_t* code, size_t size) {
     VkShaderModuleCreateInfo ci{};
@@ -372,7 +407,7 @@ bool TextboxRenderer::create_font_texture(VulkanBootstrap& vk) {
     view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
     view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     if (vkCreateImageView(device_, &view_info, nullptr, &font_view_) != VK_SUCCESS) return false;
-    
+
     // Create sampler (NEAREST for pixel-perfect)
     VkSamplerCreateInfo sampler_info{};
     sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -495,7 +530,7 @@ bool TextboxRenderer::create_pipeline(VulkanBootstrap& vk) {
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    
+
     VkPipelineColorBlendAttachmentState blend_attach{};
     blend_attach.blendEnable = VK_TRUE;
     blend_attach.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
@@ -547,6 +582,7 @@ bool TextboxRenderer::create_pipeline(VulkanBootstrap& vk) {
     return result == VK_SUCCESS;
 }
 
+
 bool TextboxRenderer::ensure_buffers(VulkanBootstrap& vk, size_t vertex_count, size_t index_count) {
     size_t vb_size = vertex_count * sizeof(TextboxVertex);
     size_t ib_size = index_count * sizeof(uint16_t);
@@ -597,183 +633,174 @@ bool TextboxRenderer::ensure_buffers(VulkanBootstrap& vk, size_t vertex_count, s
     return true;
 }
 
+
+//=============================================================================
+// parse_text_pages - Parse NativeTextSequence into displayable pages
+// Uses semantic TextControl operations (no Crystal byte codes)
+//=============================================================================
 void TextboxRenderer::parse_text_pages(TextboxState& state) {
     state.pages.clear();
     state.page_meta.clear();
-    state.visible.clear();  // Reset visible buffer
-    if (state.full_text_encoded.empty()) return;
+    state.visible.clear();
     
-    // Parse text stream into pages based on control characters
-    // Crystal textbox: 18 chars wide, 2 lines visible at a time
-    // 
-    // Reference: pokecrystal/home/text.asm
-    // - LINE (0x4F): move to line 2, no wait
-    // - PARA (0x51): wait → clear → continue same stream  
-    // - CONT (0x55/0x4B): wait → scroll → continue same stream
-    // - DONE (0x57): terminate text processing (box stays open)
-    // - PROMPT (0x58): wait → terminate
-    //
-    // Reference: Gen2Recomped TextBox.lua paginate()
-    // - Split on \f (PARA), track \v (CONT) markers per line
-    // - Pages contain only their OWN lines
-    // - CONT pages are marked with is_cont_page = true
-    // - The VisibleTextBuffer handles scroll/clear at display time
-    //
-    // IMPORTANT: Pages do NOT copy lines from previous pages.
-    // The visible buffer tracks what's displayed, and CONT vs PARA
-    // transitions manipulate the visible buffer differently.
+    if (state.text_sequence.empty()) return;
     
     const size_t max_chars_per_line = config_.text_width_tiles;
     const size_t max_lines = config_.max_lines;
     
     TextPage current_page;
-    std::vector<uint8_t> current_line;
+    std::string current_line;
     PageMeta current_meta;
     current_meta.stream_start = 0;
     
-    for (size_t i = 0; i < state.full_text_encoded.size(); ++i) {
-        uint8_t code = state.full_text_encoded[i];
-        TextControl ctrl = font_atlas_.control_for_code(code);
+    for (size_t i = 0; i < state.text_sequence.elements.size(); ++i) {
+        const auto& elem = state.text_sequence.elements[i];
         
-        if (ctrl == TextControl::Terminator || ctrl == TextControl::Done) {
-            // DONE: End text processing (box stays open until closetext)
-            if (!current_line.empty()) {
-                current_page.lines.push_back(current_line);
-            }
-            if (!current_page.lines.empty()) {
-                current_meta.stream_end = i;
-                current_meta.is_final = true;
-                state.pages.push_back(current_page);
-                state.page_meta.push_back(current_meta);
-            }
-            break;
-        }
-        else if (ctrl == TextControl::Prompt) {
-            // PROMPT: wait, then terminate
-            if (!current_line.empty()) {
-                current_page.lines.push_back(current_line);
-            }
-            if (!current_page.lines.empty()) {
-                current_meta.stream_end = i;
-                current_meta.is_final = true;
-                state.pages.push_back(current_page);
-                state.page_meta.push_back(current_meta);
-            }
-            break;
-        }
-        else if (ctrl == TextControl::Line) {
-            // LINE: Move to line 2 (no scroll, no wait)
-            // Just break to second line within the same page
-            current_page.lines.push_back(current_line);
-            current_line.clear();
+        if (elem.is_text()) {
+            // Process text character by character
+            const char* p = elem.text.c_str();
+            const char* end = p + elem.text.size();
             
-            // Check if page is full
-            // For CONT pages: max 1 line (scroll + show one new line)
-            // For normal pages: max 2 lines
-            size_t page_max_lines = current_page.is_cont_page ? 1 : max_lines;
-            
-            if (current_page.lines.size() >= page_max_lines) {
-                // Page full - treat as implicit CONT (wait → scroll)
-                current_meta.stream_end = i + 1;
-                current_meta.ends_with_cont = true;
-                state.pages.push_back(current_page);
-                state.page_meta.push_back(current_meta);
-                // Start new CONT page
-                current_page = TextPage{};
-                current_page.is_cont_page = true;
-                current_meta = PageMeta{};
-                current_meta.stream_start = i + 1;
-            }
-        }
-        else if (ctrl == TextControl::Next) {
-            // NEXT: clear and restart at line 1 (like implicit PARA but no wait)
-            current_page.lines.push_back(current_line);
-            current_line.clear();
-        }
-        else if (ctrl == TextControl::Para) {
-            // PARA: Wait → Clear → Continue SAME text stream
-            // This is a page break with clear
-            if (!current_line.empty()) {
-                current_page.lines.push_back(current_line);
-            }
-            // Even if current_page is empty, we may need a page for the wait
-            if (!current_page.lines.empty()) {
-                current_meta.stream_end = i + 1;  // Position after PARA
-                current_meta.ends_with_para = true;
-                state.pages.push_back(current_page);
-                state.page_meta.push_back(current_meta);
-            }
-            // Start completely fresh page (PARA clears the box)
-            current_page = TextPage{};
-            current_page.is_cont_page = false;  // Fresh page, no scroll
-            current_meta = PageMeta{};
-            current_meta.stream_start = i + 1;
-            current_line.clear();
-        }
-        else if (ctrl == TextControl::Cont) {
-            // CONT: Wait → Scroll → Continue SAME text stream
-            // This keeps the last line visible while scrolling new content in
-            if (!current_line.empty()) {
-                current_page.lines.push_back(current_line);
-            }
-            if (!current_page.lines.empty()) {
-                current_meta.stream_end = i + 1;  // Position after CONT
-                current_meta.ends_with_cont = true;
-                state.pages.push_back(current_page);
-                state.page_meta.push_back(current_meta);
-            }
-            // Start new page - do NOT copy lines, mark as CONT page
-            // The visible buffer scroll happens when we switch to this page
-            current_page = TextPage{};
-            current_page.is_cont_page = true;  // Mark as scroll-continuation
-            current_meta = PageMeta{};
-            current_meta.stream_start = i + 1;
-            current_line.clear();
-        }
-        else if (ctrl == TextControl::None) {
-            // Regular printable character
-            current_line.push_back(code);
-            
-            // Check for line wrap at column limit
-            if (current_line.size() >= max_chars_per_line) {
-                current_page.lines.push_back(current_line);
-                current_line.clear();
+            while (p < end) {
+                std::string ch = extract_utf8_char(p, end);
+                if (ch.empty()) continue;
                 
-                // Check if page is full
-                // For CONT pages: max 1 line (scroll + show one new line)
-                // For normal pages: max 2 lines
-                size_t page_max_lines = current_page.is_cont_page ? 1 : max_lines;
+                current_line += ch;
                 
-                if (current_page.lines.size() >= page_max_lines) {
-                    // Page full - create CONT break to scroll before more text
-                    current_meta.stream_end = i + 1;
-                    current_meta.ends_with_cont = true;
-                    state.pages.push_back(current_page);
-                    state.page_meta.push_back(current_meta);
-                    // Start new CONT page
+                // Check for line wrap
+                // Count UTF-8 characters in line (not bytes)
+                size_t char_count = 0;
+                const char* lp = current_line.c_str();
+                const char* lend = lp + current_line.size();
+                while (lp < lend) {
+                    extract_utf8_char(lp, lend);
+                    char_count++;
+                }
+                
+                if (char_count >= max_chars_per_line) {
+                    current_page.lines.push_back(current_line);
+                    current_line.clear();
+                    
+                    size_t page_max_lines = current_page.is_cont_page ? 1 : max_lines;
+                    if (current_page.lines.size() >= page_max_lines) {
+                        current_meta.stream_end = i + 1;
+                        current_meta.ends_with_cont = true;
+                        state.pages.push_back(current_page);
+                        state.page_meta.push_back(current_meta);
+                        
+                        current_page = TextPage{};
+                        current_page.is_cont_page = true;
+                        current_meta = PageMeta{};
+                        current_meta.stream_start = i + 1;
+                    }
+                }
+            }
+        }
+        else {
+            // Handle control operation
+            switch (elem.control) {
+                case TextControl::Done:
+                case TextControl::Terminator:
+                    if (!current_line.empty()) {
+                        current_page.lines.push_back(current_line);
+                    }
+                    if (!current_page.lines.empty()) {
+                        current_meta.stream_end = i;
+                        current_meta.is_final = true;
+                        state.pages.push_back(current_page);
+                        state.page_meta.push_back(current_meta);
+                    }
+                    goto done_parsing;
+
+                case TextControl::Prompt:
+                    if (!current_line.empty()) {
+                        current_page.lines.push_back(current_line);
+                    }
+                    if (!current_page.lines.empty()) {
+                        current_meta.stream_end = i;
+                        current_meta.is_final = true;
+                        state.pages.push_back(current_page);
+                        state.page_meta.push_back(current_meta);
+                    }
+                    goto done_parsing;
+                    
+                case TextControl::Line:
+                    current_page.lines.push_back(current_line);
+                    current_line.clear();
+                    {
+                        size_t page_max_lines = current_page.is_cont_page ? 1 : max_lines;
+                        if (current_page.lines.size() >= page_max_lines) {
+                            current_meta.stream_end = i + 1;
+                            current_meta.ends_with_cont = true;
+                            state.pages.push_back(current_page);
+                            state.page_meta.push_back(current_meta);
+                            
+                            current_page = TextPage{};
+                            current_page.is_cont_page = true;
+                            current_meta = PageMeta{};
+                            current_meta.stream_start = i + 1;
+                        }
+                    }
+                    break;
+                    
+                case TextControl::Next:
+                    current_page.lines.push_back(current_line);
+                    current_line.clear();
+                    break;
+                    
+                case TextControl::Para:
+                    if (!current_line.empty()) {
+                        current_page.lines.push_back(current_line);
+                    }
+                    if (!current_page.lines.empty()) {
+                        current_meta.stream_end = i + 1;
+                        current_meta.ends_with_para = true;
+                        state.pages.push_back(current_page);
+                        state.page_meta.push_back(current_meta);
+                    }
+                    current_page = TextPage{};
+                    current_page.is_cont_page = false;
+                    current_meta = PageMeta{};
+                    current_meta.stream_start = i + 1;
+                    current_line.clear();
+                    break;
+                    
+                case TextControl::Cont:
+                    if (!current_line.empty()) {
+                        current_page.lines.push_back(current_line);
+                    }
+                    if (!current_page.lines.empty()) {
+                        current_meta.stream_end = i + 1;
+                        current_meta.ends_with_cont = true;
+                        state.pages.push_back(current_page);
+                        state.page_meta.push_back(current_meta);
+                    }
                     current_page = TextPage{};
                     current_page.is_cont_page = true;
                     current_meta = PageMeta{};
                     current_meta.stream_start = i + 1;
-                }
+                    current_line.clear();
+                    break;
+                    
+                default:
+                    break;
             }
         }
     }
-    
-    // Handle any remaining text that didn't hit a terminator
-    // This handles cases like text without explicit DONE
+
+    // Handle remaining text without terminator
     if (!current_line.empty()) {
         current_page.lines.push_back(current_line);
     }
     if (!current_page.lines.empty()) {
-        // No terminator found - treat as implicit DONE
-        current_meta.stream_end = state.full_text_encoded.size();
+        current_meta.stream_end = state.text_sequence.elements.size();
         current_meta.is_final = true;
         state.pages.push_back(current_page);
         state.page_meta.push_back(current_meta);
     }
-    
-    // Initialize visible buffer with first page content
+
+done_parsing:
+    // Initialize visible buffer with first page
     if (!state.pages.empty()) {
         const auto& first_page = state.pages[0];
         if (first_page.lines.size() > 0) {
@@ -784,7 +811,7 @@ void TextboxRenderer::parse_text_pages(TextboxState& state) {
         }
     }
     
-    // Set initial wait state based on first page
+    // Set initial wait state
     if (!state.pages.empty() && !state.page_meta.empty()) {
         const auto& meta = state.page_meta[0];
         state.waiting_for_para = meta.ends_with_para;
@@ -793,185 +820,40 @@ void TextboxRenderer::parse_text_pages(TextboxState& state) {
     }
 }
 
-// TextboxState::open_with_sequence implementation
-// This is the semantic path that preserves LINE/CONT/PARA distinctions
-// from the Crystal ROM decoder through to the renderer without lossy encoding.
+//=============================================================================
+// TextboxState::open_with_sequence
+// Opens textbox with semantic text sequence (no Crystal encoding)
+//=============================================================================
 void TextboxState::open_with_sequence(const RuntimeTextSequence& seq) {
-    // Reset state
     is_open = true;
     waiting_for_input = true;
     show_cursor = true;
     waiting_for_para = false;
     waiting_for_cont = false;
     text_complete = false;
-    text.clear();
-    visible_text.clear();
-    full_text_encoded.clear();
     chars_revealed = 0;
     current_page = 0;
     pages.clear();
     page_meta.clear();
-    stream = TextStreamState{};
     visible.clear();
     
-    // Convert RuntimeTextSequence to Crystal-encoded bytes
-    // This preserves the semantic operations as actual Crystal control codes
-    //
-    // Crystal control codes (from pokecrystal/constants/charmap.asm):
-    //   LINE   = 0x4F  - move to line 2, no wait
-    //   NEXT   = 0x4E  - clear and continue (no wait)
-    //   PARA   = 0x51  - wait → clear → continue
-    //   CONT   = 0x55  - wait → scroll → continue
-    //   SCROLL = 0x4B  - scroll (internal, same as CONT for our purposes)
-    //   DONE   = 0x57  - end text processing
-    //   PROMPT = 0x58  - show cursor, wait, end
+    // Convert to native representation
+    text_sequence = NativeTextSequence::from_runtime(seq);
     
-    for (const auto& elem : seq.elements) {
-        switch (elem.op) {
-            case RuntimeTextOp::Text:
-                // Encode UTF-8 text to Crystal character codes
-                encode_utf8_to_crystal(elem.text, full_text_encoded);
-                break;
-            case RuntimeTextOp::Line:
-                full_text_encoded.push_back(0x4F);
-                break;
-            case RuntimeTextOp::Next:
-                full_text_encoded.push_back(0x4E);
-                break;
-            case RuntimeTextOp::Para:
-                full_text_encoded.push_back(0x51);
-                break;
-            case RuntimeTextOp::Cont:
-                full_text_encoded.push_back(0x55);
-                break;
-            case RuntimeTextOp::Scroll:
-                full_text_encoded.push_back(0x4B);
-                break;
-            case RuntimeTextOp::Done:
-                full_text_encoded.push_back(0x57);
-                break;
-            case RuntimeTextOp::Prompt:
-                full_text_encoded.push_back(0x58);
-                break;
-        }
+    // Ensure we have a terminator
+    if (text_sequence.elements.empty() || 
+        (text_sequence.elements.back().control != TextControl::Done &&
+         text_sequence.elements.back().control != TextControl::Prompt)) {
+        text_sequence.elements.push_back(NativeTextElement{TextControl::Done, ""});
     }
     
-    // If no terminator was added, add DONE
-    if (full_text_encoded.empty() || 
-        (full_text_encoded.back() != 0x57 && full_text_encoded.back() != 0x58)) {
-        full_text_encoded.push_back(0x57);
-    }
-    
-    // Pages will be built by TextboxRenderer::parse_text_pages() when called
+    // Pages will be built by TextboxRenderer::parse_text_pages()
 }
 
-// Helper to encode UTF-8 text to Crystal character codes
-// This is separate from control code handling - it only encodes printable characters
-void TextboxState::encode_utf8_to_crystal(const std::string& utf8_text, std::vector<uint8_t>& output) {
-    const char* p = utf8_text.c_str();
-    const char* end = p + utf8_text.size();
-    
-    while (p < end) {
-        unsigned char ch = static_cast<unsigned char>(*p);
-        
-        // Skip newlines - they should not appear in semantic text runs
-        // (LINE/CONT/PARA are separate operations now)
-        if (*p == '\n') {
-            p++;
-            continue;
-        }
-        
-        // Check for multi-byte UTF-8 sequences
-        if ((ch & 0xE0) == 0xC0 && (p + 1 < end)) {
-            // 2-byte UTF-8 sequence
-            unsigned char b1 = ch;
-            unsigned char b2 = static_cast<unsigned char>(p[1]);
-            
-            // é = 0xC3 0xA9 (UTF-8 for U+00E9)
-            if (b1 == 0xC3 && b2 == 0xA9) {
-                output.push_back(0xEA);  // Crystal code for é
-                p += 2;
-                continue;
-            }
-            // Ä = 0xC3 0x84
-            else if (b1 == 0xC3 && b2 == 0x84) {
-                output.push_back(0xC0);
-                p += 2;
-                continue;
-            }
-            // Ö = 0xC3 0x96
-            else if (b1 == 0xC3 && b2 == 0x96) {
-                output.push_back(0xC1);
-                p += 2;
-                continue;
-            }
-            // Ü = 0xC3 0x9C
-            else if (b1 == 0xC3 && b2 == 0x9C) {
-                output.push_back(0xC2);
-                p += 2;
-                continue;
-            }
-            // ä = 0xC3 0xA4
-            else if (b1 == 0xC3 && b2 == 0xA4) {
-                output.push_back(0xC3);
-                p += 2;
-                continue;
-            }
-            // ö = 0xC3 0xB6
-            else if (b1 == 0xC3 && b2 == 0xB6) {
-                output.push_back(0xC4);
-                p += 2;
-                continue;
-            }
-            // ü = 0xC3 0xBC
-            else if (b1 == 0xC3 && b2 == 0xBC) {
-                output.push_back(0xC5);
-                p += 2;
-                continue;
-            }
-            // Unknown 2-byte sequence, skip
-            p += 2;
-            output.push_back(0x7F);  // Space
-            continue;
-        }
-        else if ((ch & 0xF0) == 0xE0 && (p + 2 < end)) {
-            // 3-byte UTF-8 sequence (skip)
-            p += 3;
-            output.push_back(0x7F);
-            continue;
-        }
-        else if ((ch & 0xF8) == 0xF0 && (p + 3 < end)) {
-            // 4-byte UTF-8 sequence (skip)
-            p += 4;
-            output.push_back(0x7F);
-            continue;
-        }
-        
-        // Single-byte ASCII
-        char c = *p;
-        p++;
-        
-        uint8_t code = 0x7F;  // Space by default
-        if (c >= 'A' && c <= 'Z') code = 0x80 + (c - 'A');
-        else if (c >= 'a' && c <= 'z') code = 0xA0 + (c - 'a');
-        else if (c >= '0' && c <= '9') code = 0xF6 + (c - '0');
-        else if (c == ' ') code = 0x7F;
-        else if (c == '.') code = 0xE8;
-        else if (c == ',') code = 0xF4;
-        else if (c == '!') code = 0xE7;
-        else if (c == '?') code = 0xE6;
-        else if (c == '-') code = 0xE3;
-        else if (c == '\'') code = 0xE0;
-        else if (c == ':') code = 0x9C;
-        else if (c == ';') code = 0x9D;
-        else if (c == '(') code = 0x9A;
-        else if (c == ')') code = 0x9B;
-        else if (c == '/') code = 0xF3;
-        else if (c == '&') code = 0xE9;
-        
-        output.push_back(code);
-    }
-}
+
+//=============================================================================
+// Geometry building helpers
+//=============================================================================
 
 void TextboxRenderer::add_glyph_quad(std::vector<TextboxVertex>& vertices, 
     std::vector<uint16_t>& indices, float px, float py, uint16_t glyph_index,
@@ -984,7 +866,6 @@ void TextboxRenderer::add_glyph_quad(std::vector<TextboxVertex>& vertices,
     float h = static_cast<float>(config_.logical_height);
     float tile = static_cast<float>(config_.tile_size);
     
-    // Convert pixel position to NDC
     float x0 = (px / w) * 2.0f - 1.0f;
     float y0 = (py / h) * 2.0f - 1.0f;
     float x1 = ((px + tile) / w) * 2.0f - 1.0f;
@@ -1011,14 +892,11 @@ void TextboxRenderer::add_solid_quad(std::vector<TextboxVertex>& vertices,
     float w = static_cast<float>(config_.logical_width);
     float h = static_cast<float>(config_.logical_height);
     
-    // Convert pixel position to NDC
     float x0 = (px / w) * 2.0f - 1.0f;
     float y0 = (py / h) * 2.0f - 1.0f;
     float x1 = ((px + width) / w) * 2.0f - 1.0f;
     float y1 = ((py + height) / h) * 2.0f - 1.0f;
     
-    // Use space glyph UV (should be transparent in atlas) but with opaque color
-    // Actually, we need a solid white quad - use any UV, shader will use vertex color with alpha=1
     const auto& uv = font_atlas_.glyph_uvs[font_atlas_.space_glyph];
     
     uint16_t base = static_cast<uint16_t>(vertices.size());
@@ -1035,6 +913,7 @@ void TextboxRenderer::add_solid_quad(std::vector<TextboxVertex>& vertices,
     indices.push_back(base + 3);
 }
 
+
 void TextboxRenderer::add_border(std::vector<TextboxVertex>& vertices, 
     std::vector<uint16_t>& indices) {
     
@@ -1042,13 +921,13 @@ void TextboxRenderer::add_border(std::vector<TextboxVertex>& vertices,
     float bx = static_cast<float>(config_.box_tile_x) * tile;
     float by = static_cast<float>(config_.box_tile_y) * tile;
     float box_width = static_cast<float>(config_.box_width_tiles) * tile;
-    float box_height = (config_.box_inner_height + 2) * tile;  // +2 for border
+    float box_height = (config_.box_inner_height + 2) * tile;
     
-    // Draw opaque white background FIRST (vertex alpha=1.0 triggers solid mode)
+    // Opaque white background (vertex alpha=1.0 triggers solid mode)
     add_solid_quad(vertices, indices, bx, by, box_width, box_height,
-                   1.0f, 1.0f, 1.0f, 1.0f);  // Opaque white
+                   1.0f, 1.0f, 1.0f, 1.0f);
     
-    // Border glyphs: vertex alpha=0.0 triggers glyph mode (texture pass-through)
+    // Border glyphs (vertex alpha=0.0 triggers glyph mode)
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
     
     // Top row
@@ -1058,11 +937,10 @@ void TextboxRenderer::add_border(std::vector<TextboxVertex>& vertices,
     }
     add_glyph_quad(vertices, indices, bx + box_width - tile, by, font_atlas_.border_tr, r, g, b, a);
 
-    // Middle rows - just draw side borders (interior is already filled by background)
+    // Middle rows
     for (uint32_t row = 1; row <= config_.box_inner_height; ++row) {
         float ry = by + row * tile;
         add_glyph_quad(vertices, indices, bx, ry, font_atlas_.border_l, r, g, b, a);
-        // Right side uses vertical border
         add_glyph_quad(vertices, indices, bx + box_width - tile, ry, font_atlas_.border_l, r, g, b, a);
     }
     
@@ -1075,6 +953,11 @@ void TextboxRenderer::add_border(std::vector<TextboxVertex>& vertices,
     add_glyph_quad(vertices, indices, bx + box_width - tile, bottom_y, font_atlas_.border_br, r, g, b, a);
 }
 
+
+//=============================================================================
+// add_text - Renders visible text using UTF-8 → GlyphId lookup
+// NO Crystal encoding knowledge - uses font atlas utf8_to_glyph map
+//=============================================================================
 void TextboxRenderer::add_text(std::vector<TextboxVertex>& vertices, 
     std::vector<uint16_t>& indices) {
     
@@ -1082,163 +965,37 @@ void TextboxRenderer::add_text(std::vector<TextboxVertex>& vertices,
     float text_x = static_cast<float>(config_.text_start_tile_x) * tile;
     float text_y = static_cast<float>(config_.text_start_tile_y) * tile;
     
-    // Glyph mode: vertex alpha=0.0 (texture pass-through, black ink on transparent)
+    // Glyph mode: vertex alpha=0.0
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
     
-    // Render from the visible buffer - this handles PARA (clear) vs CONT (scroll)
-    // properly without duplicating text from previous pages
-    if (!state_.visible.line1.empty() || !state_.visible.line2.empty()) {
-        // Line 1 (top row)
-        if (!state_.visible.line1.empty()) {
-            float x = text_x;
-            float y = text_y;
-            for (uint8_t code : state_.visible.line1) {
-                uint16_t glyph = font_atlas_.glyph_for_code(code);
-                add_glyph_quad(vertices, indices, x, y, glyph, r, g, b, a);
-                x += tile;
-            }
-        }
-        
-        // Line 2 (bottom row)
-        if (!state_.visible.line2.empty()) {
-            float x = text_x;
-            float y = text_y + tile;
-            for (uint8_t code : state_.visible.line2) {
-                uint16_t glyph = font_atlas_.glyph_for_code(code);
-                add_glyph_quad(vertices, indices, x, y, glyph, r, g, b, a);
-                x += tile;
-            }
-        }
-    }
-    // Fallback: render visible_text for compatibility (legacy path)
-    else if (!state_.visible_text.empty()) {
+    // Render from visible buffer (UTF-8 strings)
+    auto render_line = [&](const std::string& line, float y) {
         float x = text_x;
-        float y = text_y;
-        int line = 0;
-        
-        // Process UTF-8 string and convert to Crystal codes
-        const char* p = state_.visible_text.c_str();
-        const char* end = p + state_.visible_text.size();
+        const char* p = line.c_str();
+        const char* end = p + line.size();
         
         while (p < end) {
-            // Handle newlines
-            if (*p == '\n') {
-                x = text_x;
-                line++;
-                y = text_y + line * tile;
-                if (static_cast<uint32_t>(line) >= config_.max_lines) break;
-                p++;
-                continue;
-            }
+            std::string ch = extract_utf8_char(p, end);
+            if (ch.empty()) continue;
             
-            uint8_t code = 0x7F;  // Space by default
-            
-            // Check for multi-byte UTF-8 sequences first
-            unsigned char ch = static_cast<unsigned char>(*p);
-            
-            if ((ch & 0xE0) == 0xC0 && (p + 1 < end)) {
-                // 2-byte UTF-8 sequence
-                unsigned char b1 = ch;
-                unsigned char b2 = static_cast<unsigned char>(p[1]);
-                
-                // é = 0xC3 0xA9 (UTF-8 for U+00E9)
-                if (b1 == 0xC3 && b2 == 0xA9) {
-                    code = 0xEA;  // Crystal code for é
-                    p += 2;
-                }
-                // Ä = 0xC3 0x84
-                else if (b1 == 0xC3 && b2 == 0x84) {
-                    code = 0xC0;
-                    p += 2;
-                }
-                // Ö = 0xC3 0x96
-                else if (b1 == 0xC3 && b2 == 0x96) {
-                    code = 0xC1;
-                    p += 2;
-                }
-                // Ü = 0xC3 0x9C
-                else if (b1 == 0xC3 && b2 == 0x9C) {
-                    code = 0xC2;
-                    p += 2;
-                }
-                // ä = 0xC3 0xA4
-                else if (b1 == 0xC3 && b2 == 0xA4) {
-                    code = 0xC3;
-                    p += 2;
-                }
-                // ö = 0xC3 0xB6
-                else if (b1 == 0xC3 && b2 == 0xB6) {
-                    code = 0xC4;
-                    p += 2;
-                }
-                // ü = 0xC3 0xBC
-                else if (b1 == 0xC3 && b2 == 0xBC) {
-                    code = 0xC5;
-                    p += 2;
-                }
-                else {
-                    // Unknown 2-byte sequence, skip and show space
-                    p += 2;
-                }
-            }
-            else if ((ch & 0xF0) == 0xE0 && (p + 2 < end)) {
-                // 3-byte UTF-8 sequence (skip these)
-                p += 3;
-            }
-            else if ((ch & 0xF8) == 0xF0 && (p + 3 < end)) {
-                // 4-byte UTF-8 sequence (skip these)
-                p += 4;
-            }
-            else {
-                // Single-byte ASCII or ASCII substitute
-                char c = *p;
-                p++;
-                
-                // Map ASCII to Crystal codes
-                if (c >= 'A' && c <= 'Z') code = 0x80 + (c - 'A');
-                else if (c >= 'a' && c <= 'z') code = 0xA0 + (c - 'a');
-                else if (c >= '0' && c <= '9') code = 0xF6 + (c - '0');
-                else if (c == ' ') code = 0x7F;
-                else if (c == '.') code = 0xE8;
-                else if (c == ',') code = 0xF4;
-                else if (c == '!') code = 0xE7;
-                else if (c == '?') code = 0xE6;
-                else if (c == '-') code = 0xE3;
-                else if (c == '\'') code = 0xE0;
-                else if (c == ':') code = 0x9C;
-                else if (c == ';') code = 0x9D;
-                else if (c == '(') code = 0x9A;
-                else if (c == ')') code = 0x9B;
-                else if (c == '/') code = 0xF3;
-                else if (c == '&') code = 0xE9;
-                else {
-                    code = 0x7F;  // Space for unrecognized characters
-                }
-            }
-            
-            uint16_t glyph = font_atlas_.glyph_for_code(code);
+            uint16_t glyph = font_atlas_.glyph_for_utf8(ch);
             add_glyph_quad(vertices, indices, x, y, glyph, r, g, b, a);
             x += tile;
             
-            // Wrap at line width
-            if (x >= text_x + config_.text_width_tiles * tile) {
-                x = text_x;
-                line++;
-                y = text_y + line * tile;
-                if (static_cast<uint32_t>(line) >= config_.max_lines) break;
-            }
+            if (x >= text_x + config_.text_width_tiles * tile) break;
         }
+    };
+    
+    if (!state_.visible.line1.empty()) {
+        render_line(state_.visible.line1, text_y);
+    }
+    if (!state_.visible.line2.empty()) {
+        render_line(state_.visible.line2, text_y + tile);
     }
     
     // Show cursor if waiting for input
-    // Crystal prompt arrow position: bottom-right corner of box, NOT in text area
-    // Gen2Recomped: (boxTx + boxTw - 2) * 8, (boxTy + boxTh - 1) * 8 - 4
-    // Our box: tile 0-19 (20 wide), tile 12-17 (6 tall = 4 inner + 2 border)
-    // Prompt at tile 18, row below text area (tile 17 - half tile offset)
     if (state_.show_cursor || state_.waiting_for_input) {
-        float cursor_x = (config_.box_width_tiles - 2) * tile;  // Tile 18
-        // Bottom of box interior, slightly raised (Crystal uses -4 pixels at 1x)
-        // box_tile_y (12) + box_inner_height (4) + 1 = tile 17, minus half tile
+        float cursor_x = (config_.box_width_tiles - 2) * tile;
         float cursor_y = (config_.box_tile_y + config_.box_inner_height + 1) * tile - tile / 2;
         add_glyph_quad(vertices, indices, cursor_x, cursor_y, font_atlas_.cursor_glyph, r, g, b, a);
     }
@@ -1252,6 +1009,7 @@ void TextboxRenderer::build_geometry(std::vector<TextboxVertex>& vertices,
     add_border(vertices, indices);
     add_text(vertices, indices);
 }
+
 
 void TextboxRenderer::render(VkCommandBuffer cmd) {
     if (!state_.is_open || !has_font_) return;
