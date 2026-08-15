@@ -25,6 +25,9 @@
 #include "crystal/script/decoder.hpp"
 #include "crystal/script/lua_emitter.hpp"
 #include "crystal/script/ir.hpp"
+#include "crystal/script/semantic_legalizer.hpp"
+#include "crystal/script/crystal_command.hpp"
+#include "engine/core/registry.hpp"
 
 #include <iostream>
 #include <sstream>
@@ -6020,6 +6023,9 @@ TEST(batch3_heal_party_egg_skip) {
     // must skip is_egg=true members
     using namespace enginemon;
     
+    // Create an empty moves registry (no moves for this test - we test egg skip behavior)
+    Registry<MoveId, MoveData> moves;
+    
     // Create test party with mixed members
     Party party;
     
@@ -6049,8 +6055,8 @@ TEST(batch3_heal_party_egg_skip) {
     mon2.status = Status::None;  // Can be fainted without status
     party.add(mon2);
     
-    // Heal all
-    party.heal_all();
+    // Heal all - passing the moves registry
+    party.heal_all(moves);
     
     // Non-eggs should be healed
     ASSERT_EQ(party[0].current_hp, party[0].max_hp);  // Full HP
@@ -6086,6 +6092,185 @@ TEST(batch3_heal_party_no_script_result) {
     ASSERT_EQ(ctx.script_var, 42);
     
     std::cout << "  [Sem_HealParty does not modify wScriptVar]\n";
+}
+
+TEST(batch3_special_27_production_lowering) {
+    // CRITICAL: Verify Special 27 through PRODUCTION legalizer rule_special
+    // This exercises the actual Stage 4 lowering path, not manual construction
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // 1. Construct Cmd_Special{27} - the Crystal bytecode representation
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{27};  // Special ID 27 = HealParty
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 27, 0};  // special opcode + id (2 bytes)
+    
+    // 2. Create a minimal CrystalScriptIR with this command
+    CrystalScriptIR ir;
+    ir.name = "test_heal_party";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    // 3. Create LoweringContext pointing at the command
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    // Create a minimal BasicBlock - the rule only needs peek() to work
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    // 4. Call rule_special - the production lowering function
+    RuleResult result = rule_special(lctx);
+    
+    // 5. ASSERT: rule matched
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1);
+    
+    // 6. ASSERT: output contains exactly 1 instruction
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    // 7. ASSERT: output contains Sem_HealParty, NOT Sem_Special
+    const auto& op = result.instructions[0].op;
+    ASSERT_TRUE(std::holds_alternative<Sem_HealParty>(op));
+    ASSERT_FALSE(std::holds_alternative<Sem_Special>(op));
+    
+    // 8. ASSERT: no Special ID 27 survives in SemanticOp
+    // (This is implicit since Sem_HealParty has no special_id field)
+    
+    std::cout << "  [Production lowering: Cmd_Special{27} → Sem_HealParty VERIFIED]\n";
+}
+
+TEST(batch3_heal_party_pp_restoration) {
+    // CRITICAL: Verify production Party::heal_all actually restores PP
+    // Contract: max_pp = base_pp + (base_pp / 5) * pp_ups
+    using namespace enginemon;
+    
+    // 1. Create a moves registry with test move data
+    Registry<MoveId, MoveData> moves;
+    
+    // Move 1: Thunderbolt with base PP 35
+    MoveData thunderbolt;
+    thunderbolt.id = MoveId{85};
+    thunderbolt.name = "Thunderbolt";
+    thunderbolt.pp = 35;  // Base PP
+    moves.register_entry(MoveId{85}, thunderbolt);
+    
+    // Move 2: Quick Attack with base PP 30
+    MoveData quick_attack;
+    quick_attack.id = MoveId{98};
+    quick_attack.name = "Quick Attack";
+    quick_attack.pp = 30;
+    moves.register_entry(MoveId{98}, quick_attack);
+    
+    // Move 3: Thunder Wave with base PP 20
+    MoveData thunder_wave;
+    thunder_wave.id = MoveId{86};
+    thunder_wave.name = "Thunder Wave";
+    thunder_wave.pp = 20;
+    moves.register_entry(MoveId{86}, thunder_wave);
+    
+    // 2. Create a Pokemon with depleted PP and PP Up investments
+    Party party;
+    Pokemon pikachu;
+    pikachu.species = SpeciesId{25};
+    pikachu.is_egg = false;
+    pikachu.current_hp = 10;
+    pikachu.max_hp = 50;
+    pikachu.status = Status::Paralysis;
+    
+    // Slot 0: Thunderbolt, base 35, 2 PP Ups, depleted
+    pikachu.moves[0].id = MoveId{85};
+    pikachu.moves[0].pp = 0;  // Depleted
+    pikachu.moves[0].pp_ups = 2;  // Has 2 PP Ups
+    
+    // Slot 1: Quick Attack, base 30, 0 PP Ups, depleted
+    pikachu.moves[1].id = MoveId{98};
+    pikachu.moves[1].pp = 0;
+    pikachu.moves[1].pp_ups = 0;  // No PP Ups
+    
+    // Slot 2: Thunder Wave, base 20, 3 PP Ups, depleted
+    pikachu.moves[2].id = MoveId{86};
+    pikachu.moves[2].pp = 0;
+    pikachu.moves[2].pp_ups = 3;  // Max PP Ups
+    
+    // Slot 3: Empty
+    pikachu.moves[3].id = MOVE_NONE;
+    pikachu.moves[3].pp = 0;
+    pikachu.moves[3].pp_ups = 0;
+    
+    party.add(pikachu);
+    
+    // 3. Call production heal_all
+    party.heal_all(moves);
+    
+    // 4. ASSERT: PP restored correctly for each move
+    // Thunderbolt: 35 + (35/5)*2 = 35 + 14 = 49
+    ASSERT_EQ(party[0].moves[0].pp, 49);
+    ASSERT_EQ(party[0].moves[0].pp_ups, 2);  // PP Ups PRESERVED
+    
+    // Quick Attack: 30 + (30/5)*0 = 30
+    ASSERT_EQ(party[0].moves[1].pp, 30);
+    ASSERT_EQ(party[0].moves[1].pp_ups, 0);
+    
+    // Thunder Wave: 20 + (20/5)*3 = 20 + 12 = 32
+    ASSERT_EQ(party[0].moves[2].pp, 32);
+    ASSERT_EQ(party[0].moves[2].pp_ups, 3);  // PP Ups PRESERVED
+    
+    // Empty slot unchanged
+    ASSERT_EQ(party[0].moves[3].id, MOVE_NONE);
+    ASSERT_EQ(party[0].moves[3].pp, 0);
+    
+    // 5. ASSERT: HP and status also healed
+    ASSERT_EQ(party[0].current_hp, party[0].max_hp);
+    ASSERT_EQ(party[0].status, Status::None);
+    
+    std::cout << "  [Production PP restoration VERIFIED: 49/30/32 with PP Ups preserved]\n";
+}
+
+TEST(batch3_heal_party_egg_pp_unchanged) {
+    // Verify eggs with moves (shouldn't exist but test the skip)
+    // are not modified even if they have depleted "moves"
+    using namespace enginemon;
+    
+    Registry<MoveId, MoveData> moves;
+    MoveData test_move;
+    test_move.id = MoveId{1};
+    test_move.pp = 35;
+    moves.register_entry(MoveId{1}, test_move);
+    
+    Party party;
+    Pokemon egg;
+    egg.species = SpeciesId{175};  // Togepi egg
+    egg.is_egg = true;
+    egg.current_hp = 0;
+    egg.max_hp = 0;
+    egg.status = Status::None;
+    
+    // Hypothetically an egg has a move slot
+    egg.moves[0].id = MoveId{1};
+    egg.moves[0].pp = 0;
+    egg.moves[0].pp_ups = 1;
+    
+    party.add(egg);
+    party.heal_all(moves);
+    
+    // Egg should be UNCHANGED - eggs are skipped entirely
+    ASSERT_TRUE(party[0].is_egg);
+    ASSERT_EQ(party[0].current_hp, 0);
+    ASSERT_EQ(party[0].moves[0].pp, 0);  // Still 0, not restored
+    ASSERT_EQ(party[0].moves[0].pp_ups, 1);  // Unchanged
+    
+    std::cout << "  [Egg PP unchanged (egg skip verified)]\n";
 }
 
 //=============================================================================
@@ -6834,6 +7019,9 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch3_heal_party_pp_formula);
     RUN_TEST(batch3_heal_party_egg_skip);
     RUN_TEST(batch3_heal_party_no_script_result);
+    RUN_TEST(batch3_special_27_production_lowering);
+    RUN_TEST(batch3_heal_party_pp_restoration);
+    RUN_TEST(batch3_heal_party_egg_pp_unchanged);
     
     // Simulation timing tests (Audit 8 - render/sim decoupling)
     RUN_TEST(timing_scheduler_basic);

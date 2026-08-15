@@ -9,6 +9,10 @@
 
 namespace enginemon {
 
+// Forward declaration
+template<typename Id, typename Data> class Registry;
+struct MoveData;
+
 // Maximum party size
 constexpr size_t MAX_PARTY_SIZE = 6;
 
@@ -49,8 +53,12 @@ public:
     std::optional<size_t> find_with_move(MoveId move) const;
     
     // Healing
-    void heal_all();
-    void heal_at(size_t index);
+    // heal_all requires move registry to compute max PP for each move
+    // Source contract (pokecrystal HealParty):
+    //   - Skips eggs
+    //   - For non-eggs: HP→max, status→clear, PP→max (preserving PP Ups)
+    void heal_all(const Registry<MoveId, MoveData>& moves);
+    void heal_at(size_t index, const Registry<MoveId, MoveData>& moves);
     
     // Total level (for some calculations)
     uint32_t total_level() const;

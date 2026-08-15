@@ -116,16 +116,16 @@ std::optional<size_t> Party::find_with_move(MoveId move) const {
 // DOES NOT produce script result (wScriptVar unchanged)
 // =============================================================================
 
-void Party::heal_all() {
+void Party::heal_all(const Registry<MoveId, MoveData>& moves) {
     for (size_t i = 0; i < count_; ++i) {
         // Eggs are SKIPPED per source: cp EGG / jr z, .next
         if (pokemon_[i].is_egg) continue;
         
-        heal_at(i);
+        heal_at(i, moves);
     }
 }
 
-void Party::heal_at(size_t index) {
+void Party::heal_at(size_t index, const Registry<MoveId, MoveData>& moves) {
     if (index >= count_) return;
     
     Pokemon& mon = pokemon_[index];
@@ -140,23 +140,21 @@ void Party::heal_at(size_t index) {
     mon.status = Status::None;
     mon.status_data = 0;
     
-    // 3. Restore PP for all moves
-    // Note: This uses the Move struct's pp_ups field directly
+    // 3. Restore PP for all moves using authoritative move definitions
     // PP formula: max_pp = base_pp + (base_pp / 5) * pp_ups
-    // Without access to Registries, we use the Pokemon's own restore_pp_without_registry helper
     for (size_t slot = 0; slot < mon.moves.size(); ++slot) {
         auto& move = mon.moves[slot];
         if (move.id == MOVE_NONE) continue;
         
-        // PP is stored as just current PP; pp_ups is separate
-        // We need the base PP from move data, but heal_at doesn't have Registries access
-        // For now, this is a limited restore that caps at known max
-        // Full implementation requires Registries passed in
-        // However, the Move struct stores pp_ups separately, so we can compute:
-        // We'll need to defer to a version with Registries, or store base_pp in Move
-        
-        // WORKAROUND: Store computed max_pp or require Registries
-        // For now, we'll leave a note that full implementation needs Registries
+        // Look up move definition for base PP
+        const MoveData* move_data = moves.get(move.id);
+        if (move_data) {
+            // max_pp = base_pp + (base_pp / 5) * pp_ups
+            uint8_t base_pp = move_data->pp;
+            uint8_t max_pp = base_pp + (base_pp / 5) * move.pp_ups;
+            move.pp = max_pp;
+            // pp_ups is PRESERVED - we don't touch it
+        }
     }
 }
 

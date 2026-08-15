@@ -110,6 +110,9 @@ int main(int argc, char* argv[]) {
     size_t rebuild_sprites_count = 0;
     size_t restart_map_music_count = 0;
     size_t fade_to_silence_count = 0;
+    size_t wait_sound_count = 0;
+    size_t play_map_music_count = 0;
+    size_t heal_party_count = 0;
     
     // Process each script
     for (uint32_t addr : all_addresses) {
@@ -155,6 +158,15 @@ int main(int argc, char* argv[]) {
                     else if constexpr (std::is_same_v<T, enginemon::Sem_FadeToSilence>) {
                         fade_to_silence_count++;
                     }
+                    else if constexpr (std::is_same_v<T, enginemon::Sem_WaitSound>) {
+                        wait_sound_count++;
+                    }
+                    else if constexpr (std::is_same_v<T, enginemon::Sem_PlayMapMusic>) {
+                        play_map_music_count++;
+                    }
+                    else if constexpr (std::is_same_v<T, enginemon::Sem_HealParty>) {
+                        heal_party_count++;
+                    }
                 }, inst.op);
             }
         }
@@ -174,7 +186,8 @@ int main(int argc, char* argv[]) {
     size_t lowered_total = screen_fade_count + sync_palettes_count + 
                            refresh_player_sprite_count + sync_sprites_count +
                            rebuild_sprites_count + restart_map_music_count + 
-                           fade_to_silence_count;
+                           fade_to_silence_count + wait_sound_count +
+                           play_map_music_count + heal_party_count;
     
     std::cout << "=== Pre-Lowering Summary ===\n";
     std::cout << "Unique Special IDs: " << pre_lowering_counts.size() << "\n";
@@ -192,6 +205,9 @@ int main(int argc, char* argv[]) {
     std::cout << "Sem_RebuildSprites:       " << rebuild_sprites_count << "\n";
     std::cout << "Sem_RestartMapMusic:      " << restart_map_music_count << "\n";
     std::cout << "Sem_FadeToSilence:        " << fade_to_silence_count << "\n";
+    std::cout << "Sem_WaitSound:            " << wait_sound_count << "\n";
+    std::cout << "Sem_PlayMapMusic:         " << play_map_music_count << "\n";
+    std::cout << "Sem_HealParty:            " << heal_party_count << "\n";
     std::cout << "Total lowered:            " << lowered_total << "\n\n";
     
     std::cout << "=== Verification ===\n";
