@@ -42,7 +42,7 @@ using enginemon::SpriteObjPalettes;
 
 struct PackageHeader {
     static constexpr uint32_t MAGIC = 0x454D4F4E;  // "EMON"
-    static constexpr uint32_t VERSION = 1;
+    static constexpr uint32_t VERSION = 2;  // v2: removed crystal_code from font charmap
     
     uint32_t magic;
     uint32_t version;

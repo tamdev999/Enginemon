@@ -6,6 +6,11 @@
 // Remappable bindings structure.
 //
 // Reference: Gen2Recomped joyLatch pattern for held-direction gating
+//
+// CRITICAL: Edge consumption model (Audit 8)
+// One host rising edge must produce at most one simulation edge event.
+// Use consume_pressed() during simulation ticks to ensure edge events
+// are observed by exactly one tick even during catch-up scenarios.
 
 #include "engine/core/types.hpp"
 #include "engine/core/game_loop.hpp"  // For InputAction
@@ -145,6 +150,26 @@ public:
     InputAction get_action(bool input_locked) const;
     
     //=========================================================================
+    // EDGE CONSUMPTION (Audit 8)
+    // One physical rising edge → at most one simulation edge
+    //
+    // Use these in simulation ticks to consume edge events.
+    // During catch-up, only the first tick observes the edge.
+    //=========================================================================
+    
+    // Consume a press edge - returns true once per physical press
+    // Subsequent calls (even in same frame) return false
+    bool consume_pressed(InputButton btn);
+    
+    // Consume a release edge - returns true once per physical release
+    bool consume_released(InputButton btn);
+    
+    // Check if edge was consumed (for debugging/testing)
+    bool is_edge_consumed(InputButton btn) const { 
+        return edge_consumed_[static_cast<int>(btn)]; 
+    }
+    
+    //=========================================================================
     // JOYPAD LATCH
     // From Gen2Recomped: mid-step button presses are held until landing
     //=========================================================================
@@ -167,6 +192,11 @@ private:
     
     // Joypad latch (buttons pressed mid-step)
     bool latched_[static_cast<int>(InputButton::Count)] = {};
+    
+    // Edge consumption tracking (Audit 8)
+    // True if the press edge has been consumed by a simulation tick
+    bool edge_consumed_[static_cast<int>(InputButton::Count)] = {};
+    bool release_consumed_[static_cast<int>(InputButton::Count)] = {};
     
     // Set button state
     void set_button(InputButton btn, bool down);

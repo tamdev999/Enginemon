@@ -1,5 +1,13 @@
 // engine/core/timing.cpp
 // Fixed-timestep simulation scheduler implementation
+//
+// CRITICAL: Accumulated simulation debt policy (Audit 8)
+// The scheduler caps ticks-per-update to prevent death spiral, BUT
+// it must NOT discard accumulated simulation time. Remaining debt
+// is retained and continues catching up in future updates.
+//
+// This ensures: total eventual tick count = elapsed simulation time
+// (subject only to nanosecond rounding)
 
 #include "engine/core/timing.hpp"
 #include <algorithm>
@@ -73,11 +81,14 @@ SchedulerTickResult SimulationScheduler::advance(int64_t delta_ns) {
         total_ticks_++;
     }
     
-    // Cap if we hit max ticks (prevent death spiral)
+    // Set capped flag if we hit max ticks (death spiral prevention)
+    // CRITICAL (Audit 8): Do NOT discard accumulated time!
+    // The remaining accumulator_ns_ is retained as debt that will
+    // continue catching up in future updates.
     if (accumulator_ns_ >= tick_duration_ns_) {
         result.capped = true;
-        // Drain excess accumulator to prevent perpetual spiral
-        accumulator_ns_ = accumulator_ns_ % tick_duration_ns_;
+        // REMOVED: accumulator_ns_ = accumulator_ns_ % tick_duration_ns_;
+        // Debt is retained, future updates will continue catching up
     }
     
     result.ticks_to_run = ticks;

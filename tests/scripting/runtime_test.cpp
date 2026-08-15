@@ -5984,6 +5984,227 @@ TEST(timing_equivalent_elapsed_same_tick_count) {
 }
 
 //=============================================================================
+// INPUT EDGE CONSUMPTION ADVERSARIAL TESTS (Audit 8)
+// Proves: one physical rising edge → at most one simulation edge event
+//=============================================================================
+
+TEST(input_edge_one_press_one_tick_consumed_once) {
+    // One physical press + 1 simulation tick → pressed observed exactly once
+    InputSystem input;
+    
+    // Simulate: host polls events → key_down
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::Z);  // A button
+    
+    // First simulation tick consumes the edge
+    bool tick1_pressed = input.consume_pressed(InputButton::A);
+    ASSERT_TRUE(tick1_pressed);
+    ASSERT_TRUE(input.is_edge_consumed(InputButton::A));
+    
+    // Key is still held
+    ASSERT_TRUE(input.snapshot().is_held(InputButton::A));
+    
+    std::cout << "  [1 press + 1 tick → pressed consumed once ✓]\n";
+}
+
+TEST(input_edge_one_press_four_ticks_consumed_once) {
+    // ADVERSARIAL: One physical press + 4 catch-up simulation ticks
+    // → pressed observed by exactly ONE tick, not all four
+    InputSystem input;
+    
+    // Simulate: host polls events → key_down
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::Z);  // A button
+    
+    // Simulate 4 catch-up ticks (as if scheduler said ticks_to_run = 4)
+    int pressed_count = 0;
+    for (int tick = 0; tick < 4; tick++) {
+        if (input.consume_pressed(InputButton::A)) {
+            pressed_count++;
+        }
+        // Held should remain true for all ticks
+        ASSERT_TRUE(input.snapshot().is_held(InputButton::A));
+    }
+    
+    // CRITICAL: Pressed must be consumed exactly ONCE, not 4 times
+    ASSERT_EQ(pressed_count, 1);
+    
+    std::cout << "  [1 press + 4 catch-up ticks → pressed consumed exactly 1 time ✓]\n";
+}
+
+TEST(input_edge_held_across_multiple_ticks) {
+    // Held state should remain true across multiple simulation ticks
+    InputSystem input;
+    
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::W);  // Up direction
+    
+    // Simulate 4 ticks - held should be true for all
+    for (int tick = 0; tick < 4; tick++) {
+        ASSERT_TRUE(input.snapshot().is_held(InputButton::Up));
+    }
+    
+    std::cout << "  [Held input across 4 ticks → is_held true on all ticks ✓]\n";
+}
+
+TEST(input_edge_release_consumed_once) {
+    // Release edge should also be consumed once
+    InputSystem input;
+    
+    // Press and hold
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::Z);
+    input.consume_pressed(InputButton::A);  // Consume press
+    
+    // Next frame: release
+    input.begin_frame();
+    input.on_key_up(Sdl3Scancode::Z);
+    
+    // Simulate 4 ticks
+    int released_count = 0;
+    for (int tick = 0; tick < 4; tick++) {
+        if (input.consume_released(InputButton::A)) {
+            released_count++;
+        }
+    }
+    
+    ASSERT_EQ(released_count, 1);
+    
+    std::cout << "  [Release edge consumed exactly 1 time ✓]\n";
+}
+
+TEST(input_edge_new_frame_resets_consumption) {
+    // New frame should reset edge consumption
+    InputSystem input;
+    
+    // Frame 1: Press and consume
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::Z);
+    ASSERT_TRUE(input.consume_pressed(InputButton::A));
+    ASSERT_FALSE(input.consume_pressed(InputButton::A));  // Already consumed
+    
+    // Frame 2: If key is released and pressed again, edge should be available again
+    input.begin_frame();  // This should reset edge_consumed
+    input.on_key_up(Sdl3Scancode::Z);
+    input.on_key_down(Sdl3Scancode::Z);  // New press
+    
+    ASSERT_TRUE(input.consume_pressed(InputButton::A));  // New edge available
+    
+    std::cout << "  [New frame resets edge consumption ✓]\n";
+}
+
+//=============================================================================
+// SCHEDULER DEBT RETENTION ADVERSARIAL TESTS (Audit 8)
+// Proves: scheduler never silently discards simulation time
+//=============================================================================
+
+TEST(scheduler_500ms_hitch_retains_debt) {
+    // 500ms hitch should run max_ticks and retain remaining debt
+    SimulationScheduler scheduler(TICK_60HZ, 10);  // Max 10 ticks per update
+    
+    // 500ms hitch
+    constexpr int64_t HITCH_500MS = 500'000'000;
+    auto result = scheduler.advance(HITCH_500MS);
+    
+    // Should run max 10 ticks
+    ASSERT_EQ(result.ticks_to_run, 10);
+    ASSERT_TRUE(result.capped);  // Hit the cap
+    
+    // 500ms at 60Hz = 30 ticks worth of time
+    // After running 10 ticks, 20 ticks worth of debt should remain in accumulator
+    // 20 ticks * 16666667 ns = ~333ms
+    int64_t expected_debt = (30 - 10) * TICK_60HZ;  // ~333ms
+    
+    // Accumulator should have significant debt (at least 15 ticks worth)
+    ASSERT_TRUE(scheduler.accumulator_ns() >= 15 * TICK_60HZ);
+    
+    std::cout << "  [500ms hitch: ran 10 ticks, retained ~" 
+              << scheduler.accumulator_ns() / 1'000'000 << "ms debt ✓]\n";
+}
+
+TEST(scheduler_2_second_hitch_retains_debt) {
+    // 2 second hitch should run max_ticks and retain remaining debt
+    SimulationScheduler scheduler(TICK_60HZ, 10);
+    
+    // 2 second hitch
+    constexpr int64_t HITCH_2S = 2'000'000'000LL;
+    auto result = scheduler.advance(HITCH_2S);
+    
+    // Should run max 10 ticks
+    ASSERT_EQ(result.ticks_to_run, 10);
+    ASSERT_TRUE(result.capped);
+    
+    // 2 seconds at 60Hz = 120 ticks worth of time
+    // After running 10 ticks, 110 ticks worth of debt should remain
+    int64_t expected_debt = (120 - 10) * TICK_60HZ;  // ~1833ms
+    
+    // Accumulator should have massive debt (at least 100 ticks worth)
+    ASSERT_TRUE(scheduler.accumulator_ns() >= 100 * TICK_60HZ);
+    
+    std::cout << "  [2s hitch: ran 10 ticks, retained ~" 
+              << scheduler.accumulator_ns() / 1'000'000 << "ms debt ✓]\n";
+}
+
+TEST(scheduler_repeated_updates_catch_up) {
+    // After hitch, repeated updates should eventually catch up
+    SimulationScheduler scheduler(TICK_60HZ, 10);
+    
+    // 500ms hitch (30 ticks worth)
+    constexpr int64_t HITCH_500MS = 500'000'000;
+    auto result = scheduler.advance(HITCH_500MS);
+    
+    int total_ticks = result.ticks_to_run;  // First batch
+    
+    // Simulate several frames with no new elapsed time (pure catch-up)
+    for (int frame = 0; frame < 5; frame++) {
+        result = scheduler.advance(0);  // No new time, just catch-up
+        total_ticks += result.ticks_to_run;
+    }
+    
+    // Should have caught up to approximately 30 ticks total
+    // (may be slightly less due to nanosecond rounding)
+    ASSERT_TRUE(total_ticks >= 29 && total_ticks <= 31);
+    ASSERT_EQ(scheduler.total_ticks(), total_ticks);
+    
+    std::cout << "  [After 500ms hitch + catch-up: " << total_ticks << " total ticks ✓]\n";
+}
+
+TEST(scheduler_total_ticks_equals_elapsed_time) {
+    // CRITICAL INVARIANT: Total eventual tick count = elapsed simulation time
+    // (subject only to nanosecond rounding)
+    SimulationScheduler scheduler(TICK_60HZ, 10);
+    
+    // Simulate: 100ms normal, 500ms hitch, 100ms normal, catch-up
+    int total_ticks = 0;
+    
+    // Normal 100ms (6 ticks)
+    total_ticks += scheduler.advance(100'000'000).ticks_to_run;
+    
+    // 500ms hitch
+    total_ticks += scheduler.advance(500'000'000).ticks_to_run;
+    
+    // Normal 100ms
+    total_ticks += scheduler.advance(100'000'000).ticks_to_run;
+    
+    // Catch-up with zero elapsed time until no debt remains
+    while (scheduler.accumulator_ns() >= TICK_60HZ) {
+        total_ticks += scheduler.advance(0).ticks_to_run;
+    }
+    
+    // Total elapsed = 100ms + 500ms + 100ms = 700ms
+    // 700ms at 60Hz = 42 ticks
+    int expected_ticks = 700'000'000 / TICK_60HZ;  // ~42
+    
+    // Should match within rounding tolerance
+    ASSERT_TRUE(total_ticks >= expected_ticks - 1 && total_ticks <= expected_ticks + 1);
+    ASSERT_EQ(scheduler.total_ticks(), total_ticks);
+    
+    std::cout << "  [700ms total → " << total_ticks << " ticks (expected ~" 
+              << expected_ticks << ") ✓]\n";
+    std::cout << "  [No simulation time discarded ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -6217,6 +6438,19 @@ int main(int argc, char* argv[]) {
     RUN_TEST(timing_144hz_rendering_produces_same_ticks);
     RUN_TEST(timing_irregular_frames_same_result);
     RUN_TEST(timing_equivalent_elapsed_same_tick_count);
+    
+    // Input edge consumption adversarial tests (Audit 8)
+    RUN_TEST(input_edge_one_press_one_tick_consumed_once);
+    RUN_TEST(input_edge_one_press_four_ticks_consumed_once);
+    RUN_TEST(input_edge_held_across_multiple_ticks);
+    RUN_TEST(input_edge_release_consumed_once);
+    RUN_TEST(input_edge_new_frame_resets_consumption);
+    
+    // Scheduler debt retention adversarial tests (Audit 8)
+    RUN_TEST(scheduler_500ms_hitch_retains_debt);
+    RUN_TEST(scheduler_2_second_hitch_retains_debt);
+    RUN_TEST(scheduler_repeated_updates_catch_up);
+    RUN_TEST(scheduler_total_ticks_equals_elapsed_time);
     
     // Summary
     std::cout << "\n=== Results ===\n";

@@ -94,8 +94,14 @@ NativeTextSequence NativeTextSequence::from_runtime(const RuntimeTextSequence& s
 
 //=============================================================================
 // RuntimeFontAtlas::from_package_data
-// Parses serialized font atlas data from the EMON package
+// Parses serialized font atlas data from the EMON package (v2 format)
 // Builds UTF-8 → GlyphId lookup (no Crystal charmap in runtime)
+//
+// v2 format removes crystal_code - font entries are now:
+//   glyph_index: u16
+//   is_control: u8
+//   control_name_len: u16, control_name: bytes
+//   utf8_len: u16, utf8_char: bytes
 //=============================================================================
 template<typename T>
 static T read_le(const uint8_t*& ptr) {
@@ -146,17 +152,16 @@ bool RuntimeFontAtlas::from_package_data(const std::vector<uint8_t>& data, Runti
         atlas.glyph_uvs[i].v1 = read_float_le(ptr);
     }
     
-    // Read charmap and build UTF-8 → GlyphId lookup
+    // Read charmap and build UTF-8 → GlyphId lookup (v2 format: no crystal_code)
     if (ptr + 4 > end) return false;
     uint32_t charmap_count = read_le<uint32_t>(ptr);
     
     atlas.utf8_to_glyph.clear();
     
     for (uint32_t i = 0; i < charmap_count; ++i) {
-        if (ptr + 4 > end) return false;
+        if (ptr + 3 > end) return false;
         
-        // Skip crystal_code - we don't use it in runtime
-        ptr++;  // uint8_t crystal_code
+        // v2 format: glyph_index, is_control, control_name, utf8_char (no crystal_code)
         uint16_t glyph_index = read_le<uint16_t>(ptr);
         uint8_t is_control = *ptr++;
         

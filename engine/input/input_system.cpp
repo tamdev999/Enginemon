@@ -2,6 +2,11 @@
 // Input system implementation for SDL3 (and other backends)
 //
 // Reference: Gen2Recomped joyLatch pattern for held-direction gating
+//
+// CRITICAL: Edge consumption model (Audit 8)
+// One host rising edge must produce at most one simulation edge event.
+// During catch-up (multiple simulation ticks per render), only the first
+// tick observes the pressed edge. Subsequent ticks see held=true but pressed=false.
 
 #include "engine/input/input_system.hpp"
 #include <algorithm>
@@ -84,6 +89,8 @@ InputSystem::InputSystem() {
         snapshot_.released[i] = false;
         prev_held_[i] = false;
         latched_[i] = false;
+        edge_consumed_[i] = false;
+        release_consumed_[i] = false;
     }
 }
 
@@ -99,6 +106,9 @@ void InputSystem::begin_frame() {
         prev_held_[i] = snapshot_.held[i];
         snapshot_.pressed[i] = false;
         snapshot_.released[i] = false;
+        // Reset edge consumption - new host poll, new edges available
+        edge_consumed_[i] = false;
+        release_consumed_[i] = false;
     }
 }
 
@@ -106,8 +116,9 @@ void InputSystem::set_button(InputButton btn, bool down) {
     int idx = static_cast<int>(btn);
     
     if (down && !snapshot_.held[idx]) {
-        // Just pressed
+        // Just pressed - set pending edge
         snapshot_.pressed[idx] = true;
+        edge_consumed_[idx] = false;  // Fresh edge, not yet consumed
     } else if (!down && snapshot_.held[idx]) {
         // Just released
         snapshot_.released[idx] = true;
@@ -142,6 +153,32 @@ void InputSystem::on_gamepad_button_up(int button_id) {
     if (btn.has_value()) {
         set_button(btn.value(), false);
     }
+}
+
+//=============================================================================
+// EDGE CONSUMPTION (Audit 8)
+// One physical rising edge → at most one simulation edge
+//=============================================================================
+
+bool InputSystem::consume_pressed(InputButton btn) {
+    int idx = static_cast<int>(btn);
+    // Only return true if pressed AND not yet consumed
+    if (snapshot_.pressed[idx] && !edge_consumed_[idx]) {
+        edge_consumed_[idx] = true;  // Mark as consumed
+        return true;
+    }
+    return false;
+}
+
+bool InputSystem::consume_released(InputButton btn) {
+    int idx = static_cast<int>(btn);
+    // Release edges also should be consumed once
+    // (though less critical than press edges for gameplay)
+    if (snapshot_.released[idx] && !release_consumed_[idx]) {
+        release_consumed_[idx] = true;
+        return true;
+    }
+    return false;
 }
 
 //=============================================================================

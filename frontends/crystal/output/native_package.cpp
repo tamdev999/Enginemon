@@ -520,10 +520,15 @@ void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
         write_le(out, *reinterpret_cast<const uint32_t*>(&uv.v1));
     }
     
-    // Charmap entries
+    // Charmap entries (native format: UTF-8 → GlyphId)
+    // NOTE: crystal_code is NOT serialized - it's frontend/compiler provenance only
     write_le(out, static_cast<uint32_t>(atlas.charmap.size()));
     for (const auto& entry : atlas.charmap) {
-        out.put(entry.crystal_code);
+        // Native charmap entry format (v2):
+        //   glyph_index: u16
+        //   is_control: u8
+        //   control_name_len: u16, control_name: bytes
+        //   utf8_len: u16, utf8_char: bytes
         write_le(out, entry.glyph_index);
         out.put(entry.is_control ? 1 : 0);
         write_le(out, static_cast<uint16_t>(entry.control_name.size()));
