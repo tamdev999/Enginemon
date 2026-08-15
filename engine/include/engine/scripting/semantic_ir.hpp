@@ -595,6 +595,40 @@ struct Sem_Wait { uint8_t duration; };
 struct Sem_Pause { uint8_t length; };
 struct Sem_CheckTime { uint8_t time_flags; };  // Sets result
 
+// =============================================================================
+// Sem_SetDaylightSaving - Set player's daylight-saving time preference
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/rtc/timeset.asm:
+//   - InitialSetDSTFlag (Special 166): set DST_F bit, show updated time
+//   - InitialClearDSTFlag (Special 167): clear DST_F bit, show updated time
+//
+// Semantic contract:
+//   Update the player's persistent daylight-saving-time preference state
+//   and present the resulting current time according to native RTC/UI policy.
+//
+// Behavior:
+//   - enabled=true: DST active (clock shows summer/shifted time)
+//   - enabled=false: Standard time active (clock shows unshifted time)
+//   - Mutates persistent RTC preference flag
+//   - Updates time display to reflect new setting
+//   - No script result (does NOT modify wScriptVar)
+//   - No input wait (returns immediately after presentation)
+//
+// What is NOT encoded:
+//   - Crystal Special IDs (166, 167)
+//   - wDST RAM address
+//   - DST_F bit position
+//   - ClearBox / PrintTextboxTextAt coordinates
+//   - Crystal tilemap addresses
+//   - UpdateTime / PrintHoursMins routine calls
+//
+// This is a generic engine concept - represents user preference for
+// daylight-saving time adjustment in any frontend with RTC support.
+// =============================================================================
+struct Sem_SetDaylightSaving {
+    bool enabled;  // true = DST active, false = standard time
+};
+
 // --- Phone ---
 struct Sem_AddPhoneNumber { uint8_t person; };
 struct Sem_DeletePhoneNumber { uint8_t person; };
@@ -755,8 +789,8 @@ using SemanticOp = std::variant<
     Sem_FadeOutMusic, Sem_FadeToSilence, Sem_PlayMapMusic, Sem_RestartMapMusic,
     Sem_WarpSound, Sem_SpecialSound, Sem_SetMusicRestartFlag,
     
-    // Time/Wait
-    Sem_Wait, Sem_Pause, Sem_CheckTime,
+    // Time/Wait/RTC
+    Sem_Wait, Sem_Pause, Sem_CheckTime, Sem_SetDaylightSaving,
     
     // Phone
     Sem_AddPhoneNumber, Sem_DeletePhoneNumber, Sem_CheckPhoneNumber, Sem_CheckPhoneCall,

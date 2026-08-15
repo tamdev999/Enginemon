@@ -7376,6 +7376,463 @@ TEST(batch7_special_160_branch_equivalence) {
 }
 
 //=============================================================================
+// BATCH 8 SPECIAL SEMANTIC OP TESTS
+// Verifies:
+//   - Special 163 (AskRememberPassword) → Sem_YesNo{}
+//   - Special 166 (InitialSetDSTFlag) → Sem_SetDaylightSaving{enabled=true}
+//   - Special 167 (InitialClearDSTFlag) → Sem_SetDaylightSaving{enabled=false}
+//   - None produce Sem_Special
+//   - 163 is semantically equivalent to ordinary yesorno opcode
+//   - 166 and 167 differ only by enabled flag
+//   - DST operations do not modify script result
+//=============================================================================
+
+TEST(batch8_special_163_emits_sem_yesno) {
+    // CRITICAL: Verify Special 163 (AskRememberPassword) is lowered
+    // to Sem_YesNo{}, NOT Sem_Special
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{163};  // AskRememberPassword
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 163, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_special_163";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    // ASSERT: rule matched and consumed command
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1);
+    
+    // ASSERT: Exactly one instruction
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    // ASSERT: Output is Sem_YesNo, NOT Sem_Special
+    const auto& op = result.instructions[0].op;
+    bool is_sem_special = std::holds_alternative<Sem_Special>(op);
+    ASSERT_FALSE(is_sem_special);
+    
+    bool is_yes_no = std::holds_alternative<Sem_YesNo>(op);
+    ASSERT_TRUE(is_yes_no);
+    
+    std::cout << "  [Special 163 → Sem_YesNo{} (verified)]\n";
+}
+
+TEST(batch8_special_163_no_sem_special) {
+    // ADVERSARIAL: Prove Special 163 does NOT produce Sem_Special
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{163};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 163, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_no_sem_special_163";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    ASSERT_EQ(result.instructions.size(), 1);
+    const auto& op = result.instructions[0].op;
+    
+    // Count Sem_Special instances (should be 0)
+    int sem_special_count = std::holds_alternative<Sem_Special>(op) ? 1 : 0;
+    ASSERT_EQ(sem_special_count, 0);
+    
+    std::cout << "  [Special 163 produces NO Sem_Special (verified)]\n";
+}
+
+TEST(batch8_special_163_yesorno_equivalence) {
+    // CRITICAL: Prove Special 163 produces IDENTICAL op as yesorno command
+    // This proves we're reusing the existing semantic operation
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // 1. Lower yesorno opcode (0x4E)
+    CrystalCommand yesorno_cmd;
+    yesorno_cmd.data = Cmd_Yesorno{};
+    yesorno_cmd.span.rom_address = 0;
+    yesorno_cmd.span.raw_bytes = {0x4E};
+    
+    CrystalScriptIR yesorno_ir;
+    yesorno_ir.name = "test_yesorno";
+    yesorno_ir.entry_address = 0;
+    yesorno_ir.rom_start = 0;
+    yesorno_ir.rom_end = 1;
+    yesorno_ir.commands.push_back(yesorno_cmd);
+    
+    LoweringContext yesorno_ctx;
+    yesorno_ctx.source_ir = &yesorno_ir;
+    yesorno_ctx.cursor = 0;
+    
+    BasicBlock yesorno_block;
+    yesorno_block.id = 0;
+    yesorno_block.start_address = 0;
+    yesorno_block.end_address = 1;
+    yesorno_block.command_start = 0;
+    yesorno_block.command_count = 1;
+    yesorno_ctx.current_block = &yesorno_block;
+    
+    RuleResult yesorno_result = rule_yes_no(yesorno_ctx);
+    
+    // 2. Lower Special 163
+    CrystalCommand special_cmd;
+    special_cmd.data = Cmd_Special{163};
+    special_cmd.span.rom_address = 0;
+    special_cmd.span.raw_bytes = {0x0F, 163, 0};
+    
+    CrystalScriptIR special_ir;
+    special_ir.name = "test_special_163";
+    special_ir.entry_address = 0;
+    special_ir.rom_start = 0;
+    special_ir.rom_end = 3;
+    special_ir.commands.push_back(special_cmd);
+    
+    LoweringContext special_ctx;
+    special_ctx.source_ir = &special_ir;
+    special_ctx.cursor = 0;
+    
+    BasicBlock special_block;
+    special_block.id = 0;
+    special_block.start_address = 0;
+    special_block.end_address = 3;
+    special_block.command_start = 0;
+    special_block.command_count = 1;
+    special_ctx.current_block = &special_block;
+    
+    RuleResult special_result = rule_special(special_ctx);
+    
+    // 3. ASSERT: Both produced exactly one instruction
+    ASSERT_EQ(yesorno_result.instructions.size(), 1);
+    ASSERT_EQ(special_result.instructions.size(), 1);
+    
+    // 4. ASSERT: Both produced Sem_YesNo
+    const auto& yesorno_op = yesorno_result.instructions[0].op;
+    const auto& special_op = special_result.instructions[0].op;
+    
+    ASSERT_TRUE(std::holds_alternative<Sem_YesNo>(yesorno_op));
+    ASSERT_TRUE(std::holds_alternative<Sem_YesNo>(special_op));
+    
+    // 5. Sem_YesNo is an empty struct, so type equality is sufficient
+    std::cout << "  [yesorno opcode → Sem_YesNo{}]\n";
+    std::cout << "  [Special 163 → Sem_YesNo{}]\n";
+    std::cout << "  [Semantic equivalence: PROVEN]\n";
+}
+
+TEST(batch8_special_166_emits_dst_true) {
+    // CRITICAL: Verify Special 166 (InitialSetDSTFlag) is lowered
+    // to Sem_SetDaylightSaving{enabled=true}
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{166};  // InitialSetDSTFlag
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 166, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_special_166";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1);
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    const auto& op = result.instructions[0].op;
+    ASSERT_FALSE(std::holds_alternative<Sem_Special>(op));
+    ASSERT_TRUE(std::holds_alternative<Sem_SetDaylightSaving>(op));
+    
+    const auto& dst_op = std::get<Sem_SetDaylightSaving>(op);
+    ASSERT_TRUE(dst_op.enabled);
+    
+    std::cout << "  [Special 166 → Sem_SetDaylightSaving{enabled=true} (verified)]\n";
+}
+
+TEST(batch8_special_167_emits_dst_false) {
+    // CRITICAL: Verify Special 167 (InitialClearDSTFlag) is lowered
+    // to Sem_SetDaylightSaving{enabled=false}
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{167};  // InitialClearDSTFlag
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 167, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_special_167";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_special(lctx);
+    
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1);
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    const auto& op = result.instructions[0].op;
+    ASSERT_FALSE(std::holds_alternative<Sem_Special>(op));
+    ASSERT_TRUE(std::holds_alternative<Sem_SetDaylightSaving>(op));
+    
+    const auto& dst_op = std::get<Sem_SetDaylightSaving>(op);
+    ASSERT_FALSE(dst_op.enabled);
+    
+    std::cout << "  [Special 167 → Sem_SetDaylightSaving{enabled=false} (verified)]\n";
+}
+
+TEST(batch8_special_166_167_differ_by_enabled) {
+    // ADVERSARIAL: Prove 166 and 167 produce DIFFERENT semantic operations
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Lower Special 166
+    CrystalCommand cmd166;
+    cmd166.data = Cmd_Special{166};
+    cmd166.span.rom_address = 0;
+    cmd166.span.raw_bytes = {0x0F, 166, 0};
+    
+    CrystalScriptIR ir166;
+    ir166.name = "test_166";
+    ir166.entry_address = 0;
+    ir166.rom_start = 0;
+    ir166.rom_end = 3;
+    ir166.commands.push_back(cmd166);
+    
+    LoweringContext ctx166;
+    ctx166.source_ir = &ir166;
+    ctx166.cursor = 0;
+    
+    BasicBlock block166;
+    block166.id = 0;
+    block166.start_address = 0;
+    block166.end_address = 3;
+    block166.command_start = 0;
+    block166.command_count = 1;
+    ctx166.current_block = &block166;
+    
+    RuleResult result166 = rule_special(ctx166);
+    
+    // Lower Special 167
+    CrystalCommand cmd167;
+    cmd167.data = Cmd_Special{167};
+    cmd167.span.rom_address = 0;
+    cmd167.span.raw_bytes = {0x0F, 167, 0};
+    
+    CrystalScriptIR ir167;
+    ir167.name = "test_167";
+    ir167.entry_address = 0;
+    ir167.rom_start = 0;
+    ir167.rom_end = 3;
+    ir167.commands.push_back(cmd167);
+    
+    LoweringContext ctx167;
+    ctx167.source_ir = &ir167;
+    ctx167.cursor = 0;
+    
+    BasicBlock block167;
+    block167.id = 0;
+    block167.start_address = 0;
+    block167.end_address = 3;
+    block167.command_start = 0;
+    block167.command_count = 1;
+    ctx167.current_block = &block167;
+    
+    RuleResult result167 = rule_special(ctx167);
+    
+    // Both should have one instruction
+    ASSERT_EQ(result166.instructions.size(), 1);
+    ASSERT_EQ(result167.instructions.size(), 1);
+    
+    // Both should be Sem_SetDaylightSaving
+    const auto& op166 = result166.instructions[0].op;
+    const auto& op167 = result167.instructions[0].op;
+    
+    ASSERT_TRUE(std::holds_alternative<Sem_SetDaylightSaving>(op166));
+    ASSERT_TRUE(std::holds_alternative<Sem_SetDaylightSaving>(op167));
+    
+    const auto& dst166 = std::get<Sem_SetDaylightSaving>(op166);
+    const auto& dst167 = std::get<Sem_SetDaylightSaving>(op167);
+    
+    // They MUST differ
+    ASSERT_TRUE(dst166.enabled != dst167.enabled);
+    
+    // Specifically: 166 = true, 167 = false
+    ASSERT_TRUE(dst166.enabled);
+    ASSERT_FALSE(dst167.enabled);
+    
+    std::cout << "  [Special 166: enabled=true]\n";
+    std::cout << "  [Special 167: enabled=false]\n";
+    std::cout << "  [166 != 167: PROVEN]\n";
+}
+
+TEST(batch8_special_166_167_no_sem_special) {
+    // ADVERSARIAL: Prove neither 166 nor 167 produces Sem_Special
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    for (uint16_t special_id : {166, 167}) {
+        CrystalCommand cmd;
+        cmd.data = Cmd_Special{special_id};
+        cmd.span.rom_address = 0;
+        cmd.span.raw_bytes = {0x0F, static_cast<uint8_t>(special_id), 0};
+        
+        CrystalScriptIR ir;
+        ir.name = "test_no_sem_special_" + std::to_string(special_id);
+        ir.entry_address = 0;
+        ir.rom_start = 0;
+        ir.rom_end = 3;
+        ir.commands.push_back(cmd);
+        
+        LoweringContext lctx;
+        lctx.source_ir = &ir;
+        lctx.cursor = 0;
+        
+        BasicBlock block;
+        block.id = 0;
+        block.start_address = 0;
+        block.end_address = 3;
+        block.command_start = 0;
+        block.command_count = 1;
+        lctx.current_block = &block;
+        
+        RuleResult result = rule_special(lctx);
+        
+        ASSERT_EQ(result.instructions.size(), 1);
+        const auto& op = result.instructions[0].op;
+        bool is_sem_special = std::holds_alternative<Sem_Special>(op);
+        ASSERT_FALSE(is_sem_special);
+    }
+    
+    std::cout << "  [Special 166 produces NO Sem_Special]\n";
+    std::cout << "  [Special 167 produces NO Sem_Special]\n";
+}
+
+TEST(batch8_dst_operations_no_script_result) {
+    // CRITICAL: DST operations do NOT modify script result
+    // Unlike Sem_YesNo which sets wScriptVar, DST operations are
+    // pure state mutation with presentation feedback
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    for (uint16_t special_id : {166, 167}) {
+        CrystalCommand cmd;
+        cmd.data = Cmd_Special{special_id};
+        cmd.span.rom_address = 0;
+        cmd.span.raw_bytes = {0x0F, static_cast<uint8_t>(special_id), 0};
+        
+        CrystalScriptIR ir;
+        ir.name = "test_dst_no_result";
+        ir.entry_address = 0;
+        ir.rom_start = 0;
+        ir.rom_end = 3;
+        ir.commands.push_back(cmd);
+        
+        LoweringContext lctx;
+        lctx.source_ir = &ir;
+        lctx.cursor = 0;
+        
+        BasicBlock block;
+        block.id = 0;
+        block.start_address = 0;
+        block.end_address = 3;
+        block.command_start = 0;
+        block.command_count = 1;
+        lctx.current_block = &block;
+        
+        RuleResult result = rule_special(lctx);
+        
+        ASSERT_EQ(result.instructions.size(), 1);
+        const auto& op = result.instructions[0].op;
+        
+        // ASSERT: NOT Sem_SetVar (which would modify script result)
+        bool is_set_var = std::holds_alternative<Sem_SetVar>(op);
+        ASSERT_FALSE(is_set_var);
+        
+        // ASSERT: IS Sem_SetDaylightSaving (pure state mutation)
+        bool is_dst = std::holds_alternative<Sem_SetDaylightSaving>(op);
+        ASSERT_TRUE(is_dst);
+    }
+    
+    std::cout << "  [DST operations do NOT modify wScriptVar]\n";
+    std::cout << "  [They are pure persistent state mutation]\n";
+}
+
+//=============================================================================
 // SIMULATION TIMING TESTS
 // Verifies SimulationScheduler decouples simulation from render rate
 //=============================================================================
@@ -8153,6 +8610,16 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch7_special_160_not_zero_instructions);
     RUN_TEST(batch7_special_160_overwrites_stale_script_var);
     RUN_TEST(batch7_special_160_branch_equivalence);
+    
+    // Batch 8 Special semantic op tests - YesNo (163), DST (166, 167)
+    RUN_TEST(batch8_special_163_emits_sem_yesno);
+    RUN_TEST(batch8_special_163_no_sem_special);
+    RUN_TEST(batch8_special_163_yesorno_equivalence);
+    RUN_TEST(batch8_special_166_emits_dst_true);
+    RUN_TEST(batch8_special_167_emits_dst_false);
+    RUN_TEST(batch8_special_166_167_differ_by_enabled);
+    RUN_TEST(batch8_special_166_167_no_sem_special);
+    RUN_TEST(batch8_dst_operations_no_script_result);
     
     // Simulation timing tests (Audit 8 - render/sim decoupling)
     RUN_TEST(timing_scheduler_basic);

@@ -1875,6 +1875,11 @@ RuleResult rule_special(LoweringContext& ctx) {
         constexpr uint16_t SPECIAL_STUBBED_TRAINER_RANKINGS_HEALINGS = 157;
         // Mobile Adapter status check (Batch 7: frontend-absorbed constant result)
         constexpr uint16_t SPECIAL_CHECK_MOBILE_ADAPTER_STATUS = 160;
+        // Yes/No prompt (Batch 8: AskRememberPassword - identical to yesorno opcode)
+        constexpr uint16_t SPECIAL_ASK_REMEMBER_PASSWORD = 163;
+        // Daylight Saving Time (Batch 8: set/clear DST flag with time display)
+        constexpr uint16_t SPECIAL_INITIAL_SET_DST_FLAG = 166;
+        constexpr uint16_t SPECIAL_INITIAL_CLEAR_DST_FLAG = 167;
         
         switch (p->special_id) {
             // =================================================================
@@ -2188,6 +2193,105 @@ RuleResult rule_special(LoweringContext& ctx) {
                 // Produce zero semantic instructions. Track as absorbed.
                 // Source command is consumed and fully accounted for.
                 r.absorbed_opcodes.push_back(cmd->opcode());
+                return r;
+            }
+            
+            // =================================================================
+            // YES/NO PROMPT (Batch 8)
+            // =================================================================
+            
+            case SPECIAL_ASK_REMEMBER_PASSWORD: {
+                // AskRememberPassword - semantically identical to yesorno opcode
+                // Source: pokecrystal/engine/events/buena_menu.asm
+                //
+                // SOURCE IMPLEMENTATION:
+                //   AskRememberPassword:
+                //       call .DoMenu
+                //       ld a, $0
+                //       jr c, .okay
+                //       ld a, $1
+                //   .okay
+                //       ld [wScriptVar], a
+                //       ret
+                //
+                // The .DoMenu routine:
+                //   - Displays Yes/No menu using YesNoMenuHeader at coords (14, 7)
+                //   - 15-frame delay after menu close (purely presentation)
+                //   - Returns carry if No/cancelled, carry clear if Yes
+                //
+                // RESULT CONTRACT (identical to Script_yesorno):
+                //   - Yes selected: wScriptVar = 1 (TRUE)
+                //   - No/cancelled: wScriptVar = 0 (FALSE)
+                //
+                // EQUIVALENCE PROOF:
+                // Script_yesorno (opcode 0x4E):
+                //   call YesNoBox; ld a, FALSE; jr c, .no; ld a, TRUE; .no: ld [wScriptVar], a
+                // AskRememberPassword (Special 163):
+                //   call .DoMenu; ld a, $0; jr c, .okay; ld a, $1; .okay: ld [wScriptVar], a
+                //
+                // Both produce TRUE (1) on Yes, FALSE (0) on No/cancel.
+                // Position/delay differences are presentation-only.
+                //
+                // SEMANTIC LOWERING:
+                // Lower to existing Sem_YesNo{}. No new op type needed.
+                r.instructions.push_back(make_inst(enginemon::Sem_YesNo{}));
+                return r;
+            }
+            
+            // =================================================================
+            // DAYLIGHT SAVING TIME OPERATIONS (Batch 8)
+            // =================================================================
+            // These set the player's DST preference and update the time display.
+            // Source: pokecrystal/engine/rtc/timeset.asm
+            //
+            // Both operations share the same structure:
+            //   1. Set/clear DST_F bit in wDST (persistent RTC state)
+            //   2. Clear screen area (presentation)
+            //   3. Call UpdateTime, print current time (presentation)
+            //   4. Print confirmation text (presentation)
+            //   5. Return immediately (no input wait, no script result)
+            
+            case SPECIAL_INITIAL_SET_DST_FLAG: {
+                // InitialSetDSTFlag - enable daylight-saving time
+                // Source: engine/rtc/timeset.asm InitialSetDSTFlag
+                //
+                // SOURCE IMPLEMENTATION:
+                //   ld a, [wDST]
+                //   set DST_F, a
+                //   ld [wDST], a
+                //   ... (clear box, print time, print "DST Is that OK?")
+                //   ret
+                //
+                // SEMANTIC CONTRACT:
+                //   - Mutates persistent DST preference to ENABLED
+                //   - Updates time display to show DST-adjusted time
+                //   - No script result (does NOT modify wScriptVar)
+                //   - No input wait
+                enginemon::Sem_SetDaylightSaving op;
+                op.enabled = true;
+                r.instructions.push_back(make_inst(std::move(op)));
+                return r;
+            }
+            
+            case SPECIAL_INITIAL_CLEAR_DST_FLAG: {
+                // InitialClearDSTFlag - disable daylight-saving time
+                // Source: engine/rtc/timeset.asm InitialClearDSTFlag
+                //
+                // SOURCE IMPLEMENTATION:
+                //   ld a, [wDST]
+                //   res DST_F, a
+                //   ld [wDST], a
+                //   ... (clear box, print time, print "Time Ask Okay?")
+                //   ret
+                //
+                // SEMANTIC CONTRACT:
+                //   - Mutates persistent DST preference to DISABLED
+                //   - Updates time display to show standard time
+                //   - No script result (does NOT modify wScriptVar)
+                //   - No input wait
+                enginemon::Sem_SetDaylightSaving op;
+                op.enabled = false;
+                r.instructions.push_back(make_inst(std::move(op)));
                 return r;
             }
             
