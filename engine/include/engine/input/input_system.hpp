@@ -153,21 +153,25 @@ public:
     // EDGE CONSUMPTION (Audit 8)
     // One physical rising edge → at most one simulation edge
     //
+    // Host edges remain pending until consumed by simulation.
+    // Render frame boundaries do NOT discard unconsumed edges.
+    //
     // Use these in simulation ticks to consume edge events.
     // During catch-up, only the first tick observes the edge.
     //=========================================================================
     
     // Consume a press edge - returns true once per physical press
     // Subsequent calls (even in same frame) return false
+    // Edge remains pending across render frames until consumed
     bool consume_pressed(InputButton btn);
     
     // Consume a release edge - returns true once per physical release
+    // Edge remains pending across render frames until consumed
     bool consume_released(InputButton btn);
     
-    // Check if edge was consumed (for debugging/testing)
-    bool is_edge_consumed(InputButton btn) const { 
-        return edge_consumed_[static_cast<int>(btn)]; 
-    }
+    // Query pending edge state (for debugging/testing)
+    bool has_pending_pressed(InputButton btn) const;
+    bool has_pending_released(InputButton btn) const;
     
     //=========================================================================
     // JOYPAD LATCH
@@ -187,16 +191,17 @@ private:
     InputBindings bindings_;
     InputSnapshot snapshot_;
     
-    // Previous frame state for edge detection
-    bool prev_held_[static_cast<int>(InputButton::Count)] = {};
+    // Current physical held state (true while key is down)
+    bool held_[static_cast<int>(InputButton::Count)] = {};
+    
+    // Pending edge flags (Audit 8)
+    // These remain set until consumed by a simulation tick.
+    // Render frame boundaries do NOT clear them.
+    bool pending_pressed_[static_cast<int>(InputButton::Count)] = {};
+    bool pending_released_[static_cast<int>(InputButton::Count)] = {};
     
     // Joypad latch (buttons pressed mid-step)
     bool latched_[static_cast<int>(InputButton::Count)] = {};
-    
-    // Edge consumption tracking (Audit 8)
-    // True if the press edge has been consumed by a simulation tick
-    bool edge_consumed_[static_cast<int>(InputButton::Count)] = {};
-    bool release_consumed_[static_cast<int>(InputButton::Count)] = {};
     
     // Set button state
     void set_button(InputButton btn, bool down);

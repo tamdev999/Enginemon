@@ -3,8 +3,17 @@
 //
 // Reference: Gen2Recomped joyLatch pattern for held-direction gating
 //
-// CRITICAL: Edge consumption model (Audit 8)
-// One host rising edge must produce at most one simulation edge event.
+// CRITICAL: Edge lifetime model (Audit 8)
+// Host edges remain pending until consumed by simulation.
+// Render frame boundaries do NOT discard unconsumed edges.
+//
+// Model:
+//   key_down: held = true, pending_pressed = true
+//   key_up:   held = false, pending_released = true
+//   consume_pressed(): if pending_pressed { pending_pressed = false; return true }
+//   consume_released(): if pending_released { pending_released = false; return true }
+//
+// One host rising edge → at most one simulation edge event.
 // During catch-up (multiple simulation ticks per render), only the first
 // tick observes the pressed edge. Subsequent ticks see held=true but pressed=false.
 
@@ -84,13 +93,10 @@ InputSystem::InputSystem() {
     
     // Clear all state
     for (int i = 0; i < static_cast<int>(InputButton::Count); i++) {
-        snapshot_.held[i] = false;
-        snapshot_.pressed[i] = false;
-        snapshot_.released[i] = false;
-        prev_held_[i] = false;
+        held_[i] = false;
+        pending_pressed_[i] = false;
+        pending_released_[i] = false;
         latched_[i] = false;
-        edge_consumed_[i] = false;
-        release_consumed_[i] = false;
     }
 }
 
@@ -101,29 +107,33 @@ InputSystem::~InputSystem() = default;
 //=============================================================================
 
 void InputSystem::begin_frame() {
-    // Copy current held state to previous
+    // CRITICAL (Audit 8): Do NOT clear pending edges here!
+    // Pending edges remain until consumed by simulation.
+    // Only update the snapshot's held state for queries.
     for (int i = 0; i < static_cast<int>(InputButton::Count); i++) {
-        prev_held_[i] = snapshot_.held[i];
-        snapshot_.pressed[i] = false;
-        snapshot_.released[i] = false;
-        // Reset edge consumption - new host poll, new edges available
-        edge_consumed_[i] = false;
-        release_consumed_[i] = false;
+        snapshot_.held[i] = held_[i];
+        // Expose pending state to snapshot for legacy was_pressed() queries
+        snapshot_.pressed[i] = pending_pressed_[i];
+        snapshot_.released[i] = pending_released_[i];
     }
 }
 
 void InputSystem::set_button(InputButton btn, bool down) {
     int idx = static_cast<int>(btn);
     
-    if (down && !snapshot_.held[idx]) {
-        // Just pressed - set pending edge
-        snapshot_.pressed[idx] = true;
-        edge_consumed_[idx] = false;  // Fresh edge, not yet consumed
-    } else if (!down && snapshot_.held[idx]) {
-        // Just released
-        snapshot_.released[idx] = true;
+    if (down && !held_[idx]) {
+        // Rising edge: key just pressed
+        pending_pressed_[idx] = true;
+        snapshot_.pressed[idx] = true;  // Immediately visible to queries
+        // Note: If press→release→press occurs before simulation tick,
+        // we keep pending_pressed true (latest state wins for Crystal semantics)
+    } else if (!down && held_[idx]) {
+        // Falling edge: key just released
+        pending_released_[idx] = true;
+        snapshot_.released[idx] = true;  // Immediately visible to queries
     }
     
+    held_[idx] = down;
     snapshot_.held[idx] = down;
 }
 
@@ -157,14 +167,15 @@ void InputSystem::on_gamepad_button_up(int button_id) {
 
 //=============================================================================
 // EDGE CONSUMPTION (Audit 8)
-// One physical rising edge → at most one simulation edge
+// Host edges remain pending until consumed by simulation.
+// One physical rising edge → at most one simulation edge event.
 //=============================================================================
 
 bool InputSystem::consume_pressed(InputButton btn) {
     int idx = static_cast<int>(btn);
-    // Only return true if pressed AND not yet consumed
-    if (snapshot_.pressed[idx] && !edge_consumed_[idx]) {
-        edge_consumed_[idx] = true;  // Mark as consumed
+    if (pending_pressed_[idx]) {
+        pending_pressed_[idx] = false;  // Consumed - clears pending
+        snapshot_.pressed[idx] = false; // Update snapshot
         return true;
     }
     return false;
@@ -172,13 +183,20 @@ bool InputSystem::consume_pressed(InputButton btn) {
 
 bool InputSystem::consume_released(InputButton btn) {
     int idx = static_cast<int>(btn);
-    // Release edges also should be consumed once
-    // (though less critical than press edges for gameplay)
-    if (snapshot_.released[idx] && !release_consumed_[idx]) {
-        release_consumed_[idx] = true;
+    if (pending_released_[idx]) {
+        pending_released_[idx] = false;  // Consumed - clears pending
+        snapshot_.released[idx] = false; // Update snapshot
         return true;
     }
     return false;
+}
+
+bool InputSystem::has_pending_pressed(InputButton btn) const {
+    return pending_pressed_[static_cast<int>(btn)];
+}
+
+bool InputSystem::has_pending_released(InputButton btn) const {
+    return pending_released_[static_cast<int>(btn)];
 }
 
 //=============================================================================
@@ -196,22 +214,23 @@ InputAction InputSystem::get_action(bool input_locked) const {
     }
     
     // A-button has highest priority (interact/confirm)
-    if (snapshot_.was_pressed(InputButton::A)) {
+    // Use pending_pressed for edge detection
+    if (pending_pressed_[static_cast<int>(InputButton::A)]) {
         return InputAction::Interact;
     }
     
     // Movement (check latched first, then held)
     // Direction priority: up > down > left > right (arbitrary but consistent)
-    if (check_latch(InputButton::Up) || snapshot_.is_held(InputButton::Up)) {
+    if (check_latch(InputButton::Up) || held_[static_cast<int>(InputButton::Up)]) {
         return InputAction::MoveUp;
     }
-    if (check_latch(InputButton::Down) || snapshot_.is_held(InputButton::Down)) {
+    if (check_latch(InputButton::Down) || held_[static_cast<int>(InputButton::Down)]) {
         return InputAction::MoveDown;
     }
-    if (check_latch(InputButton::Left) || snapshot_.is_held(InputButton::Left)) {
+    if (check_latch(InputButton::Left) || held_[static_cast<int>(InputButton::Left)]) {
         return InputAction::MoveLeft;
     }
-    if (check_latch(InputButton::Right) || snapshot_.is_held(InputButton::Right)) {
+    if (check_latch(InputButton::Right) || held_[static_cast<int>(InputButton::Right)]) {
         return InputAction::MoveRight;
     }
     
@@ -235,7 +254,7 @@ void InputSystem::clear_latch() {
 bool InputSystem::check_latch(InputButton btn) const {
     // Return true if button was latched AND is still held
     int idx = static_cast<int>(btn);
-    return latched_[idx] && snapshot_.held[idx];
+    return latched_[idx] && held_[idx];
 }
 
 } // namespace enginemon

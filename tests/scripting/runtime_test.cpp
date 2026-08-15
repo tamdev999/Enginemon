@@ -4019,15 +4019,23 @@ TEST(input_system_key_events) {
     ASSERT_TRUE(input.snapshot().is_held(InputButton::Up));
     ASSERT_TRUE(input.snapshot().was_pressed(InputButton::Up));
     
-    // Begin new frame
+    // Begin new frame - edge persists until consumed (Audit 8)
     input.begin_frame();
     ASSERT_TRUE(input.snapshot().is_held(InputButton::Up));
-    ASSERT_FALSE(input.snapshot().was_pressed(InputButton::Up));  // Cleared
+    ASSERT_TRUE(input.snapshot().was_pressed(InputButton::Up));  // Still pending until consumed
+    
+    // Consume the press edge (as simulation would)
+    ASSERT_TRUE(input.consume_pressed(InputButton::Up));
+    ASSERT_FALSE(input.snapshot().was_pressed(InputButton::Up));  // Now cleared
     
     // Release W
     input.on_key_up(Sdl3Scancode::W);
     ASSERT_FALSE(input.snapshot().is_held(InputButton::Up));
     ASSERT_TRUE(input.snapshot().was_released(InputButton::Up));
+    
+    // Consume the release edge
+    ASSERT_TRUE(input.consume_released(InputButton::Up));
+    ASSERT_FALSE(input.snapshot().was_released(InputButton::Up));  // Now cleared
     
     std::cout << "  [Key press/release events work]\n";
 }
@@ -5999,7 +6007,9 @@ TEST(input_edge_one_press_one_tick_consumed_once) {
     // First simulation tick consumes the edge
     bool tick1_pressed = input.consume_pressed(InputButton::A);
     ASSERT_TRUE(tick1_pressed);
-    ASSERT_TRUE(input.is_edge_consumed(InputButton::A));
+    
+    // Edge should no longer be pending
+    ASSERT_FALSE(input.has_pending_pressed(InputButton::A));
     
     // Key is still held
     ASSERT_TRUE(input.snapshot().is_held(InputButton::A));
@@ -6073,24 +6083,150 @@ TEST(input_edge_release_consumed_once) {
     std::cout << "  [Release edge consumed exactly 1 time ✓]\n";
 }
 
-TEST(input_edge_new_frame_resets_consumption) {
-    // New frame should reset edge consumption
+TEST(input_edge_zero_tick_frame_preserves_press) {
+    // CRITICAL ADVERSARIAL TEST: Zero-tick frame must NOT lose pending press
+    // Scenario:
+    //   Frame 1: host key_down → pending_pressed = true
+    //   Frame 1: scheduler returns 0 ticks (no simulation)
+    //   Frame 2: begin_frame() called
+    //   Frame 2: scheduler returns 1 tick → consume_pressed must return TRUE
     InputSystem input;
     
-    // Frame 1: Press and consume
+    // Frame 1: Press arrives
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::Z);  // A button
+    
+    // Frame 1: Scheduler returns 0 ticks - no simulation runs
+    // (simulated by not calling consume_pressed)
+    
+    // Frame 2: New render frame begins
+    input.begin_frame();
+    
+    // The pending press must NOT have been cleared by begin_frame()
+    ASSERT_TRUE(input.has_pending_pressed(InputButton::A));
+    
+    // Now scheduler gives us 1 tick - the press must be observable
+    bool pressed = input.consume_pressed(InputButton::A);
+    ASSERT_TRUE(pressed);
+    
+    // After consumption, no longer pending
+    ASSERT_FALSE(input.has_pending_pressed(InputButton::A));
+    
+    std::cout << "  [Press + 0-tick frame + 1-tick frame → press observed ✓]\n";
+}
+
+TEST(input_edge_zero_tick_frame_preserves_release) {
+    // CRITICAL ADVERSARIAL TEST: Zero-tick frame must NOT lose pending release
+    InputSystem input;
+    
+    // Press and consume
     input.begin_frame();
     input.on_key_down(Sdl3Scancode::Z);
-    ASSERT_TRUE(input.consume_pressed(InputButton::A));
-    ASSERT_FALSE(input.consume_pressed(InputButton::A));  // Already consumed
+    input.consume_pressed(InputButton::A);
     
-    // Frame 2: If key is released and pressed again, edge should be available again
-    input.begin_frame();  // This should reset edge_consumed
+    // Frame 2: Release arrives
+    input.begin_frame();
     input.on_key_up(Sdl3Scancode::Z);
-    input.on_key_down(Sdl3Scancode::Z);  // New press
     
-    ASSERT_TRUE(input.consume_pressed(InputButton::A));  // New edge available
+    // Frame 2: Scheduler returns 0 ticks - no simulation runs
     
-    std::cout << "  [New frame resets edge consumption ✓]\n";
+    // Frame 3: New render frame begins
+    input.begin_frame();
+    
+    // The pending release must NOT have been cleared by begin_frame()
+    ASSERT_TRUE(input.has_pending_released(InputButton::A));
+    
+    // Now scheduler gives us 1 tick - the release must be observable
+    bool released = input.consume_released(InputButton::A);
+    ASSERT_TRUE(released);
+    
+    // After consumption, no longer pending
+    ASSERT_FALSE(input.has_pending_released(InputButton::A));
+    
+    std::cout << "  [Release + 0-tick frame + 1-tick frame → release observed ✓]\n";
+}
+
+TEST(input_edge_press_release_before_tick) {
+    // Test: press → release before any simulation tick
+    // For Crystal semantics, the press may be lost (key released before observed)
+    // This is acceptable - we're testing the final state is correct
+    InputSystem input;
+    
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::Z);  // Press
+    input.on_key_up(Sdl3Scancode::Z);    // Release immediately (before tick)
+    
+    // Final state: not held
+    ASSERT_FALSE(input.snapshot().is_held(InputButton::A));
+    
+    // Both edges were registered
+    bool had_press = input.has_pending_pressed(InputButton::A);
+    bool had_release = input.has_pending_released(InputButton::A);
+    
+    // For Crystal semantics: since key is up before we tick,
+    // the simulation observes the release.
+    // The press may or may not be observable (implementation detail).
+    // Key behavior: held = false, release observable
+    ASSERT_TRUE(had_release);
+    
+    // Consume what's available
+    input.consume_pressed(InputButton::A);  // May or may not succeed
+    bool release_consumed = input.consume_released(InputButton::A);
+    ASSERT_TRUE(release_consumed);
+    
+    std::cout << "  [Press→release before tick → release observed, held=false ✓]\n";
+}
+
+TEST(input_edge_new_press_after_release) {
+    // Test: press → release → press (tap-tap) before simulation tick
+    // The second press should be observable
+    InputSystem input;
+    
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::Z);  // Press 1
+    input.on_key_up(Sdl3Scancode::Z);    // Release
+    input.on_key_down(Sdl3Scancode::Z);  // Press 2
+    
+    // Final state: held (key is down)
+    ASSERT_TRUE(input.snapshot().is_held(InputButton::A));
+    
+    // Press 2 creates a new pending edge (press 1 may have been overwritten)
+    ASSERT_TRUE(input.has_pending_pressed(InputButton::A));
+    
+    // Release was registered (but may be stale if press 2 came after)
+    // For simple model: latest state wins, so we have a press edge
+    bool pressed = input.consume_pressed(InputButton::A);
+    ASSERT_TRUE(pressed);
+    
+    std::cout << "  [Press→release→press before tick → press observed, held=true ✓]\n";
+}
+
+TEST(input_edge_multiple_render_frames_preserves_press) {
+    // Edge case: press survives multiple render frames with 0 ticks each
+    InputSystem input;
+    
+    // Frame 1: Press
+    input.begin_frame();
+    input.on_key_down(Sdl3Scancode::Z);
+    // 0 ticks
+    
+    // Frame 2: 0 ticks
+    input.begin_frame();
+    ASSERT_TRUE(input.has_pending_pressed(InputButton::A));
+    
+    // Frame 3: 0 ticks
+    input.begin_frame();
+    ASSERT_TRUE(input.has_pending_pressed(InputButton::A));
+    
+    // Frame 4: 0 ticks
+    input.begin_frame();
+    ASSERT_TRUE(input.has_pending_pressed(InputButton::A));
+    
+    // Frame 5: Finally get a tick
+    bool pressed = input.consume_pressed(InputButton::A);
+    ASSERT_TRUE(pressed);
+    
+    std::cout << "  [Press survives 4 zero-tick render frames ✓]\n";
 }
 
 //=============================================================================
@@ -6444,7 +6580,11 @@ int main(int argc, char* argv[]) {
     RUN_TEST(input_edge_one_press_four_ticks_consumed_once);
     RUN_TEST(input_edge_held_across_multiple_ticks);
     RUN_TEST(input_edge_release_consumed_once);
-    RUN_TEST(input_edge_new_frame_resets_consumption);
+    RUN_TEST(input_edge_zero_tick_frame_preserves_press);
+    RUN_TEST(input_edge_zero_tick_frame_preserves_release);
+    RUN_TEST(input_edge_press_release_before_tick);
+    RUN_TEST(input_edge_new_press_after_release);
+    RUN_TEST(input_edge_multiple_render_frames_preserves_press);
     
     // Scheduler debt retention adversarial tests (Audit 8)
     RUN_TEST(scheduler_500ms_hitch_retains_debt);
