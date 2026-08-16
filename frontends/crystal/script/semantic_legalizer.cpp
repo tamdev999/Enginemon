@@ -631,6 +631,7 @@ static constexpr uint16_t RAM_UNDERGROUND_SWITCHES = 0xd963;
 static constexpr uint16_t RAM_LINK_MODE = 0xcf51;
 static constexpr uint16_t RAM_STRENGTH_SPECIES = 0xd1ef;
 static constexpr uint16_t RAM_TEMP_WILD_MON_SPECIES = 0xd22e;
+static constexpr uint16_t RAM_BATTLE_TOWER_BEATEN_TRAINERS = 0xcf64;
 
 // Known native call addresses for field moves
 static constexpr uint32_t NATIVE_TryStrengthOW = 0xCD78;
@@ -638,6 +639,9 @@ static constexpr uint32_t NATIVE_SetStrengthFlag = 0xCD12;
 static constexpr uint32_t NATIVE_HasRockSmash = 0xCF7C;
 static constexpr uint32_t NATIVE_GetPartyNickname = 0xC706;
 static constexpr uint32_t NATIVE_RockMonEncounter = 0xB8219;
+
+// Known native call addresses for Battle Tower (corpus-discovered deferred scripts)
+static constexpr uint32_t NATIVE_BattleTowerLoadLevelGroup = 0x9f5cb;
 
 // Helper to convert RAM address to StateVarId
 static std::optional<enginemon::StateVarId> ram_to_statevar(uint16_t ram_address) {
@@ -651,6 +655,9 @@ static std::optional<enginemon::StateVarId> ram_to_statevar(uint16_t ram_address
         case RAM_UNDERGROUND_SWITCHES:
             return static_cast<enginemon::StateVarId>(
                 static_cast<uint16_t>(enginemon::WellKnownStateVar::UndergroundSwitchPositions));
+        case RAM_BATTLE_TOWER_BEATEN_TRAINERS:
+            return static_cast<enginemon::StateVarId>(
+                static_cast<uint16_t>(enginemon::WellKnownStateVar::BattleTowerBeatenTrainers));
         default:
             return std::nullopt;
     }
@@ -828,6 +835,26 @@ RuleResult rule_callasm_field_moves(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_TryRockSmashEncounter{}));
+        return r;
+    }
+    
+    // =========================================================================
+    // Battle Tower native calls (corpus-discovered deferred scripts)
+    // =========================================================================
+    
+    // BattleTowerHallwayChooseBattleRoomScript.asm_load_battle_room - Read level group
+    // Reference: pokecrystal/maps/BattleTowerHallway.asm
+    // Reads wBTChoiceOfLvlGroup from SRAM and stores in wScriptVar
+    // Used to determine which battle room corridor to walk the player to
+    if (addr == NATIVE_BattleTowerLoadLevelGroup) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        // Lower to read of Battle Tower level group state variable into wScriptVar
+        enginemon::Sem_ReadStateVar op;
+        op.state_var = static_cast<enginemon::StateVarId>(
+            static_cast<uint16_t>(enginemon::WellKnownStateVar::BattleTowerLevelGroup));
+        r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     
@@ -1629,6 +1656,42 @@ RuleResult rule_trainer_script_ops(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_EndIfJustBattled{}));
+        return r;
+    }
+    return {};
+}
+
+
+// =============================================================================
+// BATTLE TOWER TEXT RULE
+// =============================================================================
+// battletowertext (0xa4) - Display Battle Tower specific text
+// Reference: pokecrystal/engine/overworld/scripting.asm Script_battletowertext
+// Semantics: calls SetUpTextbox, reads bttext_id, calls BattleTowerText(c=bttext_id)
+//
+// BattleTowerText IDs (from pokecrystal/constants/battle_tower_constants.asm):
+//   BATTLETOWERTEXT_INTRO = 1 (opponent intro text)
+//   BATTLETOWERTEXT_WIN_TEXT = 2 (opponent win message)
+//   BATTLETOWERTEXT_LOSS_TEXT = 3 (opponent loss message)
+//
+// For corpus closure, lower to Sem_Special with opcode 0xA4 encoding the bttext_id.
+// This is a KNOWN TEMPORARY ARCHITECTURE VIOLATION - Battle Tower text should
+// eventually have proper semantic text extraction like trainertext.
+RuleResult rule_battle_tower_text(LoweringContext& ctx) {
+    const auto* cmd = ctx.peek();
+    if (!cmd) return {};
+    
+    if (auto* p = std::get_if<Cmd_Battletowertext>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        // Use Sem_Special as temporary corpus closure mechanism
+        // The special_id encodes: 0xA400 + bttext_id (opcode 0xA4 in high byte)
+        // This allows distinguishing from other Sem_Special usages
+        enginemon::Sem_Special op;
+        op.special_id = 0xA400 + p->bttext_id;  // 0xA4xx encoding
+        op.name = "battletowertext_" + std::to_string(p->bttext_id);
+        r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     return {};
@@ -3152,6 +3215,7 @@ LoweringRules LoweringRules::create_default() {
     rules.add_rule("start_battle", rule_start_battle);
     rules.add_rule("battle_aftermath", rule_battle_aftermath);
     rules.add_rule("trainer_script_ops", rule_trainer_script_ops);
+    rules.add_rule("battle_tower_text", rule_battle_tower_text);
     
     // Audio
     rules.add_rule("play_music", rule_play_music);

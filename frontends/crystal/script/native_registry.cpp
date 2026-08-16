@@ -90,6 +90,18 @@ void NativeCallRegistry::initialize() {
               NativeClassification::PureSemantic, NativeControlFlow::Returns,
               "pokecrystal/engine/events/treemons.asm", "Triggers rock smash wild encounter");
     
+    // =========================================================================
+    // Battle Tower native calls (corpus-discovered deferred scripts)
+    // =========================================================================
+    
+    // BattleTowerHallwayChooseBattleRoomScript.asm_load_battle_room (27:75cb) -> 0x9f5cb
+    // Reference: pokecrystal/maps/BattleTowerHallway.asm
+    // Reads wBTChoiceOfLvlGroup from SRAM and stores in wScriptVar
+    // Used by deferred script to select which battle room to walk to
+    add_known(0x9f5cb, "BattleTowerHallway.asm_load_battle_room", "load_battle_tower_level_group",
+              NativeClassification::PureSemantic, NativeControlFlow::Returns,
+              "pokecrystal/maps/BattleTowerHallway.asm", "Reads Battle Tower level group selection into wScriptVar");
+    
     // Bank 25 (0x25 = 37) - Overworld scripting
     // Address formula: 37 * 0x4000 + (addr - 0x4000) = 0x94000 + offset
     // EnableEvents (25:66d0) -> 0x94000 + 0x26d0 = 0x966d0
@@ -296,6 +308,17 @@ void RamAddressRegistry::initialize() {
     add_known(0xd22e, "wTempWildMonSpecies", "temp_wild_mon_species",
               RamClassification::KnownSemanticState,
               "pokecrystal11.sym", "Pending wild encounter species (field move context)");
+    
+    // =========================================================================
+    // Battle Tower State Variables
+    // =========================================================================
+    
+    // wNrOfBeatenBattleTowerTrainers (00:cf64) - Battle Tower streak counter
+    // Read by script to check if all 7 trainers in a streak have been beaten
+    // Script access via readmem lowered to Sem_ReadStateVar(BattleTowerBeatenTrainers)
+    add_known(0xcf64, "wNrOfBeatenBattleTowerTrainers", "battle_tower_beaten_trainers",
+              RamClassification::KnownSemanticState,
+              "pokecrystal11.sym", "Number of beaten Battle Tower trainers in current streak");
     
     // Script execution pointers (potential control flow)
     // These are addresses that store script pointers which memjump/memcall read

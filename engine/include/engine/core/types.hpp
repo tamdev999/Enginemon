@@ -63,6 +63,8 @@ enum class WellKnownStateVar : uint16_t {
     FarfetchdPosition = 1,       // Ilex Forest mini-game position (1-10)
     MooMooBerries = 2,           // MooMoo Farm berry feeding count
     UndergroundSwitchPositions = 3,  // Goldenrod Underground switch puzzle state
+    BattleTowerBeatenTrainers = 4,   // Number of beaten Battle Tower trainers in current streak
+    BattleTowerLevelGroup = 5,       // Battle Tower level group selection (1-10 for L10-L100)
 };
 
 // Link mode capability query results (read-only)
