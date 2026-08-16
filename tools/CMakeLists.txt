@@ -92,3 +92,21 @@ target_link_libraries(corpus_dupe_scan PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+
+# Blast radius scan - measures duplicate command identity bug
+add_executable(blast_radius_scan
+    blast_radius_scan.cpp
+)
+target_link_libraries(blast_radius_scan PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+
+# CFG integrity check - verifies CFG structure across corpus
+add_executable(cfg_integrity_check
+    cfg_integrity_check.cpp
+)
+target_link_libraries(cfg_integrity_check PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
