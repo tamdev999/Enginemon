@@ -1057,8 +1057,16 @@ CrystalScriptIR TypedScriptDecoder::decode_script(uint32_t address, const std::s
         uint32_t current = ctx.pending.back();
         ctx.pending.pop_back();
         
-        // Skip if already visited
+        // Skip if already visited as a block entry
         if (ctx.visited.contains(current)) {
+            continue;
+        }
+        
+        // If this address was already decoded as part of another block's
+        // sequential decoding, it's still valid as a branch target.
+        // Mark visited but don't re-decode.
+        if (ctx.decoded_commands.contains(current)) {
+            ctx.visited.insert(current);
             continue;
         }
         
@@ -1066,9 +1074,25 @@ CrystalScriptIR TypedScriptDecoder::decode_script(uint32_t address, const std::s
         ctx.bank = rom_.flat_to_bank(current);
         ctx.visited.insert(current);
         
-        // Decode commands until terminator
+        // Decode commands until terminator or already-decoded address
         while (true) {
+            // Check if we've reached an already-decoded command address
+            // This happens when a branch target lands in the middle of a
+            // previously-decoded sequence. Stop here - CFG will handle the split.
+            if (ctx.decoded_commands.contains(ctx.pc)) {
+                // We've hit a command that was already decoded.
+                // This is a valid back-edge or join point.
+                // Don't re-decode; the CFG builder will identify this as a leader.
+                break;
+            }
+            
+            uint32_t cmd_addr = ctx.pc;  // Capture before decode_command advances pc
             CrystalCommand cmd = decode_command(ctx);
+            
+            // Record this command's address for uniqueness tracking
+            size_t cmd_index = ir.commands.size();
+            ctx.decoded_commands[cmd_addr] = cmd_index;
+            
             ir.commands.push_back(cmd);
             
             stats_.instructions_decoded++;

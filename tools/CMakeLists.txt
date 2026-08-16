@@ -74,3 +74,21 @@ target_link_libraries(special_inventory PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+
+# Trace Special 166 duplication through pipeline
+add_executable(trace_166
+    trace_166.cpp
+)
+target_link_libraries(trace_166 PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+
+# Corpus duplicate command scan
+add_executable(corpus_dupe_scan
+    corpus_dupe_scan.cpp
+)
+target_link_libraries(corpus_dupe_scan PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)

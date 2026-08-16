@@ -22,8 +22,13 @@ struct TypedDecoderContext {
     uint32_t pc = 0;            // Current position
     uint8_t bank = 0;           // Current bank for local pointers
     
+    // Block entry addresses that have been queued/processed
     std::unordered_set<uint32_t> visited;
     std::vector<uint32_t> pending;
+    
+    // Command-level tracking: address -> index in ir.commands
+    // Enforces unique command identity per ROM address
+    std::unordered_map<uint32_t, size_t> decoded_commands;
 };
 
 // Corpus-wide statistics
