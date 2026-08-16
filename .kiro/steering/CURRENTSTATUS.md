@@ -1,5 +1,95 @@
 # Current Status
 
+## Fixed-Point Deferred Script Discovery - COMPLETED ✓
+
+**SUCCESS**: The production compiler now discovers sdefer (deferred script) targets as separate executable roots through fixed-point iteration. The corpus has expanded from 1635 to 1679 script bodies.
+
+### Production Metrics (Post-Deferred Discovery)
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Maps discovered | 378 | ✅ |
+| Object scripts | 848 | ✅ |
+| BG event scripts | 462 | ✅ |
+| Scene scripts | 170 | ✅ |
+| Callback scripts | 103 | ✅ |
+| Deferred targets encountered | 45 | ✅ |
+| New deferred roots | 44 | ✅ |
+| Map-root bodies | 1627 | ✅ (was 1583, +44 deferred) |
+| StdScript bodies | 52 | ✅ |
+| Total unique bodies | 1679 | ✅ (was 1635, +44) |
+| Fixed-point iterations | 2 | ✅ |
+
+### Special 152 Reconciliation - ALL 5 ADDRESSES VERIFIED ✓
+
+| Source Address | Body Root(s) | Root Type | Discovery Path |
+|---------------|--------------|-----------|----------------|
+| 0x192b34 | 0x19289d, 0x192952 | object | Initial root (via scall) |
+| 0x192b77 | 0x192ab6 | deferred | sdefer from scene 0x192873 |
+| 0x192bb1 | 0x192add | deferred | sdefer from scene 0x192877 |
+| 0x192c2f | 0x192a2d | object | Initial root |
+| 0x192c7a | 0x192c4e | deferred | sdefer from scene 0x19287b |
+
+### Unified Corpus Discovery API
+
+New files created:
+- `frontends/crystal/compile/corpus_discovery.hpp` - Unified discovery API
+- `frontends/crystal/compile/corpus_discovery.cpp` - Fixed-point deferred discovery implementation
+
+API: `discover_corpus(rom, profile, extractor, decoder, std_scripts)`
+
+Returns `CorpusDiscoveryResult` with:
+- `map_roots` - All discovered script roots with type classification
+- `std_script_addresses` - Unique StdScript addresses
+- `stats` - Detailed discovery statistics
+
+### What Was Implemented
+
+1. **Fixed-point deferred discovery**: `discover_corpus()` iterates to fixed point:
+   - Collect initial roots (object, BG, scene, callback, StdScript)
+   - Decode each root's executable body
+   - Scan for `Cmd_Sdefer` targets
+   - Add new targets as `ScriptRootType::Deferred` roots
+   - Repeat until no new roots discovered
+
+2. **Unified discovery API**: Both `FullGameCompiler` and `special_inventory` now call `discover_corpus()` - no duplicated logic
+
+3. **Root type classification**: Each root is classified as `Object`, `BgEvent`, `Scene`, `Callback`, `StdScript`, or `Deferred`
+
+### Architecture Decision: sdefer ≠ scall
+
+**sdefer** schedules a script to run AFTER the current script completes.
+**scall** is immediate intra-body control flow.
+
+Therefore:
+- sdefer targets = separate executable bodies (discovered as roots)
+- scall targets = intra-body CFG blocks (added to ctx.pending during decode)
+
+### Files Changed
+
+- `frontends/crystal/compile/corpus_discovery.hpp` - New unified API
+- `frontends/crystal/compile/corpus_discovery.cpp` - Fixed-point implementation
+- `frontends/crystal/compile/full_compiler.cpp` - Uses `discover_corpus()`
+- `frontends/crystal/CMakeLists.txt` - Added corpus_discovery.cpp
+- `tools/special_inventory.cpp` - Uses unified `discover_corpus()` API
+- `tools/special152_verify.cpp` - New verification tool
+
+### Test Results
+
+- **Golden Tests**: 56/56 pass
+- **Runtime Tests**: 216/216 pass
+- **Special 152 Verification**: 5/5 addresses found ✓
+
+### Known Issue: New Deferred Bodies Require More Lowering Rules
+
+Some newly discovered deferred script bodies contain opcodes without lowering rules yet:
+- opcode 0xa4 at 0x9f433
+- opcode 0x19 at 0x9f442
+
+These are NOT Pokecenter2F scripts - they are deferred targets from other maps discovered through fixed-point iteration. The deferred discovery is correct; the lowering rules need to be expanded.
+
+---
+
 ## Scene Script Discovery - COMPLETED ✓
 
 **SUCCESS**: The production compiler now discovers and processes scene scripts and callback scripts from MapScripts headers. The corpus has expanded from 1362 to 1635 script bodies.

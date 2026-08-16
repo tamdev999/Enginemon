@@ -110,3 +110,39 @@ target_link_libraries(cfg_integrity_check PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+
+# Corpus verification tool - expanded corpus verification for scene script discovery
+add_executable(corpus_verify
+    corpus_verify.cpp
+)
+target_link_libraries(corpus_verify PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+
+# Special 152 trace - traces all occurrences of SetPlayerPalette in expanded corpus
+add_executable(special152_trace
+    special152_trace.cpp
+)
+target_link_libraries(special152_trace PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+
+# Pokecenter2F trace - detailed trace of Pokecenter2F scripts
+add_executable(pokecenter2f_trace
+    pokecenter2f_trace.cpp
+)
+target_link_libraries(pokecenter2f_trace PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+
+# Special 152 verification - verifies all 5 known addresses are in corpus
+add_executable(special152_verify
+    special152_verify.cpp
+)
+target_link_libraries(special152_verify PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)

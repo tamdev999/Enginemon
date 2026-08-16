@@ -2,6 +2,7 @@
 // Full-game Crystal ROM → EMON package compiler implementation
 
 #include "crystal/compile/full_compiler.hpp"
+#include "crystal/compile/corpus_discovery.hpp"
 #include "crystal/rom/symbol_map.hpp"
 #include "crystal/script/typed_decoder.hpp"
 #include "crystal/script/decoder.hpp"  // For text decoding
@@ -506,126 +507,36 @@ void FullGameCompiler::collect_script_addresses(
     std::set<uint32_t>& map_root_addresses,
     std::map<uint32_t, enginemon::MapId>& address_to_map) {
     
-    // Crystal MapScripts structure sizes (from pokecrystal/constants/script_constants.asm)
-    constexpr uint8_t SCENE_SCRIPT_SIZE = 4;  // dw script_ptr, dw 0 (filler)
-    constexpr uint8_t CALLBACK_SIZE = 3;      // db type, dw script_ptr
+    // USE UNIFIED CORPUS DISCOVERY (with fixed-point deferred discovery)
+    // This is the AUTHORITATIVE implementation - do not duplicate logic here.
+    corpus_discovery_ = discover_corpus(rom_, profile_, *map_extractor_, 
+                                         *typed_decoder_, *std_scripts_);
     
-    const auto& o = profile_.offsets;
-    const auto& fmt = profile_.format.map;
-    
-    uint32_t scene_scripts_discovered = 0;
-    uint32_t callback_scripts_discovered = 0;
-    
-    // Collect from all discovered maps
-    for (const auto& dm : content_.maps) {
-        auto result = map_extractor_->extract_map(dm.group, dm.index);
-        if (!result.success) continue;
-        
-        enginemon::MapId map_id = (static_cast<uint16_t>(dm.group) << 8) | dm.index;
-        
-        // === Object event scripts ===
-        for (const auto& obj : result.map.objects) {
-            if (obj.script_rom_address != 0) {
-                map_root_addresses.insert(obj.script_rom_address);
-                if (!address_to_map.contains(obj.script_rom_address)) {
-                    address_to_map[obj.script_rom_address] = map_id;
-                }
-            }
-        }
-        
-        // === BG event scripts ===
-        for (const auto& bg : result.map.bg_events) {
-            if (bg.script_rom_address != 0) {
-                map_root_addresses.insert(bg.script_rom_address);
-                if (!address_to_map.contains(bg.script_rom_address)) {
-                    address_to_map[bg.script_rom_address] = map_id;
-                }
-            }
-        }
-        
-        // === Scene scripts and callbacks from MapScripts header ===
-        // Get map header to find script pointer
-        uint32_t group_ptr_addr = o.map_group_pointers + ((dm.group - 1) * 2);
-        if (group_ptr_addr + 2 > rom_.size()) continue;
-        
-        uint16_t group_addr = rom_.read_word(group_ptr_addr);
-        uint32_t group_flat = rom_.bank_to_flat(o.map_groups_bank, group_addr);
-        uint32_t map_entry_addr = group_flat + ((dm.index - 1) * 9);
-        
-        if (map_entry_addr + 9 > rom_.size()) continue;
-        
-        auto entry = rom_.read_bytes(map_entry_addr, 9);
-        uint8_t attr_bank = entry[0];
-        uint16_t attr_ptr = entry[3] | (entry[4] << 8);
-        uint32_t header_addr = rom_.bank_to_flat(attr_bank, attr_ptr);
-        
-        if (header_addr + fmt.header_size > rom_.size()) continue;
-        
-        auto header = rom_.read_bytes(header_addr, fmt.header_size);
-        uint8_t script_bank = header[fmt.script_bank_offset];
-        uint16_t script_ptr = header[fmt.script_ptr_offset] | (header[fmt.script_ptr_offset + 1] << 8);
-        
-        // MapScripts header starts at script_ptr in script_bank
-        uint32_t map_scripts_addr = rom_.bank_to_flat(script_bank, script_ptr);
-        if (map_scripts_addr + 1 > rom_.size()) continue;
-        
-        uint32_t ptr = map_scripts_addr;
-        
-        // --- Scene scripts ---
-        // Format: db scene_count, then scene_count * (dw script_ptr, dw 0)
-        uint8_t scene_count = rom_.read_byte(ptr++);
-        if (scene_count > 20) continue; // Sanity check
-        
-        for (uint8_t i = 0; i < scene_count; ++i) {
-            if (ptr + SCENE_SCRIPT_SIZE > rom_.size()) break;
-            
-            uint16_t scene_script_ptr = rom_.read_word(ptr);
-            ptr += 2;  // script_ptr
-            ptr += 2;  // filler (always 0)
-            
-            if (scene_script_ptr != 0) {
-                uint32_t scene_script_addr = rom_.bank_to_flat(script_bank, scene_script_ptr);
-                if (scene_script_addr > 0 && scene_script_addr < rom_.size()) {
-                    map_root_addresses.insert(scene_script_addr);
-                    if (!address_to_map.contains(scene_script_addr)) {
-                        address_to_map[scene_script_addr] = map_id;
-                    }
-                    ++scene_scripts_discovered;
-                }
-            }
-        }
-        
-        // --- Callbacks ---
-        // Format: db callback_count, then callback_count * (db type, dw script_ptr)
-        if (ptr + 1 > rom_.size()) continue;
-        
-        uint8_t callback_count = rom_.read_byte(ptr++);
-        if (callback_count > 20) continue; // Sanity check
-        
-        for (uint8_t i = 0; i < callback_count; ++i) {
-            if (ptr + CALLBACK_SIZE > rom_.size()) break;
-            
-            uint8_t callback_type = rom_.read_byte(ptr++);
-            (void)callback_type;  // Callback type not needed for discovery
-            
-            uint16_t callback_ptr = rom_.read_word(ptr);
-            ptr += 2;
-            
-            if (callback_ptr != 0) {
-                uint32_t callback_addr = rom_.bank_to_flat(script_bank, callback_ptr);
-                if (callback_addr > 0 && callback_addr < rom_.size()) {
-                    map_root_addresses.insert(callback_addr);
-                    if (!address_to_map.contains(callback_addr)) {
-                        address_to_map[callback_addr] = map_id;
-                    }
-                    ++callback_scripts_discovered;
-                }
-            }
+    // Extract addresses and map associations from discovery result
+    for (const auto& [addr, info] : corpus_discovery_.map_roots) {
+        map_root_addresses.insert(addr);
+        if (info.owning_map != enginemon::MAP_NONE) {
+            address_to_map[addr] = info.owning_map;
         }
     }
     
-    std::cout << "  Scene scripts discovered: " << scene_scripts_discovered << "\n";
-    std::cout << "  Callback scripts discovered: " << callback_scripts_discovered << "\n";
+    // Print discovery statistics
+    const auto& s = corpus_discovery_.stats;
+    std::cout << "  === Corpus Discovery (Fixed-Point) ===\n";
+    std::cout << "  Initial roots:\n";
+    std::cout << "    Object scripts:    " << s.object_roots << "\n";
+    std::cout << "    BG event scripts:  " << s.bg_event_roots << "\n";
+    std::cout << "    Scene scripts:     " << s.scene_roots << "\n";
+    std::cout << "    Callback scripts:  " << s.callback_roots << "\n";
+    std::cout << "  Deferred discovery:\n";
+    std::cout << "    Targets encountered: " << s.deferred_targets_encountered << "\n";
+    std::cout << "    Already known:       " << s.deferred_already_known << "\n";
+    std::cout << "    New deferred roots:  " << s.deferred_new_roots << "\n";
+    std::cout << "    Fixed-point iters:   " << s.deferred_iterations << "\n";
+    std::cout << "  Final counts:\n";
+    std::cout << "    Map-root bodies:     " << s.total_map_roots() << "\n";
+    std::cout << "    StdScript bodies:    " << s.std_script_roots << "\n";
+    std::cout << "    Total unique bodies: " << s.total_unique_bodies() << "\n";
 }
 
 std::optional<enginemon::SemanticScriptIR> FullGameCompiler::process_script_typed(

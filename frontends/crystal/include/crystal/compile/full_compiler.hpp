@@ -40,6 +40,7 @@
 #include "crystal/extract/tileset_extractor.hpp"
 #include "crystal/extract/sprite_extractor.hpp"
 #include "crystal/extract/font_extractor.hpp"
+#include "crystal/compile/corpus_discovery.hpp"
 #include "crystal/script/semantic_linker.hpp"
 #include "crystal/output/native_package.hpp"
 #include "engine/build/thread_pool.hpp"
@@ -298,6 +299,9 @@ private:
     
     // Production compiled game data (built from actual discovered content)
     CompiledGameData compiled_game_data_;
+    
+    // Unified corpus discovery result (stored for diagnostics)
+    CorpusDiscoveryResult corpus_discovery_;
     
     // Linked corpus result
     LinkedCorpus linked_corpus_;

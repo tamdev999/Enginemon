@@ -1,7 +1,10 @@
 // special_inventory.cpp - Dump all Special IDs encountered in corpus
 // After lowering, counts how many remain as Sem_Special vs lowered to semantic ops
+//
+// Uses UNIFIED corpus discovery via discover_corpus() from corpus_discovery.hpp
 #include "crystal/rom/loader.hpp"
 #include "crystal/rom/profile.hpp"
+#include "crystal/compile/corpus_discovery.hpp"
 #include "crystal/script/typed_decoder.hpp"
 #include "crystal/script/crystal_cfg.hpp"
 #include "crystal/script/semantic_legalizer.hpp"
@@ -9,7 +12,6 @@
 #include "crystal/script/legality_gate.hpp"
 #include "crystal/script/elevator_registry.hpp"
 #include "crystal/extract/map_extractor.hpp"
-#include "crystal/compile/full_compiler.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
 #include <iomanip>
@@ -44,43 +46,35 @@ int main(int argc, char* argv[]) {
     StdScriptsTable std_scripts;
     std_scripts.load(*rom, profile->offsets.std_scripts, profile->offsets.std_scripts_count);
     
-    // Discover all maps
-    MapExtractor extractor(*rom, *profile);
-    auto discovered_maps = discover_reachable_maps(*rom, *profile, extractor);
-    
-    // Collect unique script addresses
-    std::set<uint32_t> all_addresses;
-    
-    for (const auto& ref : discovered_maps) {
-        auto result = extractor.extract_map(ref.group, ref.map);
-        if (!result.success) continue;
-        
-        for (const auto& obj : result.map.objects) {
-            if (obj.script_rom_address != 0) {
-                all_addresses.insert(obj.script_rom_address);
-            }
-        }
-        for (const auto& bg : result.map.bg_events) {
-            if (bg.script_rom_address != 0) {
-                all_addresses.insert(bg.script_rom_address);
-            }
-        }
-    }
-    
-    // Add StdScript addresses
-    for (size_t i = 0; i < std_scripts.size(); ++i) {
-        const auto* entry = std_scripts.get(static_cast<uint16_t>(i));
-        if (entry && entry->flat_address != 0) {
-            all_addresses.insert(entry->flat_address);
-        }
-    }
-    
-    std::cout << "Total unique script addresses: " << all_addresses.size() << "\n\n";
-    
-    // Setup decoder and legalizer
+    // Setup decoder for corpus discovery
     SymbolMap symbols;
     TypedScriptDecoder decoder(*rom, symbols);
     
+    // Discover production corpus using UNIFIED fixed-point discovery
+    MapExtractor extractor(*rom, *profile);
+    auto corpus = discover_corpus(*rom, *profile, extractor, decoder, std_scripts);
+    
+    // Combine all addresses
+    std::set<uint32_t> all_addresses = corpus.all_addresses();
+    
+    std::cout << "=== Corpus Discovery Summary (Fixed-Point) ===\n";
+    const auto& s = corpus.stats;
+    std::cout << "Initial roots:\n";
+    std::cout << "  Object scripts:     " << s.object_roots << "\n";
+    std::cout << "  BG event scripts:   " << s.bg_event_roots << "\n";
+    std::cout << "  Scene scripts:      " << s.scene_roots << "\n";
+    std::cout << "  Callback scripts:   " << s.callback_roots << "\n";
+    std::cout << "Deferred discovery:\n";
+    std::cout << "  Targets encountered:" << s.deferred_targets_encountered << "\n";
+    std::cout << "  Already known:      " << s.deferred_already_known << "\n";
+    std::cout << "  New deferred roots: " << s.deferred_new_roots << "\n";
+    std::cout << "  Fixed-point iters:  " << s.deferred_iterations << "\n";
+    std::cout << "Final counts:\n";
+    std::cout << "  Map-root bodies:    " << s.total_map_roots() << "\n";
+    std::cout << "  StdScript bodies:   " << s.std_script_roots << "\n";
+    std::cout << "  Total unique bodies:" << s.total_unique_bodies() << "\n\n";
+    
+    // Initialize registries (decoder already created for discovery)
     NativeCallRegistry native_registry;
     native_registry.initialize();
     RamAddressRegistry ram_registry;
