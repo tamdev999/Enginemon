@@ -128,6 +128,37 @@ struct Sem_JumpIf {
 };
 struct Sem_Call { SemanticLabelRef target; };
 
+// =============================================================================
+// Sem_Sdefer - Deferred script execution
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/overworld/scripting.asm:
+//   - sdefer opcode (0x8D) stores target in wDeferredScriptAddr, sets RUN_DEFERRED_SCRIPT flag
+//   - RunSceneScript checks this flag AFTER scene script completes
+//   - If set, deferred script executes via CallScript
+//
+// Semantic contract:
+//   Schedule a script to execute AFTER the current scene script completes.
+//   This is a control-flow scheduling operation, not an immediate call.
+//
+// Behavior:
+//   - Deferred target IS a separate compiled script body (followed by TypedScriptDecoder)
+//   - Current script returns normally after sdefer
+//   - Deferred script executes in same scene-script slot after parent completes
+//
+// Discovery:
+//   - Target address IS followed by TypedScriptDecoder (via ctx.pending)
+//   - Target becomes its own compiled script body
+//   - sdefer itself is just a marker that deferred execution will occur
+//
+// What is NOT encoded:
+//   - wDeferredScriptAddr RAM address
+//   - RUN_DEFERRED_SCRIPT bit position
+//   - Target ROM address (resolved to script_id)
+// =============================================================================
+struct Sem_Sdefer {
+    std::string target_script_id;       // Resolved script identity of deferred target
+};
+
 // --- Flags and Variables ---
 struct Sem_SetFlag { FlagId flag; };
 struct Sem_ClearFlag { FlagId flag; };
@@ -559,6 +590,18 @@ struct Sem_ReloadMap {};
 struct Sem_RefreshMap {};
 struct Sem_ChangeBlock { uint8_t x; uint8_t y; uint8_t block; };
 
+// --- Command Queue (Map Behavior Registration) ---
+// Source: pokecrystal/engine/overworld/cmd_queue.asm
+// Used by puzzle maps (ice sliding, boulder puzzles) to register per-tick behavior handlers.
+// The command queue pointer references a table of queue entries in the map's script bank.
+// Runtime interprets this as a behavior registration, not raw pointer execution.
+struct Sem_WriteCmdQueue {
+    uint16_t queue_pointer;  // Pointer to command queue table (map-local)
+};
+struct Sem_DeleteCmdQueue {
+    uint8_t queue_type;      // Queue type to remove (e.g., CMDQUEUE_STONETABLE)
+};
+
 // --- Battle ---
 struct Sem_LoadWildMon { SpeciesId species; uint8_t level; };
 struct Sem_LoadTrainer { uint8_t trainer_group; uint8_t trainer_id; };
@@ -748,7 +791,7 @@ struct UnloweredDiagnostic {
 
 using SemanticOp = std::variant<
     // Control flow
-    Sem_End, Sem_Return, Sem_Jump, Sem_JumpIf, Sem_Call,
+    Sem_End, Sem_Return, Sem_Jump, Sem_JumpIf, Sem_Call, Sem_Sdefer,
     
     // Flags/Variables
     Sem_SetFlag, Sem_ClearFlag, Sem_CheckFlag,
@@ -778,6 +821,7 @@ using SemanticOp = std::variant<
     Sem_SetScene, Sem_CheckScene,
     Sem_SetMapScene, Sem_CheckMapScene, Sem_ModifyWarp, Sem_SetBlackoutPoint,
     Sem_ReloadMap, Sem_RefreshMap, Sem_ChangeBlock,
+    Sem_WriteCmdQueue, Sem_DeleteCmdQueue,
     
     // Battle
     Sem_LoadWildMon, Sem_LoadTrainer, Sem_StartBattle, Sem_ReloadMapAfterBattle,

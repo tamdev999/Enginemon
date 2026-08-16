@@ -413,6 +413,36 @@ RuleResult rule_call(LoweringContext& ctx) {
     return {};
 }
 
+// --- Deferred Script Execution ---
+// sdefer schedules a script to execute after the current scene script completes.
+// The target IS discovered and compiled as its own body by the TypedScriptDecoder.
+// Here we just emit a semantic marker with the target script_id.
+RuleResult rule_sdefer(LoweringContext& ctx) {
+    const auto* cmd = ctx.peek();
+    if (!cmd) return {};
+    
+    if (auto* sdef = std::get_if<Cmd_Sdefer>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        
+        // The deferred target is a local pointer resolved via script_bank
+        // TypedScriptDecoder already followed this via ctx.pending
+        // We generate a semantic script_id based on the resolved address
+        uint32_t target_addr = sdef->pointer;
+        
+        enginemon::Sem_Sdefer op;
+        // Generate script_id based on resolved address
+        // The target is a separate compiled body discovered by the decoder
+        auto label = make_label_ref(target_addr, ctx);
+        op.target_script_id = label.name;
+        
+        r.instructions.push_back(make_inst(std::move(op)));
+        return r;
+    }
+    return {};
+}
+
 RuleResult rule_std_script(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
@@ -1440,6 +1470,28 @@ RuleResult rule_map_ops(LoweringContext& ctx) {
         op.x = p->x;
         op.y = p->y;
         op.block = p->block;
+        r.instructions.push_back(make_inst(std::move(op)));
+        return r;
+    }
+    // writecmdqueue (0x7D): Register map command queue for puzzle behavior
+    // Reference: pokecrystal/engine/overworld/cmd_queue.asm
+    // Used by ice sliding puzzles, boulder puzzles (stonetable)
+    if (auto* p = std::get_if<Cmd_Writecmdqueue>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        enginemon::Sem_WriteCmdQueue op;
+        op.queue_pointer = p->queue_pointer;
+        r.instructions.push_back(make_inst(std::move(op)));
+        return r;
+    }
+    // delcmdqueue (0x7E): Remove command queue entry by type
+    if (auto* p = std::get_if<Cmd_Delcmdqueue>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        enginemon::Sem_DeleteCmdQueue op;
+        op.queue_type = p->byte;
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -3043,6 +3095,7 @@ LoweringRules LoweringRules::create_default() {
     rules.add_rule("conditional", rule_conditional);
     rules.add_rule("call", rule_call);
     rules.add_rule("std_script", rule_std_script);
+    rules.add_rule("sdefer", rule_sdefer);
     
     // Flags/Variables
     rules.add_rule("set_flag", rule_set_flag);

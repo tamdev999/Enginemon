@@ -1,0 +1,10 @@
+{
+  "id": "map_g20_i01",
+  "display_name": "map g20 i01",
+  "width": 8,
+  "height": 4,
+  "tileset": "pokecenter",
+  "border_block": 0,
+  "is_outdoor": false,
+  "music": "pokemon_center"
+}
