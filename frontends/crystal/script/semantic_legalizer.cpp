@@ -1631,6 +1631,7 @@ RuleResult rule_trainer_script_ops(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_TrainerText op;
+        op.domain = enginemon::TrainerTextDomain::Normal;
         op.text_id = p->text_id;
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
@@ -1667,16 +1668,20 @@ RuleResult rule_trainer_script_ops(LoweringContext& ctx) {
 // =============================================================================
 // battletowertext (0xa4) - Display Battle Tower specific text
 // Reference: pokecrystal/engine/overworld/scripting.asm Script_battletowertext
-// Semantics: calls SetUpTextbox, reads bttext_id, calls BattleTowerText(c=bttext_id)
+//            pokecrystal/engine/events/battle_tower/trainer_text.asm BattleTowerText
 //
-// BattleTowerText IDs (from pokecrystal/constants/battle_tower_constants.asm):
-//   BATTLETOWERTEXT_INTRO = 1 (opponent intro text)
-//   BATTLETOWERTEXT_WIN_TEXT = 2 (opponent win message)
-//   BATTLETOWERTEXT_LOSS_TEXT = 3 (opponent loss message)
+// Source-proven semantics:
+//   - Calls SetUpTextbox (opens text UI)
+//   - bttext_id operand: 1=Intro, 2=PlayerLost, 3=PlayerWon
+//   - Reads wBT_OTTrainerClass to determine trainer gender
+//   - For bttext_id=1: generates random text index, stores in wBT_TrainerTextIndex
+//   - For bttext_id=2,3: reuses stored index for consistency
+//   - Displays from BTMaleTrainerTexts (25 variants) or BTFemaleTrainerTexts (15 variants)
 //
-// For corpus closure, lower to Sem_Special with opcode 0xA4 encoding the bttext_id.
-// This is a KNOWN TEMPORARY ARCHITECTURE VIOLATION - Battle Tower text should
-// eventually have proper semantic text extraction like trainertext.
+// Semantic lowering:
+//   Maps to Sem_TrainerText with domain=BattleTower.
+//   This is NOT a Sem_Special escape hatch - battletowertext has well-defined semantics
+//   that parallel normal trainertext (both are parameterized trainer dialogue).
 RuleResult rule_battle_tower_text(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
@@ -1685,12 +1690,11 @@ RuleResult rule_battle_tower_text(LoweringContext& ctx) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        // Use Sem_Special as temporary corpus closure mechanism
-        // The special_id encodes: 0xA400 + bttext_id (opcode 0xA4 in high byte)
-        // This allows distinguishing from other Sem_Special usages
-        enginemon::Sem_Special op;
-        op.special_id = 0xA400 + p->bttext_id;  // 0xA4xx encoding
-        op.name = "battletowertext_" + std::to_string(p->bttext_id);
+        // Lower to Sem_TrainerText with BattleTower domain
+        // bttext_id: 1=Intro, 2=PlayerLost, 3=PlayerWon
+        enginemon::Sem_TrainerText op;
+        op.domain = enginemon::TrainerTextDomain::BattleTower;
+        op.text_id = p->bttext_id;
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }

@@ -231,6 +231,7 @@ RuleResult rule_load_trainer(LoweringContext& ctx);
 RuleResult rule_start_battle(LoweringContext& ctx);
 RuleResult rule_battle_aftermath(LoweringContext& ctx);
 RuleResult rule_trainer_script_ops(LoweringContext& ctx);
+RuleResult rule_battle_tower_text(LoweringContext& ctx);
 
 // --- Audio ---
 RuleResult rule_play_music(LoweringContext& ctx);
@@ -248,6 +249,10 @@ RuleResult rule_phone_ops(LoweringContext& ctx);
 
 // --- Visual Effects ---
 RuleResult rule_earthquake(LoweringContext& ctx);
+
+// --- RAM/Native Operations ---
+RuleResult rule_ram_operations(LoweringContext& ctx);
+RuleResult rule_callasm_field_moves(LoweringContext& ctx);
 
 // --- Misc ---
 RuleResult rule_wild_toggle(LoweringContext& ctx);

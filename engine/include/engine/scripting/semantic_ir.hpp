@@ -614,7 +614,46 @@ struct Sem_SetWinLossText {
     std::optional<TextId> win_text;   // std::nullopt = no win text
     std::optional<TextId> loss_text;  // std::nullopt = no loss text (common)
 };
-struct Sem_TrainerText { uint8_t text_id; };
+// =============================================================================
+// Sem_TrainerText - Display parameterized trainer text
+// =============================================================================
+// Source-proven contract from pokecrystal:
+//
+// Normal domain (trainertext opcode 0x62):
+//   - text_id: 0=SeenText, 1=BeatenText
+//   - References wSeenTextPointer or wBeatTextPointer from loaded trainer data
+//   - Used during trainer battles for before/after fight dialogue
+//
+// BattleTower domain (battletowertext opcode 0xa4):
+//   - text_id: 1=Intro, 2=PlayerLost, 3=PlayerWon
+//   - Reads wBT_OTTrainerClass to determine trainer gender
+//   - For text_id=1 (intro): generates random index 0-24 (male) or 0-14 (female),
+//     stores in wBT_TrainerTextIndex for consistency across intro/win/loss
+//   - For text_id=2,3: reuses stored wBT_TrainerTextIndex
+//   - Selects text from BTMaleTrainerTexts or BTFemaleTrainerTexts tables
+//   - Calls SetUpTextbox before display
+//
+// Semantic contract:
+//   Display context-appropriate text based on domain and text_id.
+//   The domain determines which trainer text pool is used.
+//   Runtime resolves to actual text content based on current trainer context.
+//
+// What is NOT encoded:
+//   - Crystal opcode numbers (0x62, 0xa4)
+//   - ROM text pointer addresses
+//   - wBT_OTTrainerClass RAM address
+//   - wBT_TrainerTextIndex RAM address
+//   - Text table ROM addresses
+// =============================================================================
+enum class TrainerTextDomain : uint8_t {
+    Normal,      // Standard trainer battle text (seen/beaten)
+    BattleTower, // Battle Tower text pool (intro/win/loss with random selection)
+};
+
+struct Sem_TrainerText {
+    TrainerTextDomain domain = TrainerTextDomain::Normal;
+    uint8_t text_id;  // Interpretation depends on domain
+};
 struct Sem_TrainerFlagAction { uint8_t action; };
 struct Sem_CheckJustBattled {};  // Sets result
 struct Sem_EndIfJustBattled {};  // Conditional end

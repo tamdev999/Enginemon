@@ -7379,6 +7379,380 @@ TEST(batch7_special_160_branch_equivalence) {
 }
 
 //=============================================================================
+// CORPUS CLOSURE: BATTLE TOWER DEFERRED SCRIPT TESTS
+// Verifies the 3 Battle Tower corpus closure lowerings:
+//   - battletowertext (0xa4) → Sem_TrainerText{domain=BattleTower}
+//   - readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)
+//   - callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)
+// Plus adversarial tests proving nearby unknown addresses are still rejected.
+//=============================================================================
+
+TEST(corpus_battletowertext_produces_trainer_text) {
+    // CRITICAL: Verify battletowertext (0xa4) is lowered to
+    // Sem_TrainerText{domain=BattleTower}, NOT Sem_Special
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Test all three bttext_ids: 1=Intro, 2=PlayerLost, 3=PlayerWon
+    for (uint8_t bttext_id = 1; bttext_id <= 3; ++bttext_id) {
+        CrystalCommand cmd;
+        cmd.data = Cmd_Battletowertext{bttext_id};
+        cmd.span.rom_address = 0;
+        cmd.span.raw_bytes = {0xA4, bttext_id};
+        
+        CrystalScriptIR ir;
+        ir.name = "test_bt_text_" + std::to_string(bttext_id);
+        ir.entry_address = 0;
+        ir.rom_start = 0;
+        ir.rom_end = 2;
+        ir.commands.push_back(cmd);
+        
+        LoweringContext lctx;
+        lctx.source_ir = &ir;
+        lctx.cursor = 0;
+        
+        BasicBlock block;
+        block.id = 0;
+        block.start_address = 0;
+        block.end_address = 2;
+        block.command_start = 0;
+        block.command_count = 1;
+        lctx.current_block = &block;
+        
+        RuleResult result = rule_battle_tower_text(lctx);
+        
+        ASSERT_TRUE(result.matched);
+        ASSERT_EQ(result.instructions.size(), 1);
+        
+        const auto& op = result.instructions[0].op;
+        // Must be Sem_TrainerText, NOT Sem_Special
+        ASSERT_TRUE(std::holds_alternative<Sem_TrainerText>(op));
+        
+        const auto& trainer_text = std::get<Sem_TrainerText>(op);
+        ASSERT_EQ(trainer_text.domain, TrainerTextDomain::BattleTower);
+        ASSERT_EQ(trainer_text.text_id, bttext_id);
+    }
+    
+    std::cout << "  [battletowertext → Sem_TrainerText{BattleTower} for IDs 1,2,3]\n";
+}
+
+TEST(corpus_battletowertext_no_sem_special) {
+    // ADVERSARIAL: Prove battletowertext does NOT produce Sem_Special
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Battletowertext{1};  // bttext_id = 1 (intro)
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0xA4, 0x01};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_bt_text_no_special";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 2;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 2;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_battle_tower_text(lctx);
+    
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    const auto& op = result.instructions[0].op;
+    // Must NOT be Sem_Special
+    ASSERT_FALSE(std::holds_alternative<Sem_Special>(op));
+    
+    std::cout << "  [battletowertext produces NO Sem_Special - VERIFIED]\n";
+}
+
+TEST(corpus_battletowertext_distinct_from_normal_trainer_text) {
+    // CRITICAL: BattleTower domain is distinct from Normal domain
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Create battletowertext command
+    CrystalCommand bt_cmd;
+    bt_cmd.data = Cmd_Battletowertext{1};
+    bt_cmd.span.rom_address = 0;
+    bt_cmd.span.raw_bytes = {0xA4, 0x01};
+    
+    // Create normal trainertext command
+    CrystalCommand normal_cmd;
+    normal_cmd.data = Cmd_Trainertext{0};  // text_id = 0 (SeenText)
+    normal_cmd.span.rom_address = 0;
+    normal_cmd.span.raw_bytes = {0x62, 0x00};
+    
+    // Lower battletowertext
+    CrystalScriptIR bt_ir;
+    bt_ir.name = "test_bt";
+    bt_ir.entry_address = 0;
+    bt_ir.rom_start = 0;
+    bt_ir.rom_end = 2;
+    bt_ir.commands.push_back(bt_cmd);
+    
+    LoweringContext bt_lctx;
+    bt_lctx.source_ir = &bt_ir;
+    bt_lctx.cursor = 0;
+    
+    BasicBlock bt_block;
+    bt_block.id = 0;
+    bt_block.start_address = 0;
+    bt_block.end_address = 2;
+    bt_block.command_start = 0;
+    bt_block.command_count = 1;
+    bt_lctx.current_block = &bt_block;
+    
+    RuleResult bt_result = rule_battle_tower_text(bt_lctx);
+    
+    // Lower normal trainertext
+    CrystalScriptIR normal_ir;
+    normal_ir.name = "test_normal";
+    normal_ir.entry_address = 0;
+    normal_ir.rom_start = 0;
+    normal_ir.rom_end = 2;
+    normal_ir.commands.push_back(normal_cmd);
+    
+    LoweringContext normal_lctx;
+    normal_lctx.source_ir = &normal_ir;
+    normal_lctx.cursor = 0;
+    
+    BasicBlock normal_block;
+    normal_block.id = 0;
+    normal_block.start_address = 0;
+    normal_block.end_address = 2;
+    normal_block.command_start = 0;
+    normal_block.command_count = 1;
+    normal_lctx.current_block = &normal_block;
+    
+    RuleResult normal_result = rule_trainer_script_ops(normal_lctx);
+    
+    // Both should produce Sem_TrainerText
+    ASSERT_TRUE(bt_result.matched);
+    ASSERT_TRUE(normal_result.matched);
+    
+    const auto& bt_op = std::get<Sem_TrainerText>(bt_result.instructions[0].op);
+    const auto& normal_op = std::get<Sem_TrainerText>(normal_result.instructions[0].op);
+    
+    // Domains must differ
+    ASSERT_EQ(bt_op.domain, TrainerTextDomain::BattleTower);
+    ASSERT_EQ(normal_op.domain, TrainerTextDomain::Normal);
+    ASSERT_TRUE(bt_op.domain != normal_op.domain);
+    
+    std::cout << "  [BattleTower ≠ Normal domain: PROVEN]\n";
+}
+
+TEST(corpus_readmem_0xcf64_produces_read_state_var) {
+    // CRITICAL: readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Readmem{0xcf64};  // wNrOfBeatenBattleTowerTrainers
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x19, 0x64, 0xcf};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_readmem_cf64";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_ram_operations(lctx);
+    
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    const auto& op = result.instructions[0].op;
+    ASSERT_TRUE(std::holds_alternative<Sem_ReadStateVar>(op));
+    
+    const auto& read_state = std::get<Sem_ReadStateVar>(op);
+    ASSERT_EQ(static_cast<uint16_t>(read_state.state_var), 
+              static_cast<uint16_t>(WellKnownStateVar::BattleTowerBeatenTrainers));
+    
+    std::cout << "  [readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)]\n";
+}
+
+TEST(corpus_readmem_nearby_addresses_rejected) {
+    // ADVERSARIAL: Prove nearby addresses (0xcf63, 0xcf65) are NOT lowered
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    uint16_t nearby_addresses[] = {0xcf63, 0xcf65, 0xcf66, 0xcf00, 0xd000};
+    
+    for (uint16_t addr : nearby_addresses) {
+        CrystalCommand cmd;
+        cmd.data = Cmd_Readmem{addr};
+        cmd.span.rom_address = 0;
+        // Explicit casts to avoid narrowing conversion warnings
+        cmd.span.raw_bytes.push_back(0x19);
+        cmd.span.raw_bytes.push_back(static_cast<uint8_t>(addr & 0xFF));
+        cmd.span.raw_bytes.push_back(static_cast<uint8_t>((addr >> 8) & 0xFF));
+        
+        CrystalScriptIR ir;
+        ir.name = "test_nearby_" + std::to_string(addr);
+        ir.entry_address = 0;
+        ir.rom_start = 0;
+        ir.rom_end = 3;
+        ir.commands.push_back(cmd);
+        
+        LoweringContext lctx;
+        lctx.source_ir = &ir;
+        lctx.cursor = 0;
+        
+        BasicBlock block;
+        block.id = 0;
+        block.start_address = 0;
+        block.end_address = 3;
+        block.command_start = 0;
+        block.command_count = 1;
+        lctx.current_block = &block;
+        
+        RuleResult result = rule_ram_operations(lctx);
+        
+        // These addresses should NOT match the RAM rule
+        ASSERT_FALSE(result.matched);
+    }
+    
+    std::cout << "  [Nearby RAM addresses (0xcf63, 0xcf65, 0xcf66, 0xcf00, 0xd000) correctly NOT lowered]\n";
+}
+
+TEST(corpus_callasm_0x9f5cb_produces_read_state_var) {
+    // CRITICAL: callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    // Cmd_Callasm has members: bank, pointer, flat_address
+    // 0x9f5cb = bank 0x27, pointer 0x75cb (or just use flat_address)
+    Cmd_Callasm callasm;
+    callasm.flat_address = 0x9f5cb;  // BattleTowerHallway.asm_load_battle_room
+    callasm.bank = 0x27;
+    callasm.pointer = 0x75cb;
+    cmd.data = callasm;
+    cmd.span.rom_address = 0;
+    // Use explicit uint8_t casts to avoid narrowing conversion
+    cmd.span.raw_bytes.push_back(uint8_t(0x0E));
+    cmd.span.raw_bytes.push_back(uint8_t(0xcb));
+    cmd.span.raw_bytes.push_back(uint8_t(0xf5));
+    cmd.span.raw_bytes.push_back(uint8_t(0x09));
+    
+    CrystalScriptIR ir;
+    ir.name = "test_callasm_9f5cb";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 4;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext lctx;
+    lctx.source_ir = &ir;
+    lctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 4;
+    block.command_start = 0;
+    block.command_count = 1;
+    lctx.current_block = &block;
+    
+    RuleResult result = rule_callasm_field_moves(lctx);
+    
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.instructions.size(), 1);
+    
+    const auto& op = result.instructions[0].op;
+    ASSERT_TRUE(std::holds_alternative<Sem_ReadStateVar>(op));
+    
+    const auto& read_state = std::get<Sem_ReadStateVar>(op);
+    ASSERT_EQ(static_cast<uint16_t>(read_state.state_var), 
+              static_cast<uint16_t>(WellKnownStateVar::BattleTowerLevelGroup));
+    
+    std::cout << "  [callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)]\n";
+}
+
+TEST(corpus_callasm_nearby_addresses_rejected) {
+    // ADVERSARIAL: Prove nearby native addresses are NOT lowered
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    uint32_t nearby_addresses[] = {0x9f5ca, 0x9f5cc, 0x9f5d0, 0x9f500, 0xa0000};
+    
+    for (uint32_t addr : nearby_addresses) {
+        CrystalCommand cmd;
+        // Cmd_Callasm has members: bank, pointer, flat_address
+        Cmd_Callasm callasm;
+        callasm.flat_address = addr;
+        callasm.bank = 0;
+        callasm.pointer = 0;
+        cmd.data = callasm;
+        cmd.span.rom_address = 0;
+        // Dummy bytes, content doesn't matter for rule matching
+        cmd.span.raw_bytes.push_back(uint8_t(0x0E));
+        cmd.span.raw_bytes.push_back(uint8_t(0x00));
+        cmd.span.raw_bytes.push_back(uint8_t(0x00));
+        cmd.span.raw_bytes.push_back(uint8_t(0x00));
+        
+        CrystalScriptIR ir;
+        ir.name = "test_nearby_native_" + std::to_string(addr);
+        ir.entry_address = 0;
+        ir.rom_start = 0;
+        ir.rom_end = 4;
+        ir.commands.push_back(cmd);
+        
+        LoweringContext lctx;
+        lctx.source_ir = &ir;
+        lctx.cursor = 0;
+        
+        BasicBlock block;
+        block.id = 0;
+        block.start_address = 0;
+        block.end_address = 4;
+        block.command_start = 0;
+        block.command_count = 1;
+        lctx.current_block = &block;
+        
+        RuleResult result = rule_callasm_field_moves(lctx);
+        
+        // These addresses should NOT match the callasm rule
+        ASSERT_FALSE(result.matched);
+    }
+    
+    std::cout << "  [Nearby native addresses (0x9f5ca, 0x9f5cc, etc.) correctly NOT lowered]\n";
+}
+
+//=============================================================================
 // BATCH 8 SPECIAL SEMANTIC OP TESTS
 // Verifies:
 //   - Special 163 (AskRememberPassword) → Sem_YesNo{}
@@ -8800,6 +9174,15 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch7_special_160_not_zero_instructions);
     RUN_TEST(batch7_special_160_overwrites_stale_script_var);
     RUN_TEST(batch7_special_160_branch_equivalence);
+    
+    // Corpus closure: Battle Tower deferred script tests
+    RUN_TEST(corpus_battletowertext_produces_trainer_text);
+    RUN_TEST(corpus_battletowertext_no_sem_special);
+    RUN_TEST(corpus_battletowertext_distinct_from_normal_trainer_text);
+    RUN_TEST(corpus_readmem_0xcf64_produces_read_state_var);
+    RUN_TEST(corpus_readmem_nearby_addresses_rejected);
+    RUN_TEST(corpus_callasm_0x9f5cb_produces_read_state_var);
+    RUN_TEST(corpus_callasm_nearby_addresses_rejected);
     
     // Batch 8 Special semantic op tests - YesNo (163), DST (166, 167)
     RUN_TEST(batch8_special_163_emits_sem_yesno);
