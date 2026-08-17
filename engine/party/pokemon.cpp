@@ -3,7 +3,7 @@
 
 #include "engine/party/pokemon.hpp"
 #include "engine/core/registry.hpp"
-#include <random>
+#include "engine/core/game_state.hpp"  // For RngState
 
 namespace enginemon {
 
@@ -145,25 +145,21 @@ void Pokemon::recalculate_stats(const SpeciesData& species_data) {
 // POKEMON CREATION
 // =============================================================================
 
-Pokemon create_pokemon(SpeciesId species, uint8_t level, uint32_t rng_seed, const Registries& reg) {
-    // Deterministic DVs from provided seed
-    // ARCHITECTURAL NOTE: This function requires an explicit seed parameter.
-    // The seed must come from GameState::rng.next() in gameplay code.
+Pokemon create_pokemon(SpeciesId species, uint8_t level, RngState& rng, const Registries& reg) {
+    // Draw DVs directly from the canonical GameState RNG.
+    // Each call to rng.next() advances the authoritative RNG state.
     // This ensures:
-    //   - Deterministic simulation (same seed → same Pokemon)
-    //   - Proper save/load (GameState RNG state is serialized)
+    //   - Deterministic simulation (same sequence → same Pokemon)
+    //   - Proper save/load (RNG state is part of GameState)
     //   - Multiplayer compatibility (synchronized RNG)
     //
-    // DO NOT add std::random_device or standalone RNG here.
-    
-    std::mt19937 rng(rng_seed);
-    std::uniform_int_distribution<int> dv_dist(0, 15);
+    // NO private RNG streams. NO std::mt19937. All randomness from GameState.
     
     Pokemon::DVs dvs;
-    dvs.attack = static_cast<uint8_t>(dv_dist(rng));
-    dvs.defense = static_cast<uint8_t>(dv_dist(rng));
-    dvs.speed = static_cast<uint8_t>(dv_dist(rng));
-    dvs.special = static_cast<uint8_t>(dv_dist(rng));
+    dvs.attack = static_cast<uint8_t>(rng.next() & 0x0F);   // 0-15
+    dvs.defense = static_cast<uint8_t>(rng.next() & 0x0F);
+    dvs.speed = static_cast<uint8_t>(rng.next() & 0x0F);
+    dvs.special = static_cast<uint8_t>(rng.next() & 0x0F);
     
     return create_pokemon(species, level, dvs, reg);
 }
@@ -200,15 +196,13 @@ Pokemon create_pokemon(SpeciesId species, uint8_t level, Pokemon::DVs dvs, const
     return mon;
 }
 
-Pokemon create_wild_pokemon(SpeciesId species, uint8_t level, const Registries& reg, uint32_t seed) {
-    std::mt19937 rng(seed);
-    std::uniform_int_distribution<int> dv_dist(0, 15);
-    
+Pokemon create_wild_pokemon(SpeciesId species, uint8_t level, const Registries& reg, RngState& rng) {
+    // Draw DVs directly from canonical RNG - no private substreams
     Pokemon::DVs dvs;
-    dvs.attack = static_cast<uint8_t>(dv_dist(rng));
-    dvs.defense = static_cast<uint8_t>(dv_dist(rng));
-    dvs.speed = static_cast<uint8_t>(dv_dist(rng));
-    dvs.special = static_cast<uint8_t>(dv_dist(rng));
+    dvs.attack = static_cast<uint8_t>(rng.next() & 0x0F);
+    dvs.defense = static_cast<uint8_t>(rng.next() & 0x0F);
+    dvs.speed = static_cast<uint8_t>(rng.next() & 0x0F);
+    dvs.special = static_cast<uint8_t>(rng.next() & 0x0F);
     
     return create_pokemon(species, level, dvs, reg);
 }

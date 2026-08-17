@@ -75,6 +75,7 @@ private:
     PackageHeader header_;
     std::vector<TocEntry> toc_;
     std::filesystem::path path_;
+    size_t file_size_ = 0;  // For bounds validation
     
     // Index maps for fast lookup
     std::unordered_map<std::string, size_t> map_index_;

@@ -277,6 +277,7 @@ private:
     
     uint32_t next_coroutine_id_ = 1;
     std::unordered_map<uint32_t, ScriptCoroutine> coroutines_;
+    std::unordered_map<uint32_t, ScriptState> completed_states_;  // Final states for cleaned-up coroutines
     
     ErrorHandler error_handler_;
     

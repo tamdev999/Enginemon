@@ -10,6 +10,7 @@
 #include "engine/core/game_state.hpp"
 #include <cstring>
 #include <algorithm>
+#include <stdexcept>
 
 namespace enginemon {
 
@@ -208,8 +209,20 @@ std::vector<uint8_t> GameState::serialize() const {
 }
 
 GameState GameState::deserialize(const std::vector<uint8_t>& data) {
-    // Legacy wrapper - uses try_deserialize internally
+    // Legacy wrapper - DEPRECATED
+    // This function MUST NOT be used in production save/load paths
+    // because it silently converts corrupt data to empty GameState.
+    //
+    // Use try_deserialize() which returns explicit error codes.
     auto result = try_deserialize(data);
+    if (!result.ok()) {
+        // In debug builds, fail loudly to catch any production usage
+#ifndef NDEBUG
+        throw std::runtime_error("GameState::deserialize() failed with error code " + 
+            std::to_string(static_cast<int>(result.error)) + 
+            " - use try_deserialize() for explicit error handling");
+#endif
+    }
     return result.state;
 }
 

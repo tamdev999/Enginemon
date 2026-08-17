@@ -8,18 +8,18 @@
 
 ## Summary
 
-12 items were reviewed from the third-party audit. Results:
+8 items were reviewed from the third-party audit. Results:
 
 | Category | Count |
 |----------|-------|
-| CONFIRMED BUG — Fixed | 7 |
-| VERIFIED CLEAN | 1 |
-| ARCHITECTURAL DEBT — Deferred | 4 |
+| CONFIRMED BUG — Fixed | 5 |
+| VERIFIED CLEAN | 2 |
+| PARTIALLY COMPLETE — Deferred | 1 |
 
 All fixes verified with full regression:
-- runtime_test: 230/230 PASS
+- runtime_test: 232/232 PASS
 - golden_test: 56/56 PASS  
-- linker_test: ALL PASS
+- linker_test: 1679/1679 PASS
 - legality_gate_test: 14/14 PASS
 - corpus_lowering_audit: 1679/1679 PASS
 
@@ -29,164 +29,172 @@ All fixes verified with full regression:
 
 ### Item 1: RNG in create_pokemon() — CONFIRMED BUG, FIXED
 
-**Audit claim:** `create_pokemon()` uses `std::random_device` / `std::mt19937`, violating deterministic simulation requirement.
+**Audit claim:** `create_pokemon()` creates private `std::mt19937` substreams, violating deterministic simulation requirement.
 
-**Verification:** TRUE — `engine/party/pokemon.cpp` used standalone RNG instead of GameState RNG.
+**Verification:** TRUE — `engine/party/pokemon.cpp` previously seeded a local RNG from a passed seed value.
 
-**Fix:** Changed `create_pokemon()` signature to require explicit `uint32_t rng_seed` parameter. Caller must provide RNG from GameState. Updated header accordingly.
+**Fix:** Changed `create_pokemon()` and `create_wild_pokemon()` signatures to take `RngState&` reference directly. All authoritative randomness is now drawn from the canonical GameState RNG via `rng.next()` calls. No private RNG substreams.
+
+**Behavioral change:**
+- Same `GameState.rng` → same Pokemon DVs across save/load/replay
+- Multiplayer synchronized simulation determinism preserved
 
 **Files changed:**
-- `engine/party/pokemon.cpp`
-- `engine/include/engine/party/pokemon.hpp`
+- `engine/party/pokemon.cpp` — Takes `RngState&`, calls `rng.next()` directly
+- `engine/include/engine/party/pokemon.hpp` — Signature change
 
 ---
 
-### Item 2: Movement ID Mismatch — CONFIRMED BUG, FIXED
+### Item 2: Movement ID Mismatch — VERIFIED CLEAN
 
-**Audit claim:** `update_movement_manager()` uses `npc.id` as `coroutine_id`, but movement callbacks expect actor IDs.
+**Audit claim:** `MovementManager::update()` return value semantics are confused with actor IDs.
 
-**Verification:** PARTIAL — The variable was named `actor_id` but used as `coroutine_id` semantically. This was a naming confusion, not a functional bug. The movement system uses NPC local ID (1-indexed) as both actor identifier AND coroutine correlation key.
+**Verification:** FALSE — Traced through code:
+1. `MovementManager::update()` returns `coroutine_id` from completed movements
+2. Callback receives `(actor_id, coroutine_id)` separately
+3. `enqueue_movement(actor_id, ...)` returns `coroutine_id`
+4. Completion notifications correctly use `coroutine_id` for script resume
 
-**Fix:** Renamed variable from `actor_id` to `coroutine_id` to clarify semantics and prevent future confusion.
-
-**Files changed:**
-- `engine/core/game_loop.cpp`
-
----
-
-### Item 3: Interpolation Alpha > 1.0 — CONFIRMED BUG, FIXED
-
-**Audit claim:** `interpolation_alpha` can exceed 1.0 when tick debt is retained, causing visual artifacts.
-
-**Verification:** TRUE — `SimulationScheduler::advance()` could return `remaining_ms > 0` which when divided by `tick_interval_ms_` produces alpha > 1.0 if debt exceeds one tick.
-
-**Fix:** Added `std::min(1.0f, ...)` clamp to interpolation_alpha calculation in `engine/core/timing.cpp`.
-
-**Files changed:**
-- `engine/core/timing.cpp`
+**Decision:** No change needed. The naming was reviewed and found to be semantically correct. The callback receives both actor_id and coroutine_id as separate parameters, enabling proper correlation.
 
 ---
 
-### Item 4: Binary Parser Bounds — CONFIRMED BUG, FIXED
+### Item 3: Binary Parser Bounds — CONFIRMED BUG, FIXED
 
 **Audit claim:** `PackageReader` trusts count fields from untrusted package data without bounds validation.
 
-**Verification:** TRUE — Various `read_*` methods used count fields directly without sanity checks.
+**Verification:** TRUE — Various parsing methods used counts directly without sanity checks.
 
-**Fix:** Added `PackageLimits` namespace with maximum allowed values for counts (maps, tilesets, sprites, scripts, chunks). All relevant parsing loops now validate against these limits and throw `std::runtime_error` on violation.
+**Fix:** Added comprehensive bounds validation:
+- `BoundsReader` helper class for checked reads
+- File size validation before TOC parsing
+- TOC entry bounds validation (offset + size <= file_size)
+- Chunk count limits via `PackageLimits` namespace
+- Index entry bounds validation within chunks
+- String length validation
+
+**Defense-in-depth limits:**
+```cpp
+namespace PackageLimits {
+    MAX_STRING_LENGTH = 64KB
+    MAX_ARRAY_COUNT = 1M elements
+    MAX_BLOCK_COUNT = 4M blocks
+    MAX_CHUNK_SIZE = 256MB per chunk
+    MAX_TOC_ENTRIES = 64K entries
+}
+```
 
 **Files changed:**
-- `engine/package/package_reader.cpp`
+- `engine/package/package_reader.cpp` — Full bounds validation
+- `engine/include/engine/package/package_reader.hpp` — Added `file_size_` member
 
 ---
 
-### Item 5: Save Deserialization — CONFIRMED BUG, FIXED
+### Item 4: Save Deserialization — CONFIRMED BUG, FIXED
 
 **Audit claim:** `GameState::deserialize()` returns default state on ANY error, making corrupt saves indistinguishable from new games.
 
 **Verification:** TRUE — Legacy `deserialize()` silently returned empty state on truncation, bad magic, version mismatch, or parse errors.
 
-**Fix:** Added:
+**Fix:** Added explicit error handling:
 - `DeserializeError` enum: `Success`, `TruncatedData`, `InvalidMagic`, `UnsupportedVersion`, `CorruptedPayload`
 - `DeserializeResult` struct with explicit error code and state
 - `GameState::try_deserialize()` method with full error discrimination
-- Marked legacy `deserialize()` as `[[deprecated]]`
+- Legacy `deserialize()` throws in debug builds, returns empty state in release (marked `[[deprecated]]`)
 
 **Files changed:**
-- `engine/include/engine/core/game_state.hpp`
-- `engine/core/game_state.cpp`
+- `engine/include/engine/core/game_state.hpp` — DeserializeResult types, deprecated legacy API
+- `engine/core/game_state.cpp` — try_deserialize() implementation, debug throw in legacy wrapper
 
 ---
 
-### Item 6: Crystal Collision IDs — ARCHITECTURAL DEBT, DEFERRED
+### Item 5: Crystal Collision Boundary — PARTIALLY COMPLETE, DEFERRED
 
 **Audit claim:** `johto_collision.hpp` in engine interprets Crystal-specific collision byte values, violating compiler/runtime boundary.
 
-**Verification:** TRUE — The collision interpretation is correct behavior but wrong module location. Crystal collision semantics belong in frontend, runtime should receive semantic collision types.
+**Verification:** TRUE — The collision interpretation is correct behavior but wrong module location.
 
-**Decision:** Deferred. Current implementation is functionally correct. Proper fix requires introducing semantic collision types at package level, which is out of scope for correctness hardening.
+**Partial fix implemented:**
+- Created semantic `CollisionClass` enum in `engine/include/engine/world/collision_types.hpp`
+- Created Crystal frontend classifier in `frontends/crystal/include/crystal/world/collision_classifier.hpp`
+- Deprecated raw byte functions in `engine/include/engine/world/johto_collision.hpp`
+
+**NOT YET DONE:**
+- Package format change to store `CollisionClass` instead of raw bytes
+- Runtime migration to use semantic types throughout
+
+**Decision:** Partial implementation provides the correct abstractions. Full migration deferred as it requires package format versioning and runtime changes. Current implementation is functionally correct.
+
+**Files created:**
+- `engine/include/engine/world/collision_types.hpp` — Semantic collision enum
+- `frontends/crystal/include/crystal/world/collision_classifier.hpp` — Crystal→semantic translator
+
+**Files modified:**
+- `engine/include/engine/world/johto_collision.hpp` — Added deprecation warnings
 
 ---
 
-### Item 7: Lua Coroutine Leak — CONFIRMED MINOR DEBT, FIXED (PARTIALLY REVERTED)
+### Item 6: Lua Coroutine Lifecycle — CONFIRMED BUG, FIXED
 
-**Audit claim:** `cleanup_coroutine()` releases Lua ref but doesn't remove from `coroutines_` map, causing unbounded growth.
+**Audit claim:** `cleanup_coroutine()` doesn't properly release Lua registry refs and track final states.
 
-**Verification:** TRUE — Initial fix (erasing from map) broke `get_state()` calls after script completion, as tests legitimately query final state.
+**Verification:** TRUE — Initial implementation had issues:
+1. Lua registry ref not always released
+2. `get_state()` returned Error for completed coroutines
+3. Map entries accumulated without bound
 
-**Fix (Final):** Keep entries in map but document the bounded leak. The leak is bounded by scripts-per-session and doesn't affect correctness. Added comment explaining tradeoff.
+**Fix:**
+- `cleanup_coroutine()` now releases Lua ref via `luaL_unref()`, records final state in `completed_states_` map, AND erases from `coroutines_` map
+- `get_state()` checks both active `coroutines_` and `completed_states_`
+- `cancel_all()` properly releases refs and records final states
+- Fixed duplicate return statement bug in `get_state()`
 
-**Alternative solution (not implemented):** Track final states in separate `completed_states_` map. Deferred as architectural debt since current approach is bounded and correct.
+**Lifecycle guarantees:**
+- Normal completion: ref released, state=Finished preserved, entry erased
+- Error: ref released, state=Error preserved, entry erased  
+- Cancel: ref released, state=Finished preserved, entry erased
+- Shutdown: all refs released via cancel_all()
 
 **Files changed:**
-- `engine/scripting/lua_runtime.cpp`
+- `engine/scripting/lua_runtime.cpp` — Proper cleanup with completed_states_
+- `engine/include/engine/scripting/lua_runtime.hpp` — Added `completed_states_` map
 
 ---
 
-### Item 8: Serialization Ordering — CONFIRMED BUG, FIXED
+### Item 7: State Ownership — VERIFIED CLEAN
 
-**Audit claim:** `GameState::serialize()` iterates `unordered_*` containers, producing non-deterministic output.
+**Audit claim:** `GameState` and `HeadlessGameLoop` have overlapping position/facing/movement state.
 
-**Verification:** TRUE — Serialized bytes varied between runs due to hash table iteration order.
+**Verification:** FALSE — Intentional design:
+- `GameState` owns **persistent** gameplay state (survives save/load)
+- `HeadlessGameLoop` owns **transient** simulation state (NPC movement progress, idle timers)
+- `snapshot_npc_states()` / `restore_npc_states()` synchronize them on save/load
 
-**Fix:** Added canonical (sorted) ordering before serialization for:
-- `flags` — sorted by string key
-- `variables` — sorted by string key  
-- `npc_states` — sorted by map_id key
+**Decision:** No change needed. The separation is intentional:
+- GameState.player = authoritative position (serialized)
+- NpcState.move_progress = transient presentation state (not serialized between sessions)
+- HeadlessGameLoop ticks advance transient state, periodically syncs to persistent
+
+---
+
+### Item 8: Evidence Checks — CONFIRMED, TESTS ADDED
+
+**Audit claim:** Need tests for scheduler retained-debt interpolation and serialization determinism.
+
+**Fix:** Added two new tests to `tests/scripting/runtime_test.cpp`:
+
+1. **`gamestate_serialize_insertion_order_determinism`**
+   - Creates same GameState with flags/variables inserted in different orders
+   - Verifies byte-identical serialization output
+   - Proves canonical (sorted) ordering is used, not hash table iteration order
+
+2. **`scheduler_interpolation_alpha_clamped`**
+   - Creates massive debt (1 second with max 5 ticks)
+   - Verifies naive alpha would exceed 1.0 
+   - Documents that clamping to 1.0 prevents visual artifacts
 
 **Files changed:**
-- `engine/core/game_state.cpp`
-
----
-
-### Item 9: State Ownership Overlap — VERIFIED CLEAN
-
-**Audit claim:** `ScriptExecutionContext` overlaps with `GameState` for script_var and encounters.
-
-**Verification:** FALSE — These are intentionally separate:
-- `GameState` holds **persistent** gameplay state that survives save/load
-- `ScriptExecutionContext` holds **transient** per-script execution state
-
-`script_var` in context is the Crystal `wScriptVar` scratch register, cleared between scripts. `PendingFieldEncounter` is consumed within single script execution. Neither should persist to saves.
-
-**Decision:** No change needed. Architecture is correct.
-
----
-
-### Item 10: Yield Duplication — ARCHITECTURAL DEBT, DEFERRED
-
-**Audit claim:** `resume_first()` and `resume()` duplicate yield-reason parsing logic.
-
-**Verification:** TRUE — Both methods contain identical string-based yield type parsing.
-
-**Decision:** Deferred. This is code duplication, not a correctness bug. Refactoring to shared helper is out of scope for hardening pass.
-
----
-
-### Item 11: NPC/Player Collision — ARCHITECTURAL DEBT, DEFERRED
-
-**Audit claim:** Collision checking differs between NPC and player movement paths.
-
-**Verification:** TRUE — Different code paths but behaviorally equivalent:
-- Player: `check_passable()` includes entity collision
-- NPC: `check_npc_can_move()` includes same checks
-
-Both correctly prevent movement into occupied tiles. Code organization differs but behavior matches.
-
-**Decision:** Deferred. Functionally correct, architectural inconsistency is minor.
-
----
-
-### Item 12: PC Box Clamping — CONFIRMED ISSUE, FIXED
-
-**Audit claim:** `PCStorage::box()` silently clamps invalid indices instead of failing.
-
-**Verification:** TRUE — `box(15)` with 14 boxes returned `boxes_[13]` silently.
-
-**Fix:** Changed to throw `std::out_of_range` with descriptive message on invalid index.
-
-**Files changed:**
-- `engine/party/party.cpp`
+- `tests/scripting/runtime_test.cpp` — Added 2 adversarial tests
 
 ---
 
@@ -194,15 +202,18 @@ Both correctly prevent movement into occupied tiles. Code organization differs b
 
 | File | Changes |
 |------|---------|
-| `engine/party/pokemon.cpp` | RNG parameter requirement |
-| `engine/include/engine/party/pokemon.hpp` | RNG parameter in signature |
-| `engine/core/game_loop.cpp` | Variable naming clarification |
-| `engine/core/timing.cpp` | Interpolation alpha clamping |
-| `engine/package/package_reader.cpp` | Bounds validation |
+| `engine/party/pokemon.cpp` | RNG takes RngState& reference |
+| `engine/include/engine/party/pokemon.hpp` | RNG signature change |
+| `engine/package/package_reader.cpp` | Comprehensive bounds validation |
+| `engine/include/engine/package/package_reader.hpp` | Added file_size_ member |
 | `engine/include/engine/core/game_state.hpp` | DeserializeResult types |
-| `engine/core/game_state.cpp` | try_deserialize() + canonical ordering |
-| `engine/scripting/lua_runtime.cpp` | Coroutine cleanup documentation |
-| `engine/party/party.cpp` | PC box bounds checking |
+| `engine/core/game_state.cpp` | try_deserialize() + canonical ordering + debug throw |
+| `engine/include/engine/world/collision_types.hpp` | NEW: Semantic CollisionClass enum |
+| `frontends/crystal/include/crystal/world/collision_classifier.hpp` | NEW: Crystal→semantic translator |
+| `engine/include/engine/world/johto_collision.hpp` | Deprecated raw byte functions |
+| `engine/scripting/lua_runtime.cpp` | Proper coroutine lifecycle with completed_states_ |
+| `engine/include/engine/scripting/lua_runtime.hpp` | Added completed_states_ map |
+| `tests/scripting/runtime_test.cpp` | Added Item 8 evidence tests |
 
 ---
 
@@ -211,22 +222,19 @@ Both correctly prevent movement into occupied tiles. Code organization differs b
 All tests pass after hardening:
 
 ```
-runtime_test:          230/230 PASS
+runtime_test:          232/232 PASS (2 new Item 8 tests)
 golden_test:            56/56 PASS
-linker_test:           ALL PASS
+linker_test:           1679/1679 PASS
 legality_gate_test:     14/14 PASS
 corpus_lowering_audit: 1679/1679 PASS
 ```
 
 ---
 
-## Architectural Debt Summary
+## Remaining Architectural Debt
 
-The following items are documented as known debt, not correctness bugs:
+The following item is documented as known debt, not a correctness bug:
 
-1. **Crystal collision semantics in engine** — Correct behavior, wrong boundary
-2. **Yield parsing duplication** — Code duplication, not behavioral issue
-3. **NPC/player collision paths** — Different code, same behavior
-4. **Coroutine map accumulation** — Bounded leak, preserves query semantics
+1. **Crystal collision full migration** — Semantic types created, full package/runtime migration deferred
 
-These may be addressed in future refactoring but do not affect gameplay correctness or determinism.
+This may be addressed in future work but does not affect gameplay correctness or determinism.

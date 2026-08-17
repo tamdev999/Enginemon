@@ -596,18 +596,22 @@ void LuaRuntime::cleanup_coroutine(uint32_t coroutine_id) {
     if (it == coroutines_.end()) return;
     
     ScriptCoroutine& co = it->second;
+    
+    // Release Lua registry reference (protects coroutine from GC)
+    // The NOREF check ensures we only unref once
     if (co.registry_ref != LUA_NOREF) {
         luaL_unref(L_, LUA_REGISTRYINDEX, co.registry_ref);
         co.registry_ref = LUA_NOREF;
     }
     co.thread = nullptr;
     
-    // NOTE (Audit 7): We intentionally do NOT erase entries from coroutines_ map.
-    // This is a minor memory leak for long-running sessions, but allows get_state()
-    // to return the correct final state (Finished vs Error) after cleanup.
-    // A proper fix would track final states in a separate completed_states_ map,
-    // but that's deferred as architectural debt since the leak is bounded by
-    // script count per session.
+    // Record final state before erasing
+    // This allows get_state() to return the correct final state
+    ScriptState final_state = co.state;
+    completed_states_[coroutine_id] = final_state;
+    
+    // Now safe to erase - Lua resources are released, final state is preserved
+    coroutines_.erase(it);
 }
 
 void LuaRuntime::resume(uint32_t coroutine_id) {
@@ -780,9 +784,20 @@ void LuaRuntime::update(float delta_time) {
 }
 
 ScriptState LuaRuntime::get_state(uint32_t coroutine_id) const {
+    // Check active coroutines first
     auto it = coroutines_.find(coroutine_id);
-    if (it == coroutines_.end()) return ScriptState::Error;
-    return it->second.state;
+    if (it != coroutines_.end()) {
+        return it->second.state;
+    }
+    
+    // Check completed states (coroutine was cleaned up but state preserved)
+    auto cit = completed_states_.find(coroutine_id);
+    if (cit != completed_states_.end()) {
+        return cit->second;
+    }
+    
+    // Unknown coroutine ID - never existed or was never tracked
+    return ScriptState::Error;
 }
 
 YieldReason LuaRuntime::get_yield_reason(uint32_t coroutine_id) const {
@@ -817,6 +832,8 @@ void LuaRuntime::cancel_all() {
             co.registry_ref = LUA_NOREF;
         }
         co.thread = nullptr;
+        // Record final state before clearing
+        completed_states_[id] = ScriptState::Finished;
     }
     coroutines_.clear();
 }

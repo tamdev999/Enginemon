@@ -49,13 +49,60 @@ uint32_t calculate_crc32(const void* data, size_t size) {
 // SERIALIZATION HELPERS - with bounds validation (Audit 4)
 //=============================================================================
 
-// Maximum reasonable limits for package data (prevents huge allocations from malformed data)
+// Maximum reasonable limits for package data (defense-in-depth, not primary safety)
 namespace PackageLimits {
     constexpr uint32_t MAX_STRING_LENGTH = 64 * 1024;      // 64KB per string
     constexpr uint32_t MAX_ARRAY_COUNT = 1024 * 1024;      // 1M elements max
     constexpr uint32_t MAX_BLOCK_COUNT = 4 * 1024 * 1024;  // 4M blocks max
     constexpr uint32_t MAX_CHUNK_SIZE = 256 * 1024 * 1024; // 256MB per chunk
+    constexpr uint32_t MAX_TOC_ENTRIES = 65536;            // 64K TOC entries max
 }
+
+// Bounds-checked read helper - validates remaining bytes BEFORE reading
+class BoundsReader {
+public:
+    BoundsReader(std::istream& in, size_t total_size)
+        : in_(in), total_size_(total_size), current_pos_(0) {}
+    
+    bool has_bytes(size_t count) const {
+        return current_pos_ + count <= total_size_;
+    }
+    
+    template<typename T>
+    bool read_le(T& out) {
+        if (!has_bytes(sizeof(T))) return false;
+        out = 0;
+        for (size_t i = 0; i < sizeof(T); ++i) {
+            int byte = in_.get();
+            if (byte == EOF) return false;
+            out |= static_cast<T>(static_cast<uint8_t>(byte)) << (i * 8);
+        }
+        current_pos_ += sizeof(T);
+        return true;
+    }
+    
+    bool read_bytes(void* dst, size_t count) {
+        if (!has_bytes(count)) return false;
+        in_.read(static_cast<char*>(dst), count);
+        if (!in_.good() && !in_.eof()) return false;
+        current_pos_ += count;
+        return true;
+    }
+    
+    bool skip(size_t count) {
+        if (!has_bytes(count)) return false;
+        in_.seekg(count, std::ios::cur);
+        current_pos_ += count;
+        return in_.good();
+    }
+    
+    size_t remaining() const { return total_size_ - current_pos_; }
+    
+private:
+    std::istream& in_;
+    size_t total_size_;
+    size_t current_pos_;
+};
 
 template<typename T>
 static T read_le(std::istream& in) {
@@ -287,8 +334,19 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
     std::ifstream in(path, std::ios::binary);
     if (!in) return nullptr;
     
+    // Get file size for bounds validation
+    in.seekg(0, std::ios::end);
+    size_t file_size = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    
+    // Validate minimum header size
+    if (file_size < sizeof(PackageHeader)) {
+        return nullptr;  // Truncated: header doesn't fit
+    }
+    
     auto reader = std::unique_ptr<PackageReader>(new PackageReader());
     reader->path_ = path;
+    reader->file_size_ = file_size;
     
     // Read header
     in.read(reinterpret_cast<char*>(&reader->header_), sizeof(PackageHeader));
@@ -298,9 +356,22 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
         return nullptr;
     }
     
+    // Validate TOC bounds: offset + size must be within file
+    if (reader->header_.toc_offset > file_size ||
+        reader->header_.toc_size > file_size ||
+        reader->header_.toc_offset + reader->header_.toc_size > file_size) {
+        return nullptr;  // TOC extends beyond file
+    }
+    
     // Read TOC
     in.seekg(reader->header_.toc_offset);
     uint32_t toc_entries = reader->header_.toc_size / (sizeof(uint32_t) * 5);
+    
+    // Validate TOC entry count
+    if (toc_entries > PackageLimits::MAX_TOC_ENTRIES) {
+        return nullptr;  // Unreasonable TOC size
+    }
+    
     reader->toc_.reserve(toc_entries);
     
     for (uint32_t i = 0; i < toc_entries; ++i) {
@@ -310,6 +381,19 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
         entry.size = read_le<uint32_t>(in);
         entry.count = read_le<uint32_t>(in);
         entry.crc32 = read_le<uint32_t>(in);
+        
+        // Validate each chunk's bounds BEFORE using
+        if (entry.offset > file_size ||
+            entry.size > file_size ||
+            entry.offset + entry.size > file_size) {
+            return nullptr;  // Chunk extends beyond file
+        }
+        
+        // Validate chunk size against limits
+        if (entry.size > PackageLimits::MAX_CHUNK_SIZE) {
+            return nullptr;  // Chunk too large
+        }
+        
         reader->toc_.push_back(entry);
     }
     
@@ -340,11 +424,44 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
                 continue;
         }
         
+        // Validate count against limits
+        if (entry.count > PackageLimits::MAX_ARRAY_COUNT) {
+            return nullptr;  // Too many entries in chunk
+        }
+        
+        // Track consumed bytes within chunk for bounds checking
+        size_t consumed = 0;
+        
         for (uint32_t j = 0; j < entry.count; ++j) {
+            // Check we have room for length prefix
+            if (consumed + 2 > entry.size) {
+                return nullptr;  // Truncated index entry
+            }
+            
             uint16_t id_len = read_le<uint16_t>(in);
+            consumed += 2;
+            
+            // Validate string length
+            if (id_len > PackageLimits::MAX_STRING_LENGTH ||
+                consumed + id_len > entry.size) {
+                return nullptr;  // String extends beyond chunk
+            }
+            
             std::string id(id_len, '\0');
             in.read(id.data(), id_len);
+            consumed += id_len;
+            
+            // Check we have room for data_size
+            if (consumed + 4 > entry.size) {
+                return nullptr;  // Truncated index entry
+            }
+            
             uint32_t data_size = read_le<uint32_t>(in);
+            consumed += 4;
+            
+            // Don't need to validate data_size fits here since we're just reading index
+            // The actual data read will validate against remaining chunk size
+            
             (*target_index)[id] = j;
             (void)data_size;
         }

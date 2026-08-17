@@ -1,6 +1,19 @@
 #pragma once
 // engine/world/johto_collision.hpp
-// Collision lookup and warp entrance validation for Crystal-derived tilesets
+// Collision lookup and warp entrance validation
+//
+// ARCHITECTURE NOTE (Audit Item 5 - In Progress):
+// This file currently interprets raw Crystal collision byte values directly,
+// which violates the compiler/runtime boundary. The correct architecture is:
+//
+//   Crystal ROM → frontend classifier → semantic CollisionClass → package → runtime
+//
+// The semantic types are defined in collision_types.hpp. New code should use:
+//   - CollisionClass enum for semantic collision types
+//   - collision_is_warp(), collision_is_walkable(), etc. for queries
+//
+// The raw byte interpretation functions below are DEPRECATED and will be
+// removed once tileset collision data is stored as CollisionClass in packages.
 //
 // Reference: pokecrystal/data/tilesets/*_collision.asm
 // Each metatile (32×32 block) has 4 collision bytes (2×2 at 16×16 each)
@@ -10,6 +23,7 @@
 // Per-tileset collision is extracted by the Crystal frontend and stored
 // in the native package. Each tileset has its own collision table.
 
+#include "engine/world/collision_types.hpp"
 #include <cstdint>
 #include <vector>
 
@@ -17,65 +31,64 @@ namespace enginemon {
 
 //=============================================================================
 // WARP/ENTRANCE COLLISION CLASS CHECKS
+// DEPRECATED: Use collision_is_warp(CollisionClass) from collision_types.hpp
+//
 // Reference: Gen2Recomped Map.lua gen2IsEntrance, gen2IsDoorway, gen2IsPit
 //
 // CheckWarpCollision (05:$4A18): $60, $68 and the whole $70-$7F carpet/door
 // range are the collision classes that let a Gen2 warp_event fire.
 //=============================================================================
 
+// DEPRECATED: Use collision_is_warp(CollisionClass) instead
 // Is this collision class a valid warp entrance?
 // Warps only trigger when standing on a tile with one of these collision classes.
+[[deprecated("Use collision_is_warp(CollisionClass) from collision_types.hpp")]]
 inline bool is_warp_entrance(uint8_t coll) {
     // 0x60 = COLL_PIT, 0x68 = COLL_PIT_68, 0x70-0x7F = carpet/door/stair range
     return coll == 0x60 || coll == 0x68 || (coll >= 0x70 && coll <= 0x7F);
 }
 
-// Is this collision class a doorway (outdoor door or cave mouth)?
-// These are the tiles that leave the player standing in the opening.
-// 0x71 = COLL_DOOR (outdoor building door), 0x7B = COLL_CAVE (cave mouth)
+// DEPRECATED: Use collision_is_door_warp(CollisionClass) instead
+[[deprecated("Use collision_is_door_warp(CollisionClass) from collision_types.hpp")]]
 inline bool is_doorway_entrance(uint8_t coll) {
     return coll == 0x71 || coll == 0x7B;
 }
 
-// Is this collision class a pit/hole?
-// 0x60 = COLL_PIT, 0x68 = COLL_PIT_68
-// Used for Strength boulder drops and fall-through holes.
+// DEPRECATED: Use collision_is_pit(CollisionClass) instead
+[[deprecated("Use collision_is_pit(CollisionClass) from collision_types.hpp")]]
 inline bool is_pit_collision(uint8_t coll) {
     return coll == 0x60 || coll == 0x68;
 }
 
-// Is this collision class an exit carpet?
-// Exit carpets (mats at interior exits) require facing outward + d-pad held.
-// 0x70 = WARP_CARPET_DOWN, 0x76 = WARP_CARPET_LEFT
-// 0x78 = WARP_CARPET_RIGHT, 0x7E = WARP_CARPET_UP
+// DEPRECATED: Use collision_is_carpet_warp(CollisionClass) instead
+[[deprecated("Use collision_is_carpet_warp(CollisionClass) from collision_types.hpp")]]
 inline bool is_exit_carpet(uint8_t coll) {
     return coll == 0x70 || coll == 0x76 || coll == 0x78 || coll == 0x7E;
 }
 
-// Is this collision class a doorway (outdoor door or cave mouth)?
-// Reference: Gen2Recomped Map.lua gen2IsDoorway
-// ONLY 0x71 = COLL_DOOR (outdoor building door), 0x7B = COLL_CAVE (cave mouth)
-// These are the tiles that trigger auto-step south on arrival (PlayerStepOutFromDoor).
-// Note: This is the SAME as is_doorway_entrance() - both check gen2IsDoorway semantics.
+// DEPRECATED: Use collision_is_door_warp(CollisionClass) instead
+[[deprecated("Use collision_is_door_warp(CollisionClass) from collision_types.hpp")]]
 inline bool is_door_tile(uint8_t coll) {
     return coll == 0x71 || coll == 0x7B;
 }
 
-// Is this collision class a staircase/ladder (clears standingOnWarp flag)?
-// Reference: Gen2Recomped OverworldController.lua refreshStandingOnWarp
-// Staircase tiles: 0x72 = COLL_STAIRCASE, 0x73 = COLL_STAIRCASE_73
-// These clear BIT_STANDING_ON_WARP so you can't bounce between floors.
+// DEPRECATED: Use collision_clears_warp_flag(CollisionClass) instead
+[[deprecated("Use collision_clears_warp_flag(CollisionClass) from collision_types.hpp")]]
 inline bool is_staircase_tile(uint8_t coll) {
     return coll == 0x72 || coll == 0x73;
 }
 
 //=============================================================================
 // COLLISION LOOKUP
+// This function returns raw Crystal bytes - NEEDS MIGRATION to CollisionClass
 //=============================================================================
 
 // Get collision byte at tile position from metatile block array
 // Uses per-tileset collision data (4 bytes per metatile: TL, TR, BL, BR)
 // 
+// MIGRATION NOTE: This returns raw Crystal bytes. Future packages should store
+// CollisionClass values, and this function should return CollisionClass.
+//
 // Parameters:
 // - blocks: metatile indices for the map (width*height bytes)
 // - collision: per-tileset collision data (metatile_count * 4 bytes)

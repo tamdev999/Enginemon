@@ -100,17 +100,17 @@ struct Pokemon {
     void cure_status();
 };
 
-// Create a new Pokemon with random DVs
-// REQUIRES: rng_seed from GameState::rng.next() for determinism
+// Create a new Pokemon with random DVs drawn from canonical RNG
+// REQUIRES: Reference to GameState::rng (advances authoritative state)
 Pokemon create_pokemon(SpeciesId species, uint8_t level,
-                       uint32_t rng_seed, const struct Registries& reg);
+                       struct RngState& rng, const struct Registries& reg);
 
-// Create with specific DVs (for starters, gifts, etc.)
+// Create with specific DVs (for starters, gifts, fixed encounters)
 Pokemon create_pokemon(SpeciesId species, uint8_t level,
                        Pokemon::DVs dvs, const struct Registries& reg);
 
-// Create wild Pokemon with random DVs
+// Create wild Pokemon with random DVs from canonical RNG
 Pokemon create_wild_pokemon(SpeciesId species, uint8_t level,
-                           const struct Registries& reg, uint32_t seed);
+                           const struct Registries& reg, struct RngState& rng);
 
 } // namespace enginemon
