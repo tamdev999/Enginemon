@@ -23,10 +23,10 @@ Enginemon adopts a single canonical deterministic PRNG that replaces Crystal's h
 | Category | Preserved Exactly |
 |----------|-------------------|
 | Encounter probabilities | ✅ Slot thresholds (1-100), time-of-day tables |
-| Accuracy thresholds | ✅ Compare random byte against accuracy value |
+| Accuracy thresholds | ✅ threshold==255 skips RNG (0 draws); otherwise 1 draw |
 | Critical hit thresholds | ✅ Stage-based thresholds (17, 32, 64, 85, 128, 255) |
 | Damage variation | ✅ Rejection loop until byte ≥ 217, then damage * byte / 255 |
-| Secondary effect probabilities | ✅ Exact threshold comparisons |
+| Secondary effect probabilities | ✅ Exact threshold comparisons (1/256 bug preserved) |
 | Speed tie resolution | ✅ 50% chance, Quick Claw logic |
 | Flee formulas | ✅ Speed ratio calculation, random comparison |
 | AI random choices | ✅ Move selection, item use probabilities |
@@ -226,8 +226,8 @@ Each mechanic must document its consumption:
 | Secondary effect | 1 | Only if effect can trigger |
 | Speed tie | 1-4 | Branch-dependent |
 | Flee | 0 or 1 | 0 if guaranteed escape; 1 otherwise |
-| Wild DVs | VERIFY | Needs disassembly verification |
-| Wild item | VERIFY | Needs disassembly verification |
+| Wild DVs | 2 | Exactly 2 draws (one per DV byte) — **VERIFIED** |
+| Wild item | 1 or 2 | 1 for 75% check; +1 if item assigned (8% Item2) — **VERIFIED** |
 | AI move choice | 1+ | Per evaluation loop |
 
 **CRITICAL FIX**: The accuracy check consumption was incorrectly documented as "1, Always" in earlier versions. Crystal explicitly skips the RNG call when `accuracy == 255` (source: `effect_commands.asm:BattleCommand_CheckHit`):
@@ -913,20 +913,45 @@ uint64_t GameState::state_hash() const {
 
 ---
 
-## 13. Unverified Consumption Counts
+## 13. Wild Encounter RNG Verification
 
-The following consumption counts are documented but require verification against actual Crystal disassembly:
+The following consumption counts were verified against `pokecrystal/engine/battle/core.asm` (lines ~6030-6100):
 
-| Mechanic | Claimed Draws | Verification Status |
-|----------|---------------|---------------------|
-| Wild DVs | 2 | **NEEDS VERIFICATION** |
-| Wild item | 2 | **NEEDS VERIFICATION** |
+### Wild DVs — VERIFIED: 2 draws
 
-These values are plausible (2 bytes for DV generation, 2 checks for item selection) but a single off-by-one error would break every wild encounter golden fixture. Before implementation, verify against:
+```asm
+.GenerateDVs:
+    call BattleRandom      ; Draw 1 → high nibbles (Atk/Def)
+    ld b, a
+    call BattleRandom      ; Draw 2 → low nibbles (Spd/Spc)
+    ld c, a
+```
 
-1. `pokecrystal/engine/pokemon/mon_data.asm` or similar
-2. `Gen2Recomped` source for the same mechanics
-3. RNG manipulation community documentation
+DVs are 2 bytes total: one byte for Atk/Def DVs (high nibbles), one byte for Spd/Spc DVs. Each byte requires one `BattleRandom` call. **Exactly 2 draws, always.**
+
+### Wild Item — VERIFIED: 1 or 2 draws (branch-dependent)
+
+```asm
+; First check: 75% chance to have no item
+    call BattleRandom      ; Draw 1
+    cp 75 percent + 1      ; = 192
+    jr c, .UpdateItem      ; < 192 → no item, DONE (1 draw only)
+    
+; If 75% check passes, 8% chance for Item2
+    call BattleRandom      ; Draw 2
+    cp 8 percent + 1       ; = 21
+    ld a, [wBaseData + BASE_ITEM1]
+    jr nc, .UpdateItem     ; >= 21 → Item1
+    ld a, [wBaseData + BASE_ITEM2]  ; < 21 → Item2
+```
+
+- **75% of encounters**: 1 draw (no item assigned)
+- **25% of encounters**: 2 draws (item assigned, either Item1 or Item2)
+
+| Mechanic | Draws | Condition | Status |
+|----------|-------|-----------|--------|
+| Wild DVs | 2 | Always exactly 2 | ✅ VERIFIED |
+| Wild Item | 1 or 2 | 1 if no item (75%), 2 if item assigned (25%) | ✅ VERIFIED |
 
 ---
 
@@ -995,7 +1020,11 @@ Battle Compiler
 
 2. **PCG seeding**: Changed from direct assignment to O'Neill canonical initialization (`state=0; step(); state+=seed; step();`) per reference implementation.
 
-3. **Wild DV/item draws**: Marked as "NEEDS VERIFICATION" rather than asserting specific counts without disassembly proof.
+3. **Wild DV/item draws**: Verified against `core.asm` lines ~6030-6100:
+   - Wild DVs: **2 draws** (exactly 2 `BattleRandom` calls, one per DV byte)
+   - Wild Item: **1 or 2 draws** (1 for 75% no-item check; +1 if item assigned)
+
+4. **Secondary effect 1/256 bug**: Verified in `effect_commands.asm` that `BattleCommand_EffectChance` does NOT have the threshold==255 skip. Source comment explicitly states: `; BUG: Moves with a 100% secondary effect chance will not trigger it in 1/256 uses`. This bug IS real and correctly preserved (distinct from accuracy check which was patched).
 
 ---
 
