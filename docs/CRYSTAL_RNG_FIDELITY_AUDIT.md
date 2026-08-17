@@ -375,8 +375,26 @@ The length filter uses feet/inches but compares against millimeters. No Magikarp
 ```
 Shiny DVs ($EA $AA) produce letter 'I'. If player hasn't unlocked 'I', the loop never terminates. **This is a source bug worth preserving in faithful mode.**
 
-### 1/256 Move Failures
-Accuracy checks use `cp b` where b can be 255. RNG values 0-254 hit; 255 misses. Even "100% accurate" moves have 1/256 miss chance. **This is intentional Gen 2 behavior.**
+### 1/256 Move Failures — CORRECTION
+
+**This section was incorrect.** The Gen 1 "1/256 miss on 100% accurate moves" bug was **fixed in Gen 2**.
+
+Crystal's `BattleCommand_CheckHit` (effect_commands.asm) explicitly checks for threshold==255 and skips the RNG call entirely:
+
+```asm
+.skip_brightpowder
+    ld a, b
+    cp -1           ; Compare against 255
+    jr z, .Hit      ; If accuracy == 255, SKIP BattleRandom entirely!
+    
+    call BattleRandom  ; Only called when accuracy < 255
+    cp b
+    jr nc, .Miss
+```
+
+**Correct behavior**: Moves with computed accuracy of 255 always hit and consume **zero RNG draws**.
+
+**Note**: The 1/256 secondary effect miss (BattleCommand_EffectChance) is a separate mechanic and does still exist in Gen 2 — that code does NOT have the threshold check.
 
 ### Speed Tie Double-Roll
 Speed ties can consume 2-4 BattleRandom calls depending on Quick Claw and link clock. The call count is deterministic given game state, but complex.
