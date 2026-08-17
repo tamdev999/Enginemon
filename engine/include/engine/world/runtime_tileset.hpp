@@ -20,6 +20,8 @@
 // - Maps store environment + time_policy for palette selection
 // - Renderer resolves: indexed tile + palette_id + active palette set → final color
 
+#include "engine/world/collision_types.hpp"
+
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -100,10 +102,13 @@ struct RuntimeTileset {
     // All blocks/metatiles (typically 64-128 blocks per tileset)
     std::vector<RuntimeBlock> blocks;
     
-    // Collision data: 4 bytes per block (TL, TR, BL, BR quadrants)
+    // Collision data: 4 entries per block (TL, TR, BL, BR quadrants)
     // Index formula: collision[block_index * 4 + quadrant]
     // where quadrant = (cell_x % 2) + (cell_y % 2) * 2
-    std::vector<uint8_t> collision;
+    // 
+    // SEMANTIC: This stores CollisionClass values, NOT raw Crystal bytes.
+    // The Crystal frontend classifies raw bytes at packaging time.
+    std::vector<CollisionClass> collision;
     
     // Palette map: tile_id → palette_id (0-6)
     // Used at render time to look up which palette each tile uses

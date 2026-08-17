@@ -862,6 +862,7 @@ int main(int argc, char* argv[]) {
     SemanticLegalizer legalizer;
     legalizer.set_native_registry(&native_registry);
     legalizer.set_ram_registry(&ram_registry);
+    legalizer.set_num_pokemon(profile->counts.num_pokemon);
     
     enginemon::Stage4CorpusStats stage4_stats;
     

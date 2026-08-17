@@ -2595,29 +2595,32 @@ RuleResult rule_special(LoweringContext& ctx) {
             }
             
             case SPECIAL_SET_PLAYER_PALETTE: {
-                // SetPlayerPalette - change player sprite palette from wScriptVar
+                // SetPlayerPalette - change player sprite visual appearance from wScriptVar
                 // Source: pokecrystal/engine/overworld/map_objects.asm _SetPlayerPalette
                 //
-                // Crystal encoding: PAL_NPC_* << 4 (0x80=PAL0, 0x90=PAL1, etc.)
-                // Bit 7 MUST be set for valid palette literal. If not set, routine returns early.
-                //
-                // Crystal math:
+                // Source-proven semantics from _SetPlayerPalette:
                 //   ld a, d
                 //   and 1 << 7     ; Check bit 7
-                //   ret z          ; Return if not set
+                //   ret z          ; No-op if bit 7 not set
                 //   ...
-                //   swap a         ; Swap nibbles: 0x80→0x08, 0x90→0x09, 0xAB→0xBA
-                //   and OAM_PALETTE; OAM_PALETTE = 0x07 (bits 0-2 for CGB OBJ palette)
+                //   swap a         ; Swap nibbles
+                //   and OAM_PALETTE; OAM_PALETTE = %00000_111 = 0x07
+                //   ...            ; Apply selector to wPlayerStruct.OBJECT_PALETTE
                 //
-                // Equivalence proof:
-                //   swap(x) & 0x07 = ((x & 0x0F) << 4 | (x >> 4)) & 0x07 = (x >> 4) & 0x07
-                //   Since bit 7 is set: (x >> 4) ∈ [8, 15]
-                //   (x >> 4) & 0x07 = (x >> 4) - 8 for x ∈ [0x80, 0xF0] with low nibble 0
+                // Source contract:
+                //   - Input with bit 7 clear: no-op (routine returns immediately)
+                //   - Input with bit 7 set: extract 3-bit selector (0-7) and apply
+                //   - Extraction: (input >> 4) & 0x07 (or equivalently: swap & 0x07)
+                //   - ALL selectors 0-7 are source-valid; do not reject merely because
+                //     vanilla corpus only uses 0 and 1
                 //
-                // Normalization: (value >> 4) & 0x07 = semantic PaletteId (0-7)
-                //   0x80 → palette 0
-                //   0x90 → palette 1
-                //   0xF0 → palette 7
+                // Vanilla Crystal usage (corpus-observed):
+                //   - Selector 0 (0x80): Normal player colors (PAL_NPC_RED << 4)
+                //   - Selector 1 (0x90): Team Rocket disguise (PAL_NPC_BLUE << 4)
+                //   - Selectors 2-7: Not used in vanilla corpus, but source-valid
+                //
+                // ROM hacks may use any selector 0-7. The frontend must not reject
+                // source-valid values merely because vanilla doesn't use them.
                 //
                 // Does NOT write wScriptVar (preserves context)
                 
@@ -2631,15 +2634,17 @@ RuleResult rule_special(LoweringContext& ctx) {
                 // This matches Crystal's `and 1 << 7; ret z` - routine does nothing if bit 7 not set
                 if ((raw_palette & 0x80) == 0) {
                     // Invalid encoding - refuse contextual lowering
+                    // The source routine would be a no-op; fall through to Sem_Special
                     break;
                 }
                 
-                // Normalize Crystal encoding to semantic PaletteId
+                // Normalize Crystal encoding to selector (frontend computation)
                 // Equivalent to Crystal's `swap a; and OAM_PALETTE` = (raw >> 4) & 0x07
-                uint8_t palette_id = (raw_palette >> 4) & 0x07;
+                // ALL selectors 0-7 are source-valid
+                uint8_t selector = (raw_palette >> 4) & 0x07;
                 
                 enginemon::Sem_SetPlayerPalette op;
-                op.palette_id = palette_id;
+                op.selector = selector;
                 r.instructions.push_back(make_inst(std::move(op)));
                 // Context preserved - SetPlayerPalette does NOT write wScriptVar
                 return r;

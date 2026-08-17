@@ -146,3 +146,21 @@ target_link_libraries(special152_verify PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+
+# Corpus lowering audit - enumerates ALL lowering failures in expanded corpus
+add_executable(corpus_lowering_audit
+    corpus_lowering_audit.cpp
+)
+target_link_libraries(corpus_lowering_audit PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+
+# Batch 9 detailed analysis - analyzes setval→special context patterns
+add_executable(batch9_analysis
+    batch9_analysis.cpp
+)
+target_link_libraries(batch9_analysis PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)

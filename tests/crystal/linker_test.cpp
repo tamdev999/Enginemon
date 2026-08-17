@@ -191,6 +191,7 @@ int main(int argc, char* argv[]) {
     legalizer.set_elevator_registry(&elevator_registry);
     legalizer.set_pokemail_registry(&pokemail_registry);
     legalizer.set_text_registry(&text_registry);
+    legalizer.set_num_pokemon(profile->counts.num_pokemon);
     
     LegalityGate legality_gate;
     

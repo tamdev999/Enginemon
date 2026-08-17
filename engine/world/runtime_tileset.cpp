@@ -76,14 +76,15 @@ RuntimeTileset RuntimeTileset::from_package_data(
     }
     uint32_t coll_count = read_le<uint32_t>(ptr);
     
-    // Read collision data
+    // Read collision data (semantic CollisionClass values, 1 byte each)
     if (ptr + coll_count > end) {
         std::cerr << "[TILESET] " << tileset_id << ": truncated at collision data\n";
         return tileset;
     }
     tileset.collision.resize(coll_count);
-    std::memcpy(tileset.collision.data(), ptr, coll_count);
-    ptr += coll_count;
+    for (uint32_t i = 0; i < coll_count; ++i) {
+        tileset.collision[i] = static_cast<CollisionClass>(*ptr++);
+    }
     
     // Read palette map
     if (ptr + 4 > end) {

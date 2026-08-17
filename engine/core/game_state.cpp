@@ -209,19 +209,17 @@ std::vector<uint8_t> GameState::serialize() const {
 }
 
 GameState GameState::deserialize(const std::vector<uint8_t>& data) {
-    // Legacy wrapper - DEPRECATED
-    // This function MUST NOT be used in production save/load paths
-    // because it silently converts corrupt data to empty GameState.
-    //
-    // Use try_deserialize() which returns explicit error codes.
+    // Legacy wrapper - ALWAYS throws on error
+    // Production code must handle load failures explicitly.
+    // Use try_deserialize() for non-throwing error handling.
     auto result = try_deserialize(data);
     if (!result.ok()) {
-        // In debug builds, fail loudly to catch any production usage
-#ifndef NDEBUG
-        throw std::runtime_error("GameState::deserialize() failed with error code " + 
-            std::to_string(static_cast<int>(result.error)) + 
-            " - use try_deserialize() for explicit error handling");
-#endif
+        throw std::runtime_error("GameState::deserialize() failed: " + 
+            std::string(result.error == DeserializeError::TruncatedData ? "TruncatedData" :
+                       result.error == DeserializeError::InvalidMagic ? "InvalidMagic" :
+                       result.error == DeserializeError::UnsupportedVersion ? "UnsupportedVersion" :
+                       result.error == DeserializeError::CorruptedPayload ? "CorruptedPayload" :
+                       "Unknown"));
     }
     return result.state;
 }

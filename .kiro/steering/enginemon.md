@@ -34,6 +34,32 @@ The shipped game must run without:
 
 ---
 
+## Compiler Input Contract
+
+The Crystal frontend accepts ONLY raw ROM bytes as input.
+
+**No auxiliary files:**
+- no .sym symbol files
+- no pokecrystal source tree at compile time
+- no external metadata files
+- no manually selected hack profiles
+
+**No hardcoded assumptions:**
+- species count must be derived from ROM structure, not hardcoded 251
+- table locations may be discovered or validated from ROM patterns
+- domain sizes come from ROM evidence, not profile overrides
+
+The frontend may embed knowledge of Crystal data-structure formats (record sizes, field offsets, encoding rules), but counts and locations must be proven from the ROM being compiled.
+
+This enables:
+- vanilla Crystal (251 species)
+- format-compatible ROM hacks (245, 274, or other species counts)
+- relocated tables (common in ROM hacks)
+
+without per-hack profile maintenance.
+
+---
+
 ## Build Instructions
 
 **CRITICAL**: Use Windows CMake:

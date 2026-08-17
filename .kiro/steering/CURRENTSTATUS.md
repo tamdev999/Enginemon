@@ -1,5 +1,49 @@
 # Current Status
 
+## Hardening Closeout - COMPLETED ✓
+
+**SUCCESS**: All four hardening closeout items (A, B, C, D) have been completed.
+
+### Item A: Save Failure Semantics - DONE ✓
+- `GameState::deserialize()` now ALWAYS throws on error (not just debug builds)
+- Added adversarial test `gamestate_deserialize_malformed_throws` in `runtime_test.cpp`
+- Test verifies throws for: truncated, bad_magic, bad_version, empty data
+
+### Item B: Collision Migration - DONE ✓
+- `RuntimeTileset::collision` is now `std::vector<CollisionClass>` (semantic types, not raw bytes)
+- `johto_collision.hpp::get_collision_from_blocks()` returns `CollisionClass`
+- `main_tiles.cpp` uses semantic collision queries (`collision_is_warp()`, `collision_is_door_warp()`)
+- Crystal frontend classifies raw bytes to `CollisionClass` at packaging time via `classify_crystal_collision()`
+- Tests use raw bytes for backward compatibility with `Collision` class tests
+
+### Item C: State Ownership Evidence - VERIFIED CLEAN ✓
+- Full field-level ownership table documented in `docs/STATE_OWNERSHIP_AUDIT.md`
+- No divergent authoritative copies exist
+- Clear separation: `HeadlessGameLoop` (simulation) vs `GameState` (persistence)
+- RNG owned by `GameState` with no fallback - intentional design
+- Snapshot/restore protocol for NPC states is complete
+
+### Item D: Parser Arithmetic Proof - VERIFIED SAFE ✓
+- Analysis documented in `docs/PARSER_ARITHMETIC_PROOF.md`
+- `BoundsReader` validates remaining bytes BEFORE all reads
+- `PackageLimits` constants bound all `count * element_size` products
+- All `offset + size` operations check individual terms before sum
+- No code changes needed - existing protection is complete
+
+### Test Results (Post-Hardening)
+- **Runtime Tests**: 233/233 pass
+- **Golden Tests**: 56/56 pass
+- **Legality Gate Tests**: 14/14 pass
+- **Linker Tests**: All pass
+
+### Files Created/Modified
+- `engine/core/game_state.cpp` - Unconditional throw on deserialize error
+- `tests/scripting/runtime_test.cpp` - Added adversarial deserialize test
+- `docs/STATE_OWNERSHIP_AUDIT.md` - NEW: Field-level ownership analysis
+- `docs/PARSER_ARITHMETIC_PROOF.md` - NEW: Overflow protection analysis
+
+---
+
 ## Expanded Corpus Lowering Closure - COMPLETED ✓
 
 **SUCCESS**: All 1679 script bodies discovered through fixed-point deferred iteration now compile successfully through the typed script pipeline. The corpus closure is complete with proper native semantics.

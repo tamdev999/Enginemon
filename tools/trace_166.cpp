@@ -186,6 +186,7 @@ int main(int argc, char* argv[]) {
     legalizer.set_native_registry(&native_registry);
     legalizer.set_ram_registry(&ram_registry);
     legalizer.set_elevator_registry(&elevator_registry);
+    legalizer.set_num_pokemon(profile->counts.num_pokemon);
     
     auto lowered = legalizer.lower(ir, cfg);
     

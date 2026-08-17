@@ -81,6 +81,15 @@ struct LoweringContext {
     
     // Profile domain bounds for validation
     // Species domain: [1, num_pokemon] (default 251 for vanilla Crystal)
+    // 
+    // GUARANTEE: For production compilation (FullGameCompiler), num_pokemon
+    // is set from profile.counts.num_pokemon, which is explicitly configured
+    // in profile.cpp for each supported ROM version. Vanilla Crystal sets this
+    // to 251 (contiguous domain, no holes).
+    //
+    // For tools/tests that don't call set_num_pokemon(), the default 251 is
+    // appropriate for vanilla Crystal ROMs. ROM hacks with expanded species
+    // must explicitly set num_pokemon from their profile.
     uint16_t num_pokemon = 251;
     
     // Current position in block

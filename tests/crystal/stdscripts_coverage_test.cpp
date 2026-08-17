@@ -298,6 +298,7 @@ int main(int argc, char* argv[]) {
     SemanticLegalizer legalizer;
     legalizer.set_native_registry(&native_registry);
     legalizer.set_ram_registry(&ram_registry);
+    legalizer.set_num_pokemon(profile->counts.num_pokemon);
     
     LegalityGate legality_gate;
 

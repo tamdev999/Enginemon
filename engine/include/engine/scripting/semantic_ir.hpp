@@ -877,7 +877,49 @@ struct Sem_HallOfFame {};
 struct Sem_Credits {};
 struct Sem_CheckSave {};   // Sets result
 struct Sem_CheckWarp {};   // Sets result based on warp validity (used after Battle Tower)
-struct Sem_SetPlayerPalette { uint8_t palette_id; };  // Change player sprite palette
+
+// =============================================================================
+// Sem_SetPlayerPalette - Set player sprite OBJ palette selector
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/overworld/map_objects.asm:
+//
+//   _SetPlayerPalette:
+//     ld a, d
+//     and 1 << 7     ; Check bit 7
+//     ret z          ; No-op if bit 7 not set
+//     ...
+//     swap a         ; Swap nibbles
+//     and OAM_PALETTE; OAM_PALETTE = %00000_111 = 0x07
+//     ...            ; Apply selector to wPlayerStruct.OBJECT_PALETTE
+//
+// Source semantics:
+//   - Input with bit 7 clear: no-op (routine returns immediately)
+//   - Input with bit 7 set: extract 3-bit palette selector (0-7) and apply
+//   - Extraction: (input >> 4) & 0x07 (or equivalently: swap & 0x07)
+//
+// Semantic model:
+//   The Crystal frontend extracts the 3-bit source selector.
+//   The semantic operation carries this selector as a frontend-resolved value.
+//   Runtime maps this to a native PaletteId/PaletteDefinition through
+//   the palette resource system, NOT through fixed CGB OAM slot identity.
+//
+// Vanilla Crystal usage (corpus-observed):
+//   - Selector 0 (0x80): Normal player colors
+//   - Selector 1 (0x90): Team Rocket disguise
+//   - Selectors 2-7: Not used in vanilla corpus, but source-valid
+//
+// ROM hacks may use any selector 0-7. The frontend must not reject
+// source-valid values merely because vanilla doesn't use them.
+//
+// What is NOT encoded:
+//   - CGB OAM slot identity (runtime uses native palette resources)
+//   - Fixed capacity of 8 palettes (native system may support more)
+//   - Crystal's shifted-nibble encoding (normalized by frontend)
+//   - Bit-7 guard logic (frontend handles no-op case)
+// =============================================================================
+struct Sem_SetPlayerPalette {
+    uint8_t selector;  // Source palette selector 0-7 (frontend-extracted from Crystal encoding)
+};
 
 // --- Standard Scripts (known semantic behaviors) ---
 // StdScriptId is a semantic identifier for standard scripts, NOT Crystal's raw table index.

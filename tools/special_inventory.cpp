@@ -89,6 +89,8 @@ int main(int argc, char* argv[]) {
     legalizer.set_native_registry(&native_registry);
     legalizer.set_ram_registry(&ram_registry);
     legalizer.set_elevator_registry(&elevator_registry);
+    // Set species domain from profile - guarantees correct validation
+    legalizer.set_num_pokemon(profile->counts.num_pokemon);
     
     // Track pre-lowering Special IDs
     std::map<uint16_t, size_t> pre_lowering_counts;

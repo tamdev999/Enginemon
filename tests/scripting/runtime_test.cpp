@@ -3804,6 +3804,57 @@ TEST(gamestate_serialize_insertion_order_determinism) {
     std::cout << "  [Same state, different insertion order → byte-identical serialization ✓]\n";
 }
 
+TEST(gamestate_deserialize_malformed_throws) {
+    // CRITICAL (Audit A): Malformed input MUST throw, never return default GameState
+    // This tests that release builds get explicit load failure, not silent corruption.
+    
+    // Test 1: Truncated data
+    std::vector<uint8_t> truncated = {0x45, 0x4E, 0x47, 0x4D};  // Just magic, no version
+    bool threw_truncated = false;
+    try {
+        GameState::deserialize(truncated);
+    } catch (const std::runtime_error& e) {
+        threw_truncated = true;
+        ASSERT_STR_CONTAINS(e.what(), "Truncated");
+    }
+    ASSERT_TRUE(threw_truncated);
+    
+    // Test 2: Invalid magic
+    std::vector<uint8_t> bad_magic = {0xDE, 0xAD, 0xBE, 0xEF, 0x02, 0x00, 0x00, 0x00};
+    bool threw_magic = false;
+    try {
+        GameState::deserialize(bad_magic);
+    } catch (const std::runtime_error& e) {
+        threw_magic = true;
+        ASSERT_STR_CONTAINS(e.what(), "InvalidMagic");
+    }
+    ASSERT_TRUE(threw_magic);
+    
+    // Test 3: Unsupported version (magic OK, version too high)
+    // SAVE_MAGIC = 0x454E474D, in little-endian: 0x4D, 0x47, 0x4E, 0x45
+    std::vector<uint8_t> bad_version = {0x4D, 0x47, 0x4E, 0x45, 0xFF, 0x00, 0x00, 0x00};
+    bool threw_version = false;
+    try {
+        GameState::deserialize(bad_version);
+    } catch (const std::runtime_error& e) {
+        threw_version = true;
+        ASSERT_STR_CONTAINS(e.what(), "UnsupportedVersion");
+    }
+    ASSERT_TRUE(threw_version);
+    
+    // Test 4: Empty data
+    std::vector<uint8_t> empty;
+    bool threw_empty = false;
+    try {
+        GameState::deserialize(empty);
+    } catch (const std::runtime_error& e) {
+        threw_empty = true;
+    }
+    ASSERT_TRUE(threw_empty);
+    
+    std::cout << "  [Malformed input throws in all cases: truncated, bad_magic, bad_version, empty ✓]\n";
+}
+
 TEST(scheduler_interpolation_alpha_clamped) {
     // CRITICAL (Audit 8): Interpolation alpha must never exceed 1.0
     // This could cause visual artifacts when tick debt is retained.
@@ -9487,6 +9538,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(gamestate_rng_persist);
     RUN_TEST(save_mutate_load_identical);
     RUN_TEST(gamestate_serialize_insertion_order_determinism);
+    RUN_TEST(gamestate_deserialize_malformed_throws);
     RUN_TEST(scheduler_interpolation_alpha_clamped);
     
     // Multi-page text state machine tests

@@ -141,11 +141,11 @@ struct WarpArrivalState {
     //
     // Logic: Set if warp exists AND NOT (warp-entrance-tile AND NOT door-tile)
     // Meaning: Clear if on a warp-entrance tile that's NOT a door (stairs, carpets, pits)
-    void refresh_standing_on_warp(uint8_t collision, bool has_warp) {
+    void refresh_standing_on_warp(CollisionClass collision, bool has_warp) {
         standing_on_warp = false;
         if (has_warp) {
-            bool is_warp_tile = is_warp_entrance(collision);
-            bool is_door = is_door_tile(collision);
+            bool is_warp_tile = collision_is_warp(collision);
+            bool is_door = collision_is_door_warp(collision);
             // NOT (warp_tile AND NOT door) = NOT warp_tile OR door
             if (!is_warp_tile || is_door) {
                 standing_on_warp = true;
@@ -440,20 +440,20 @@ static bool transition_to_map(
             // WARP ARRIVAL: Set warpEntryCell
             ctx.warp_state->set_entry(player_x, player_y);
             
-            // Get collision class at landing position
-            uint8_t landing_coll = get_collision_from_blocks(
+            // Get collision class at landing position (returns semantic CollisionClass)
+            CollisionClass landing_coll = get_collision_from_blocks(
                 world_state.map.blocks, world_state.tileset.collision,
                 world_state.map.width, player_x, player_y);
             
-            // Check if landing on a doorway tile (0x71 or 0x7B only)
+            // Check if landing on a doorway tile
             // Reference: Gen2Recomped Map.gen2IsDoorway, startWarpTo lines 4791-4805
-            if (is_door_tile(landing_coll)) {
+            if (collision_is_door_warp(landing_coll)) {
                 // Check if movement south is legal
                 // Reference: Gen2Recomped Collision.canMove check
                 int32_t south_y = player_y + 1;
                 
                 // Check collision at south cell
-                uint8_t south_coll = get_collision_from_blocks(
+                CollisionClass south_coll = get_collision_from_blocks(
                     world_state.map.blocks, world_state.tileset.collision,
                     world_state.map.width, player_x, south_y);
                 
@@ -466,8 +466,8 @@ static bool transition_to_map(
                     }
                 }
                 
-                // South cell is walkable if collision <= 0x0F or is an exit carpet
-                bool south_walkable = (south_coll <= 0x0F || is_exit_carpet(south_coll));
+                // South cell is walkable if it's a walkable semantic collision class
+                bool south_walkable = collision_is_walkable(south_coll);
                 bool can_step_south = south_walkable && !npc_blocking;
                 
                 if (can_step_south) {
@@ -1173,8 +1173,8 @@ int main(int argc, char* argv[]) {
                     // Step 1: Clear warp entry suppression if player moved off entry cell
                     warp_state.check_and_clear_entry(px, py);
                     
-                    // Get collision class at player position
-                    uint8_t coll = get_collision_from_blocks(
+                    // Get semantic collision class at player position
+                    CollisionClass coll = get_collision_from_blocks(
                         world_state.map.blocks, world_state.tileset.collision,
                         world_state.map.width, px, py);
                     
@@ -1195,7 +1195,7 @@ int main(int argc, char* argv[]) {
                         // Step 4: Check Warp.onArrive - warp tiles fire immediately
                         // Reference: Gen2Recomped Warp.lua onArrive (lines 17-22)
                         // A warp fires if: warpAtCell exists AND isWarpTileCell (gen2IsEntrance)
-                        if (has_warp && is_warp_entrance(coll)) {
+                        if (has_warp && collision_is_warp(coll)) {
                             warp_to_take = warp_at_pos;
                         }
                         

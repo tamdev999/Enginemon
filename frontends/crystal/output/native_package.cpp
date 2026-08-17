@@ -8,6 +8,7 @@
 #include "crystal/extract/map_extractor.hpp"
 #include "crystal/extract/tileset_extractor.hpp"
 #include "crystal/extract/font_extractor.hpp"
+#include "crystal/world/collision_classifier.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -446,10 +447,14 @@ void PackageWriter::add_tileset(const ExtractedTileset& tileset, TimeOfDay tod) 
         }
     }
     
-    // Write collision count and data
+    // Write collision count and data (CLASSIFIED to semantic CollisionClass)
+    // The Crystal classifier converts raw bytes to semantic values at packaging time
+    // Runtime never sees raw Crystal collision bytes
     write_le(out, static_cast<uint32_t>(tileset.collision.size()));
     for (auto coll : tileset.collision) {
-        out.put(static_cast<uint8_t>(coll));
+        // Classify Crystal raw byte to semantic CollisionClass
+        auto coll_class = crystal::classify_crystal_collision(coll);
+        out.put(static_cast<uint8_t>(coll_class));
     }
     
     // Write palette map

@@ -183,8 +183,15 @@ void ProfileRegistry::register_crystal_v11() {
     //-------------------------------------------------------------------------
     // Counts
     //-------------------------------------------------------------------------
+    // These counts establish the authoritative semantic domains for validation.
+    // The species domain [1, num_pokemon] is used by SemanticLegalizer to validate
+    // SpeciesId references. For vanilla Crystal, this is contiguous 1-251.
+    //
+    // GUARANTEE: num_pokemon establishes a closed, contiguous species domain.
+    // There are no holes - all 251 species have definitions in base_stats/*.asm.
+    //-------------------------------------------------------------------------
     auto& c = profile.counts;
-    c.num_pokemon           = 251;  // 1-251 (0 = none)
+    c.num_pokemon           = 251;  // Species domain [1-251] - contiguous, no holes
     c.num_moves             = 251;  // 1-251 (0 = none)
     c.num_items             = 256;  // 0-255
     c.num_types             = 18;   // 0-17 (includes ???)
