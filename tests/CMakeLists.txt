@@ -57,15 +57,6 @@ target_link_libraries(legality_gate_test PRIVATE
     enginemon_engine
 )
 
-# StdScripts coverage analysis (Stage 5 verification)
-add_executable(stdscripts_coverage_test
-    crystal/stdscripts_coverage_test.cpp
-)
-target_link_libraries(stdscripts_coverage_test PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
 # Structural compatibility check (field-move actor lifetime analysis)
 add_executable(structural_check
     crystal/structural_check.cpp

@@ -75,92 +75,12 @@ target_link_libraries(special_inventory PRIVATE
     enginemon_engine
 )
 
-# Trace Special 166 duplication through pipeline
-add_executable(trace_166
-    trace_166.cpp
-)
-target_link_libraries(trace_166 PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
-# Corpus duplicate command scan
-add_executable(corpus_dupe_scan
-    corpus_dupe_scan.cpp
-)
-target_link_libraries(corpus_dupe_scan PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
-# Blast radius scan - measures duplicate command identity bug
-add_executable(blast_radius_scan
-    blast_radius_scan.cpp
-)
-target_link_libraries(blast_radius_scan PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
-# CFG integrity check - verifies CFG structure across corpus
-add_executable(cfg_integrity_check
-    cfg_integrity_check.cpp
-)
-target_link_libraries(cfg_integrity_check PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
-# Corpus verification tool - expanded corpus verification for scene script discovery
-add_executable(corpus_verify
-    corpus_verify.cpp
-)
-target_link_libraries(corpus_verify PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
-# Special 152 trace - traces all occurrences of SetPlayerPalette in expanded corpus
-add_executable(special152_trace
-    special152_trace.cpp
-)
-target_link_libraries(special152_trace PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
-# Pokecenter2F trace - detailed trace of Pokecenter2F scripts
-add_executable(pokecenter2f_trace
-    pokecenter2f_trace.cpp
-)
-target_link_libraries(pokecenter2f_trace PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
-# Special 152 verification - verifies all 5 known addresses are in corpus
-add_executable(special152_verify
-    special152_verify.cpp
-)
-target_link_libraries(special152_verify PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
 # Corpus lowering audit - enumerates ALL lowering failures in expanded corpus
+# Reports corpus=1679/1679 invariant
 add_executable(corpus_lowering_audit
     corpus_lowering_audit.cpp
 )
 target_link_libraries(corpus_lowering_audit PRIVATE
-    enginemon_crystal
-    enginemon_engine
-)
-
-# Batch 9 detailed analysis - analyzes setval→special context patterns
-add_executable(batch9_analysis
-    batch9_analysis.cpp
-)
-target_link_libraries(batch9_analysis PRIVATE
     enginemon_crystal
     enginemon_engine
 )
