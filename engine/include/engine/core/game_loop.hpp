@@ -358,8 +358,9 @@ private:
     LoopState state_ = LoopState::Idle;
     PlayerState player_;
     
-    // Map data
-    const RuntimeMap* current_map_ = nullptr;
+    // Map data - owned by the loop to prevent dangling pointers
+    std::optional<RuntimeMap> current_map_owned_;
+    const RuntimeMap* current_map_ = nullptr;  // Points to current_map_owned_ when set
     std::function<CollisionClass(int32_t, int32_t)> get_collision_;
     
     // NPCs

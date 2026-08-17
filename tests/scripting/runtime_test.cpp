@@ -3613,6 +3613,273 @@ TEST(warp_elms_lab_to_newbark_last_map) {
     std::cout << "  [LAST_MAP resolved to new_bark_town at remembered position]\n";
 }
 
+// =============================================================================
+// REGRESSION TESTS: Targeted runtime correctness fix pass
+// =============================================================================
+
+TEST(collision_dimension_uses_collision_not_tile_width) {
+    // REGRESSION TEST for Fix 1: HeadlessGameLoop collision dimensions
+    // Verifies that gameplay bounds use collision_width()/collision_height() (blocks*2)
+    // NOT tile_width()/tile_height() (blocks*4)
+    //
+    // Player coordinates are in collision cells (16×16 pixel grid), not render tiles (8×8).
+    // A map of 10×9 blocks has:
+    //   - collision dimensions: 20×18 cells (collision_width/height)
+    //   - render dimensions: 40×36 tiles (tile_width/height)
+    //
+    // The bug was: bounds checks used tile_width (40) when they should use collision_width (20)
+    // This caused the collision boundary to be 2× larger than correct.
+    
+    HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(12345);
+    loop.set_game_state(&game_state);
+    
+    // Create a 10×9 block map (like New Bark Town)
+    RuntimeMap rtmap;
+    rtmap.width = 10;
+    rtmap.height = 9;
+    rtmap.blocks.resize(90, 0x01);  // Fill with some non-zero blocks
+    
+    loop.load_map(rtmap);
+    
+    // Verify the dimension methods are correct
+    ASSERT_EQ(rtmap.tile_width(), 40);       // 10 * 4 = 40 render tiles
+    ASSERT_EQ(rtmap.tile_height(), 36);      // 9 * 4 = 36 render tiles
+    ASSERT_EQ(rtmap.collision_width(), 20);  // 10 * 2 = 20 collision cells
+    ASSERT_EQ(rtmap.collision_height(), 18); // 9 * 2 = 18 collision cells
+    
+    // Set up collision data that's walkable everywhere
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
+    });
+    
+    // Place player near what would be the tile boundary (30) but past the collision boundary (19)
+    // If the bug exists, this would be "in bounds" when it should be "out of bounds"
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    
+    // Add an NPC at the collision boundary edge
+    NpcState npc;
+    npc.id = 1;
+    npc.x = 19;  // Right at collision width - 1 (valid)
+    npc.y = 17;  // Right at collision height - 1 (valid)
+    npc.facing = enginemon::Direction::Right;
+    npc.behavior = NpcMovementBehavior::RandomWalkXY;
+    npc.idle_timer = 0;
+    npc.radius_x = 5;  // Large radius to test bounds
+    npc.radius_y = 5;
+    npc.init_x = 19;
+    npc.init_y = 17;
+    npc.visible = true;
+    npc.frozen = false;
+    loop.add_npc(npc);
+    
+    // The NPC at (19, 17) should NOT be able to move right (would be x=20, out of bounds)
+    // If the bug existed, it would think x=20 < tile_width(40), allowing the move
+    
+    // Tick several times and verify NPC never exceeds collision bounds
+    for (int i = 0; i < 500; i++) {
+        loop.tick();
+        const NpcState* current = loop.get_npc(1);
+        ASSERT_TRUE(current->x < 20);  // Must be < collision_width
+        ASSERT_TRUE(current->y < 18);  // Must be < collision_height
+    }
+    
+    std::cout << "  [Collision dimensions correctly use collision_width/height, not tile_width/height]\n";
+}
+
+TEST(warp_invalid_index_zero_fails) {
+    // ADVERSARIAL TEST for Fix 2: warp_index=0 must fail explicitly
+    // Crystal warp indices are 1-based, so 0 is always invalid
+    
+    WorldManager wm;
+    GameState state;
+    
+    // Create a simple map with one warp
+    RuntimeMap target_map;
+    target_map.map_id = "target";
+    target_map.width = 5;
+    target_map.height = 5;
+    RuntimeWarp valid_warp;
+    valid_warp.x = 2;
+    valid_warp.y = 2;
+    valid_warp.target_map_id = "target";
+    valid_warp.target_warp_index = 1;
+    target_map.warps.push_back(valid_warp);
+    
+    wm.set_map_loader([&target_map](const std::string& map_id) -> std::optional<RuntimeMap> {
+        if (map_id == "target") return target_map;
+        return std::nullopt;
+    });
+    
+    // Create a warp with invalid index 0
+    RuntimeWarp bad_warp;
+    bad_warp.x = 0;
+    bad_warp.y = 0;
+    bad_warp.target_map_id = "target";
+    bad_warp.target_warp_index = 0;  // INVALID: Crystal indices are 1-based
+    
+    auto result = wm.resolve_warp(bad_warp, state);
+    ASSERT_FALSE(result.success);
+    ASSERT_STR_CONTAINS(result.error.c_str(), "Invalid warp index 0");
+    
+    std::cout << "  [warp_index=0 correctly rejected]\n";
+}
+
+TEST(warp_invalid_index_out_of_range_fails) {
+    // ADVERSARIAL TEST for Fix 2: out-of-range warp index must fail explicitly
+    // Must NOT silently fallback to warp[0]
+    
+    WorldManager wm;
+    GameState state;
+    
+    // Create a target map with only 2 warps
+    RuntimeMap target_map;
+    target_map.map_id = "target";
+    target_map.width = 5;
+    target_map.height = 5;
+    RuntimeWarp warp1, warp2;
+    warp1.x = 1; warp1.y = 1; warp1.target_map_id = "x"; warp1.target_warp_index = 1;
+    warp2.x = 2; warp2.y = 2; warp2.target_map_id = "x"; warp2.target_warp_index = 1;
+    target_map.warps.push_back(warp1);
+    target_map.warps.push_back(warp2);
+    
+    wm.set_map_loader([&target_map](const std::string& map_id) -> std::optional<RuntimeMap> {
+        if (map_id == "target") return target_map;
+        return std::nullopt;
+    });
+    
+    // Try to warp to index 5 (out of range - map has only 2 warps)
+    RuntimeWarp bad_warp;
+    bad_warp.x = 0;
+    bad_warp.y = 0;
+    bad_warp.target_map_id = "target";
+    bad_warp.target_warp_index = 5;  // INVALID: only warps 1-2 exist
+    
+    auto result = wm.resolve_warp(bad_warp, state);
+    ASSERT_FALSE(result.success);
+    ASSERT_STR_CONTAINS(result.error.c_str(), "out of range");
+    
+    std::cout << "  [warp_index out of range correctly rejected]\n";
+}
+
+TEST(warp_target_map_no_warps_fails) {
+    // ADVERSARIAL TEST for Fix 2: target map with zero warps must fail explicitly
+    
+    WorldManager wm;
+    GameState state;
+    
+    // Create a target map with NO warps
+    RuntimeMap empty_map;
+    empty_map.map_id = "empty";
+    empty_map.width = 5;
+    empty_map.height = 5;
+    // No warps added
+    
+    wm.set_map_loader([&empty_map](const std::string& map_id) -> std::optional<RuntimeMap> {
+        if (map_id == "empty") return empty_map;
+        return std::nullopt;
+    });
+    
+    // Try to warp to a map with no warps
+    RuntimeWarp bad_warp;
+    bad_warp.x = 0;
+    bad_warp.y = 0;
+    bad_warp.target_map_id = "empty";
+    bad_warp.target_warp_index = 1;  // Even index 1 is invalid when there are 0 warps
+    
+    auto result = wm.resolve_warp(bad_warp, state);
+    ASSERT_FALSE(result.success);
+    ASSERT_STR_CONTAINS(result.error.c_str(), "no warps");
+    
+    std::cout << "  [target map with no warps correctly rejected]\n";
+}
+
+TEST(warp_valid_index_succeeds) {
+    // Positive test: valid warp indices still work after the fix
+    
+    WorldManager wm;
+    GameState state;
+    
+    RuntimeMap target_map;
+    target_map.map_id = "target";
+    target_map.width = 5;
+    target_map.height = 5;
+    
+    // Add 3 warps
+    RuntimeWarp w1, w2, w3;
+    w1.x = 1; w1.y = 1; w1.target_map_id = "x"; w1.target_warp_index = 1;
+    w2.x = 2; w2.y = 2; w2.target_map_id = "x"; w2.target_warp_index = 1;
+    w3.x = 3; w3.y = 3; w3.target_map_id = "x"; w3.target_warp_index = 1;
+    target_map.warps.push_back(w1);
+    target_map.warps.push_back(w2);
+    target_map.warps.push_back(w3);
+    
+    wm.set_map_loader([&target_map](const std::string& map_id) -> std::optional<RuntimeMap> {
+        if (map_id == "target") return target_map;
+        return std::nullopt;
+    });
+    
+    // Test all valid indices
+    for (uint8_t idx = 1; idx <= 3; idx++) {
+        RuntimeWarp good_warp;
+        good_warp.x = 0;
+        good_warp.y = 0;
+        good_warp.target_map_id = "target";
+        good_warp.target_warp_index = idx;
+        
+        auto result = wm.resolve_warp(good_warp, state);
+        ASSERT_TRUE(result.success);
+        ASSERT_EQ(result.target_x, idx);  // w1.x=1, w2.x=2, w3.x=3
+        ASSERT_EQ(result.target_y, idx);  // Same for y
+    }
+    
+    std::cout << "  [Valid warp indices 1-3 all succeed]\n";
+}
+
+TEST(load_map_owns_copy_prevents_dangling) {
+    // REGRESSION TEST for Fix 3: RuntimeMap lifetime safety
+    // HeadlessGameLoop::load_map() must copy the map to prevent dangling pointers
+    
+    HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(42);
+    loop.set_game_state(&game_state);
+    
+    // Create a map in a temporary scope
+    {
+        RuntimeMap temp_map;
+        temp_map.map_id = "temp_test";
+        temp_map.width = 8;
+        temp_map.height = 6;
+        temp_map.blocks.resize(48, 0x01);
+        
+        // Add some warps to prove they're copied
+        RuntimeWarp warp;
+        warp.x = 4;
+        warp.y = 3;
+        warp.target_map_id = "destination";
+        warp.target_warp_index = 1;
+        temp_map.warps.push_back(warp);
+        
+        loop.load_map(temp_map);
+    }
+    // temp_map is now out of scope and destroyed
+    
+    // The loop should still have valid map data (it owns a copy)
+    const RuntimeMap* map = loop.current_map();
+    ASSERT_TRUE(map != nullptr);
+    ASSERT_STR_EQ(map->map_id.c_str(), "temp_test");
+    ASSERT_EQ(map->width, 8);
+    ASSERT_EQ(map->height, 6);
+    ASSERT_EQ(map->warps.size(), 1);
+    ASSERT_EQ(map->warps[0].x, 4);
+    ASSERT_EQ(map->warps[0].y, 3);
+    ASSERT_STR_EQ(map->warps[0].target_map_id.c_str(), "destination");
+    
+    std::cout << "  [HeadlessGameLoop owns map copy - no dangling pointer]\n";
+}
+
 TEST(connection_newbark_to_route29) {
     // Test connection crossing from New Bark Town to Route 29
     WorldManager wm;
@@ -9796,6 +10063,15 @@ int main(int argc, char* argv[]) {
     RUN_TEST(world_manager_get_warp_at);
     RUN_TEST(warp_newbark_to_elms_lab);
     RUN_TEST(warp_elms_lab_to_newbark_last_map);
+    
+    // Targeted runtime correctness fix regression tests
+    RUN_TEST(collision_dimension_uses_collision_not_tile_width);
+    RUN_TEST(warp_invalid_index_zero_fails);
+    RUN_TEST(warp_invalid_index_out_of_range_fails);
+    RUN_TEST(warp_target_map_no_warps_fails);
+    RUN_TEST(warp_valid_index_succeeds);
+    RUN_TEST(load_map_owns_copy_prevents_dangling);
+    
     RUN_TEST(connection_newbark_to_route29);
     RUN_TEST(connection_landing_math);
     

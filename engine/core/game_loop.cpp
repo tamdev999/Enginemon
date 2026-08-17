@@ -32,7 +32,10 @@ HeadlessGameLoop::~HeadlessGameLoop() = default;
 //=============================================================================
 
 void HeadlessGameLoop::load_map(const RuntimeMap& map) {
-    current_map_ = &map;
+    // Copy the map to owned storage to prevent dangling pointers
+    // Caller's map may be temporary or have shorter lifetime than the game loop
+    current_map_owned_ = map;
+    current_map_ = &current_map_owned_.value();
     // Clear NPCs when loading new map
     npcs_.clear();
 }
@@ -153,8 +156,10 @@ InputResult HeadlessGameLoop::handle_interact() {
     auto bg_events = build_bg_events();
     
     InteractionMap imap;
-    imap.width = current_map_->tile_width();
-    imap.height = current_map_->tile_height();
+    // CRITICAL: Use collision_width/height (blocks*2), NOT tile_width/height (blocks*4)
+    // Player coordinates are in collision cells (16×16 pixel grid), not render tiles (8×8)
+    imap.width = current_map_->collision_width();
+    imap.height = current_map_->collision_height();
     imap.get_collision = get_collision_ ? get_collision_ : 
         [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
@@ -188,9 +193,11 @@ CollisionResult HeadlessGameLoop::check_player_collision(Direction dir) {
     }
     
     // Build collision map using semantic CollisionClass
+    // CRITICAL: Use collision_width/height (blocks*2), NOT tile_width/height (blocks*4)
+    // Player coordinates are in collision cells (16×16 pixel grid), not render tiles (8×8)
     CollisionMap cmap;
-    cmap.width = current_map_->tile_width();
-    cmap.height = current_map_->tile_height();
+    cmap.width = current_map_->collision_width();
+    cmap.height = current_map_->collision_height();
     cmap.get_collision = get_collision_;
     
     // Build entity list
@@ -522,6 +529,7 @@ uint64_t HeadlessGameLoop::state_hash() const {
 void HeadlessGameLoop::reset() {
     state_ = LoopState::Idle;
     player_ = PlayerState{};
+    current_map_owned_.reset();
     current_map_ = nullptr;
     get_collision_ = nullptr;
     npcs_.clear();
@@ -678,9 +686,11 @@ bool HeadlessGameLoop::check_npc_can_move(const NpcState& npc, Direction dir) {
     }
     
     // Check map bounds
+    // CRITICAL: Use collision_width/height (blocks*2), NOT tile_width/height (blocks*4)
+    // Player/NPC coordinates are in collision cells (16×16 pixel grid), not render tiles (8×8)
     if (target_x < 0 || target_y < 0 ||
-        target_x >= current_map_->tile_width() ||
-        target_y >= current_map_->tile_height()) {
+        target_x >= current_map_->collision_width() ||
+        target_y >= current_map_->collision_height()) {
         return false;
     }
     
