@@ -79,6 +79,10 @@ struct LoweringContext {
     // Text registry for resolving text ROM pointers to semantic IDs
     TextRegistry* text_registry = nullptr;
     
+    // Profile domain bounds for validation
+    // Species domain: [1, num_pokemon] (default 251 for vanilla Crystal)
+    uint16_t num_pokemon = 251;
+    
     // Current position in block
     size_t cursor = 0;              // Command index within block
     
@@ -158,6 +162,10 @@ public:
     // Set Text registry for trainer win/loss text resolution
     void set_text_registry(TextRegistry* reg) { text_registry_ = reg; }
     
+    // Set profile domain bounds (for species validation)
+    // num_pokemon: valid species range is [1, num_pokemon] (default 251 for vanilla Crystal)
+    void set_num_pokemon(uint16_t count) { num_pokemon_ = count; }
+    
     // Set custom rules (optional, uses defaults if not set)
     void set_rules(LoweringRules rules) { rules_ = std::move(rules); }
     
@@ -170,6 +178,7 @@ private:
     ElevatorRegistry* elevator_registry_ = nullptr;
     PokeMailRegistry* pokemail_registry_ = nullptr;
     TextRegistry* text_registry_ = nullptr;
+    uint16_t num_pokemon_ = 251;  // Default for vanilla Crystal
     LoweringRules rules_;
     
     // Initialize rules if not set

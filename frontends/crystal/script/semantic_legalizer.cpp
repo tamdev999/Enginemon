@@ -110,6 +110,7 @@ enginemon::LoweringResult SemanticLegalizer::lower(
     ctx.elevator_registry = elevator_registry_;
     ctx.pokemail_registry = pokemail_registry_;
     ctx.text_registry = text_registry_;
+    ctx.num_pokemon = num_pokemon_;  // Pass profile domain to context
     build_label_map(cfg, ctx);
 
     // Track source commands consumed for invariant checking
@@ -2491,7 +2492,7 @@ RuleResult rule_special(LoweringContext& ctx) {
             case SPECIAL_GAME_CORNER_PRIZE_MON_CHECK_DEX: {
                 // GameCornerPrizeMonCheckDex - conditionally register new Pokedex entry
                 // Source: pokecrystal/engine/events/specials.asm GameCornerPrizeMonCheckDex
-                // Domain: SpeciesId 1-251 valid
+                // Domain: SpeciesId [1, num_pokemon] from profile (not hardcoded 251)
                 // Does NOT write wScriptVar (preserves context)
                 
                 if (!ctx.block_ctx.has_value()) {
@@ -2500,8 +2501,8 @@ RuleResult rule_special(LoweringContext& ctx) {
                 }
                 uint8_t species = ctx.block_ctx.value();
                 
-                // Domain validation: valid Gen 2 species (1-251)
-                if (species == 0 || species > 251) {
+                // Domain validation: valid species from profile domain
+                if (species == 0 || species > ctx.num_pokemon) {
                     // Invalid species - refuse contextual lowering
                     break;
                 }
@@ -2516,7 +2517,7 @@ RuleResult rule_special(LoweringContext& ctx) {
             case SPECIAL_FIND_PARTY_MON_THAT_SPECIES: {
                 // FindPartyMonThatSpecies - search party for species (any OT)
                 // Source: pokecrystal/engine/events/specials.asm FindPartyMonThatSpecies
-                // Domain: SpeciesId 1-251 valid
+                // Domain: SpeciesId [1, num_pokemon] from profile (not hardcoded 251)
                 // WRITES wScriptVar with result (1-6 = slot+1, 0 = not found)
                 
                 if (!ctx.block_ctx.has_value()) {
@@ -2525,8 +2526,8 @@ RuleResult rule_special(LoweringContext& ctx) {
                 }
                 uint8_t species = ctx.block_ctx.value();
                 
-                // Domain validation: valid Gen 2 species (1-251)
-                if (species == 0 || species > 251) {
+                // Domain validation: valid species from profile domain
+                if (species == 0 || species > ctx.num_pokemon) {
                     // Invalid species - refuse contextual lowering
                     break;
                 }
@@ -2543,7 +2544,7 @@ RuleResult rule_special(LoweringContext& ctx) {
             case SPECIAL_FIND_PARTY_MON_YOUR_TRAINER_ID: {
                 // FindPartyMonThatSpeciesYourTrainerID - search party for species (player OT only)
                 // Source: pokecrystal/engine/events/specials.asm FindPartyMonThatSpeciesYourTrainerID
-                // Domain: SpeciesId 1-251 valid
+                // Domain: SpeciesId [1, num_pokemon] from profile (not hardcoded 251)
                 // WRITES wScriptVar with result (1-6 = slot+1, 0 = not found)
                 
                 if (!ctx.block_ctx.has_value()) {
@@ -2552,8 +2553,8 @@ RuleResult rule_special(LoweringContext& ctx) {
                 }
                 uint8_t species = ctx.block_ctx.value();
                 
-                // Domain validation: valid Gen 2 species (1-251)
-                if (species == 0 || species > 251) {
+                // Domain validation: valid species from profile domain
+                if (species == 0 || species > ctx.num_pokemon) {
                     // Invalid species - refuse contextual lowering
                     break;
                 }
@@ -2570,7 +2571,7 @@ RuleResult rule_special(LoweringContext& ctx) {
             case SPECIAL_PLAY_SLOW_CRY: {
                 // PlaySlowCry - play slowed Pokemon cry from wScriptVar
                 // Source: pokecrystal/engine/events/specials.asm PlaySlowCry
-                // Domain: SpeciesId 1-251 valid
+                // Domain: SpeciesId [1, num_pokemon] from profile (not hardcoded 251)
                 // Does NOT write wScriptVar (preserves context)
                 
                 if (!ctx.block_ctx.has_value()) {
@@ -2579,8 +2580,8 @@ RuleResult rule_special(LoweringContext& ctx) {
                 }
                 uint8_t species = ctx.block_ctx.value();
                 
-                // Domain validation: valid Gen 2 species (1-251)
-                if (species == 0 || species > 251) {
+                // Domain validation: valid species from profile domain
+                if (species == 0 || species > ctx.num_pokemon) {
                     // Invalid species - refuse contextual lowering
                     break;
                 }
@@ -2595,13 +2596,28 @@ RuleResult rule_special(LoweringContext& ctx) {
             
             case SPECIAL_SET_PLAYER_PALETTE: {
                 // SetPlayerPalette - change player sprite palette from wScriptVar
-                // Source: pokecrystal/engine/events/specials.asm SetPlayerPalette
+                // Source: pokecrystal/engine/overworld/map_objects.asm _SetPlayerPalette
                 //
                 // Crystal encoding: PAL_NPC_* << 4 (0x80=PAL0, 0x90=PAL1, etc.)
-                // Bit 7 MUST be set for valid palette literal.
-                // Normalization: (value >> 4) - 8 = semantic PaletteId
-                //   0x80 → (8-8) = 0
-                //   0x90 → (9-8) = 1
+                // Bit 7 MUST be set for valid palette literal. If not set, routine returns early.
+                //
+                // Crystal math:
+                //   ld a, d
+                //   and 1 << 7     ; Check bit 7
+                //   ret z          ; Return if not set
+                //   ...
+                //   swap a         ; Swap nibbles: 0x80→0x08, 0x90→0x09, 0xAB→0xBA
+                //   and OAM_PALETTE; OAM_PALETTE = 0x07 (bits 0-2 for CGB OBJ palette)
+                //
+                // Equivalence proof:
+                //   swap(x) & 0x07 = ((x & 0x0F) << 4 | (x >> 4)) & 0x07 = (x >> 4) & 0x07
+                //   Since bit 7 is set: (x >> 4) ∈ [8, 15]
+                //   (x >> 4) & 0x07 = (x >> 4) - 8 for x ∈ [0x80, 0xF0] with low nibble 0
+                //
+                // Normalization: (value >> 4) & 0x07 = semantic PaletteId (0-7)
+                //   0x80 → palette 0
+                //   0x90 → palette 1
+                //   0xF0 → palette 7
                 //
                 // Does NOT write wScriptVar (preserves context)
                 
@@ -2612,19 +2628,15 @@ RuleResult rule_special(LoweringContext& ctx) {
                 uint8_t raw_palette = ctx.block_ctx.value();
                 
                 // Domain validation: bit 7 must be set (Crystal encoding)
+                // This matches Crystal's `and 1 << 7; ret z` - routine does nothing if bit 7 not set
                 if ((raw_palette & 0x80) == 0) {
                     // Invalid encoding - refuse contextual lowering
                     break;
                 }
                 
                 // Normalize Crystal encoding to semantic PaletteId
-                uint8_t palette_id = (raw_palette >> 4) - 8;
-                
-                // Additional validation: result should be small (Crystal uses 0-7 max)
-                if (palette_id > 7) {
-                    // Unexpected result - refuse
-                    break;
-                }
+                // Equivalent to Crystal's `swap a; and OAM_PALETTE` = (raw >> 4) & 0x07
+                uint8_t palette_id = (raw_palette >> 4) & 0x07;
                 
                 enginemon::Sem_SetPlayerPalette op;
                 op.palette_id = palette_id;

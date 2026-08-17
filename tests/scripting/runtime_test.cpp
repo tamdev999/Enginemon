@@ -8413,6 +8413,86 @@ TEST(batch9_special_152_invalid_encoding_rejected) {
     std::cout << "  [Special 152 raw value 1 → Sem_Special (bit7 reject) ✓]\n";
 }
 
+TEST(batch9_species_domain_from_profile_not_hardcoded) {
+    // ADVERSARIAL TEST: Prove species validation uses ctx.num_pokemon from profile,
+    // NOT a hardcoded 251 maximum.
+    //
+    // This test demonstrates that:
+    // 1. A species value of 252 (outside vanilla range) passes if profile allows it
+    // 2. A species value of 252 fails if profile is vanilla (num_pokemon=251)
+    // 3. A species value of 200 (inside vanilla range) always passes
+    //
+    // This ensures ROM hacks with expanded species are supported.
+    
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Helper to build context with test command (Special 66 = FindPartyMonThatSpecies)
+    auto make_context = [](uint8_t species_value, uint16_t profile_num_pokemon) {
+        auto* ctx = new LoweringContext();
+        ctx->num_pokemon = profile_num_pokemon;
+        ctx->block_ctx.on_setval(species_value);
+        
+        auto* cmd = new CrystalCommand();
+        cmd->data = Cmd_Special{66};  // FindPartyMonThatSpecies
+        cmd->span.rom_address = 0;
+        cmd->span.raw_bytes = {0x0F, 66, 0};
+        
+        auto* ir = new CrystalScriptIR();
+        ir->name = "test_species_domain";
+        ir->entry_address = 0;
+        ir->rom_start = 0;
+        ir->rom_end = 3;
+        ir->commands.push_back(*cmd);
+        
+        ctx->source_ir = ir;
+        ctx->cursor = 0;
+        
+        auto* block = new BasicBlock();
+        block->id = 0;
+        block->start_address = 0;
+        block->end_address = 3;
+        block->command_start = 0;
+        block->command_count = 1;
+        ctx->current_block = block;
+        
+        return ctx;
+    };
+    
+    // Test 1: Species 200 with vanilla profile (num_pokemon=251) → should succeed
+    {
+        auto* ctx = make_context(200, 251);
+        RuleResult result = rule_special(*ctx);
+        auto* sem_find = std::get_if<Sem_FindPartyMon>(&result.instructions[0].op);
+        ASSERT_TRUE(sem_find != nullptr);
+        ASSERT_EQ(sem_find->species, 200);
+        std::cout << "  [Species 200 + num_pokemon=251 → Sem_FindPartyMon ✓]\n";
+    }
+    
+    // Test 2: Species 252 with vanilla profile (num_pokemon=251) → should REJECT
+    {
+        auto* ctx = make_context(252, 251);  // 252 > 251
+        RuleResult result = rule_special(*ctx);
+        // Should fall through to Sem_Special since species is out of domain
+        auto* sem_special = std::get_if<Sem_Special>(&result.instructions[0].op);
+        ASSERT_TRUE(sem_special != nullptr);
+        std::cout << "  [Species 252 + num_pokemon=251 → Sem_Special (out of domain) ✓]\n";
+    }
+    
+    // Test 3: Species 252 with extended profile (num_pokemon=256) → should SUCCEED
+    {
+        auto* ctx = make_context(252, 256);  // 252 <= 256
+        RuleResult result = rule_special(*ctx);
+        auto* sem_find = std::get_if<Sem_FindPartyMon>(&result.instructions[0].op);
+        ASSERT_TRUE(sem_find != nullptr);
+        ASSERT_EQ(sem_find->species, 252);
+        std::cout << "  [Species 252 + num_pokemon=256 → Sem_FindPartyMon ✓]\n";
+    }
+    
+    std::cout << "  [Species domain validated from profile, not hardcoded 251 ✓]\n";
+}
+
 //=============================================================================
 // DECODER UNIQUE COMMAND IDENTITY TESTS
 // Verifies: one ROM instruction → one decoded CrystalCommand
@@ -9404,6 +9484,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch9_special_40_no_context_fallback);
     RUN_TEST(batch9_special_152_palette_normalization);
     RUN_TEST(batch9_special_152_invalid_encoding_rejected);
+    RUN_TEST(batch9_species_domain_from_profile_not_hardcoded);
     
     // Decoder unique command identity tests (loop/back-edge handling)
     RUN_TEST(decoder_unique_command_identity_loop);

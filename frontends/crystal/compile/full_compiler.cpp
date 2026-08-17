@@ -1294,6 +1294,7 @@ std::vector<MapIdRef> discover_reachable_maps(
     SemanticLegalizer legalizer;
     legalizer.set_native_registry(&native_registry);
     legalizer.set_ram_registry(&ram_registry);
+    legalizer.set_num_pokemon(profile.counts.num_pokemon);  // Use profile domain
     
     // Track processed script addresses to avoid reprocessing
     std::set<uint32_t> processed_scripts;
