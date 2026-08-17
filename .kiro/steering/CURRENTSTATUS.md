@@ -1341,9 +1341,12 @@ Completed font extraction from ROM bytes (not PNG files).
 
 ## Test Results (All Pass)
 
-- **Golden Tests**: 54/54 pass (40 original + 14 new font tests)
-- **Runtime Tests**: 107/107 pass
-- **Total**: 161/161 pass
+- **Runtime Tests**: 232/232 pass
+- **Golden Tests**: 56/56 pass
+- **Legality Gate Tests**: 14/14 pass
+- **Corpus Test**: PASS (decoder/CFG integrity)
+- **Corpus Lowering Audit**: 1679/1679 SUCCESS
+- **Linker Test**: corpus=1679/1679, InvalidOwnership=0
 
 ---
 
@@ -1354,11 +1357,32 @@ Completed font extraction from ROM bytes (not PNG files).
 & "C:\Program Files\CMake\bin\cmake.exe" --build build --target enginemon_tiles --config Release
 
 # Run tile renderer
-.\build\runtime\Release\enginemon_tiles.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\runtime\Release\enginemon_tiles.exe "crystal.emon"
+```
 
-# Run tests
-.\build\tests\Release\golden_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+## Run All Tests (Canonical Verifier)
+
+```powershell
+# Find ROM path and run canonical verifier
+$romPath = (Get-ChildItem -Path "references" -Filter "*.gbc" | Select-Object -First 1).FullName
+.\run_all_tests.ps1 -RomPath $romPath
+```
+
+This runs all 6 test suites and reports key invariants:
+- corpus lowering = 1679/1679
+- linker corpus = 1679/1679
+- InvalidOwnership = 0
+- decoder/CFG = PASS
+
+## Run Individual Test Suites
+
+```powershell
 .\build\tests\Release\runtime_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\golden_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\legality_gate_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\corpus_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\linker_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tools\Release\corpus_lowering_audit.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
 ```
 
 ---

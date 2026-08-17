@@ -101,11 +101,29 @@ Start-Process `
   -WorkingDirectory (Get-Location)
 ```
 
-### Run Tests
+### Run All Tests (Canonical Verifier)
 
 ```powershell
-.\build\tests\Release\golden_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+# Find ROM path and run canonical verifier
+$romPath = (Get-ChildItem -Path "references" -Filter "*.gbc" | Select-Object -First 1).FullName
+.\run_all_tests.ps1 -RomPath $romPath
+```
+
+This runs all 6 test suites and reports key invariants:
+- corpus lowering = 1679/1679
+- linker corpus = 1679/1679
+- InvalidOwnership = 0
+- decoder/CFG = PASS
+
+### Run Individual Test Suites
+
+```powershell
 .\build\tests\Release\runtime_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\golden_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\legality_gate_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\corpus_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\linker_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tools\Release\corpus_lowering_audit.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
 ```
 
 ---

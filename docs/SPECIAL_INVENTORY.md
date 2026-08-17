@@ -190,11 +190,14 @@ The architecture ensures:
 
 ## Part 8: Test Results
 
-- **Corpus Lowering Audit**: 1679/1679 SUCCESS
+Run canonical verifier: `.\run_all_tests.ps1 -RomPath "<Crystal ROM>"`
+
+- **Runtime Tests**: 232/232 pass
 - **Golden Tests**: 56/56 pass
-- **Runtime Tests**: 230/230 pass (including Batch 9 adversarial tests)
-- **Linker Tests**: 1679/1679 bodies linked
 - **Legality Gate Tests**: 14/14 pass
+- **Corpus Test**: PASS (decoder/CFG integrity)
+- **Corpus Lowering Audit**: 1679/1679 SUCCESS
+- **Linker Tests**: 1679/1679 bodies linked, InvalidOwnership=0
 
 ---
 
