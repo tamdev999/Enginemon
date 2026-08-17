@@ -343,12 +343,17 @@ void HeadlessGameLoop::complete_player_movement() {
 
 bool HeadlessGameLoop::update_movement() {
     // Tick movement manager
-    auto completed = movement_manager_.update();
+    // NOTE: update() returns coroutine IDs, not actor IDs.
+    // For non-script player movement, we use coroutine_id=0.
+    // The callback handles the actual actor_id dispatch.
+    auto completed_coroutine_ids = movement_manager_.update();
     
-    // Check if player movement was in the completions
-    for (uint32_t actor_id : completed) {
-        if (actor_id == 0) {
-            return true;  // Player movement completed
+    // For non-script player movement (coroutine_id = 0), check if it completed
+    for (uint32_t coroutine_id : completed_coroutine_ids) {
+        if (coroutine_id == 0) {
+            // Non-script player movement completed
+            // (The callback already called complete_player_movement)
+            return true;
         }
     }
     

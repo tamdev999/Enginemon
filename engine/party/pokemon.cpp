@@ -145,10 +145,18 @@ void Pokemon::recalculate_stats(const SpeciesData& species_data) {
 // POKEMON CREATION
 // =============================================================================
 
-Pokemon create_pokemon(SpeciesId species, uint8_t level, const Registries& reg) {
-    // Random DVs
-    std::random_device rd;
-    std::mt19937 rng(rd());
+Pokemon create_pokemon(SpeciesId species, uint8_t level, uint32_t rng_seed, const Registries& reg) {
+    // Deterministic DVs from provided seed
+    // ARCHITECTURAL NOTE: This function requires an explicit seed parameter.
+    // The seed must come from GameState::rng.next() in gameplay code.
+    // This ensures:
+    //   - Deterministic simulation (same seed → same Pokemon)
+    //   - Proper save/load (GameState RNG state is serialized)
+    //   - Multiplayer compatibility (synchronized RNG)
+    //
+    // DO NOT add std::random_device or standalone RNG here.
+    
+    std::mt19937 rng(rng_seed);
     std::uniform_int_distribution<int> dv_dist(0, 15);
     
     Pokemon::DVs dvs;

@@ -93,6 +93,23 @@ struct NpcSaveState {
 };
 
 //=============================================================================
+// DESERIALIZATION RESULT TYPES (Audit 5)
+// Explicit error handling for save loading - corrupt saves must not silently
+// become default/new-game states
+//=============================================================================
+
+enum class DeserializeError {
+    Success,
+    TruncatedData,          // Data too short
+    InvalidMagic,           // Wrong magic number
+    UnsupportedVersion,     // Schema version mismatch
+    CorruptedPayload,       // Parse error within payload
+};
+
+// Forward declaration - DeserializeResult is defined after GameState
+struct DeserializeResult;
+
+//=============================================================================
 // GAME STATE
 // Complete saveable state
 //=============================================================================
@@ -156,11 +173,31 @@ struct GameState {
     // Serialize to bytes
     std::vector<uint8_t> serialize() const;
     
-    // Deserialize from bytes
+    // Deserialize from bytes with explicit error handling (Audit 5)
+    // Returns DeserializeResult with error code - corrupt saves never silently
+    // become valid default states
+    static DeserializeResult try_deserialize(const std::vector<uint8_t>& data);
+    
+    // Legacy API - DEPRECATED, prefer try_deserialize()
+    // Returns default GameState on ANY error (can't distinguish error from empty)
+    [[deprecated("Use try_deserialize() for explicit error handling")]]
     static GameState deserialize(const std::vector<uint8_t>& data);
     
     // Validate deserialized state
     bool is_valid() const;
+};
+
+//=============================================================================
+// DESERIALIZATION RESULT (Audit 5)
+// Must be defined after GameState since it contains a GameState member
+//=============================================================================
+
+struct DeserializeResult {
+    DeserializeError error = DeserializeError::Success;
+    GameState state;
+    
+    bool ok() const { return error == DeserializeError::Success; }
+    explicit operator bool() const { return ok(); }
 };
 
 //=============================================================================

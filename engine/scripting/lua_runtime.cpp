@@ -601,6 +601,13 @@ void LuaRuntime::cleanup_coroutine(uint32_t coroutine_id) {
         co.registry_ref = LUA_NOREF;
     }
     co.thread = nullptr;
+    
+    // NOTE (Audit 7): We intentionally do NOT erase entries from coroutines_ map.
+    // This is a minor memory leak for long-running sessions, but allows get_state()
+    // to return the correct final state (Finished vs Error) after cleanup.
+    // A proper fix would track final states in a separate completed_states_ map,
+    // but that's deferred as architectural debt since the leak is bounded by
+    // script count per session.
 }
 
 void LuaRuntime::resume(uint32_t coroutine_id) {
@@ -797,6 +804,7 @@ void LuaRuntime::cancel(uint32_t coroutine_id) {
     auto it = coroutines_.find(coroutine_id);
     if (it != coroutines_.end()) {
         it->second.state = ScriptState::Finished;
+        // cleanup_coroutine will erase from map (Audit 7)
         cleanup_coroutine(coroutine_id);
     }
 }

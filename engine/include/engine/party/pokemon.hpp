@@ -100,9 +100,10 @@ struct Pokemon {
     void cure_status();
 };
 
-// Create a new Pokemon
-Pokemon create_pokemon(SpeciesId species, uint8_t level, 
-                       const struct Registries& reg);
+// Create a new Pokemon with random DVs
+// REQUIRES: rng_seed from GameState::rng.next() for determinism
+Pokemon create_pokemon(SpeciesId species, uint8_t level,
+                       uint32_t rng_seed, const struct Registries& reg);
 
 // Create with specific DVs (for starters, gifts, etc.)
 Pokemon create_pokemon(SpeciesId species, uint8_t level,

@@ -3,9 +3,13 @@
 //
 // Minimal binary format for save/load testing.
 // Not the final save format - just proving ownership boundaries.
+//
+// NOTE (Audit 8): Iteration order of unordered containers is implementation-defined.
+// Serialization MUST use canonical (sorted) ordering for deterministic output.
 
 #include "engine/core/game_state.hpp"
 #include <cstring>
+#include <algorithm>
 
 namespace enginemon {
 
@@ -151,15 +155,20 @@ std::vector<uint8_t> GameState::serialize() const {
     write_int32(out, warp_memory.backup_x);
     write_int32(out, warp_memory.backup_y);
     
-    // Flags
-    write_int32(out, static_cast<int32_t>(flags.size()));
-    for (const auto& flag : flags) {
+    // Flags - sorted for canonical ordering (Audit 8)
+    std::vector<std::string> sorted_flags(flags.begin(), flags.end());
+    std::sort(sorted_flags.begin(), sorted_flags.end());
+    write_int32(out, static_cast<int32_t>(sorted_flags.size()));
+    for (const auto& flag : sorted_flags) {
         write_string(out, flag);
     }
     
-    // Variables
-    write_int32(out, static_cast<int32_t>(variables.size()));
-    for (const auto& [key, value] : variables) {
+    // Variables - sorted for canonical ordering (Audit 8)
+    std::vector<std::pair<std::string, int32_t>> sorted_vars(variables.begin(), variables.end());
+    std::sort(sorted_vars.begin(), sorted_vars.end(), 
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    write_int32(out, static_cast<int32_t>(sorted_vars.size()));
+    for (const auto& [key, value] : sorted_vars) {
         write_string(out, key);
         write_int32(out, value);
     }
@@ -171,9 +180,13 @@ std::vector<uint8_t> GameState::serialize() const {
     // Playtime
     write_uint64(out, playtime_frames);
     
-    // NPC states per map
-    write_int32(out, static_cast<int32_t>(npc_states.size()));
-    for (const auto& [map_id, states] : npc_states) {
+    // NPC states per map - sorted by map_id for canonical ordering (Audit 8)
+    std::vector<std::pair<std::string, std::vector<NpcSaveState>>> sorted_npc_states(
+        npc_states.begin(), npc_states.end());
+    std::sort(sorted_npc_states.begin(), sorted_npc_states.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    write_int32(out, static_cast<int32_t>(sorted_npc_states.size()));
+    for (const auto& [map_id, states] : sorted_npc_states) {
         write_string(out, map_id);
         write_int32(out, static_cast<int32_t>(states.size()));
         for (const auto& npc : states) {
@@ -195,101 +208,243 @@ std::vector<uint8_t> GameState::serialize() const {
 }
 
 GameState GameState::deserialize(const std::vector<uint8_t>& data) {
-    GameState state;
+    // Legacy wrapper - uses try_deserialize internally
+    auto result = try_deserialize(data);
+    return result.state;
+}
+
+DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
+    DeserializeResult result;
     
-    if (data.size() < 8) return state;  // Invalid
+    if (data.size() < 8) {
+        result.error = DeserializeError::TruncatedData;
+        return result;
+    }
     
     const uint8_t* ptr = data.data();
     const uint8_t* end = data.data() + data.size();
     
     // Header
     int32_t magic = 0, version = 0;
-    if (!read_int32(ptr, end, magic)) return state;
-    if (!read_int32(ptr, end, version)) return state;
+    if (!read_int32(ptr, end, magic)) {
+        result.error = DeserializeError::TruncatedData;
+        return result;
+    }
+    if (!read_int32(ptr, end, version)) {
+        result.error = DeserializeError::TruncatedData;
+        return result;
+    }
     
-    if (static_cast<uint32_t>(magic) != SAVE_MAGIC) return state;
-    if (static_cast<uint32_t>(version) != SAVE_VERSION) return state;
+    if (static_cast<uint32_t>(magic) != SAVE_MAGIC) {
+        result.error = DeserializeError::InvalidMagic;
+        return result;
+    }
+    if (static_cast<uint32_t>(version) != SAVE_VERSION) {
+        result.error = DeserializeError::UnsupportedVersion;
+        return result;
+    }
+    
+    GameState& state = result.state;
     
     // Player state
-    if (!read_string(ptr, end, state.player.current_map_id)) return state;
-    if (!read_int32(ptr, end, state.player.x)) return state;
-    if (!read_int32(ptr, end, state.player.y)) return state;
+    if (!read_string(ptr, end, state.player.current_map_id)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_int32(ptr, end, state.player.x)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_int32(ptr, end, state.player.y)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     
     uint8_t facing = 0;
-    if (!read_uint8(ptr, end, facing)) return state;
+    if (!read_uint8(ptr, end, facing)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     state.player.facing = static_cast<Direction>(facing);
     
     uint8_t surfing = 0, on_bike = 0;
-    if (!read_uint8(ptr, end, surfing)) return state;
-    if (!read_uint8(ptr, end, on_bike)) return state;
+    if (!read_uint8(ptr, end, surfing)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_uint8(ptr, end, on_bike)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     state.player.surfing = surfing != 0;
     state.player.on_bike = on_bike != 0;
     
     // Warp memory
-    if (!read_string(ptr, end, state.warp_memory.map_id)) return state;
-    if (!read_int32(ptr, end, state.warp_memory.x)) return state;
-    if (!read_int32(ptr, end, state.warp_memory.y)) return state;
-    if (!read_string(ptr, end, state.warp_memory.backup_map_id)) return state;
-    if (!read_int32(ptr, end, state.warp_memory.backup_x)) return state;
-    if (!read_int32(ptr, end, state.warp_memory.backup_y)) return state;
+    if (!read_string(ptr, end, state.warp_memory.map_id)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_int32(ptr, end, state.warp_memory.x)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_int32(ptr, end, state.warp_memory.y)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_string(ptr, end, state.warp_memory.backup_map_id)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_int32(ptr, end, state.warp_memory.backup_x)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_int32(ptr, end, state.warp_memory.backup_y)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     
     // Flags
     int32_t flag_count = 0;
-    if (!read_int32(ptr, end, flag_count)) return state;
+    if (!read_int32(ptr, end, flag_count)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    // Bounds check (Audit 4)
+    if (flag_count < 0 || flag_count > 1000000) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     for (int32_t i = 0; i < flag_count; i++) {
         std::string flag;
-        if (!read_string(ptr, end, flag)) return state;
+        if (!read_string(ptr, end, flag)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
         state.flags.insert(flag);
     }
     
     // Variables
     int32_t var_count = 0;
-    if (!read_int32(ptr, end, var_count)) return state;
+    if (!read_int32(ptr, end, var_count)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    // Bounds check (Audit 4)
+    if (var_count < 0 || var_count > 1000000) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     for (int32_t i = 0; i < var_count; i++) {
         std::string key;
         int32_t value = 0;
-        if (!read_string(ptr, end, key)) return state;
-        if (!read_int32(ptr, end, value)) return state;
+        if (!read_string(ptr, end, key)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        if (!read_int32(ptr, end, value)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
         state.variables[key] = value;
     }
     
     // RNG state
-    if (!read_uint64(ptr, end, state.rng.seed)) return state;
-    if (!read_uint64(ptr, end, state.rng.state)) return state;
+    if (!read_uint64(ptr, end, state.rng.seed)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (!read_uint64(ptr, end, state.rng.state)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     
     // Playtime
-    if (!read_uint64(ptr, end, state.playtime_frames)) return state;
+    if (!read_uint64(ptr, end, state.playtime_frames)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     
     // NPC states per map (only present in version 2+)
     int32_t map_count = 0;
     if (read_int32(ptr, end, map_count)) {
+        // Bounds check (Audit 4)
+        if (map_count < 0 || map_count > 10000) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
         for (int32_t m = 0; m < map_count; m++) {
             std::string map_id;
-            if (!read_string(ptr, end, map_id)) return state;
+            if (!read_string(ptr, end, map_id)) {
+                result.error = DeserializeError::CorruptedPayload;
+                return result;
+            }
             
             int32_t npc_count = 0;
-            if (!read_int32(ptr, end, npc_count)) return state;
+            if (!read_int32(ptr, end, npc_count)) {
+                result.error = DeserializeError::CorruptedPayload;
+                return result;
+            }
+            // Bounds check (Audit 4)
+            if (npc_count < 0 || npc_count > 1000) {
+                result.error = DeserializeError::CorruptedPayload;
+                return result;
+            }
             
             std::vector<NpcSaveState> npcs;
             npcs.reserve(npc_count);
             
             for (int32_t n = 0; n < npc_count; n++) {
                 NpcSaveState npc;
-                if (!read_uint16(ptr, end, npc.id)) return state;
-                if (!read_int32(ptr, end, npc.x)) return state;
-                if (!read_int32(ptr, end, npc.y)) return state;
+                if (!read_uint16(ptr, end, npc.id)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
+                if (!read_int32(ptr, end, npc.x)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
+                if (!read_int32(ptr, end, npc.y)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
                 
                 uint8_t facing = 0;
-                if (!read_uint8(ptr, end, facing)) return state;
+                if (!read_uint8(ptr, end, facing)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
                 npc.facing = static_cast<Direction>(facing);
                 
-                if (!read_bool(ptr, end, npc.is_moving)) return state;
-                if (!read_int32(ptr, end, npc.idle_timer)) return state;
-                if (!read_int32(ptr, end, npc.target_x)) return state;
-                if (!read_int32(ptr, end, npc.target_y)) return state;
-                if (!read_int32(ptr, end, npc.move_progress)) return state;
-                if (!read_bool(ptr, end, npc.frozen)) return state;
-                if (!read_bool(ptr, end, npc.visible)) return state;
+                if (!read_bool(ptr, end, npc.is_moving)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
+                if (!read_int32(ptr, end, npc.idle_timer)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
+                if (!read_int32(ptr, end, npc.target_x)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
+                if (!read_int32(ptr, end, npc.target_y)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
+                if (!read_int32(ptr, end, npc.move_progress)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
+                if (!read_bool(ptr, end, npc.frozen)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
+                if (!read_bool(ptr, end, npc.visible)) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
                 
                 npcs.push_back(npc);
             }
@@ -298,7 +453,8 @@ GameState GameState::deserialize(const std::vector<uint8_t>& data) {
         }
     }
     
-    return state;
+    result.error = DeserializeError::Success;
+    return result;
 }
 
 bool GameState::is_valid() const {

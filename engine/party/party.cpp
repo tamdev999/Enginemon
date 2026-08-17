@@ -4,6 +4,8 @@
 #include "engine/party/party.hpp"
 #include "engine/core/registry.hpp"
 #include <algorithm>
+#include <cassert>
+#include <stdexcept>
 
 namespace enginemon {
 
@@ -210,11 +212,22 @@ PCStorage::PCStorage() : current_box_(0) {
 }
 
 PCBox& PCStorage::box(size_t index) {
-    return boxes_[std::min(index, NUM_BOXES - 1)];
+    // AUDIT 12: Programmer error must not silently return wrong object
+    // Invalid index is a programming error, not a user input issue
+    assert(index < NUM_BOXES && "PCStorage::box() index out of bounds");
+    if (index >= NUM_BOXES) {
+        throw std::out_of_range("PCStorage::box() index out of bounds: " + std::to_string(index));
+    }
+    return boxes_[index];
 }
 
 const PCBox& PCStorage::box(size_t index) const {
-    return boxes_[std::min(index, NUM_BOXES - 1)];
+    // AUDIT 12: Programmer error must not silently return wrong object
+    assert(index < NUM_BOXES && "PCStorage::box() index out of bounds");
+    if (index >= NUM_BOXES) {
+        throw std::out_of_range("PCStorage::box() index out of bounds: " + std::to_string(index));
+    }
+    return boxes_[index];
 }
 
 void PCStorage::set_current_box(size_t index) {

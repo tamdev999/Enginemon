@@ -95,8 +95,17 @@ SchedulerTickResult SimulationScheduler::advance(int64_t delta_ns) {
     
     // Calculate interpolation alpha (how far into the next tick we are)
     // 0.0 = just finished a tick, 1.0 = about to complete next tick
+    // CRITICAL (Audit 3): interpolation_alpha is for render smoothing ONLY.
+    // It must be clamped to [0.0, 1.0] even when debt is retained.
+    // Without clamping, retained debt would cause extrapolation (alpha > 1.0),
+    // which produces incorrect visual positions beyond the actual simulation state.
     result.interpolation_alpha = static_cast<float>(accumulator_ns_) / 
                                   static_cast<float>(tick_duration_ns_);
+    
+    // Clamp to prevent extrapolation when debt exceeds one tick
+    if (result.interpolation_alpha > 1.0f) {
+        result.interpolation_alpha = 1.0f;
+    }
     
     return result;
 }

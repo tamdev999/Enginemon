@@ -46,14 +46,24 @@ uint32_t calculate_crc32(const void* data, size_t size) {
 }
 
 //=============================================================================
-// SERIALIZATION HELPERS
+// SERIALIZATION HELPERS - with bounds validation (Audit 4)
 //=============================================================================
+
+// Maximum reasonable limits for package data (prevents huge allocations from malformed data)
+namespace PackageLimits {
+    constexpr uint32_t MAX_STRING_LENGTH = 64 * 1024;      // 64KB per string
+    constexpr uint32_t MAX_ARRAY_COUNT = 1024 * 1024;      // 1M elements max
+    constexpr uint32_t MAX_BLOCK_COUNT = 4 * 1024 * 1024;  // 4M blocks max
+    constexpr uint32_t MAX_CHUNK_SIZE = 256 * 1024 * 1024; // 256MB per chunk
+}
 
 template<typename T>
 static T read_le(std::istream& in) {
     T value = 0;
     for (size_t i = 0; i < sizeof(T); ++i) {
-        value |= static_cast<T>(static_cast<uint8_t>(in.get())) << (i * 8);
+        int byte = in.get();
+        if (byte == EOF) return value;  // Partial read on truncated data
+        value |= static_cast<T>(static_cast<uint8_t>(byte)) << (i * 8);
     }
     return value;
 }
@@ -61,11 +71,32 @@ static T read_le(std::istream& in) {
 static std::string read_fixed_string(std::istream& in, size_t size) {
     std::string str(size, '\0');
     in.read(str.data(), size);
+    if (!in.good() && !in.eof()) {
+        return "";  // Read error
+    }
     auto null_pos = str.find('\0');
     if (null_pos != std::string::npos) {
         str.resize(null_pos);
     }
     return str;
+}
+
+// Read a length-prefixed string with bounds validation
+static bool read_length_string(std::istream& in, std::string& out) {
+    uint16_t len = read_le<uint16_t>(in);
+    if (!in.good()) return false;
+    
+    // Bounds check: reject unreasonably large strings
+    if (len > PackageLimits::MAX_STRING_LENGTH) {
+        return false;
+    }
+    
+    out.resize(len);
+    if (len > 0) {
+        in.read(out.data(), len);
+        if (!in.good() && !in.eof()) return false;
+    }
+    return true;
 }
 
 //=============================================================================
@@ -77,9 +108,9 @@ static RuntimeWarp read_warp(std::istream& in) {
     warp.x = in.get();
     warp.y = in.get();
     warp.target_warp_index = in.get();
-    uint16_t id_len = read_le<uint16_t>(in);
-    warp.target_map_id.resize(id_len);
-    in.read(warp.target_map_id.data(), id_len);
+    if (!read_length_string(in, warp.target_map_id)) {
+        warp.target_map_id.clear();
+    }
     return warp;
 }
 
@@ -88,9 +119,9 @@ static RuntimeCoordEvent read_coord_event(std::istream& in) {
     evt.x = in.get();
     evt.y = in.get();
     evt.scene_id = read_le<uint16_t>(in);
-    uint16_t id_len = read_le<uint16_t>(in);
-    evt.script_id.resize(id_len);
-    in.read(evt.script_id.data(), id_len);
+    if (!read_length_string(in, evt.script_id)) {
+        evt.script_id.clear();
+    }
     return evt;
 }
 
@@ -109,12 +140,12 @@ static RuntimeBgEvent read_bg_event(std::istream& in) {
     }
     
     evt.quantity = in.get();
-    uint16_t script_len = read_le<uint16_t>(in);
-    evt.script_id.resize(script_len);
-    in.read(evt.script_id.data(), script_len);
-    uint16_t item_len = read_le<uint16_t>(in);
-    evt.item_id.resize(item_len);
-    in.read(evt.item_id.data(), item_len);
+    if (!read_length_string(in, evt.script_id)) {
+        evt.script_id.clear();
+    }
+    if (!read_length_string(in, evt.item_id)) {
+        evt.item_id.clear();
+    }
     return evt;
 }
 
@@ -132,15 +163,15 @@ static RuntimeObject read_object(std::istream& in) {
     obj.is_trainer = (in.get() != 0);
     obj.trainer_sight_range = in.get();
     
-    uint16_t sprite_len = read_le<uint16_t>(in);
-    obj.sprite_id.resize(sprite_len);
-    in.read(obj.sprite_id.data(), sprite_len);
-    uint16_t script_len = read_le<uint16_t>(in);
-    obj.script_id.resize(script_len);
-    in.read(obj.script_id.data(), script_len);
-    uint16_t flag_len = read_le<uint16_t>(in);
-    obj.visibility_flag.resize(flag_len);
-    in.read(obj.visibility_flag.data(), flag_len);
+    if (!read_length_string(in, obj.sprite_id)) {
+        obj.sprite_id.clear();
+    }
+    if (!read_length_string(in, obj.script_id)) {
+        obj.script_id.clear();
+    }
+    if (!read_length_string(in, obj.visibility_flag)) {
+        obj.visibility_flag.clear();
+    }
     
     return obj;
 }
@@ -160,18 +191,26 @@ static RuntimeConnection read_connection(std::istream& in) {
     
     conn.strip_offset = read_le<int32_t>(in);
     conn.strip_length = in.get();
-    uint16_t id_len = read_le<uint16_t>(in);
-    conn.target_map_id.resize(id_len);
-    in.read(conn.target_map_id.data(), id_len);
+    if (!read_length_string(in, conn.target_map_id)) {
+        conn.target_map_id.clear();
+    }
     return conn;
 }
 
+// Read counted array with bounds validation (Audit 4)
 template<typename T>
 static std::vector<T> read_counted_array(std::istream& in, T (*read_item)(std::istream&)) {
     uint32_t count = read_le<uint32_t>(in);
+    
+    // Bounds check: reject unreasonably large counts
+    if (count > PackageLimits::MAX_ARRAY_COUNT) {
+        return {};  // Return empty on malformed data
+    }
+    
     std::vector<T> arr;
     arr.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
+        if (!in.good()) break;  // Stop on stream error
         arr.push_back(read_item(in));
     }
     return arr;
@@ -222,8 +261,11 @@ static RuntimeMap deserialize_map(const std::vector<uint8_t>& data) {
     in.get();  // padding
     in.get();  // padding
     
-    // Block data
+    // Block data with bounds validation (Audit 4)
     uint32_t block_count = read_le<uint32_t>(in);
+    if (block_count > PackageLimits::MAX_BLOCK_COUNT) {
+        return map;  // Return partial map on malformed data
+    }
     map.blocks.resize(block_count);
     in.read(reinterpret_cast<char*>(map.blocks.data()), block_count);
     
