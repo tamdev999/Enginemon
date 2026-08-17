@@ -1,5 +1,93 @@
 # Current Status
 
+## Expanded Corpus Lowering Closure - COMPLETED ✓
+
+**SUCCESS**: All 1679 script bodies discovered through fixed-point deferred iteration now compile successfully through the typed script pipeline. The corpus closure is complete with proper native semantics.
+
+### Production Metrics (Post-Corpus Closure)
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Total unique bodies | 1679 | ✅ |
+| Bodies compiling | 1679 | ✅ |
+| Decode failures | 0 | ✅ |
+| CFG failures | 0 | ✅ |
+| Lowering failures | 0 | ✅ |
+| Legality failures | 0 | ✅ |
+
+### Failing Commands Fixed
+
+| Body Root | Address | Opcode | Command | Lowering |
+|-----------|---------|--------|---------|----------|
+| 0x9f421 | 0x9f433 | 0xa4 | battletowertext | Sem_TrainerText{domain=BattleTower, text_id} |
+| 0x9f421 | 0x9f442 | 0x19 | readmem 0xcf64 | Sem_ReadStateVar(BattleTowerBeatenTrainers) |
+| 0x9f5c1 | 0x9f5c4 | 0x0e | callasm 0x9f5cb | Sem_ReadStateVar(BattleTowerLevelGroup) |
+
+### New Semantic State Variables
+
+Added to `WellKnownStateVar` enum in `engine/include/engine/core/types.hpp`:
+
+| StateVar | ID | RAM Address | Description |
+|----------|----|-----------:|-------------|
+| BattleTowerBeatenTrainers | 4 | 0xcf64 | Streak counter (0-7) |
+| BattleTowerLevelGroup | 5 | SRAM | Selected level group (1-10) |
+
+### Registry Additions
+
+**RamAddressRegistry** (`native_registry.cpp`):
+- `wNrOfBeatenBattleTowerTrainers` at 0xcf64 - Battle Tower streak counter
+
+**NativeCallRegistry** (`native_registry.cpp`):
+- `BattleTowerHallway.asm_load_battle_room` at 0x9f5cb - Reads level group to wScriptVar
+
+### Battle Tower Text - Native Semantics ✓
+
+The `battletowertext` command (opcode 0xa4) is now properly lowered to `Sem_TrainerText{domain=BattleTower, text_id}`.
+
+**TrainerTextDomain enum** added to `semantic_ir.hpp`:
+- `Normal` - Standard trainer battle text (trainertext opcode 0x62)
+- `BattleTower` - Battle Tower text pool (battletowertext opcode 0xa4)
+
+**Source-proven semantics** from `pokecrystal/engine/events/battle_tower/trainer_text.asm`:
+- bttext_id: 1=Intro, 2=PlayerLost, 3=PlayerWon
+- Reads wBT_OTTrainerClass for trainer gender selection
+- For bttext_id=1: generates random index 0-24 (male) or 0-14 (female), stores in wBT_TrainerTextIndex
+- For bttext_id=2,3: reuses stored index for consistency across intro/win/loss
+- Selects from BTMaleTrainerTexts (25 variants) or BTFemaleTrainerTexts (15 variants)
+
+**What is NOT encoded**:
+- Crystal opcode numbers (0x62, 0xa4)
+- ROM text pointer addresses
+- wBT_OTTrainerClass RAM address
+- wBT_TrainerTextIndex RAM address
+- Text table ROM addresses
+
+### Adversarial Test Coverage
+
+7 new tests added to `runtime_test.cpp`:
+- `corpus_battletowertext_produces_trainer_text` - verifies IDs 1,2,3 → Sem_TrainerText{BattleTower}
+- `corpus_battletowertext_no_sem_special` - proves NO Sem_Special escape hatch
+- `corpus_battletowertext_distinct_from_normal_trainer_text` - proves domain distinction
+- `corpus_readmem_0xcf64_produces_read_state_var` - verifies BattleTowerBeatenTrainers lowering
+- `corpus_readmem_nearby_addresses_rejected` - adversarial: 0xcf63, 0xcf65 etc. NOT lowered
+- `corpus_callasm_0x9f5cb_produces_read_state_var` - verifies BattleTowerLevelGroup lowering
+- `corpus_callasm_nearby_addresses_rejected` - adversarial: nearby native addresses NOT lowered
+
+### Test Results
+
+- **corpus_lowering_audit**: 1679/1679 SUCCESS
+- **Golden Tests**: 56/56 pass
+- **Runtime Tests**: 223/223 pass (216 original + 7 new adversarial tests)
+- **Linker Tests**: 1362/1362 bodies linked
+- **Legality Gate Tests**: 14/14 pass
+
+### Git Commits
+
+- `1bc3526` - Corpus closure: Add lowering rules for Battle Tower deferred scripts
+- `89a7574` - scripts: give Battle Tower text native semantics (CORRECTIVE)
+
+---
+
 ## Fixed-Point Deferred Script Discovery - COMPLETED ✓
 
 **SUCCESS**: The production compiler now discovers sdefer (deferred script) targets as separate executable roots through fixed-point iteration. The corpus has expanded from 1635 to 1679 script bodies.
@@ -80,13 +168,13 @@ Therefore:
 - **Runtime Tests**: 216/216 pass
 - **Special 152 Verification**: 5/5 addresses found ✓
 
-### Known Issue: New Deferred Bodies Require More Lowering Rules
+### Known Issue: RESOLVED ✓
 
-Some newly discovered deferred script bodies contain opcodes without lowering rules yet:
-- opcode 0xa4 at 0x9f433
-- opcode 0x19 at 0x9f442
+~~Some newly discovered deferred script bodies contain opcodes without lowering rules yet:~~
+- ~~opcode 0xa4 at 0x9f433~~
+- ~~opcode 0x19 at 0x9f442~~
 
-These are NOT Pokecenter2F scripts - they are deferred targets from other maps discovered through fixed-point iteration. The deferred discovery is correct; the lowering rules need to be expanded.
+**FIXED**: All three failing opcodes (battletowertext 0xa4, readmem 0x19, callasm 0x0e) now have lowering rules. See "Expanded Corpus Lowering Closure" section above.
 
 ---
 
