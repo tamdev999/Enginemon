@@ -9444,6 +9444,213 @@ TEST(scheduler_total_ticks_equals_elapsed_time) {
 }
 
 //=============================================================================
+// Coroutine Lifecycle Adversarial Tests
+// Proves: cleanup_coroutine() called on terminal paths, no stale entries
+//=============================================================================
+
+TEST(lua_coroutine_cleanup_via_resume) {
+    // INVARIANT: After coroutine finishes via resume(), the active entry is
+    // removed and registry ref is released. get_state() returns correct final state.
+    LuaRuntime runtime;
+    
+    // Script that completes immediately (no yield)
+    const char* immediate_script = R"lua(
+        script = {
+            main = function(ctx)
+                return 42
+            end
+        }
+    )lua";
+    
+    runtime.execute_string(immediate_script, "immediate");
+    uint32_t coro_id = runtime.start_script("script");
+    
+    // Script should have finished immediately in start_script
+    ScriptState state = runtime.get_state(coro_id);
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Finished));
+    
+    // Verify no active coroutine entries remain (has_active_scripts should be false)
+    ASSERT_FALSE(runtime.has_active_scripts());
+    
+    std::cout << "  [Immediate completion cleans up ✓]\n";
+    
+    // Script that yields once then finishes
+    const char* yield_once_script = R"lua(
+        script = {
+            main = function(ctx)
+                coroutine.yield("dialog")
+                return 1
+            end
+        }
+    )lua";
+    
+    runtime.execute_string(yield_once_script, "yield_once");
+    coro_id = runtime.start_script("script");
+    
+    // Should be yielded
+    state = runtime.get_state(coro_id);
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Yielded));
+    ASSERT_TRUE(runtime.has_active_scripts());
+    
+    // Resume via resume() - should complete
+    runtime.resume(coro_id);
+    
+    state = runtime.get_state(coro_id);
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Finished));
+    ASSERT_FALSE(runtime.has_active_scripts());
+    
+    std::cout << "  [Yield+resume completion cleans up ✓]\n";
+}
+
+TEST(lua_coroutine_cleanup_via_resume_with_result) {
+    // INVARIANT: After coroutine finishes via resume_with_result(), the active
+    // entry is removed and registry ref is released - same behavior as resume().
+    LuaRuntime runtime;
+    
+    // Script that yields for choice then finishes
+    const char* choice_script = R"lua(
+        script = {
+            main = function(ctx)
+                local result = coroutine.yield("choice")
+                return result  -- Return the choice result
+            end
+        }
+    )lua";
+    
+    runtime.execute_string(choice_script, "choice");
+    uint32_t coro_id = runtime.start_script("script");
+    
+    // Should be yielded waiting for choice
+    ScriptState state = runtime.get_state(coro_id);
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Yielded));
+    ASSERT_EQ(static_cast<int>(runtime.get_yield_reason(coro_id)), 
+              static_cast<int>(YieldReason::Choice));
+    ASSERT_TRUE(runtime.has_active_scripts());
+    
+    // Resume with result - should complete and clean up
+    runtime.resume_with_result(coro_id, 1);  // User chose option 1
+    
+    state = runtime.get_state(coro_id);
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Finished));
+    
+    // CRITICAL: No stale active entry should remain
+    ASSERT_FALSE(runtime.has_active_scripts());
+    
+    std::cout << "  [resume_with_result() cleans up on completion ✓]\n";
+    
+    // Test error path via resume_with_error
+    const char* error_script = R"lua(
+        script = {
+            main = function(ctx)
+                local result = coroutine.yield("dialog")
+                return result
+            end
+        }
+    )lua";
+    
+    runtime.execute_string(error_script, "error_test");
+    coro_id = runtime.start_script("script");
+    
+    state = runtime.get_state(coro_id);
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Yielded));
+    ASSERT_TRUE(runtime.has_active_scripts());
+    
+    // Inject error - should clean up
+    runtime.resume_with_error(coro_id, "injected test error");
+    
+    state = runtime.get_state(coro_id);
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Error));
+    ASSERT_FALSE(runtime.has_active_scripts());
+    
+    std::cout << "  [resume_with_error() cleans up on error ✓]\n";
+}
+
+TEST(npc_destination_occupancy_blocks_conflicting_movement) {
+    // INVARIANT: When an NPC is moving toward a destination tile, another entity
+    // attempting to move to that same tile should be blocked.
+    // Reference: Gen2Recomped Collision.occupied() checks both cellX/Y AND targetX/Y
+    
+    HeadlessGameLoop loop;
+    GameState gs;
+    loop.set_game_state(&gs);
+    loop.set_rng_seed(12345);
+    
+    // Create a simple 10x10 map (width/height in tiles)
+    RuntimeMap rtmap;
+    rtmap.width = 20;
+    rtmap.height = 20;
+    rtmap.blocks.resize(100, 0);
+    
+    loop.load_map(rtmap);
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        if (x < 0 || y < 0 || x >= 20 || y >= 20) return CollisionClass::Wall;
+        return CollisionClass::Floor;
+    });
+    
+    // NPC 1 at (5,5), currently moving toward (6,5) - destination reserved
+    NpcState npc1;
+    npc1.id = 1;
+    npc1.x = 5;
+    npc1.y = 5;
+    npc1.target_x = 6;  // Destination is (6,5)
+    npc1.target_y = 5;
+    npc1.is_moving = true;
+    npc1.move_progress = 8;  // Midway through step
+    npc1.facing = enginemon::Direction::Right;
+    npc1.behavior = NpcMovementBehavior::Standing;
+    npc1.visible = true;
+    npc1.frozen = true;  // Freeze to prevent behavior updates
+    loop.add_npc(npc1);
+    
+    // Player at (7,5) trying to move left to (6,5) - should be blocked
+    loop.spawn_player(7, 5, enginemon::Direction::Left);
+    
+    InputResult result = loop.process_input(InputAction::MoveLeft);
+    
+    // Should be blocked because NPC1's destination is (6,5)
+    ASSERT_TRUE(result.blocked);
+    ASSERT_STR_EQ(result.block_reason, "entity");
+    
+    std::cout << "  [Player blocked by NPC moving toward same tile ✓]\n";
+    
+    // Now test that the NPC's current position (5,5) is also blocked
+    loop.spawn_player(4, 5, enginemon::Direction::Right);
+    
+    result = loop.process_input(InputAction::MoveRight);
+    
+    // Should be blocked because NPC1's current position is (5,5)
+    ASSERT_TRUE(result.blocked);
+    ASSERT_STR_EQ(result.block_reason, "entity");
+    
+    std::cout << "  [Player blocked by NPC's current position ✓]\n";
+    
+    // Test: NPC not moving - target_x/y equals x/y, only current position blocked
+    loop.clear_npcs();
+    
+    NpcState npc2;
+    npc2.id = 2;
+    npc2.x = 5;
+    npc2.y = 5;
+    npc2.target_x = 5;  // Not moving - target equals current
+    npc2.target_y = 5;
+    npc2.is_moving = false;
+    npc2.facing = enginemon::Direction::Down;
+    npc2.behavior = NpcMovementBehavior::Standing;
+    npc2.visible = true;
+    loop.add_npc(npc2);
+    
+    // Player at (7,5) can now move to (6,5) because NPC2 isn't targeting it
+    loop.spawn_player(7, 5, enginemon::Direction::Left);
+    
+    result = loop.process_input(InputAction::MoveLeft);
+    
+    ASSERT_TRUE(result.accepted);
+    ASSERT_FALSE(result.blocked);
+    
+    std::cout << "  [Player allowed when NPC not targeting destination ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -9774,6 +9981,13 @@ int main(int argc, char* argv[]) {
     RUN_TEST(scheduler_2_second_hitch_retains_debt);
     RUN_TEST(scheduler_repeated_updates_catch_up);
     RUN_TEST(scheduler_total_ticks_equals_elapsed_time);
+    
+    // Coroutine lifecycle adversarial tests (Audit 7 fix verification)
+    RUN_TEST(lua_coroutine_cleanup_via_resume);
+    RUN_TEST(lua_coroutine_cleanup_via_resume_with_result);
+    
+    // NPC destination occupancy adversarial test (Audit 7 fix verification)
+    RUN_TEST(npc_destination_occupancy_blocks_conflicting_movement);
     
     // Summary
     std::cout << "\n=== Results ===\n";

@@ -720,23 +720,71 @@ void LuaRuntime::resume_with_result(uint32_t coroutine_id, int result) {
     int nres = 0;
     int status = lua_resume(co.thread, L_, 1, &nres);
     
-    // Handle result same as resume()
+    // Handle result - MUST use same finalization as resume()
     if (status == LUA_OK) {
+        // Script finished - clean up registry ref and active entry
         co.state = ScriptState::Finished;
-        lua_pop(co.thread, nres);
+        if (nres > 0) lua_pop(co.thread, nres);
+        cleanup_coroutine(coroutine_id);  // FIX: Was missing!
     }
     else if (status == LUA_YIELD) {
         co.state = ScriptState::Yielded;
-        // Parse yield reason...
-        lua_pop(co.thread, nres);
+        
+        // Parse yield reason (same as resume())
+        if (nres > 0 && lua_isstring(co.thread, -nres)) {
+            std::string yield_type = lua_tostring(co.thread, -nres);
+            
+            if (yield_type == "wait_frames") {
+                co.yield_reason = YieldReason::WaitFrames;
+                if (nres > 1 && lua_isinteger(co.thread, -nres + 1)) {
+                    co.wait_frames = static_cast<int>(lua_tointeger(co.thread, -nres + 1));
+                }
+            }
+            else if (yield_type == "wait_seconds") {
+                co.yield_reason = YieldReason::WaitSeconds;
+                if (nres > 1 && lua_isnumber(co.thread, -nres + 1)) {
+                    co.wait_seconds = static_cast<float>(lua_tonumber(co.thread, -nres + 1));
+                }
+            }
+            else if (yield_type == "wait_button" || yield_type == "dialog") {
+                co.yield_reason = YieldReason::Dialog;
+            }
+            else if (yield_type == "choice") {
+                co.yield_reason = YieldReason::Choice;
+            }
+            else if (yield_type == "movement") {
+                co.yield_reason = YieldReason::Movement;
+            }
+            else if (yield_type == "fade") {
+                co.yield_reason = YieldReason::Fade;
+            }
+            else if (yield_type == "battle") {
+                co.yield_reason = YieldReason::Battle;
+            }
+            else if (yield_type == "warp") {
+                co.yield_reason = YieldReason::Warp;
+            }
+            else {
+                co.yield_reason = YieldReason::Custom;
+            }
+        }
+        if (nres > 0) lua_pop(co.thread, nres);
     }
     else {
+        // Error - clean up registry ref and active entry
         co.state = ScriptState::Error;
         std::string error = lua_tostring(co.thread, -1);
-        lua_pop(co.thread, 1);
+        std::string traceback;
+        luaL_traceback(co.thread, co.thread, error.c_str(), 1);
+        traceback = lua_tostring(co.thread, -1);
+        lua_pop(co.thread, 2);
+        
         if (error_handler_) {
-            error_handler_(error, "");
+            error_handler_(error, traceback);
+        } else {
+            std::cerr << "Script error: " << error << "\n" << traceback << "\n";
         }
+        cleanup_coroutine(coroutine_id);  // FIX: Was missing!
     }
 }
 
@@ -749,6 +797,9 @@ void LuaRuntime::resume_with_error(uint32_t coroutine_id, const std::string& err
     if (error_handler_) {
         error_handler_(error, "");
     }
+    
+    // FIX: Clean up registry ref and active entry on error path
+    cleanup_coroutine(coroutine_id);
 }
 
 void LuaRuntime::update(float delta_time) {

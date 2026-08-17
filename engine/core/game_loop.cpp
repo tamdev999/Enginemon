@@ -219,8 +219,12 @@ std::vector<CollisionEntity> HeadlessGameLoop::build_collision_entities() const 
         entity.id = npc.id;
         entity.x = npc.x;
         entity.y = npc.y;
-        entity.target_x = npc.x;
-        entity.target_y = npc.y;
+        // FIX: Use actual target position from NPC state when moving
+        // Reference: Gen2Recomped Collision.occupied() checks both cellX/Y AND targetX/Y
+        // During movement, both source tile (x,y) and destination tile (target_x,target_y)
+        // must be reserved to prevent other entities from moving into the destination
+        entity.target_x = npc.target_x;
+        entity.target_y = npc.target_y;
         entity.is_moving = npc.is_moving;
         entity.is_passable = false;
         entities.push_back(entity);
