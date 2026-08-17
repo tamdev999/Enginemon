@@ -40,31 +40,6 @@ namespace ui_api {
 // - Runtime B text operation → calls Runtime B's hooks only
 // =============================================================================
 
-// DEPRECATED: Process-global callback setters
-// These remain for backward compatibility during transition.
-// New code should use: runtime.get_presentation_hooks().open_text = ...
-// TODO: Remove after all callers are updated to use per-runtime hooks
-
-void set_open_text_callback(VoidCallback cb) {
-    // DEPRECATED - no-op, use runtime.get_presentation_hooks() instead
-    (void)cb;
-}
-
-void set_close_text_callback(VoidCallback cb) {
-    // DEPRECATED - no-op, use runtime.get_presentation_hooks() instead
-    (void)cb;
-}
-
-void set_text_callback(TextCallback cb) {
-    // DEPRECATED - no-op, use runtime.get_presentation_hooks() instead
-    (void)cb;
-}
-
-void set_text_sequence_callback(TextSequenceCallback cb) {
-    // DEPRECATED - no-op, use runtime.get_presentation_hooks() instead
-    (void)cb;
-}
-
 // ctx.ui:open_text()
 int open_text(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);

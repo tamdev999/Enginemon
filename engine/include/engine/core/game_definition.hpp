@@ -38,9 +38,6 @@ struct MapData {
     // Tile indices into tileset
     std::vector<uint8_t> tiles;
     
-    // Collision data (parallel to tiles)
-    std::vector<uint8_t> collision;
-    
     // Border block for out-of-bounds
     uint8_t border_block;
     

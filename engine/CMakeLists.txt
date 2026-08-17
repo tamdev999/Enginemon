@@ -18,7 +18,6 @@ add_library(enginemon_engine STATIC
     world/collision.cpp
     world/interaction.cpp
     world/world_manager.cpp
-    world/tileset_atlas.cpp
     world/runtime_tileset.cpp
     world/sprite_atlas.cpp
     

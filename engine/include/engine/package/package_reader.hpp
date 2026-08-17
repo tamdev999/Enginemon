@@ -52,9 +52,6 @@ public:
         return load_tileset_data(tileset_id);
     }
     
-    // Load collision data
-    std::optional<std::vector<uint8_t>> load_collision(const std::string& tileset_id) const;
-    
     // Load font atlas (raw package data)
     std::optional<std::vector<uint8_t>> load_font_atlas(const std::string& font_id) const;
     

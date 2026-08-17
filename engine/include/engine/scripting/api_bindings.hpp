@@ -218,18 +218,6 @@ namespace ui_api {
     using VoidCallback = std::function<void()>;
     using TextSequenceCallback = std::function<void(const RuntimeTextSequence&)>;
     
-    // DEPRECATED: Process-global callback setters
-    // These are no-ops - use runtime.get_presentation_hooks() instead
-    // Each LuaRuntime instance owns its own PresentationHooks for proper isolation
-    [[deprecated("Use LuaRuntime::get_presentation_hooks() instead")]]
-    void set_open_text_callback(VoidCallback cb);
-    [[deprecated("Use LuaRuntime::get_presentation_hooks() instead")]]
-    void set_close_text_callback(VoidCallback cb);
-    [[deprecated("Use LuaRuntime::get_presentation_hooks() instead")]]
-    void set_text_callback(TextCallback cb);
-    [[deprecated("Use LuaRuntime::get_presentation_hooks() instead")]]
-    void set_text_sequence_callback(TextSequenceCallback cb);
-    
     // ctx.ui:open_text()
     // Opens a text box UI
     int open_text(lua_State* L);

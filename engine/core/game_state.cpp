@@ -208,22 +208,6 @@ std::vector<uint8_t> GameState::serialize() const {
     return out;
 }
 
-GameState GameState::deserialize(const std::vector<uint8_t>& data) {
-    // Legacy wrapper - ALWAYS throws on error
-    // Production code must handle load failures explicitly.
-    // Use try_deserialize() for non-throwing error handling.
-    auto result = try_deserialize(data);
-    if (!result.ok()) {
-        throw std::runtime_error("GameState::deserialize() failed: " + 
-            std::string(result.error == DeserializeError::TruncatedData ? "TruncatedData" :
-                       result.error == DeserializeError::InvalidMagic ? "InvalidMagic" :
-                       result.error == DeserializeError::UnsupportedVersion ? "UnsupportedVersion" :
-                       result.error == DeserializeError::CorruptedPayload ? "CorruptedPayload" :
-                       "Unknown"));
-    }
-    return result.state;
-}
-
 DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
     DeserializeResult result;
     

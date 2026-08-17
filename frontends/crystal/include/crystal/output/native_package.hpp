@@ -201,8 +201,6 @@ public:
     std::vector<std::string> list_tilesets() const;
     std::optional<std::vector<uint8_t>> load_tileset_atlas(const std::string& tileset_id) const;
     
-    std::optional<std::vector<uint8_t>> load_collision(const std::string& tileset_id) const;
-    
     // Load font atlas
     std::optional<std::vector<uint8_t>> load_font_atlas(const std::string& font_id) const;
     

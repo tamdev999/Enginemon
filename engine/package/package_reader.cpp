@@ -604,12 +604,6 @@ std::optional<std::vector<uint8_t>> PackageReader::load_tileset_data(
     return read_indexed_chunk(ChunkType::TilesetAtlases, tileset_id, tileset_index_);
 }
 
-std::optional<std::vector<uint8_t>> PackageReader::load_collision(
-    const std::string& tileset_id) const {
-    // TODO: Implement if needed
-    return std::nullopt;
-}
-
 std::optional<std::vector<uint8_t>> PackageReader::load_font_atlas(
     const std::string& font_id) const {
     return read_indexed_chunk(ChunkType::Fonts, font_id, font_index_);

@@ -3711,7 +3711,9 @@ TEST(gamestate_serialize_roundtrip) {
     auto bytes = original.serialize();
     ASSERT_TRUE(bytes.size() > 0);
     
-    GameState restored = GameState::deserialize(bytes);
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+    GameState& restored = result.state;
     ASSERT_TRUE(restored.is_valid());
     
     ASSERT_STR_EQ(restored.player.current_map_id.c_str(), "new_bark_town");
@@ -3732,7 +3734,9 @@ TEST(gamestate_flags_persist) {
     original.set_flag("BADGE_ZEPHYR");
     
     auto bytes = original.serialize();
-    GameState restored = GameState::deserialize(bytes);
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+    GameState& restored = result.state;
     
     ASSERT_TRUE(restored.check_flag("MET_PROFESSOR_ELM"));
     ASSERT_TRUE(restored.check_flag("RECEIVED_STARTER"));
@@ -3751,7 +3755,9 @@ TEST(gamestate_variables_persist) {
     original.set_var("ZERO_VAR", 0);
     
     auto bytes = original.serialize();
-    GameState restored = GameState::deserialize(bytes);
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+    GameState& restored = result.state;
     
     ASSERT_EQ(restored.get_var("PLAYER_MONEY"), 3000);
     ASSERT_EQ(restored.get_var("SCORE"), -50);
@@ -3773,7 +3779,9 @@ TEST(gamestate_warp_memory_persist) {
     original.warp_memory.backup_y = 10;
     
     auto bytes = original.serialize();
-    GameState restored = GameState::deserialize(bytes);
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+    GameState& restored = result.state;
     
     ASSERT_STR_EQ(restored.warp_memory.map_id.c_str(), "new_bark_town");
     ASSERT_EQ(restored.warp_memory.x, 12);
@@ -3791,7 +3799,9 @@ TEST(gamestate_rng_persist) {
     original.rng.state = 0x12345678ABCDEF00ULL;
     
     auto bytes = original.serialize();
-    GameState restored = GameState::deserialize(bytes);
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+    GameState& restored = result.state;
     
     ASSERT_EQ(restored.rng.seed, 0xDEADBEEF);
     ASSERT_EQ(restored.rng.state, 0x12345678ABCDEF00ULL);
@@ -3819,7 +3829,9 @@ TEST(save_mutate_load_identical) {
     state1.clear_flag("FLAG_A");
     
     // Load from saved bytes
-    GameState state2 = GameState::deserialize(saved_bytes);
+    auto result = GameState::try_deserialize(saved_bytes);
+    ASSERT_TRUE(result.ok());
+    GameState& state2 = result.state;
     
     // state2 should have original values, not mutated ones
     ASSERT_EQ(state2.player.x, 5);
@@ -3868,55 +3880,40 @@ TEST(gamestate_serialize_insertion_order_determinism) {
     std::cout << "  [Same state, different insertion order → byte-identical serialization ✓]\n";
 }
 
-TEST(gamestate_deserialize_malformed_throws) {
-    // CRITICAL (Audit A): Malformed input MUST throw, never return default GameState
-    // This tests that release builds get explicit load failure, not silent corruption.
+TEST(gamestate_deserialize_malformed_rejects) {
+    // CRITICAL (Audit A): Malformed input MUST be rejected, never return valid GameState
+    // This tests that try_deserialize() returns explicit error codes for invalid input.
     
     // Test 1: Truncated data
     std::vector<uint8_t> truncated = {0x45, 0x4E, 0x47, 0x4D};  // Just magic, no version
-    bool threw_truncated = false;
-    try {
-        GameState::deserialize(truncated);
-    } catch (const std::runtime_error& e) {
-        threw_truncated = true;
-        ASSERT_STR_CONTAINS(e.what(), "Truncated");
-    }
-    ASSERT_TRUE(threw_truncated);
+    auto result_truncated = GameState::try_deserialize(truncated);
+    ASSERT_FALSE(result_truncated.ok());
+    ASSERT_EQ(static_cast<int>(result_truncated.error), 
+              static_cast<int>(DeserializeError::TruncatedData));
     
     // Test 2: Invalid magic
     std::vector<uint8_t> bad_magic = {0xDE, 0xAD, 0xBE, 0xEF, 0x02, 0x00, 0x00, 0x00};
-    bool threw_magic = false;
-    try {
-        GameState::deserialize(bad_magic);
-    } catch (const std::runtime_error& e) {
-        threw_magic = true;
-        ASSERT_STR_CONTAINS(e.what(), "InvalidMagic");
-    }
-    ASSERT_TRUE(threw_magic);
+    auto result_magic = GameState::try_deserialize(bad_magic);
+    ASSERT_FALSE(result_magic.ok());
+    ASSERT_EQ(static_cast<int>(result_magic.error), 
+              static_cast<int>(DeserializeError::InvalidMagic));
     
     // Test 3: Unsupported version (magic OK, version too high)
     // SAVE_MAGIC = 0x454E474D, in little-endian: 0x4D, 0x47, 0x4E, 0x45
     std::vector<uint8_t> bad_version = {0x4D, 0x47, 0x4E, 0x45, 0xFF, 0x00, 0x00, 0x00};
-    bool threw_version = false;
-    try {
-        GameState::deserialize(bad_version);
-    } catch (const std::runtime_error& e) {
-        threw_version = true;
-        ASSERT_STR_CONTAINS(e.what(), "UnsupportedVersion");
-    }
-    ASSERT_TRUE(threw_version);
+    auto result_version = GameState::try_deserialize(bad_version);
+    ASSERT_FALSE(result_version.ok());
+    ASSERT_EQ(static_cast<int>(result_version.error), 
+              static_cast<int>(DeserializeError::UnsupportedVersion));
     
     // Test 4: Empty data
     std::vector<uint8_t> empty;
-    bool threw_empty = false;
-    try {
-        GameState::deserialize(empty);
-    } catch (const std::runtime_error& e) {
-        threw_empty = true;
-    }
-    ASSERT_TRUE(threw_empty);
+    auto result_empty = GameState::try_deserialize(empty);
+    ASSERT_FALSE(result_empty.ok());
+    ASSERT_EQ(static_cast<int>(result_empty.error), 
+              static_cast<int>(DeserializeError::TruncatedData));
     
-    std::cout << "  [Malformed input throws in all cases: truncated, bad_magic, bad_version, empty ✓]\n";
+    std::cout << "  [Malformed input rejected in all cases: truncated, bad_magic, bad_version, empty ✓]\n";
 }
 
 TEST(scheduler_interpolation_alpha_clamped) {
@@ -4956,7 +4953,9 @@ TEST(npc_rng_save_restore_determinism) {
     }
     
     // Restore from save
-    GameState restored_state = GameState::deserialize(saved_bytes);
+    auto deser_result = GameState::try_deserialize(saved_bytes);
+    ASSERT_TRUE(deser_result.ok());
+    GameState& restored_state = deser_result.state;
     
     // Verify NPC state was serialized/deserialized
     ASSERT_TRUE(restored_state.npc_states.count("test_map") > 0);
@@ -9601,7 +9600,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(gamestate_rng_persist);
     RUN_TEST(save_mutate_load_identical);
     RUN_TEST(gamestate_serialize_insertion_order_determinism);
-    RUN_TEST(gamestate_deserialize_malformed_throws);
+    RUN_TEST(gamestate_deserialize_malformed_rejects);
     RUN_TEST(scheduler_interpolation_alpha_clamped);
     
     // Multi-page text state machine tests

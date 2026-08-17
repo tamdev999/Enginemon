@@ -1073,12 +1073,6 @@ std::optional<std::vector<uint8_t>> PackageReader::load_tileset_atlas(
     return data;
 }
 
-std::optional<std::vector<uint8_t>> PackageReader::load_collision(
-    const std::string& tileset_id) const {
-    // TODO: Implement
-    return std::nullopt;
-}
-
 std::optional<std::vector<uint8_t>> PackageReader::load_font_atlas(
     const std::string& font_id) const {
     // Find fonts chunk

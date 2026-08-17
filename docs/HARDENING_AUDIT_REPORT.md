@@ -14,7 +14,7 @@
 |----------|-------|
 | CONFIRMED BUG — Fixed | 5 |
 | VERIFIED CLEAN | 2 |
-| PARTIALLY COMPLETE — Deferred | 1 |
+| COMPLETE | 1 |
 
 All fixes verified with full regression:
 - runtime_test: 232/232 PASS
@@ -108,29 +108,27 @@ namespace PackageLimits {
 
 ---
 
-### Item 5: Crystal Collision Boundary — PARTIALLY COMPLETE, DEFERRED
+### Item 5: Crystal Collision Boundary — COMPLETE
 
 **Audit claim:** `johto_collision.hpp` in engine interprets Crystal-specific collision byte values, violating compiler/runtime boundary.
 
-**Verification:** TRUE — The collision interpretation is correct behavior but wrong module location.
+**Status:** COMPLETE — The collision system now operates ONLY on semantic `CollisionClass` values. All raw Crystal byte interpretation has been removed from the generic engine and runtime.
 
-**Partial fix implemented:**
+**Implementation:**
 - Created semantic `CollisionClass` enum in `engine/include/engine/world/collision_types.hpp`
 - Created Crystal frontend classifier in `frontends/crystal/include/crystal/world/collision_classifier.hpp`
-- Deprecated raw byte functions in `engine/include/engine/world/johto_collision.hpp`
+- `HeadlessGameLoop::set_collision_data()` takes `std::function<CollisionClass(...)>` (not `uint8_t`)
+- `RuntimeTileset::collision` stores `std::vector<CollisionClass>` (not raw bytes)
+- `CollisionMap::get_collision()` returns `CollisionClass` (not `uint8_t`)
+- All collision queries use semantic functions (`collision_is_walkable()`, etc.)
+- Legacy raw byte collision artifacts removed
 
-**NOT YET DONE:**
-- Package format change to store `CollisionClass` instead of raw bytes
-- Runtime migration to use semantic types throughout
-
-**Decision:** Partial implementation provides the correct abstractions. Full migration deferred as it requires package format versioning and runtime changes. Current implementation is functionally correct.
-
-**Files created:**
-- `engine/include/engine/world/collision_types.hpp` — Semantic collision enum
+**Files changed:**
+- `engine/include/engine/world/collision_types.hpp` — Semantic collision enum and query functions
 - `frontends/crystal/include/crystal/world/collision_classifier.hpp` — Crystal→semantic translator
-
-**Files modified:**
-- `engine/include/engine/world/johto_collision.hpp` — Added deprecation warnings
+- `engine/include/engine/world/johto_collision.hpp` — Updated for semantic types
+- `engine/core/game_loop.cpp` — Semantic collision callback interface
+- `tests/scripting/runtime_test.cpp` — Adversarial semantic boundary tests
 
 ---
 
@@ -233,8 +231,4 @@ corpus_lowering_audit: 1679/1679 PASS
 
 ## Remaining Architectural Debt
 
-The following item is documented as known debt, not a correctness bug:
-
-1. **Crystal collision full migration** — Semantic types created, full package/runtime migration deferred
-
-This may be addressed in future work but does not affect gameplay correctness or determinism.
+None. All hardening items are complete.

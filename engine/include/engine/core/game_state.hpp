@@ -178,11 +178,6 @@ struct GameState {
     // become valid default states
     static DeserializeResult try_deserialize(const std::vector<uint8_t>& data);
     
-    // Legacy API - throws on ANY error (Audit A: release builds must not silently succeed)
-    // Use try_deserialize() if you need non-throwing error handling
-    [[deprecated("Use try_deserialize() for explicit error handling")]]
-    static GameState deserialize(const std::vector<uint8_t>& data);
-    
     // Validate deserialized state
     bool is_valid() const;
 };
