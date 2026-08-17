@@ -805,25 +805,165 @@ private:
 
 ### Migration Strategy
 
-1. **Save format version increment**: Old saves get migrated
-2. **Migration path**: `old_state → new_state = seed(old_state)`
-3. **Test suite update**: All RNG tests use new API
-4. **Golden fixture update**: Recalculate expected values with new PRNG
+Save format migration must use version dispatch to handle legacy saves:
 
-### Backward Compatibility
-
-Old saves can be loaded:
+**Version Dispatch (MUST occur before rejecting unsupported versions)**:
 
 ```cpp
-GameplayRng migrate_from_old(uint64_t old_lcg_state) {
-    // Use old state as seed for new PRNG
+enum class SaveVersion : uint32_t {
+    V2_LegacyLCG = 2,   // Original Numerical Recipes LCG state
+    V3_NativePCG = 3,   // Native PCG-XSH-RR state
+    // Future versions...
+};
+
+Result<GameState, SaveError> load_save(std::span<const uint8_t> data) {
+    if (data.size() < 4) return SaveError::Truncated;
+    
+    uint32_t version = read_le32(data.data());
+    
+    switch (static_cast<SaveVersion>(version)) {
+        case SaveVersion::V2_LegacyLCG:
+            return load_v2_save(data);
+            
+        case SaveVersion::V3_NativePCG:
+            return load_v3_save(data);
+            
+        default:
+            return SaveError::UnsupportedVersion;
+    }
+}
+```
+
+**V2 Migration (legacy LCG → PCG)**:
+
+```cpp
+Result<GameState, SaveError> load_v2_save(std::span<const uint8_t> data) {
+    // Parse exact v2 layout
+    auto reader = BoundsReader(data);
+    reader.skip(4);  // version already read
+    
+    // Extract legacy LCG state
+    auto legacy_state = reader.read_u64_le();
+    if (!legacy_state) return SaveError::Truncated;
+    
+    // ... parse rest of v2 save ...
+    
+    // Deterministically migrate LCG state into PCG
     GameplayRng rng;
-    rng.seed(old_lcg_state);
+    rng.seed(*legacy_state);  // O'Neill initialization with legacy state as seed
+    
+    GameState gs;
+    gs.rng = rng;
+    // ... populate rest of GameState ...
+    
+    return gs;
+}
+```
+
+**V3 Native Load**:
+
+```cpp
+Result<GameState, SaveError> load_v3_save(std::span<const uint8_t> data) {
+    auto reader = BoundsReader(data);
+    reader.skip(4);  // version
+    
+    // Parse native PCG state directly
+    auto pcg_state = reader.read_u64_le();
+    if (!pcg_state) return SaveError::Truncated;
+    
+    GameplayRng rng;
+    rng.restore_state(*pcg_state);  // Direct state restoration, NOT seed()
+    
+    // ... parse rest of save ...
+    
+    return gs;
+}
+```
+
+**Re-save always emits current version**:
+
+```cpp
+void GameState::serialize(std::vector<uint8_t>& out) const {
+    write_le32(out, static_cast<uint32_t>(SaveVersion::V3_NativePCG));
+    rng.serialize(out);  // 8 bytes, little-endian
+    // ... rest of save ...
+}
+```
+
+### Golden Fixture for V2 Migration
+
+A golden fixture test MUST prove:
+
+```cpp
+TEST(save_v2_migration_deterministic) {
+    // Actual v2 serialized save (committed to test fixtures)
+    const uint8_t v2_save[] = {
+        0x02, 0x00, 0x00, 0x00,  // Version 2
+        0x78, 0x56, 0x34, 0x12,  // Legacy LCG state (low)
+        0xF0, 0xDE, 0xBC, 0x9A,  // Legacy LCG state (high)
+        // ... rest of v2 save data ...
+    };
+    
+    // Load succeeds
+    auto result = load_save(std::span(v2_save));
+    ASSERT_TRUE(result.is_ok());
+    
+    auto& gs = result.value();
+    
+    // Migration is deterministic: same v2 save → same PCG state
+    // (Record expected state from first successful migration)
+    ASSERT_EQ(gs.rng.state(), 0xSOME_EXPECTED_PCG_STATE);
+    
+    // Re-save emits v3
+    std::vector<uint8_t> resaved;
+    gs.serialize(resaved);
+    ASSERT_EQ(read_le32(resaved.data()), 3);  // V3_NativePCG
+}
+```
+
+### Bounds-Checked Deserialization API
+
+RNG deserialization MUST use bounds-checked APIs:
+
+```cpp
+// REQUIRED: Bounds-carrying deserialize API
+static Result<GameplayRng, DeserializeError> GameplayRng::deserialize(
+    std::span<const uint8_t> bytes
+) {
+    if (bytes.size() < 8) {
+        return DeserializeError::InsufficientData;
+    }
+    
+    GameplayRng rng;
+    uint64_t state = 0;
+    for (int i = 0; i < 8; i++) {
+        state |= static_cast<uint64_t>(bytes[i]) << (i * 8);
+    }
+    rng.restore_state(state);
+    return rng;
+}
+
+// Or use existing BoundsReader if available:
+static Result<GameplayRng, DeserializeError> GameplayRng::deserialize(
+    BoundsReader& reader
+) {
+    auto state = reader.read_u64_le();
+    if (!state) return DeserializeError::InsufficientData;
+    
+    GameplayRng rng;
+    rng.restore_state(*state);
     return rng;
 }
 ```
 
-This changes future RNG values but allows old saves to load.
+**FORBIDDEN**: Raw pointer APIs without length validation
+
+```cpp
+// FORBIDDEN: No bounds checking
+static GameplayRng deserialize(const uint8_t* data);  // NO!
+```
+
+Even though RNG state is only 8 bytes, the deserialize path MUST validate that 8 bytes are available before reading.
 
 
 ---
@@ -1204,12 +1344,30 @@ Battle Compiler
 
 The following tasks are required when implementing this design:
 
+**Core Implementation**:
 - [ ] Replace Numerical Recipes LCG with PCG-XSH-RR
 - [ ] Migrate all authoritative RNG callers to new API
 - [ ] Remove inaccurate "pokecrystal RNG" comments from code
 - [ ] Preserve GameState ownership of RNG
-- [ ] Update save schema if required (version increment)
-- [ ] Migrate legacy serialized RNG state explicitly (old saves)
+
+**Save Format Migration**:
+- [ ] Implement version dispatch (V2 → V3 migration)
+- [ ] Ensure version dispatch occurs BEFORE rejecting unsupported versions
+- [ ] V2 load: parse exact v2 layout, extract legacy LCG state
+- [ ] V2 migration: deterministically seed PCG from legacy state
+- [ ] V3 load: parse native PCG state directly via restore_state()
+- [ ] Re-save: always emit current version (V3)
+- [ ] Create golden fixture with actual v2 serialized save
+- [ ] Test: v2 load succeeds
+- [ ] Test: migration is deterministic (same v2 → same PCG state)
+- [ ] Test: re-save emits v3
+
+**Deserialization Safety**:
+- [ ] Use bounds-carrying API (std::span or BoundsReader)
+- [ ] Remove any raw-pointer deserialize overloads
+- [ ] Validate 8 bytes available before reading RNG state
+
+**Testing**:
 - [ ] Add PCG known-answer test vectors
 - [ ] Test next_u64() ordering (first=high, second=low)
 - [ ] Test bounded(0) explicit failure

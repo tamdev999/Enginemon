@@ -1,7 +1,9 @@
 # Crystal RNG Fidelity Architecture Audit
 
-**Status**: Research/Design Complete — No Implementation  
+**Status**: Historical/Reference Document — Behavioral Reference Only  
 **Date**: 2026-08-17
+
+**Purpose**: This document describes Crystal's original RNG mechanisms for reference. It is NOT a production requirements specification. The native Enginemon RNG (PCG-XSH-RR) may preserve the resulting probability distributions and consumption semantics without preserving the literal Crystal algorithms.
 
 ---
 
@@ -76,15 +78,15 @@ _BattleRandom::
     inc a
     ld [wLinkBattleRNCount], a
 
-    cp SERIAL_RNS_LENGTH - 1  ; Check if stream exhausted
-    ld a, [hl]
+    cp SERIAL_RNS_LENGTH - 1  ; Compare incremented count against 9
+    ld a, [hl]                ; Load value at current index
     pop bc, hl
-    ret c                      ; Return current value if not exhausted
+    ret c                     ; Return if count < 9 (indices 0-8)
 
-    ; Regenerate all 10 seeds
+    ; Count reached 9: return seeds[9], then regenerate
     push hl, bc, af
     xor a
-    ld [wLinkBattleRNCount], a
+    ld [wLinkBattleRNCount], a  ; Reset counter to 0
     ld hl, wLinkBattleRNs
     ld b, 10
 .loop:
@@ -97,15 +99,44 @@ _BattleRandom::
     ld [hli], a
     dec b
     jr nz, .loop
-    pop af, bc, hl
-    ret
+    pop af, bc, hl             ; Restore A (seeds[9] value before regeneration)
+    ret                        ; Return seeds[9]
 ```
+
+**Detailed Counter Behavior (source-verified)**:
+
+The counter increments BEFORE the range check:
+1. Load counter (0-9), increment to (1-10), store incremented value
+2. Compare incremented value against 9 (`cp SERIAL_RNS_LENGTH - 1`)
+3. Load value at ORIGINAL index (before increment)
+4. If incremented count < 9 (carry set), return immediately
+5. If incremented count >= 9, regenerate all seeds, return original value
+
+**Sequence for 12 calls**:
+
+| Call | Counter Before | Counter After | Index Read | Return Value | Notes |
+|------|----------------|---------------|------------|--------------|-------|
+| 1 | 0 | 1 | 0 | seeds[0] | 1 < 9, no regen |
+| 2 | 1 | 2 | 1 | seeds[1] | 2 < 9, no regen |
+| 3 | 2 | 3 | 2 | seeds[2] | 3 < 9, no regen |
+| 4 | 3 | 4 | 3 | seeds[3] | 4 < 9, no regen |
+| 5 | 4 | 5 | 4 | seeds[4] | 5 < 9, no regen |
+| 6 | 5 | 6 | 5 | seeds[5] | 6 < 9, no regen |
+| 7 | 6 | 7 | 6 | seeds[6] | 7 < 9, no regen |
+| 8 | 7 | 8 | 7 | seeds[7] | 8 < 9, no regen |
+| 9 | 8 | 9 | 8 | seeds[8] | 9 >= 9, REGEN after return |
+| 10 | 0 | 1 | 0 | seeds'[0] | Fresh cycle |
+| 11 | 1 | 2 | 1 | seeds'[1] | ... |
+| 12 | 2 | 3 | 2 | seeds'[2] | ... |
+
+**Note**: The 10th seed (seeds[9]) is NEVER directly returned! When counter reaches 9, regeneration happens but the returned value is seeds[8]. The unused tenth value is a source quirk.
 
 **Characteristics:**
 - **Non-link mode**: Falls through to `Random` (hardware-dependent)
 - **Link mode**: Pure software PRNG
 - **State**: 10 bytes at wLinkBattleRNs, 1 byte counter at wLinkBattleRNCount
 - **Algorithm**: LCG with multiplier=5, increment=1, modulus=256
+- **Effective stream length**: 9 values per cycle (seeds[9] never returned)
 - **Output**: 8-bit value
 - **Synchronization**: Seeds shared via link cable at battle start
 
@@ -304,13 +335,29 @@ Without link mode, `_BattleRandom` simply calls `Random()`:
 
 ```asm
 BattleCommand_CheckHit:
-    ; Always consumes RNG, even if move can't miss
-    call BattleRandom
+    ; ... accuracy calculation ...
+    
+.skip_brightpowder:
+    ld a, b
+    cp -1               ; Compare accuracy against 255
+    jr z, .Hit          ; If accuracy == 255, SKIP RNG entirely!
+    
+    call BattleRandom   ; Only called when accuracy < 255
     cp b                ; b = accuracy threshold
     jr nc, .Miss
+.Hit:
+    ; Move hits
 ```
 
-If accuracy is 100% (b = 255), the roll is consumed but always succeeds.
+**CRITICAL**: When accuracy threshold == 255:
+- RNG is NOT consumed (0 draws)
+- Move always hits (guaranteed)
+
+This is the Gen 2 fix for the Gen 1 "1/256 miss on 100% moves" bug. Gen 1 always called RNG and compared `roll < threshold`, causing roll=255 to fail even with threshold=255.
+
+**Gen 2 behavior** (Crystal):
+- threshold == 255 → guaranteed hit, **zero RNG draws**
+- threshold < 255 → one RNG draw, hit if roll < threshold
 
 ### Critical Hit Consumption
 
@@ -375,11 +422,11 @@ The length filter uses feet/inches but compares against millimeters. No Magikarp
 ```
 Shiny DVs ($EA $AA) produce letter 'I'. If player hasn't unlocked 'I', the loop never terminates. **This is a source bug worth preserving in faithful mode.**
 
-### 1/256 Move Failures — CORRECTION
+### 1/256 Move Failures — CORRECTED
 
-**This section was incorrect.** The Gen 1 "1/256 miss on 100% accurate moves" bug was **fixed in Gen 2**.
+**This section documents the correction of a previously incorrect claim.**
 
-Crystal's `BattleCommand_CheckHit` (effect_commands.asm) explicitly checks for threshold==255 and skips the RNG call entirely:
+The Gen 1 "1/256 miss on 100% accurate moves" bug was **fixed in Gen 2**. Crystal's `BattleCommand_CheckHit` (effect_commands.asm) explicitly checks for threshold==255 and skips the RNG call entirely:
 
 ```asm
 .skip_brightpowder
@@ -392,26 +439,30 @@ Crystal's `BattleCommand_CheckHit` (effect_commands.asm) explicitly checks for t
     jr nc, .Miss
 ```
 
-**Correct behavior**: Moves with computed accuracy of 255 always hit and consume **zero RNG draws**.
+**Correct Crystal behavior**: Moves with computed accuracy of 255 always hit and consume **zero RNG draws**.
 
-**Note**: The 1/256 secondary effect miss (BattleCommand_EffectChance) is a separate mechanic and does still exist in Gen 2 — that code does NOT have the threshold check.
+**The 1/256 secondary effect miss IS still present**: `BattleCommand_EffectChance` does NOT have the threshold==255 skip. This is a separate mechanic from accuracy checking, and the source comment confirms the bug: `; BUG: Moves with a 100% secondary effect chance will not trigger it in 1/256 uses.`
 
 ### Speed Tie Double-Roll
 Speed ties can consume 2-4 BattleRandom calls depending on Quick Claw and link clock. The call count is deterministic given game state, but complex.
 
 ---
 
-## 7. Proposed Native Representation
+## 7. Proposed Native Representation (Historical Reference)
 
-### Minimal Native Model
+**NOTE**: This section documents Crystal's original algorithms for reference. The production Enginemon RNG uses PCG-XSH-RR, not these Crystal algorithms. The native design preserves probability distributions and consumption semantics, not literal Crystal byte sequences.
+
+### Crystal Battle RNG Model (Reference Only)
 
 ```cpp
 namespace enginemon {
 
-// Battle RNG - exactly reproduces Crystal link battle behavior
+// Battle RNG - Crystal link battle algorithm (REFERENCE ONLY)
+// NOTE: Production Enginemon uses PCG-XSH-RR, not this algorithm.
+// This is documented for source fidelity research, not implementation.
 struct CrystalBattleRng {
     uint8_t seeds[10];      // wLinkBattleRNs
-    uint8_t index = 0;      // wLinkBattleRNCount
+    uint8_t index = 0;      // wLinkBattleRNCount (0-9, but 9 is never read)
     
     // Initialize from 10 seed bytes (captured entropy or predefined)
     void init(const uint8_t initial_seeds[10]) {
@@ -420,17 +471,21 @@ struct CrystalBattleRng {
     }
     
     // Crystal-exact PRNG: a[n+1] = (a[n] * 5 + 1) % 256
+    // NOTE: Due to the increment-before-compare quirk, seeds[9] is never returned!
+    // The stream is effectively 9 values per cycle, not 10.
     uint8_t next() {
+        uint8_t current_index = index;
+        index++;  // Increment BEFORE compare (matches Crystal)
+        
         if (index >= 9) {
-            // Return last value, then regenerate
-            uint8_t result = seeds[index];
+            // index reached 9: return seeds[8], then regenerate
+            // This means seeds[9] is NEVER returned (source quirk)
             index = 0;
             for (int i = 0; i < 10; i++) {
                 seeds[i] = seeds[i] * 5 + 1;
             }
-            return result;
         }
-        return seeds[index++];
+        return seeds[current_index];
     }
     
     // For save/restore
@@ -598,27 +653,41 @@ struct RngState {
 ```asm
 .loop:
     call BattleRandom    ; Get random byte
-    rrca                 ; Rotate right (divide by 2, carry=LSB)
+    rrca                 ; Rotate right: RRCA(x) = ((x >> 1) | (x << 7)) & 0xFF
     cp 85 percent + 1    ; Compare with 217
     jr c, .loop          ; Retry if < 217
 ```
 
+**Note on RRCA**: The Z80 `rrca` instruction rotates the accumulator right, moving bit 0 to bit 7 (and to the carry flag). The correct equivalent is:
+
+```cpp
+// CORRECT: Rotate right (bit 0 wraps to bit 7)
+uint8_t rrca(uint8_t x) {
+    return static_cast<uint8_t>((x >> 1) | (x << 7));
+}
+
+// INCORRECT: x >> 1 is NOT equivalent to rrca
+```
+
+**Enginemon note**: The native PCG design preserves the resulting damage-roll distribution (rejection until >= 217, final range 217-255) without preserving the literal RRCA transform. The consumption semantics (1+ draws) are preserved.
+
 **Crystal behavior**:
 - Initial seeds: [0x12, 0x34, 0x56, ...]
 - First BattleRandom: returns 0x12, index becomes 1
-- 0x12 >> 1 = 0x09, 0x09 < 217, retry
+- RRCA(0x12) = ((0x12 >> 1) | (0x12 << 7)) = 0x09, 0x09 < 217, retry
 - Second BattleRandom: returns 0x34, index becomes 2
-- 0x34 >> 1 = 0x1A, 0x1A < 217, retry
+- RRCA(0x34) = 0x1A, 0x1A < 217, retry
 - ... (continues until value >= 217)
 
-**Native reproduction**:
+**Native reproduction** (historical reference only — not production requirement):
 ```cpp
 CrystalBattleRng rng;
 rng.init({0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22});
 
 uint8_t roll;
 do {
-    roll = rng.next() >> 1;  // rrca equivalent
+    uint8_t raw = rng.next();
+    roll = (raw >> 1) | (raw << 7);  // Correct RRCA
 } while (roll < 217);
 
 // Result matches Crystal exactly
@@ -686,32 +755,28 @@ bool crit = (roll < 17);    // true, same as Crystal
 3. **Crystal's design intent**:
    - Battles are meant to be deterministic (for link play)
    - Overworld is meant to be unpredictable (player experience)
-   - Enginemon can honor both intents natively
+   - Enginemon honors both intents via native PCG (preserving consumption semantics)
 
-### Minimal Native State Machine
+### Crystal State Machine (Historical Reference Only)
+
+**NOTE**: This documents Crystal's original algorithm. Production Enginemon uses PCG-XSH-RR.
 
 ```cpp
-// For battles (link-compatible, deterministic)
+// Crystal battle RNG - REFERENCE ONLY, not production implementation
+// Note the unused-tenth-value quirk: seeds[9] is never returned
 struct CrystalBattleRng {
     uint8_t seeds[10];
     uint8_t index;
     
     uint8_t next() {
+        uint8_t current = index++;
         if (index >= 9) {
-            uint8_t result = seeds[index];
             index = 0;
             for (int i = 0; i < 10; i++)
                 seeds[i] = seeds[i] * 5 + 1;
-            return result;
         }
-        return seeds[index++];
+        return seeds[current];  // Returns seeds[0..8], never seeds[9]
     }
-};
-
-// For overworld (semantic approximation)
-struct CrystalOverworldRng {
-    uint8_t add, sub;
-    uint8_t next(uint8_t tick_derived_div);
 };
 ```
 
@@ -723,7 +788,7 @@ struct CrystalOverworldRng {
 | Link seed initialization | link.asm:622-638 |
 | Speed tie RNG | core.asm:544-552 |
 | Damage roll RNG | effect_commands.asm:1522-1527 |
-| Accuracy RNG | effect_commands.asm:1605 |
+| Accuracy RNG (threshold==255 skip) | effect_commands.asm:1605 |
 | Critical RNG | effect_commands.asm:1201 |
 | Random uses DIV | home/random.asm:12-26 |
 | VBlank churns RNG | home/vblank.asm:66-78 |
