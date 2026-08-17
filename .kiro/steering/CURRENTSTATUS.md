@@ -1,5 +1,62 @@
 # Current Status
 
+## Collision Boundary Migration - COMPLETED ✓
+
+**SUCCESS**: The collision system now operates ONLY on semantic `CollisionClass` values. All raw Crystal byte interpretation has been removed from the generic engine and runtime.
+
+### Migration Summary
+
+| Component | Before | After | Status |
+|-----------|--------|-------|--------|
+| `HeadlessGameLoop::set_collision_data()` | `std::function<uint8_t(...)>` | `std::function<CollisionClass(...)>` | ✅ |
+| `RuntimeTileset::collision` | `std::vector<uint8_t>` | `std::vector<CollisionClass>` | ✅ |
+| `get_collision_from_blocks()` | Returns `uint8_t` | Returns `CollisionClass` | ✅ |
+| `CollisionMap::get_collision` | Returns `uint8_t` | Returns `CollisionClass` | ✅ |
+| Test collision callbacks | `-> uint8_t` | `-> CollisionClass` | ✅ |
+| Side wall passability | Bug: SideWall* not walkable | Fixed: SideWall* are walkable | ✅ |
+
+### Key Changes
+
+1. **Engine Collision Types** (`collision_types.hpp`):
+   - `collision_is_side_wall()` moved before `collision_is_walkable()` 
+   - `collision_is_walkable()` now includes `collision_is_side_wall(c)` - side walls ARE walkable (directional blocking checked separately)
+
+2. **Test File** (`runtime_test.cpp`):
+   - All ~12 collision callbacks updated from `-> uint8_t` to `-> CollisionClass`
+   - Replaced 3 `CollisionPermissionTable` tests with 1 `collision_class_semantic_queries` test
+   - Added `collision_semantic_boundary_adversarial` test proving semantic-only boundary
+
+3. **Test Helpers** (`runtime_test.cpp`):
+   - `get_collision_from_blocks_johto()` wrapper returns `CollisionClass` for tests using legacy JOHTO_COLLISION_TABLE
+   - `classify_raw_johto_collision()` translates raw test bytes to semantic types
+
+### Adversarial Boundary Proof
+
+The `collision_semantic_boundary_adversarial` test proves:
+- `CollisionClass` enum uses Enginemon semantic IDs (not Crystal bytes)
+- `CollisionMap::get_collision` returns `CollisionClass`, not `uint8_t`
+- `HeadlessGameLoop::set_collision_data()` takes `CollisionClass` callback
+- All collision queries use semantic functions (`collision_is_walkable()`, etc.)
+- `CollisionResult::collision_class` is `CollisionClass`, not raw byte
+
+### Grep Verification
+
+```
+# No CollisionByte in engine:
+grep -r "CollisionByte" engine/  → 0 matches
+
+# No uint8_t collision returns in engine:
+grep -r "collision.*-> uint8_t" engine/  → 0 matches
+grep -r "get_collision.*uint8_t" engine/  → 0 matches
+```
+
+### Test Results
+
+- **Runtime Tests**: 232/232 pass (231 + 1 new adversarial)
+- **Golden Tests**: 56/56 pass
+
+---
+
 ## Hardening Closeout - COMPLETED ✓
 
 **SUCCESS**: All four hardening closeout items (A, B, C, D) have been completed.
@@ -14,7 +71,7 @@
 - `johto_collision.hpp::get_collision_from_blocks()` returns `CollisionClass`
 - `main_tiles.cpp` uses semantic collision queries (`collision_is_warp()`, `collision_is_door_warp()`)
 - Crystal frontend classifies raw bytes to `CollisionClass` at packaging time via `classify_crystal_collision()`
-- Tests use raw bytes for backward compatibility with `Collision` class tests
+- Runtime and engine collision system uses ONLY semantic `CollisionClass`
 
 ### Item C: State Ownership Evidence - VERIFIED CLEAN ✓
 - Full field-level ownership table documented in `docs/STATE_OWNERSHIP_AUDIT.md`
@@ -31,7 +88,7 @@
 - No code changes needed - existing protection is complete
 
 ### Test Results (Post-Hardening)
-- **Runtime Tests**: 233/233 pass
+- **Runtime Tests**: 232/232 pass
 - **Golden Tests**: 56/56 pass
 - **Legality Gate Tests**: 14/14 pass
 - **Linker Tests**: All pass

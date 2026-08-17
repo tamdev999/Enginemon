@@ -37,7 +37,7 @@ void HeadlessGameLoop::load_map(const RuntimeMap& map) {
     npcs_.clear();
 }
 
-void HeadlessGameLoop::set_collision_data(std::function<uint8_t(int32_t, int32_t)> get_collision) {
+void HeadlessGameLoop::set_collision_data(std::function<CollisionClass(int32_t, int32_t)> get_collision) {
     get_collision_ = std::move(get_collision);
 }
 
@@ -156,7 +156,7 @@ InputResult HeadlessGameLoop::handle_interact() {
     imap.width = current_map_->tile_width();
     imap.height = current_map_->tile_height();
     imap.get_collision = get_collision_ ? get_collision_ : 
-        [](int32_t, int32_t) -> uint8_t { return 0; };
+        [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
     // Check interaction
     InteractionResult interaction_result = interaction_.check(
@@ -187,27 +187,11 @@ CollisionResult HeadlessGameLoop::check_player_collision(Direction dir) {
         return CollisionResult::blocked(MoveBlockReason::Bounds);
     }
     
-    // Build collision map
+    // Build collision map using semantic CollisionClass
     CollisionMap cmap;
     cmap.width = current_map_->tile_width();
     cmap.height = current_map_->tile_height();
     cmap.get_collision = get_collision_;
-    cmap.get_side_walls = [this](int32_t x, int32_t y) -> uint8_t {
-        if (!get_collision_) return 0;
-        uint8_t col = get_collision_(x, y);
-        // Check if high nybble is 0xB0 (side walls)
-        if ((col & 0xF0) == 0xB0) {
-            // Low nybble indicates direction blocked
-            // B0=right, B1=left, B2=up, B3=down
-            switch (col & 0x0F) {
-                case 0: return DirectionMask::RIGHT;
-                case 1: return DirectionMask::LEFT;
-                case 2: return DirectionMask::UP;
-                case 3: return DirectionMask::DOWN;
-            }
-        }
-        return 0;
-    };
     
     // Build entity list
     auto entities = build_collision_entities();
@@ -696,9 +680,9 @@ bool HeadlessGameLoop::check_npc_can_move(const NpcState& npc, Direction dir) {
         return false;
     }
     
-    // Check tile collision
-    uint8_t tile_col = get_collision_(target_x, target_y);
-    if (!collision_.is_tile_walkable(tile_col, false)) {
+    // Check tile collision using semantic CollisionClass
+    CollisionClass tile_coll = get_collision_(target_x, target_y);
+    if (!collision_is_walkable(tile_coll)) {
         return false;
     }
     

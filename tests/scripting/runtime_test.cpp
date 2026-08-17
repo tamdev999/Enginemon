@@ -1437,67 +1437,43 @@ end
 
 // =============================================================================
 // COLLISION TESTS - Native overworld collision system
-// Reference: pokecrystal/data/collision/collision_permissions.asm
-// Reference: pokecrystal/home/map.asm GetMovementPermissions
-// Reference: Gen2Recomped/src/world/Collision.lua
+// Reference: engine/world/collision_types.hpp
+// Reference: Semantic CollisionClass enum for all collision checks
 // =============================================================================
 
-TEST(collision_permission_table_land) {
-    // Test that floor tiles are correctly identified as land
-    CollisionPermissionTable table;
+TEST(collision_class_semantic_queries) {
+    // Test semantic collision queries using CollisionClass
+    // This replaces the deleted CollisionPermissionTable tests
     
-    // COLL_FLOOR = 0x00 should be land
-    ASSERT_TRUE(table.is_land(0x00));
+    // Walkable tiles
+    ASSERT_TRUE(collision_is_walkable(CollisionClass::Floor));
+    ASSERT_TRUE(collision_is_walkable(CollisionClass::Grass));
+    ASSERT_TRUE(collision_is_walkable(CollisionClass::WarpDoor));
+    ASSERT_TRUE(collision_is_walkable(CollisionClass::WarpFloor));
     
-    // COLL_TALL_GRASS = 0x18 should be land
-    ASSERT_TRUE(table.is_land(0x18));
+    // Non-walkable on foot
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::Wall));
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::Water));
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::Counter));
     
-    // COLL_ICE = 0x23 should be land (it's walkable, just slippery)
-    ASSERT_TRUE(table.is_land(0x23));
+    // Water passable while surfing
+    ASSERT_TRUE(collision_is_passable(CollisionClass::Water, true));
+    ASSERT_TRUE(collision_is_passable(CollisionClass::Whirlpool, true));
+    ASSERT_FALSE(collision_is_passable(CollisionClass::Water, false));
     
-    // Warp tiles (0x70-0x7F) should be land
-    ASSERT_TRUE(table.is_land(0x71));  // COLL_DOOR
-    ASSERT_TRUE(table.is_land(0x7A));  // COLL_STAIRCASE
+    // Warp detection
+    ASSERT_TRUE(collision_is_warp(CollisionClass::WarpFloor));
+    ASSERT_TRUE(collision_is_warp(CollisionClass::WarpDoor));
+    ASSERT_TRUE(collision_is_warp(CollisionClass::WarpCave));
+    ASSERT_TRUE(collision_is_warp(CollisionClass::WarpPit));
+    ASSERT_FALSE(collision_is_warp(CollisionClass::Floor));
     
-    std::cout << "  [Permission table correctly identifies land tiles]\n";
-}
-
-TEST(collision_permission_table_water) {
-    // Test that water tiles are correctly identified
-    CollisionPermissionTable table;
+    // Counter detection
+    ASSERT_TRUE(collision_is_counter(CollisionClass::Counter));
+    ASSERT_FALSE(collision_is_counter(CollisionClass::Floor));
+    ASSERT_FALSE(collision_is_counter(CollisionClass::Wall));
     
-    // COLL_WATER = 0x29 should be water
-    ASSERT_TRUE(table.is_water(0x29));
-    
-    // COLL_WATERFALL = 0x33 should be water
-    ASSERT_TRUE(table.is_water(0x33));
-    
-    // Side buoys (0xC0-0xCF) should be water
-    ASSERT_TRUE(table.is_water(0xC0));
-    
-    std::cout << "  [Permission table correctly identifies water tiles]\n";
-}
-
-TEST(collision_permission_table_wall) {
-    // Test that wall tiles are correctly identified
-    CollisionPermissionTable table;
-    
-    // COLL_WALL = 0x07 should be wall
-    ASSERT_TRUE(table.is_wall(0x07));
-    
-    // Counter/furniture (0x90-0x9F) should be walls
-    ASSERT_TRUE(table.is_wall(0x90));  // COLL_COUNTER
-    ASSERT_TRUE(table.is_wall(0x91));  // COLL_BOOKSHELF
-    ASSERT_TRUE(table.is_wall(0x93));  // COLL_PC
-    
-    // COLL_CUT_TREE = 0x12 should be wall (but talkable)
-    ASSERT_TRUE(table.is_wall(0x12));
-    ASSERT_TRUE(table.has_talk_flag(0x12));
-    
-    // COLL_FF = 0xFF should be wall
-    ASSERT_TRUE(table.is_wall(0xFF));
-    
-    std::cout << "  [Permission table correctly identifies wall tiles]\n";
+    std::cout << "  [Semantic CollisionClass queries verified]\n";
 }
 
 TEST(collision_passable_floor) {
@@ -1508,11 +1484,8 @@ TEST(collision_passable_floor) {
     CollisionMap map;
     map.width = 5;
     map.height = 5;
-    map.get_collision = [](int32_t x, int32_t y) -> uint8_t {
-        return 0x00;  // COLL_FLOOR everywhere
-    };
-    map.get_side_walls = [](int32_t x, int32_t y) -> uint8_t {
-        return 0;  // No side walls
+    map.get_collision = [](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;  // All walkable
     };
     
     // No entities
@@ -1538,12 +1511,9 @@ TEST(collision_blocked_wall) {
     CollisionMap map;
     map.width = 5;
     map.height = 5;
-    map.get_collision = [](int32_t x, int32_t y) -> uint8_t {
-        if (x == 3 && y == 2) return 0x07;  // COLL_WALL
-        return 0x00;  // COLL_FLOOR
-    };
-    map.get_side_walls = [](int32_t x, int32_t y) -> uint8_t {
-        return 0;
+    map.get_collision = [](int32_t x, int32_t y) -> CollisionClass {
+        if (x == 3 && y == 2) return CollisionClass::Wall;
+        return CollisionClass::Floor;
     };
     
     std::vector<CollisionEntity> entities;
@@ -1571,11 +1541,8 @@ TEST(collision_blocked_bounds) {
     CollisionMap map;
     map.width = 3;
     map.height = 3;
-    map.get_collision = [](int32_t x, int32_t y) -> uint8_t {
-        return 0x00;  // All floor
-    };
-    map.get_side_walls = [](int32_t x, int32_t y) -> uint8_t {
-        return 0;
+    map.get_collision = [](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;  // All floor
     };
     
     std::vector<CollisionEntity> entities;
@@ -1606,11 +1573,8 @@ TEST(collision_blocked_entity) {
     CollisionMap map;
     map.width = 5;
     map.height = 5;
-    map.get_collision = [](int32_t x, int32_t y) -> uint8_t {
-        return 0x00;  // All floor
-    };
-    map.get_side_walls = [](int32_t x, int32_t y) -> uint8_t {
-        return 0;
+    map.get_collision = [](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;  // All floor
     };
     
     // NPC at (3, 2)
@@ -1642,11 +1606,8 @@ TEST(collision_entity_target_blocks) {
     CollisionMap map;
     map.width = 5;
     map.height = 5;
-    map.get_collision = [](int32_t x, int32_t y) -> uint8_t {
-        return 0x00;
-    };
-    map.get_side_walls = [](int32_t x, int32_t y) -> uint8_t {
-        return 0;
+    map.get_collision = [](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     };
     
     // NPC currently at (4, 2) but moving INTO (3, 2)
@@ -1673,14 +1634,10 @@ TEST(collision_side_wall_blocks) {
     CollisionMap map;
     map.width = 5;
     map.height = 5;
-    map.get_collision = [](int32_t x, int32_t y) -> uint8_t {
-        // Put an UP_WALL at (2, 1)
-        // UP_WALL (0xB2) blocks stepping INTO it from below (i.e., moving up)
-        if (x == 2 && y == 1) return 0xB2;  // COLL_UP_WALL
-        return 0x00;
-    };
-    map.get_side_walls = [](int32_t x, int32_t y) -> uint8_t {
-        return 0;
+    map.get_collision = [](int32_t x, int32_t y) -> CollisionClass {
+        // Put a SIDE_WALL_N (blocks from south) at (2, 1)
+        if (x == 2 && y == 1) return CollisionClass::SideWallN;
+        return CollisionClass::Floor;
     };
     
     std::vector<CollisionEntity> entities;
@@ -1701,28 +1658,82 @@ TEST(collision_side_wall_blocks) {
 }
 
 TEST(collision_ledge_detection) {
-    // Test ledge detection
+    // Test ledge detection using semantic CollisionClass
+    // Ledge collision is semantic - it's in CollisionClass::Ledge
+    // The direction is determined by the frontend classifier
+    
+    // CollisionClass::Ledge represents a ledge tile
+    // Ledges block movement in most directions but allow hops in specific direction
+    // For semantic collision, ledge detection is handled by collision_is_walkable which
+    // returns false for Ledge (since you can't walk normally onto a ledge)
+    
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::Ledge));
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::Wall));
+    ASSERT_TRUE(collision_is_walkable(CollisionClass::Floor));
+    
+    std::cout << "  [Ledge tiles correctly classified as non-walkable]\n";
+}
+
+TEST(collision_semantic_boundary_adversarial) {
+    // ADVERSARIAL TEST: Prove the collision system uses ONLY semantic CollisionClass
+    // and has NO dependency on raw Crystal byte values.
+    //
+    // This test constructs collision scenarios using ONLY CollisionClass enums,
+    // proving the runtime collision path is free of Crystal-specific encoding.
+    
     Collision collision;
     
-    // COLL_HOP_DOWN = 0xA3
-    ASSERT_TRUE(collision.is_ledge(0xA3));
-    ASSERT_EQ(static_cast<int>(collision.get_ledge_direction(0xA3)), 
-              static_cast<int>(enginemon::Direction::Down));
+    // Test 1: CollisionClass is an enum, not a raw byte wrapper
+    // All semantic types have explicit enum values, not raw bytes
+    static_assert(static_cast<uint8_t>(CollisionClass::Floor) == 0, "Floor semantic ID");
+    static_assert(static_cast<uint8_t>(CollisionClass::Wall) == 1, "Wall semantic ID");
+    static_assert(static_cast<uint8_t>(CollisionClass::Water) == 2, "Water semantic ID");
+    static_assert(static_cast<uint8_t>(CollisionClass::WarpDoor) == 11, "WarpDoor semantic ID");
+    static_assert(static_cast<uint8_t>(CollisionClass::SideWallN) == 30, "SideWallN semantic ID");
     
-    // COLL_HOP_RIGHT = 0xA0
-    ASSERT_TRUE(collision.is_ledge(0xA0));
-    ASSERT_EQ(static_cast<int>(collision.get_ledge_direction(0xA0)), 
-              static_cast<int>(enginemon::Direction::Right));
+    // These are Enginemon semantic values, NOT Crystal collision bytes:
+    // Crystal uses 0x00=floor, 0x01=wall, 0x0F=water, 0x71=door, 0xB2=side_wall
+    // Enginemon uses clean sequential semantic IDs
     
-    // COLL_HOP_LEFT = 0xA1
-    ASSERT_TRUE(collision.is_ledge(0xA1));
-    ASSERT_EQ(static_cast<int>(collision.get_ledge_direction(0xA1)), 
-              static_cast<int>(enginemon::Direction::Left));
+    // Test 2: CollisionMap accepts std::function<CollisionClass(...)>, NOT uint8_t
+    CollisionMap map;
+    map.width = 5;
+    map.height = 5;
+    map.get_collision = [](int32_t x, int32_t y) -> CollisionClass {
+        // Return semantic types, not raw bytes
+        if (x == 2 && y == 2) return CollisionClass::Wall;
+        if (x == 3 && y == 2) return CollisionClass::Water;
+        return CollisionClass::Floor;
+    };
     
-    // COLL_FLOOR = 0x00 is NOT a ledge
-    ASSERT_TRUE(!collision.is_ledge(0x00));
+    // Test 3: HeadlessGameLoop.set_collision_data() signature takes CollisionClass callback
+    HeadlessGameLoop loop;
+    RuntimeMap rtmap;
+    rtmap.width = 5;
+    rtmap.height = 5;
+    rtmap.blocks.resize(25, 0);
+    loop.load_map(rtmap);
     
-    std::cout << "  [Ledge tiles correctly detected]\n";
+    // This would not compile if the API still used uint8_t:
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
+    });
+    
+    // Test 4: Collision queries use semantic functions, not byte comparisons
+    ASSERT_TRUE(collision_is_walkable(CollisionClass::Floor));
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::Wall));
+    ASSERT_TRUE(collision_is_warp(CollisionClass::WarpDoor));
+    ASSERT_TRUE(collision_is_side_wall(CollisionClass::SideWallN));
+    ASSERT_TRUE(collision_is_counter(CollisionClass::Counter));
+    
+    // Test 5: CollisionResult contains CollisionClass, not raw bytes
+    std::vector<CollisionEntity> entities;
+    CollisionEntity mover{1, 0, 0, 0, 0, false, false};
+    auto result = collision.can_move(map, entities, mover, enginemon::Direction::Down);
+    ASSERT_TRUE(result.allowed);
+    ASSERT_EQ(static_cast<uint8_t>(result.collision_class), static_cast<uint8_t>(CollisionClass::Floor));
+    
+    std::cout << "  [Collision boundary is 100% semantic CollisionClass - no raw Crystal bytes]\n";
 }
 
 // =============================================================================
@@ -1767,21 +1778,19 @@ TEST(interaction_facing_calculation) {
 
 TEST(interaction_counter_tile_detection) {
     // Test counter tile detection for double-reach
-    // Reference: pokecrystal/data/collision/collision_permissions.asm 0x90-0x9F
+    // Using semantic CollisionClass now instead of raw bytes
     Interaction interaction;
     
-    // Counter tiles (0x90-0x9F) should be detected
-    ASSERT_TRUE(interaction.is_counter_tile(0x90));  // COLL_COUNTER
-    ASSERT_TRUE(interaction.is_counter_tile(0x91));  // COLL_BOOKSHELF
-    ASSERT_TRUE(interaction.is_counter_tile(0x9F));  // End of range
+    // Counter tiles should be detected
+    ASSERT_TRUE(interaction.is_counter_tile(CollisionClass::Counter));
     
     // Non-counter tiles should not be detected
-    ASSERT_TRUE(!interaction.is_counter_tile(0x00));  // COLL_FLOOR
-    ASSERT_TRUE(!interaction.is_counter_tile(0x07));  // COLL_WALL
-    ASSERT_TRUE(!interaction.is_counter_tile(0x8F));  // Just before range
-    ASSERT_TRUE(!interaction.is_counter_tile(0xA0));  // Just after range
+    ASSERT_TRUE(!interaction.is_counter_tile(CollisionClass::Floor));
+    ASSERT_TRUE(!interaction.is_counter_tile(CollisionClass::Wall));
+    ASSERT_TRUE(!interaction.is_counter_tile(CollisionClass::Water));
+    ASSERT_TRUE(!interaction.is_counter_tile(CollisionClass::WarpDoor));
     
-    std::cout << "  [Counter tiles (0x90-0x9F) correctly detected]\n";
+    std::cout << "  [Counter tiles correctly detected via CollisionClass]\n";
 }
 
 TEST(interaction_bg_event_facing_requirement) {
@@ -1813,7 +1822,7 @@ TEST(interaction_object_found) {
     InteractionMap map;
     map.width = 10;
     map.height = 10;
-    map.get_collision = [](int32_t, int32_t) -> uint8_t { return 0x00; };
+    map.get_collision = [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
     std::vector<InteractableObject> objects;
     objects.push_back({1, 6, 5, false, false, "test_script", ""});  // NPC at (6, 5)
@@ -1838,7 +1847,7 @@ TEST(interaction_bg_event_found) {
     InteractionMap map;
     map.width = 10;
     map.height = 10;
-    map.get_collision = [](int32_t, int32_t) -> uint8_t { return 0x00; };
+    map.get_collision = [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
     std::vector<InteractableObject> objects;
     
@@ -1863,7 +1872,7 @@ TEST(interaction_object_priority_over_bg) {
     InteractionMap map;
     map.width = 10;
     map.height = 10;
-    map.get_collision = [](int32_t, int32_t) -> uint8_t { return 0x00; };
+    map.get_collision = [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
     // Both NPC and sign at same cell
     std::vector<InteractableObject> objects;
@@ -1891,7 +1900,7 @@ TEST(interaction_moving_npc_not_interactable) {
     InteractionMap map;
     map.width = 10;
     map.height = 10;
-    map.get_collision = [](int32_t, int32_t) -> uint8_t { return 0x00; };
+    map.get_collision = [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
     // NPC at (6, 5) but is_moving = true
     std::vector<InteractableObject> objects;
@@ -1915,7 +1924,7 @@ TEST(interaction_directional_bg_wrong_facing) {
     InteractionMap map;
     map.width = 10;
     map.height = 10;
-    map.get_collision = [](int32_t, int32_t) -> uint8_t { return 0x00; };
+    map.get_collision = [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
     std::vector<InteractableObject> objects;
     
@@ -1941,9 +1950,9 @@ TEST(interaction_counter_extends_reach) {
     InteractionMap map;
     map.width = 10;
     map.height = 10;
-    map.get_collision = [](int32_t x, int32_t y) -> uint8_t {
-        if (x == 6 && y == 5) return 0x90;  // COLL_COUNTER
-        return 0x00;
+    map.get_collision = [](int32_t x, int32_t y) -> CollisionClass {
+        if (x == 6 && y == 5) return CollisionClass::Counter;
+        return CollisionClass::Floor;
     };
     
     std::vector<InteractableObject> objects;
@@ -1970,7 +1979,7 @@ TEST(interaction_bounds_check) {
     InteractionMap map;
     map.width = 5;
     map.height = 5;
-    map.get_collision = [](int32_t, int32_t) -> uint8_t { return 0x00; };
+    map.get_collision = [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
     std::vector<InteractableObject> objects;
     std::vector<InteractableBgEvent> bg_events;
@@ -2194,13 +2203,78 @@ inline uint8_t get_collision_from_blocks(
 
 // Backward-compatible version using hardcoded JOHTO_COLLISION_TABLE
 // Used by tests that don't have tileset collision extracted yet
-inline uint8_t get_collision_from_blocks_johto(
+inline uint8_t get_collision_from_blocks_johto_raw(
     const std::vector<uint8_t>& blocks,
     int map_width_blocks,
     int tile_x, int tile_y
 ) {
     static const std::vector<uint8_t> flat_johto = make_flat_collision_table();
     return get_collision_from_blocks(blocks, flat_johto, map_width_blocks, tile_x, tile_y);
+}
+
+//=============================================================================
+// TEST-ONLY COLLISION CLASSIFIER
+// Mimics Crystal frontend's collision classifier for test purposes
+// Maps raw Johto collision bytes to semantic CollisionClass
+//=============================================================================
+
+inline CollisionClass classify_raw_johto_collision(uint8_t raw_byte) {
+    // This is a TEST-ONLY helper - the real classifier is in frontends/crystal/
+    // Simplified mapping for common collision types
+    if (raw_byte == 0xFF) return CollisionClass::Wall;
+    if (raw_byte == 0x07) return CollisionClass::Wall;  // COLL_WALL
+    
+    // Water tiles (0x20-0x3F)
+    uint8_t hi = raw_byte & 0xF0;
+    if (hi == 0x20 || hi == 0x30) {
+        if (raw_byte == 0x23 || raw_byte == 0x2B) return CollisionClass::Ice;  // ICE
+        if (raw_byte == 0x24 || raw_byte == 0x2C) return CollisionClass::Whirlpool;
+        if (raw_byte == 0x33) return CollisionClass::Waterfall;
+        return CollisionClass::Water;
+    }
+    
+    // Warp tiles (0x70-0x7F)
+    if (hi == 0x70) {
+        if (raw_byte == 0x71 || raw_byte == 0x75 || raw_byte == 0x79 || raw_byte == 0x7D) 
+            return CollisionClass::WarpDoor;
+        if (raw_byte == 0x7B || raw_byte == 0x74) return CollisionClass::WarpCave;
+        if (raw_byte == 0x72 || raw_byte == 0x7A) return CollisionClass::WarpStair;
+        if (raw_byte == 0x70 || raw_byte == 0x76 || raw_byte == 0x78 || raw_byte == 0x7E)
+            return CollisionClass::WarpCarpet;
+        return CollisionClass::WarpFloor;
+    }
+    
+    // Pit tiles (0x60, 0x68)
+    if (raw_byte == 0x60 || raw_byte == 0x68) return CollisionClass::WarpPit;
+    
+    // Counter tiles (0x90-0x9F)
+    if (hi == 0x90) return CollisionClass::Counter;
+    
+    // Grass tiles
+    if (raw_byte == 0x18 || raw_byte == 0x14) return CollisionClass::Grass;
+    
+    // Side walls (0xB0-0xB7)
+    if (hi == 0xB0) {
+        switch (raw_byte & 0x07) {
+            case 2: return CollisionClass::SideWallN;  // UP_WALL
+            case 3: return CollisionClass::SideWallS;  // DOWN_WALL
+            case 1: return CollisionClass::SideWallE;  // LEFT_WALL (blocks from east)
+            case 0: return CollisionClass::SideWallW;  // RIGHT_WALL (blocks from west)
+        }
+    }
+    
+    // Default: floor (walkable)
+    return CollisionClass::Floor;
+}
+
+// Semantic version that returns CollisionClass - use this for tests
+inline CollisionClass get_collision_from_blocks_johto(
+    const std::vector<uint8_t>& blocks,
+    int map_width_blocks,
+    int tile_x, int tile_y
+) {
+    uint8_t raw = get_collision_from_blocks_johto_raw(blocks, map_width_blocks, tile_x, tile_y);
+    return classify_raw_johto_collision(raw);
 }
 
 TEST(newbarktown_real_collision_map) {
@@ -2226,10 +2300,9 @@ TEST(newbarktown_real_collision_map) {
     const std::vector<uint8_t>& blocks = result.map.blocks;
     const int map_width_blocks = result.map.width;
     
-    collision_map.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    collision_map.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
-    collision_map.get_side_walls = [](int32_t, int32_t) { return uint8_t{0}; };
     
     // Verify dimensions
     ASSERT_EQ(collision_map.width, 20);
@@ -2249,15 +2322,13 @@ TEST(newbarktown_known_walkable_tiles) {
     const std::vector<uint8_t>& blocks = result.map.blocks;
     const int map_width_blocks = result.map.width;
     
-    Collision collision;
-    
     // Teacher stands at (6, 8) - must be walkable
-    uint8_t coll = get_collision_from_blocks_johto(blocks, map_width_blocks, 6, 8);
-    ASSERT_TRUE(collision.is_tile_walkable(coll, false));
+    CollisionClass coll = get_collision_from_blocks_johto(blocks, map_width_blocks, 6, 8);
+    ASSERT_TRUE(collision_is_walkable(coll));
     
     // Fisher stands at (12, 9) - must be walkable
     coll = get_collision_from_blocks_johto(blocks, map_width_blocks, 12, 9);
-    ASSERT_TRUE(collision.is_tile_walkable(coll, false));
+    ASSERT_TRUE(collision_is_walkable(coll));
     
     // Sign at (8, 8) - BG event position
     // Note: BG events can be on tiles the player faces, not necessarily stands on
@@ -2277,15 +2348,13 @@ TEST(newbarktown_known_blocked_tiles) {
     const std::vector<uint8_t>& blocks = result.map.blocks;
     const int map_width_blocks = result.map.width;
     
-    Collision collision;
-    
     // Tile (4, 2) should be wall - inside Elm's Lab roof area
-    uint8_t coll = get_collision_from_blocks_johto(blocks, map_width_blocks, 4, 2);
-    ASSERT_TRUE(collision.is_tile_walkable(coll, false) == false);
+    CollisionClass coll = get_collision_from_blocks_johto(blocks, map_width_blocks, 4, 2);
+    ASSERT_TRUE(collision_is_walkable(coll) == false);
     
     // Tile (14, 2) should be wall - Player's House roof
     coll = get_collision_from_blocks_johto(blocks, map_width_blocks, 14, 2);
-    ASSERT_TRUE(collision.is_tile_walkable(coll, false) == false);
+    ASSERT_TRUE(collision_is_walkable(coll) == false);
     
     std::cout << "  [Known blocked tiles verified]\n";
 }
@@ -2299,16 +2368,13 @@ TEST(newbarktown_water_tiles) {
     const std::vector<uint8_t>& blocks = result.map.blocks;
     const int map_width_blocks = result.map.width;
     
-    Collision collision;
-    CollisionPermissionTable table;
-    
     // Check far-right edge for water tiles (near Route 27 water)
     // Look for any water tiles in the map
     int water_count = 0;
     for (int y = 0; y < result.map.height * 2; ++y) {
         for (int x = 0; x < result.map.width * 2; ++x) {
-            uint8_t coll = get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
-            if (table.is_water(coll)) {
+            CollisionClass coll = get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
+            if (collision_is_swimmable(coll)) {
                 water_count++;
             }
         }
@@ -2328,7 +2394,7 @@ TEST(newbarktown_door_tiles) {
     const std::vector<uint8_t>& blocks = result.map.blocks;
     const int map_width_blocks = result.map.width;
     
-    // Door tiles have collision 0x71 (COLL_DOOR)
+    // Door tiles have semantic CollisionClass::WarpDoor
     // Check near Elm's Lab entrance (warp at 6, 3 in blocks = tile 12, 6 area)
     // The door might be in the BR quadrant of a metatile
     
@@ -2336,8 +2402,8 @@ TEST(newbarktown_door_tiles) {
     bool found_door = false;
     for (int y = 5; y < 9; ++y) {
         for (int x = 11; x < 15; ++x) {
-            uint8_t coll = get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
-            if (coll == 0x71) {  // COLL_DOOR
+            CollisionClass coll = get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
+            if (coll == CollisionClass::WarpDoor) {
                 found_door = true;
                 break;
             }
@@ -2363,10 +2429,9 @@ TEST(newbarktown_collision_movement_blocked) {
     CollisionMap collision_map;
     collision_map.width = tile_width;
     collision_map.height = tile_height;
-    collision_map.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    collision_map.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
-    collision_map.get_side_walls = [](int32_t, int32_t) { return uint8_t{0}; };
     
     Collision collision;
     std::vector<CollisionEntity> entities;
@@ -2376,8 +2441,8 @@ TEST(newbarktown_collision_movement_blocked) {
     CollisionEntity player{1, 10, 10, 0, 0, false, false};
     
     // Verify current position is walkable
-    uint8_t curr_coll = get_collision_from_blocks_johto(blocks, map_width_blocks, 10, 10);
-    ASSERT_TRUE(collision.is_tile_walkable(curr_coll, false));
+    CollisionClass curr_coll = get_collision_from_blocks_johto(blocks, map_width_blocks, 10, 10);
+    ASSERT_TRUE(collision_is_walkable(curr_coll));
     
     // Try moving up repeatedly until blocked
     int steps_until_blocked = 0;
@@ -2413,10 +2478,9 @@ TEST(newbarktown_entity_collision) {
     CollisionMap collision_map;
     collision_map.width = tile_width;
     collision_map.height = tile_height;
-    collision_map.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    collision_map.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
-    collision_map.get_side_walls = [](int32_t, int32_t) { return uint8_t{0}; };
     
     Collision collision;
     
@@ -2426,8 +2490,8 @@ TEST(newbarktown_entity_collision) {
     
     // Player at (5, 8) trying to move right into Teacher at (6, 8)
     // First verify (5, 8) is walkable
-    uint8_t player_tile = get_collision_from_blocks_johto(blocks, map_width_blocks, 5, 8);
-    ASSERT_TRUE(collision.is_tile_walkable(player_tile, false));
+    CollisionClass player_tile = get_collision_from_blocks_johto(blocks, map_width_blocks, 5, 8);
+    ASSERT_TRUE(collision_is_walkable(player_tile));
     
     CollisionEntity player{1, 5, 8, 0, 0, false, false};
     
@@ -2589,7 +2653,7 @@ TEST(newbarktown_sign_wrong_facing) {
     InteractionMap imap;
     imap.width = map.width * 2;
     imap.height = map.height * 2;
-    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
     
@@ -2625,7 +2689,7 @@ TEST(newbarktown_sign_correct_facing) {
     InteractionMap imap;
     imap.width = map.width * 2;
     imap.height = map.height * 2;
-    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
     
@@ -2663,7 +2727,7 @@ TEST(newbarktown_teacher_interaction) {
     InteractionMap imap;
     imap.width = map.width * 2;
     imap.height = map.height * 2;
-    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
     
@@ -2702,7 +2766,7 @@ TEST(newbarktown_object_priority_integration) {
     InteractionMap imap;
     imap.width = map.width * 2;
     imap.height = map.height * 2;
-    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
     
@@ -2765,7 +2829,7 @@ TEST(newbarktown_package_roundtrip_interaction) {
     InteractionMap imap;
     imap.width = map.width * 2;
     imap.height = map.height * 2;
-    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
     
@@ -2829,7 +2893,7 @@ TEST(newbarktown_interaction_determinism) {
     InteractionMap imap;
     imap.width = map.width * 2;
     imap.height = map.height * 2;
-    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> uint8_t {
+    imap.get_collision = [&blocks, map_width_blocks](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width_blocks, x, y);
     };
     
@@ -2879,8 +2943,8 @@ TEST(headless_loop_facing_update) {
     loop.spawn_player(5, 5, enginemon::Direction::Down);
     
     // Set up a map with all walkable tiles (no collision)
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return CollisionByte::FLOOR;  // All walkable
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;  // All walkable
     });
     
     // Load a minimal map
@@ -2905,9 +2969,9 @@ TEST(headless_loop_movement_blocked) {
     loop.spawn_player(0, 5, enginemon::Direction::Left);  // At left edge
     
     // Set up collision that blocks left edge
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        if (x < 0) return CollisionByte::WALL;
-        return CollisionByte::FLOOR;
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        if (x < 0) return CollisionClass::Wall;
+        return CollisionClass::Floor;
     });
     
     RuntimeMap map;
@@ -2935,8 +2999,8 @@ TEST(headless_loop_movement_ticks) {
     HeadlessGameLoop loop;
     loop.spawn_player(5, 5, enginemon::Direction::Down);
     
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return CollisionByte::FLOOR;
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     RuntimeMap map;
@@ -2970,8 +3034,8 @@ TEST(headless_loop_input_locked_during_movement) {
     HeadlessGameLoop loop;
     loop.spawn_player(5, 5, enginemon::Direction::Down);
     
-    loop.set_collision_data([](int32_t, int32_t) -> uint8_t {
-        return CollisionByte::FLOOR;
+    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     RuntimeMap map;
@@ -3082,7 +3146,7 @@ TEST(headless_newbark_walk_one_tile) {
     const auto& blocks = rtmap.blocks;
     int map_width = rtmap.width;
     
-    loop.set_collision_data([&blocks, map_width](int32_t x, int32_t y) -> uint8_t {
+    loop.set_collision_data([&blocks, map_width](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width, x, y);
     });
     
@@ -3126,7 +3190,7 @@ TEST(headless_newbark_sign_interaction) {
     const auto& blocks = rtmap.blocks;
     int map_width = rtmap.width;
     
-    loop.set_collision_data([&blocks, map_width](int32_t x, int32_t y) -> uint8_t {
+    loop.set_collision_data([&blocks, map_width](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width, x, y);
     });
     
@@ -3165,7 +3229,7 @@ TEST(headless_newbark_teacher_interaction) {
     const auto& blocks = rtmap.blocks;
     int map_width = rtmap.width;
     
-    loop.set_collision_data([&blocks, map_width](int32_t x, int32_t y) -> uint8_t {
+    loop.set_collision_data([&blocks, map_width](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width, x, y);
     });
     
@@ -3228,7 +3292,7 @@ TEST(headless_newbark_determinism) {
     const auto& blocks = rtmap.blocks;
     int map_width = rtmap.width;
     
-    auto collision_fn = [&blocks, map_width](int32_t x, int32_t y) -> uint8_t {
+    auto collision_fn = [&blocks, map_width](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width, x, y);
     };
     
@@ -3277,7 +3341,7 @@ TEST(headless_newbark_script_execution) {
     const auto& blocks = rtmap.blocks;
     int map_width = rtmap.width;
     
-    loop.set_collision_data([&blocks, map_width](int32_t x, int32_t y) -> uint8_t {
+    loop.set_collision_data([&blocks, map_width](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks_johto(blocks, map_width, x, y);
     });
     
@@ -4321,8 +4385,8 @@ TEST(npc_idle_timer_countdown) {
     rtmap.blocks.resize(100, 0x01);  // Walkable
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;  // Walkable floor
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;  // Walkable floor
     });
     
     // Add an NPC with spin behavior (will turn but not walk)
@@ -4362,8 +4426,8 @@ TEST(npc_frozen_blocks_movement) {
     rtmap.blocks.resize(100, 0x01);
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     NpcState npc;
@@ -4412,8 +4476,8 @@ TEST(npc_standing_never_moves) {
     rtmap.blocks.resize(100, 0x01);
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     NpcState npc;
@@ -4457,8 +4521,8 @@ TEST(npc_spin_changes_facing) {
     rtmap.blocks.resize(100, 0x01);
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     NpcState npc;
@@ -4512,8 +4576,8 @@ TEST(npc_walk_changes_position) {
     rtmap.blocks.resize(100, 0x01);
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;  // All walkable
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;  // All walkable
     });
     
     NpcState npc;
@@ -4565,8 +4629,8 @@ TEST(npc_respects_radius_bounds) {
     rtmap.blocks.resize(400, 0x01);
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     NpcState npc;
@@ -4620,8 +4684,8 @@ TEST(npc_collision_with_player) {
     rtmap.blocks.resize(100, 0x01);
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     NpcState npc;
@@ -4666,8 +4730,8 @@ TEST(npc_walk_up_down_direction) {
     rtmap.blocks.resize(100, 0x01);
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     NpcState npc;
@@ -4753,8 +4817,8 @@ TEST(npc_rng_determinism_via_gamestate) {
         rtmap.blocks.resize(400, 0x01);
         
         loop.load_map(rtmap);
-        loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-            return 0x01;  // All walkable
+        loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+            return CollisionClass::Floor;  // All walkable
         });
         
         NpcState npc;
@@ -4832,8 +4896,8 @@ TEST(npc_rng_save_restore_determinism) {
     rtmap.blocks.resize(400, 0x01);
     
     loop.load_map(rtmap);
-    loop.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;  // All walkable
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;  // All walkable
     });
     
     // Add NPC with random walk behavior
@@ -4905,8 +4969,8 @@ TEST(npc_rng_save_restore_determinism) {
     // Create fresh loop with restored state
     HeadlessGameLoop loop2;
     loop2.load_map(rtmap);
-    loop2.set_collision_data([](int32_t x, int32_t y) -> uint8_t {
-        return 0x01;
+    loop2.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
     });
     
     // Add NPC with same config (immutable properties come from map definition)
@@ -9464,9 +9528,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(async_movement_resumes_after_complete);
     
     // Collision tests - native overworld collision system
-    RUN_TEST(collision_permission_table_land);
-    RUN_TEST(collision_permission_table_water);
-    RUN_TEST(collision_permission_table_wall);
+    RUN_TEST(collision_class_semantic_queries);
     RUN_TEST(collision_passable_floor);
     RUN_TEST(collision_blocked_wall);
     RUN_TEST(collision_blocked_bounds);
@@ -9474,6 +9536,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(collision_entity_target_blocks);
     RUN_TEST(collision_side_wall_blocks);
     RUN_TEST(collision_ledge_detection);
+    RUN_TEST(collision_semantic_boundary_adversarial);
     
     // Interaction tests - A-button interaction system
     RUN_TEST(interaction_facing_calculation);

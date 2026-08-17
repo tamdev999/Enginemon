@@ -10,16 +10,6 @@
 namespace enginemon {
 
 //=============================================================================
-// COUNTER TILES (from pokecrystal)
-// Reference: data/collision/collision_permissions.asm
-// Counter tiles (0x90-0x9F) allow talking across them
-//=============================================================================
-
-// COLL_COUNTER through COLL_COUNTER_97
-static constexpr uint8_t COUNTER_TILE_MIN = 0x90;
-static constexpr uint8_t COUNTER_TILE_MAX = 0x9F;
-
-//=============================================================================
 // CONSTRUCTION
 //=============================================================================
 
@@ -45,11 +35,11 @@ void Interaction::get_facing_cell(int32_t x, int32_t y, Direction dir,
 
 //=============================================================================
 // COUNTER DETECTION
+// Now uses semantic CollisionClass instead of raw Crystal bytes
 //=============================================================================
 
-bool Interaction::is_counter_tile(uint8_t collision_byte) const {
-    return collision_byte >= COUNTER_TILE_MIN && 
-           collision_byte <= COUNTER_TILE_MAX;
+bool Interaction::is_counter_tile(CollisionClass coll) const {
+    return collision_is_counter(coll);
 }
 
 //=============================================================================
@@ -190,7 +180,7 @@ InteractionResult Interaction::check(
     // Check for counter tile - doubles reach
     // Reference: pokecrystal/engine/overworld/npc_movement.asm CheckFacingObject
     if (map.get_collision) {
-        uint8_t coll = map.get_collision(fx, fy);
+        CollisionClass coll = map.get_collision(fx, fy);
         if (is_counter_tile(coll)) {
             // Double the facing distance for counters
             int32_t fx2, fy2;

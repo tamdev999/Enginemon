@@ -364,7 +364,7 @@ static bool transition_to_map(
     ctx.game_loop->load_map(world_state.map);
     
     // Set collision data for new map using per-tileset collision
-    ctx.game_loop->set_collision_data([&world_state](int32_t x, int32_t y) -> uint8_t {
+    ctx.game_loop->set_collision_data([&world_state](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks(world_state.map.blocks, 
             world_state.tileset.collision, world_state.map.width, x, y);
     });
@@ -621,7 +621,7 @@ int main(int argc, char* argv[]) {
     
     // Set collision data using per-tileset collision
     // Lambda captures world_state by reference for the current map
-    game_loop.set_collision_data([&world_state](int32_t x, int32_t y) -> uint8_t {
+    game_loop.set_collision_data([&world_state](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks(world_state.map.blocks, 
             world_state.tileset.collision, world_state.map.width, x, y);
     });

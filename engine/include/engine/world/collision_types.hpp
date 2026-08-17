@@ -81,11 +81,18 @@ inline bool collision_clears_warp_flag(CollisionClass c) {
     return c == CollisionClass::WarpStair;
 }
 
+// Is this a side wall blocking from a specific direction?
+inline bool collision_is_side_wall(CollisionClass c) {
+    return c >= CollisionClass::SideWallN && c <= CollisionClass::SideWallW;
+}
+
 // Is this passable on foot (no special moves)?
 inline bool collision_is_walkable(CollisionClass c) {
     return c == CollisionClass::Floor || 
            c == CollisionClass::Grass ||
-           collision_is_warp(c);  // Warps are walkable (they trigger after)
+           c == CollisionClass::Ice ||
+           collision_is_warp(c) ||  // Warps are walkable (they trigger after)
+           collision_is_side_wall(c);  // Side walls are walkable (they have directional restrictions checked separately)
 }
 
 // Is this passable while surfing?
@@ -94,14 +101,18 @@ inline bool collision_is_swimmable(CollisionClass c) {
            c == CollisionClass::Whirlpool;
 }
 
+// Is this passable with current mode (foot or surfing)?
+// Note: On foot, only collision_is_walkable() tiles are passable.
+//       While surfing, water tiles are also passable.
+inline bool collision_is_passable(CollisionClass c, bool surfing) {
+    if (collision_is_walkable(c)) return true;
+    if (surfing && collision_is_swimmable(c)) return true;
+    return false;
+}
+
 // Does this tile extend interaction reach?
 inline bool collision_is_counter(CollisionClass c) {
     return c == CollisionClass::Counter;
-}
-
-// Is this a side wall blocking from a specific direction?
-inline bool collision_is_side_wall(CollisionClass c) {
-    return c >= CollisionClass::SideWallN && c <= CollisionClass::SideWallW;
 }
 
 } // namespace enginemon

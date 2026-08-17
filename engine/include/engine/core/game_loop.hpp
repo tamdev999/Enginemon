@@ -13,6 +13,7 @@
 #include "engine/core/game_state.hpp"
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/collision.hpp"
+#include "engine/world/collision_types.hpp"
 #include "engine/world/interaction.hpp"
 #include "engine/world/movement_manager.hpp"
 #include "engine/scripting/lua_runtime.hpp"
@@ -206,8 +207,8 @@ public:
     // Load a map from package (runtime-native types only)
     void load_map(const RuntimeMap& map);
     
-    // Set collision data (block bytes for the current map)
-    void set_collision_data(std::function<uint8_t(int32_t, int32_t)> get_collision);
+    // Set collision data (semantic CollisionClass for the current map)
+    void set_collision_data(std::function<CollisionClass(int32_t, int32_t)> get_collision);
     
     // Spawn player at position
     void spawn_player(int32_t x, int32_t y, Direction facing = Direction::Down);
@@ -359,7 +360,7 @@ private:
     
     // Map data
     const RuntimeMap* current_map_ = nullptr;
-    std::function<uint8_t(int32_t, int32_t)> get_collision_;
+    std::function<CollisionClass(int32_t, int32_t)> get_collision_;
     
     // NPCs
     std::vector<NpcState> npcs_;

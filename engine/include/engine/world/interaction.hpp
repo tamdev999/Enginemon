@@ -17,6 +17,7 @@
 // - Directional BG events require matching facing
 
 #include "engine/core/types.hpp"
+#include "engine/world/collision_types.hpp"
 #include <cstdint>
 #include <string>
 #include <optional>
@@ -110,8 +111,8 @@ struct InteractionMap {
     int32_t width;              // Map width in tiles
     int32_t height;             // Map height in tiles
     
-    // Get collision byte at tile (for counter detection)
-    std::function<uint8_t(int32_t x, int32_t y)> get_collision;
+    // Get collision class at tile (for counter detection)
+    std::function<CollisionClass(int32_t x, int32_t y)> get_collision;
 };
 
 //=============================================================================
@@ -138,7 +139,7 @@ public:
                                 int32_t& out_x, int32_t& out_y);
     
     // Check if tile is a counter (doubles interaction reach)
-    bool is_counter_tile(uint8_t collision_byte) const;
+    bool is_counter_tile(CollisionClass coll) const;
     
     // Check if BG event type requires specific facing
     static bool bg_event_requires_facing(uint8_t bg_type);
