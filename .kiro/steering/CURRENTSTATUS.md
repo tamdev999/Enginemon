@@ -90,25 +90,42 @@ The linker now uses the same `discover_corpus()` implementation as the productio
 compiler corpus = inventory corpus = legality corpus = linker corpus = 1679
 ```
 
-**Linker Classification Counts (Updated):**
+**Linker Classification Counts (Final):**
 
-| Classification | Old (1362) | New (1679) |
-|---------------|------------|------------|
-| ExactResolved | 324 | 379 |
-| OwnershipValidated | 804 | 1127 |
-| RangeOnly | 3677 | 4451 |
-| InvalidOwnership | 0 | 18 |
+| Classification | Value | Description |
+|---------------|-------|-------------|
+| ExactResolved | 379 | Verified against compiled definitions |
+| OwnershipValidated | 1145 | Valid object references for owning map |
+| RangeOnly | 4451 | Valid within type range |
+| InvalidOwnership | 0 | ✅ All resolved |
 
-**Known Limitation: 18 InvalidOwnership**
+### Deferred Script Ownership Fix - COMPLETED ✓
 
-The expanded corpus exposes 18 Object references in scene/callback scripts that exceed the map's static object count. These are **known Crystal patterns** where scripts reference dynamically spawned objects:
+Fixed a bug in corpus discovery where deferred scripts (sdefer targets) were assigned incorrect `owning_map` values.
 
-- `map_12_2_0x437063` - Objects 7-13 (7 refs)
-- `map_4_1_0x626276` - Object 6 (5 refs)
-- `map_4_1_0x630214` - Object 8 (2 refs)
-- `map_7_17_0x1593487` - Object 8 (4 refs)
+**Root Cause**: When discovering sdefer targets during fixed-point iteration, the code matched deferred scripts to map roots by **bank number**. Multiple maps share the same script bank (e.g., Route 11 and Route 36 National Park Gate both use bank 0x1a), so the first-match heuristic assigned wrong ownership.
 
-These are NOT semantic errors - they are limitations of static analysis. The scripts are valid at runtime.
+**Example traced**:
+- Script `0x437063` was assigned to Route 11 (map 12:2) based on bank matching
+- Actual owner: Route36NationalParkGate which has 12 static objects
+- Object references 7-13 in the script ARE VALID for Route36NationalParkGate (not Route 11 which has only 2 objects)
+
+**Fix**: Track `target → discovering_root` relationship at discovery time, then inherit `owning_map` from the actual discovering root rather than bank-matching.
+
+**Code change** in `corpus_discovery.cpp`:
+```cpp
+// OLD: std::set<uint32_t> new_deferred_targets
+// NEW: std::map<uint32_t, uint32_t> new_deferred_targets  // target → discovering_root
+
+// At discovery time, record which root found each target:
+new_deferred_targets[target] = addr;  // addr is the currently decoding root
+
+// When adding deferred roots, inherit from actual discoverer:
+auto root_it = result.map_roots.find(discovering_root);
+if (root_it != result.map_roots.end()) {
+    owning_map = root_it->second.owning_map;
+}
+```
 
 ### Git Commits
 
@@ -116,6 +133,7 @@ These are NOT semantic errors - they are limitations of static analysis. The scr
 - `89a7574` - scripts: give Battle Tower text native semantics (CORRECTIVE)
 - `78b3f82` - docs: update CURRENTSTATUS with Battle Tower native semantics fix
 - `da43c90` - scripts: unify linker with production corpus discovery
+- `34f5c59` - scripts: fix deferred script ownership in corpus discovery
 
 ---
 

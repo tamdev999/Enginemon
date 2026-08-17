@@ -295,7 +295,8 @@ CorpusDiscoveryResult discover_corpus(
         ++result.stats.deferred_iterations;
         
         // Process one batch: decode all pending, collect new targets
-        std::set<uint32_t> new_deferred_targets;
+        // Track which root discovered each target (target -> discovering_root)
+        std::map<uint32_t, uint32_t> new_deferred_targets;
         
         while (!pending.empty()) {
             uint32_t addr = pending.front();
@@ -331,9 +332,9 @@ CorpusDiscoveryResult discover_corpus(
                     
                     if (is_map_root || is_std_root) {
                         ++result.stats.deferred_already_known;
-                    } else if (!decoded.contains(target)) {
-                        // New deferred target
-                        new_deferred_targets.insert(target);
+                    } else if (!decoded.contains(target) && !new_deferred_targets.contains(target)) {
+                        // New deferred target - record which root discovered it
+                        new_deferred_targets[target] = addr;
                     }
                 }
             } catch (const std::exception& e) {
@@ -343,36 +344,25 @@ CorpusDiscoveryResult discover_corpus(
         }
         
         // Add new deferred targets as roots and queue them
-        for (uint32_t target : new_deferred_targets) {
+        for (const auto& [target, discovering_root] : new_deferred_targets) {
             if (!result.map_roots.contains(target) && 
                 !result.std_script_addresses.contains(target)) {
                 
-                // Determine owning map (if deferred from a known map root)
+                // Inherit owning_map from the actual discovering root
                 enginemon::MapId owning_map = enginemon::MAP_NONE;
-                uint32_t discovered_from = 0;
                 
-                // Look for the root that discovered this target
-                // (The target's script_bank should match)
-                for (const auto& [root_addr, info] : result.map_roots) {
-                    // Check if this root could have discovered the target
-                    // by checking if they share the same bank
-                    auto root_bank_it = address_to_script_bank.find(root_addr);
-                    uint8_t target_bank = rom.flat_to_bank(target);
-                    
-                    if (root_bank_it != address_to_script_bank.end() &&
-                        root_bank_it->second == target_bank) {
-                        owning_map = info.owning_map;
-                        discovered_from = root_addr;
-                        break;
-                    }
+                auto root_it = result.map_roots.find(discovering_root);
+                if (root_it != result.map_roots.end()) {
+                    owning_map = root_it->second.owning_map;
                 }
+                // StdScript roots have no owning_map, which is correct (MAP_NONE)
                 
                 result.map_roots[target] = {
                     target,
                     ScriptRootType::Deferred,
                     owning_map,
                     static_cast<uint8_t>(result.stats.deferred_new_roots),
-                    discovered_from
+                    discovering_root
                 };
                 
                 // Set script_bank for the new root
