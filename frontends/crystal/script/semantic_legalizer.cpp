@@ -161,6 +161,10 @@ enginemon::SemanticBasicBlock SemanticLegalizer::lower_block(
     ctx.current_block = &block;
     ctx.cursor = 0;
     
+    // Batch 9: Reset block-local ScriptVar context at block entry
+    // No propagation across CFG edges - context begins unknown
+    ctx.block_ctx.invalidate();
+    
     // Process commands in block
     while (ctx.cursor < block.command_count) {
         size_t cmd_idx = block.command_start + ctx.cursor;
@@ -565,6 +569,11 @@ RuleResult rule_set_var(LoweringContext& ctx) {
         op.var = enginemon::VarId{0};  // wScriptVar
         op.source = enginemon::VarValueSource::literal(p->value);
         r.instructions.push_back(make_inst(std::move(op)));
+        
+        // Batch 9: Record literal in block-local context for subsequent Specials
+        // The setval STILL emits Sem_SetVar (observable wScriptVar write) AND records fact
+        ctx.block_ctx.on_setval(p->value);
+        
         return r;
     }
     if (auto* p = std::get_if<Cmd_Loadvar>(&cmd->data)) {
@@ -575,6 +584,7 @@ RuleResult rule_set_var(LoweringContext& ctx) {
         op.var = enginemon::VarId{p->var_id};
         op.source = enginemon::VarValueSource::literal(p->value);
         r.instructions.push_back(make_inst(std::move(op)));
+        // Note: loadvar writes to a VAR slot, not wScriptVar, so no context change
         return r;
     }
     return {};
@@ -593,6 +603,10 @@ RuleResult rule_add_var(LoweringContext& ctx) {
         op.var = enginemon::VarId{0};  // wScriptVar
         op.delta = p->value;
         r.instructions.push_back(make_inst(std::move(op)));
+        
+        // Batch 9: Invalidate context - addval modifies wScriptVar to unknown value
+        ctx.block_ctx.invalidate();
+        
         return r;
     }
     return {};
@@ -609,6 +623,10 @@ RuleResult rule_random(LoweringContext& ctx) {
         enginemon::Sem_Random op;
         op.range = p->range;
         r.instructions.push_back(make_inst(std::move(op)));
+        
+        // Batch 9: Invalidate context - random writes non-deterministic value to wScriptVar
+        ctx.block_ctx.invalidate();
+        
         return r;
     }
     return {};
@@ -680,6 +698,8 @@ RuleResult rule_ram_operations(LoweringContext& ctx) {
             // Link mode is a capability query, not mutable state
             // Sets wScriptVar to 0 (Gen1/not connected) or non-zero (Gen2)
             r.instructions.push_back(make_inst(enginemon::Sem_CheckLinkMode{}));
+            // Batch 9: Invalidate - result is runtime-dependent
+            ctx.block_ctx.invalidate();
             return r;
         }
         
@@ -688,6 +708,8 @@ RuleResult rule_ram_operations(LoweringContext& ctx) {
         if (p->ram_address == RAM_TEMP_WILD_MON_SPECIES) {
             // Maps to Sem_ReadEncounterSpecies which reads from PendingFieldEncounter
             r.instructions.push_back(make_inst(enginemon::Sem_ReadEncounterSpecies{}));
+            // Batch 9: Invalidate - result is runtime-dependent
+            ctx.block_ctx.invalidate();
             return r;
         }
         
@@ -699,6 +721,8 @@ RuleResult rule_ram_operations(LoweringContext& ctx) {
             // Note: In practice, scripts use "cry" command after SetStrengthFlag
             // which internally reads wStrengthSpecies, not via script readmem
             r.instructions.push_back(make_inst(enginemon::Sem_ReadEncounterSpecies{}));
+            // Batch 9: Invalidate - result is runtime-dependent
+            ctx.block_ctx.invalidate();
             return r;
         }
         
@@ -707,6 +731,8 @@ RuleResult rule_ram_operations(LoweringContext& ctx) {
             enginemon::Sem_ReadStateVar op;
             op.state_var = *state_var;
             r.instructions.push_back(make_inst(std::move(op)));
+            // Batch 9: Invalidate - readmem always writes to wScriptVar
+            ctx.block_ctx.invalidate();
             return r;
         }
         
@@ -1427,6 +1453,10 @@ RuleResult rule_scene_ops(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_CheckScene{}));
+        
+        // Batch 9: Invalidate context - checkscene writes to wScriptVar
+        ctx.block_ctx.invalidate();
+        
         return r;
     }
     if (auto* p = std::get_if<Cmd_Setmapscene>(&cmd->data)) {
@@ -1446,6 +1476,10 @@ RuleResult rule_scene_ops(LoweringContext& ctx) {
         enginemon::Sem_CheckMapScene op;
         op.map = enginemon::MapId{p->map.as_u16()};
         r.instructions.push_back(make_inst(std::move(op)));
+        
+        // Batch 9: Invalidate context - checkmapscene writes to wScriptVar
+        ctx.block_ctx.invalidate();
+        
         return r;
     }
     return {};
@@ -1977,6 +2011,11 @@ RuleResult rule_special(LoweringContext& ctx) {
         // Unclassified in Batch 1 (need context tracking)
         constexpr uint16_t SPECIAL_PLAY_SLOW_CRY = 95;
         constexpr uint16_t SPECIAL_SET_PLAYER_PALETTE = 152;
+        // Batch 9: Context-dependent Specials (require setval producer)
+        constexpr uint16_t SPECIAL_MAP_RADIO = 40;
+        constexpr uint16_t SPECIAL_GAME_CORNER_PRIZE_MON_CHECK_DEX = 57;
+        constexpr uint16_t SPECIAL_FIND_PARTY_MON_THAT_SPECIES = 66;
+        constexpr uint16_t SPECIAL_FIND_PARTY_MON_YOUR_TRAINER_ID = 67;
         // Party/Pokemon
         constexpr uint16_t SPECIAL_HEAL_PARTY = 27;     // Batch 3: HealParty
         constexpr uint16_t SPECIAL_CHECK_POKERUS = 78;  // Batch 5: CheckPokerus
@@ -2415,20 +2454,183 @@ RuleResult rule_special(LoweringContext& ctx) {
             }
             
             // =================================================================
-            // STILL UNCLASSIFIED IN BATCH 1 (need context tracking)
+            // BATCH 9: CONTEXT-DEPENDENT SPECIALS (block-local ScriptVar)
             // =================================================================
+            // These Specials consume wScriptVar set by preceding setval.
+            // Lowering requires:
+            //   1. Known ScriptVar value (ctx.block_ctx.has_value())
+            //   2. Valid domain for the consumed value
+            // On success: emit typed semantic op, invalidate context if result-writing
+            // On failure: fall through to Sem_Special
+            
+            case SPECIAL_MAP_RADIO: {
+                // MapRadio - play radio channel from wScriptVar
+                // Source: pokecrystal/engine/events/specials.asm MapRadio
+                // Domain: RadioChannelId 0-8 valid (0=off, 1-8=channels)
+                // Does NOT write wScriptVar (preserves context)
+                
+                if (!ctx.block_ctx.has_value()) {
+                    // No producer - cannot lower contextually
+                    break;
+                }
+                uint8_t channel = ctx.block_ctx.value();
+                
+                // Domain validation: Crystal has channels 0-8
+                if (channel > 8) {
+                    // Invalid channel - refuse contextual lowering
+                    break;
+                }
+                
+                enginemon::Sem_PlayRadio op;
+                op.channel = channel;
+                r.instructions.push_back(make_inst(std::move(op)));
+                // Context preserved - MapRadio does NOT write wScriptVar
+                return r;
+            }
+            
+            case SPECIAL_GAME_CORNER_PRIZE_MON_CHECK_DEX: {
+                // GameCornerPrizeMonCheckDex - conditionally register new Pokedex entry
+                // Source: pokecrystal/engine/events/specials.asm GameCornerPrizeMonCheckDex
+                // Domain: SpeciesId 1-251 valid
+                // Does NOT write wScriptVar (preserves context)
+                
+                if (!ctx.block_ctx.has_value()) {
+                    // No producer - cannot lower contextually
+                    break;
+                }
+                uint8_t species = ctx.block_ctx.value();
+                
+                // Domain validation: valid Gen 2 species (1-251)
+                if (species == 0 || species > 251) {
+                    // Invalid species - refuse contextual lowering
+                    break;
+                }
+                
+                enginemon::Sem_RegisterNewDexEntry op;
+                op.species = enginemon::SpeciesId{species};
+                r.instructions.push_back(make_inst(std::move(op)));
+                // Context preserved - GameCornerPrizeMonCheckDex does NOT write wScriptVar
+                return r;
+            }
+            
+            case SPECIAL_FIND_PARTY_MON_THAT_SPECIES: {
+                // FindPartyMonThatSpecies - search party for species (any OT)
+                // Source: pokecrystal/engine/events/specials.asm FindPartyMonThatSpecies
+                // Domain: SpeciesId 1-251 valid
+                // WRITES wScriptVar with result (1-6 = slot+1, 0 = not found)
+                
+                if (!ctx.block_ctx.has_value()) {
+                    // No producer - cannot lower contextually
+                    break;
+                }
+                uint8_t species = ctx.block_ctx.value();
+                
+                // Domain validation: valid Gen 2 species (1-251)
+                if (species == 0 || species > 251) {
+                    // Invalid species - refuse contextual lowering
+                    break;
+                }
+                
+                enginemon::Sem_FindPartyMon op;
+                op.species = enginemon::SpeciesId{species};
+                op.require_ot = false;
+                r.instructions.push_back(make_inst(std::move(op)));
+                // Batch 9: Invalidate context - result-writing Special
+                ctx.block_ctx.invalidate();
+                return r;
+            }
+            
+            case SPECIAL_FIND_PARTY_MON_YOUR_TRAINER_ID: {
+                // FindPartyMonThatSpeciesYourTrainerID - search party for species (player OT only)
+                // Source: pokecrystal/engine/events/specials.asm FindPartyMonThatSpeciesYourTrainerID
+                // Domain: SpeciesId 1-251 valid
+                // WRITES wScriptVar with result (1-6 = slot+1, 0 = not found)
+                
+                if (!ctx.block_ctx.has_value()) {
+                    // No producer - cannot lower contextually
+                    break;
+                }
+                uint8_t species = ctx.block_ctx.value();
+                
+                // Domain validation: valid Gen 2 species (1-251)
+                if (species == 0 || species > 251) {
+                    // Invalid species - refuse contextual lowering
+                    break;
+                }
+                
+                enginemon::Sem_FindPartyMon op;
+                op.species = enginemon::SpeciesId{species};
+                op.require_ot = true;
+                r.instructions.push_back(make_inst(std::move(op)));
+                // Batch 9: Invalidate context - result-writing Special
+                ctx.block_ctx.invalidate();
+                return r;
+            }
             
             case SPECIAL_PLAY_SLOW_CRY: {
-                // PlaySlowCry reads species from wScriptVar (set by preceding setval)
-                // Requires: setval → special pattern recognition
-                // Remains as Sem_Special until context tracking implemented
-                break;
+                // PlaySlowCry - play slowed Pokemon cry from wScriptVar
+                // Source: pokecrystal/engine/events/specials.asm PlaySlowCry
+                // Domain: SpeciesId 1-251 valid
+                // Does NOT write wScriptVar (preserves context)
+                
+                if (!ctx.block_ctx.has_value()) {
+                    // No producer - cannot lower contextually
+                    break;
+                }
+                uint8_t species = ctx.block_ctx.value();
+                
+                // Domain validation: valid Gen 2 species (1-251)
+                if (species == 0 || species > 251) {
+                    // Invalid species - refuse contextual lowering
+                    break;
+                }
+                
+                enginemon::Sem_PlayCry op;
+                op.species = enginemon::SpeciesId{species};
+                op.variant = enginemon::CryVariant::Slow;
+                r.instructions.push_back(make_inst(std::move(op)));
+                // Context preserved - PlaySlowCry does NOT write wScriptVar
+                return r;
             }
+            
             case SPECIAL_SET_PLAYER_PALETTE: {
-                // SetPlayerPalette reads palette_id from wScriptVar (set by preceding setval)
-                // Requires: setval → special pattern recognition
-                // Remains as Sem_Special until context tracking implemented
-                break;
+                // SetPlayerPalette - change player sprite palette from wScriptVar
+                // Source: pokecrystal/engine/events/specials.asm SetPlayerPalette
+                //
+                // Crystal encoding: PAL_NPC_* << 4 (0x80=PAL0, 0x90=PAL1, etc.)
+                // Bit 7 MUST be set for valid palette literal.
+                // Normalization: (value >> 4) - 8 = semantic PaletteId
+                //   0x80 → (8-8) = 0
+                //   0x90 → (9-8) = 1
+                //
+                // Does NOT write wScriptVar (preserves context)
+                
+                if (!ctx.block_ctx.has_value()) {
+                    // No producer - cannot lower contextually
+                    break;
+                }
+                uint8_t raw_palette = ctx.block_ctx.value();
+                
+                // Domain validation: bit 7 must be set (Crystal encoding)
+                if ((raw_palette & 0x80) == 0) {
+                    // Invalid encoding - refuse contextual lowering
+                    break;
+                }
+                
+                // Normalize Crystal encoding to semantic PaletteId
+                uint8_t palette_id = (raw_palette >> 4) - 8;
+                
+                // Additional validation: result should be small (Crystal uses 0-7 max)
+                if (palette_id > 7) {
+                    // Unexpected result - refuse
+                    break;
+                }
+                
+                enginemon::Sem_SetPlayerPalette op;
+                op.palette_id = palette_id;
+                r.instructions.push_back(make_inst(std::move(op)));
+                // Context preserved - SetPlayerPalette does NOT write wScriptVar
+                return r;
             }
             
             default:
@@ -2583,6 +2785,10 @@ RuleResult rule_read_var(LoweringContext& ctx) {
         op.op = "load";  // Special: load value into script result, not comparison
         op.value = 0;
         r.instructions.push_back(make_inst(std::move(op)));
+        
+        // Batch 9: Invalidate context - readvar writes to wScriptVar
+        ctx.block_ctx.invalidate();
+        
         return r;
     }
     

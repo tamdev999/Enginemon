@@ -32,6 +32,30 @@ class PokeMailRegistry;
 class TextRegistry;
 
 // =============================================================================
+// BLOCK-LOCAL LOWERING CONTEXT (Batch 9)
+// =============================================================================
+
+// Block-local fact tracking for ScriptVar (wScriptVar)
+// This tracks compile-time-known literal values for context-dependent lowering.
+// NOT a runtime semantic type - this is frontend evidence only.
+//
+// Lifecycle:
+//   - Reset to unknown at every block entry
+//   - Established by setval (literal value)
+//   - Invalidated by addval, random, readmem, readvar, result-writing operations
+//   - Consumed (read then invalidate) by context-dependent Specials
+//
+// No propagation across CFG edges. No SSA. No dataflow merging.
+struct BlockLoweringContext {
+    std::optional<uint8_t> known_script_var;  // Known literal if established
+    
+    void on_setval(uint8_t value) { known_script_var = value; }
+    void invalidate() { known_script_var = std::nullopt; }
+    bool has_value() const { return known_script_var.has_value(); }
+    uint8_t value() const { return known_script_var.value(); }
+};
+
+// =============================================================================
 // LOWERING CONTEXT
 // =============================================================================
 
@@ -69,6 +93,9 @@ struct LoweringContext {
     
     // Helper to check if address is a block boundary (leader)
     bool is_block_boundary(uint32_t addr) const;
+    
+    // Block-local context for ScriptVar fact tracking (Batch 9)
+    BlockLoweringContext block_ctx;
 };
 
 // =============================================================================

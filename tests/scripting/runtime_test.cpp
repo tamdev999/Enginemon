@@ -8210,6 +8210,210 @@ TEST(batch8_dst_operations_no_script_result) {
 }
 
 //=============================================================================
+// BATCH 9 SPECIAL SEMANTIC OP TESTS - Block-Local ScriptVar Context
+// Verifies: Context-dependent Specials (IDs 40, 57, 66, 67, 95, 152)
+// These Specials consume wScriptVar value set by preceding setval
+//=============================================================================
+
+TEST(batch9_setval_establishes_context) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand setval_cmd;
+    setval_cmd.data = Cmd_Setval{25};
+    setval_cmd.span.rom_address = 0;
+    setval_cmd.span.raw_bytes = {0x15, 25};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_context";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 2;
+    ir.commands.push_back(setval_cmd);
+    
+    LoweringContext ctx;
+    ctx.source_ir = &ir;
+    ctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 2;
+    block.command_start = 0;
+    block.command_count = 1;
+    ctx.current_block = &block;
+    
+    ASSERT_FALSE(ctx.block_ctx.has_value());
+    RuleResult result = rule_set_var(ctx);
+    ASSERT_TRUE(result.matched);
+    ASSERT_TRUE(ctx.block_ctx.has_value());
+    ASSERT_EQ(ctx.block_ctx.value(), 25);
+    
+    std::cout << "  [setval establishes known_script_var = 25 ✓]\n";
+}
+
+TEST(batch9_special_40_with_context) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    LoweringContext ctx;
+    ctx.block_ctx.on_setval(4);
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{40};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 40, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_radio";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    ctx.source_ir = &ir;
+    ctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    ctx.current_block = &block;
+    
+    RuleResult result = rule_special(ctx);
+    ASSERT_TRUE(result.matched);
+    
+    auto* play_radio = std::get_if<Sem_PlayRadio>(&result.instructions[0].op);
+    ASSERT_TRUE(play_radio != nullptr);
+    ASSERT_EQ(play_radio->channel, 4);
+    
+    std::cout << "  [Special 40 + context → Sem_PlayRadio{channel=4} ✓]\n";
+}
+
+TEST(batch9_special_40_no_context_fallback) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{40};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 40, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_no_context";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    LoweringContext ctx;
+    ctx.source_ir = &ir;
+    ctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    ctx.current_block = &block;
+    
+    ASSERT_FALSE(ctx.block_ctx.has_value());
+    RuleResult result = rule_special(ctx);
+    
+    auto* sem_special = std::get_if<Sem_Special>(&result.instructions[0].op);
+    ASSERT_TRUE(sem_special != nullptr);
+    ASSERT_EQ(sem_special->special_id, 40);
+    
+    std::cout << "  [Special 40 no context → Sem_Special (fallback) ✓]\n";
+}
+
+TEST(batch9_special_152_palette_normalization) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    for (auto [crystal_val, expected_id] : {std::pair{0x80, 0}, std::pair{0x90, 1}}) {
+        LoweringContext ctx;
+        ctx.block_ctx.on_setval(static_cast<uint8_t>(crystal_val));
+        
+        CrystalCommand cmd;
+        cmd.data = Cmd_Special{152};
+        cmd.span.rom_address = 0;
+        cmd.span.raw_bytes = {0x0F, 152, 0};
+        
+        CrystalScriptIR ir;
+        ir.name = "test_palette";
+        ir.entry_address = 0;
+        ir.rom_start = 0;
+        ir.rom_end = 3;
+        ir.commands.push_back(cmd);
+        
+        ctx.source_ir = &ir;
+        ctx.cursor = 0;
+        
+        BasicBlock block;
+        block.id = 0;
+        block.start_address = 0;
+        block.end_address = 3;
+        block.command_start = 0;
+        block.command_count = 1;
+        ctx.current_block = &block;
+        
+        RuleResult result = rule_special(ctx);
+        auto* set_pal = std::get_if<Sem_SetPlayerPalette>(&result.instructions[0].op);
+        ASSERT_TRUE(set_pal != nullptr);
+        ASSERT_EQ(set_pal->palette_id, expected_id);
+    }
+    
+    std::cout << "  [Special 152: 0x80 → PaletteId 0 ✓]\n";
+    std::cout << "  [Special 152: 0x90 → PaletteId 1 ✓]\n";
+}
+
+TEST(batch9_special_152_invalid_encoding_rejected) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    LoweringContext ctx;
+    ctx.block_ctx.on_setval(1);  // bit 7 not set - invalid
+    
+    CrystalCommand cmd;
+    cmd.data = Cmd_Special{152};
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x0F, 152, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_invalid_palette";
+    ir.entry_address = 0;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    ctx.source_ir = &ir;
+    ctx.cursor = 0;
+    
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    ctx.current_block = &block;
+    
+    RuleResult result = rule_special(ctx);
+    auto* sem_special = std::get_if<Sem_Special>(&result.instructions[0].op);
+    ASSERT_TRUE(sem_special != nullptr);
+    
+    std::cout << "  [Special 152 raw value 1 → Sem_Special (bit7 reject) ✓]\n";
+}
+
+//=============================================================================
 // DECODER UNIQUE COMMAND IDENTITY TESTS
 // Verifies: one ROM instruction → one decoded CrystalCommand
 // This tests the fix for the duplicate command identity bug where loops
@@ -9193,6 +9397,13 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch8_special_166_167_differ_by_enabled);
     RUN_TEST(batch8_special_166_167_no_sem_special);
     RUN_TEST(batch8_dst_operations_no_script_result);
+    
+    // Batch 9 Special semantic op tests - Block-Local ScriptVar Context (40, 57, 66, 67, 95, 152)
+    RUN_TEST(batch9_setval_establishes_context);
+    RUN_TEST(batch9_special_40_with_context);
+    RUN_TEST(batch9_special_40_no_context_fallback);
+    RUN_TEST(batch9_special_152_palette_normalization);
+    RUN_TEST(batch9_special_152_invalid_encoding_rejected);
     
     // Decoder unique command identity tests (loop/back-edge handling)
     RUN_TEST(decoder_unique_command_identity_loop);

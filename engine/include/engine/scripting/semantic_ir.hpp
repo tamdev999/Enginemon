@@ -661,7 +661,28 @@ struct Sem_EndIfJustBattled {};  // Conditional end
 // --- Audio ---
 struct Sem_PlayMusic { MusicId music; };
 struct Sem_PlaySound { SfxId sound; };
-struct Sem_PlayCry { SpeciesId species; };
+
+// =============================================================================
+// Sem_PlayCry - Play Pokemon cry sound
+// =============================================================================
+// Normal cry: Standard pitch and duration
+// Slow cry: Lower pitch, longer duration (used for dramatic moments)
+//
+// Source references:
+//   - Normal: cry opcode (0x98) or Special PlayCry
+//   - Slow: Special 95 (PlaySlowCry)
+//
+// Both variants consume species from context (setval preceding the operation).
+// =============================================================================
+enum class CryVariant : uint8_t {
+    Normal,  // Standard cry playback
+    Slow,    // Lower pitch, longer duration
+};
+
+struct Sem_PlayCry {
+    SpeciesId species;
+    CryVariant variant = CryVariant::Normal;
+};
 struct Sem_PlaySlowCry { SpeciesId species; };  // Slowed-down cry (lower pitch, longer duration)
 struct Sem_WaitSound {};
 struct Sem_FadeOutMusic { MusicId music; uint8_t fade_time; };
@@ -720,6 +741,70 @@ struct Sem_SpecialPhoneCall { uint16_t call_id; };  // Trigger special phone cal
 
 // --- Decoration ---
 struct Sem_DescribeDecoration { uint8_t decoration_id; };  // Show decoration description text
+
+// =============================================================================
+// RADIO OPERATIONS (Batch 9)
+// =============================================================================
+// Sem_PlayRadio - Start playing radio channel
+// Source: Special 40 (MapRadio) - consumes channel from wScriptVar
+//
+// Semantic contract:
+//   - Start playing the specified radio channel
+//   - May involve UI presentation (radio card/dial)
+//   - Channel 0 = off/silent
+//
+// Domain: RadioChannelId (0-8 valid for Crystal)
+// =============================================================================
+struct Sem_PlayRadio {
+    uint8_t channel;  // RadioChannelId: 0=off, 1-8=channels
+};
+
+// =============================================================================
+// POKEDEX OPERATIONS (Batch 9)
+// =============================================================================
+// Sem_RegisterNewDexEntry - Conditionally register new Pokedex entry
+// Source: Special 57 (GameCornerPrizeMonCheckDex)
+//
+// Semantic contract:
+//   - If species NOT already caught:
+//     1. Mark species as seen
+//     2. Mark species as caught
+//     3. Present native "new Pokédex entry" UI
+//   - If species already caught:
+//     1. No mutation
+//     2. No UI
+//
+// This is ONE atomic semantic operation, NOT decomposed into check + register.
+// Does NOT write wScriptVar.
+// =============================================================================
+struct Sem_RegisterNewDexEntry {
+    SpeciesId species;  // Must be valid species (1-251 for Crystal)
+};
+
+// =============================================================================
+// PARTY SEARCH OPERATIONS (Batch 9)
+// =============================================================================
+// Sem_FindPartyMon - Search party for Pokemon of species
+// Source: Special 66 (FindPartyMonThatSpecies) - require_ot=false
+//         Special 67 (FindPartyMonThatSpeciesYourTrainerID) - require_ot=true
+//
+// Semantic contract:
+//   - Search party for Pokemon of given species
+//   - If require_ot=true, also require original trainer matches player
+//   - WRITES wScriptVar with result:
+//     - Found: party slot index (0-5) + 1 = 1-6
+//     - Not found: 0
+//   - Used for species-based conditional checks (e.g., trade eligibility)
+//
+// Source-proven result convention (pokecrystal FindPartyMonThatSpecies):
+//   - Iterates party slots 0-5
+//   - On match: wScriptVar = slot + 1 (so 1-6), carry clear
+//   - No match: wScriptVar = 0, carry set
+// =============================================================================
+struct Sem_FindPartyMon {
+    SpeciesId species;   // Target species to find
+    bool require_ot;     // true = must be player's OT, false = any OT
+};
 
 // --- Pokemon Mail ---
 // Mail operations use semantic PokeMailId, NOT ROM pointers.
@@ -881,6 +966,15 @@ using SemanticOp = std::variant<
     
     // Decoration
     Sem_DescribeDecoration,
+    
+    // Radio (Batch 9)
+    Sem_PlayRadio,
+    
+    // Pokedex (Batch 9)
+    Sem_RegisterNewDexEntry,
+    
+    // Party search (Batch 9)
+    Sem_FindPartyMon,
     
     // Pokemon Mail
     Sem_GivePokeMail, Sem_CheckPokeMail,
