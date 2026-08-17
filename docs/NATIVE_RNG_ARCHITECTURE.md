@@ -1,6 +1,6 @@
 # Enginemon Native Deterministic RNG Architecture
 
-**Status**: Design Audit Complete — No Implementation  
+**Status**: Design Audit Complete — Implementation Ready  
 **Date**: 2026-08-17  
 **Prerequisite**: Crystal RNG Fidelity Audit (completed)
 
@@ -13,6 +13,8 @@ Enginemon adopts a single canonical deterministic PRNG that replaces Crystal's h
 **Recommended PRNG**: PCG-XSH-RR (32-bit output, 64-bit state)
 
 **Core Principle**: Crystal formulas and call ordering are authoritative; the entropy source is modernized.
+
+**Terminology Clarification**: The term "Crystal-faithful" refers to preserving Crystal's probability formulas, threshold comparisons, and RNG consumption ordering—NOT reproducing Crystal's exact RNG sequence. The native PCG produces different byte values than Crystal's hardware DIV-based RNG. What is preserved is the *structure* of randomness consumption, not the specific values.
 
 ---
 
@@ -137,47 +139,103 @@ struct PcgState {
 
 ## 3. Output API
 
+### Terminology: "Draw" Definition
+
+Throughout this document, **"draw"** means exactly one core PRNG state advancement via `next_u32()`. All consumption counts are expressed in draws.
+
+### Primitive Draw Counts (Contractual)
+
+| API Call | Core Draws | Notes |
+|----------|------------|-------|
+| `next_u32()` | 1 | Core primitive, advances state once |
+| `next_u8()` | 1 | Calls `next_u32()` once, masks to 8 bits |
+| `next_u64()` | 2 | Calls `next_u32()` twice in defined sequence |
+| `bounded(n)` | 1+ | Rejection sampling; 1 draw typical, more if rejected |
+
 ### Primitive Operations
 
 ```cpp
 class GameplayRng {
 public:
-    // Core advance - always consumes one draw
+    // === Core primitive (1 draw) ===
     uint32_t next_u32();
     
-    // Derived primitives - consume exactly one draw each
-    uint64_t next_u64();      // Two next_u32() calls
-    uint8_t next_u8();        // next_u32() masked to 8 bits
+    // === Derived primitives ===
     
-    // Unbiased bounded sampling - consumes 1+ draws (rejection)
+    // 8-bit draw for Crystal-derived mechanics (1 draw)
+    // Used wherever Crystal calls BattleRandom
+    uint8_t next_u8() {
+        return static_cast<uint8_t>(next_u32());
+    }
+    
+    // 64-bit draw with DEFINED sequencing (2 draws)
+    // First draw = high 32 bits, second draw = low 32 bits
+    uint64_t next_u64() {
+        uint64_t hi = next_u32();  // Draw 1
+        uint64_t lo = next_u32();  // Draw 2
+        return (hi << 32) | lo;
+    }
+    
+    // === Bounded sampling (1+ draws) ===
+    // PRECONDITION: exclusive_max > 0 (zero is programmer error)
     uint32_t bounded(uint32_t exclusive_max);
     
-    // Probability check - consumes exactly one draw
-    bool chance(uint32_t numerator, uint32_t denominator);
+    // === State management ===
+    uint64_t state() const;           // Current internal state
+    void restore_state(uint64_t s);   // Direct state restoration (save/load)
+    void seed(uint64_t seed_value);   // O'Neill canonical initialization
     
-    // State management
-    uint64_t get_state() const;
-    void set_state(uint64_t state);
-    void seed(uint64_t seed);      // Uses O'Neill initialization
-    void seed_raw(uint64_t state); // Direct state assignment (for deserialization)
+    // === Serialization ===
+    void serialize(std::vector<uint8_t>& out) const;
+    static GameplayRng deserialize(const uint8_t* data);
 };
 ```
 
-### Unbiased Bounded Sampling
+### CRITICAL: next_u64() Sequencing
 
-Crystal uses modulo for bounded sampling, which has slight bias. Enginemon preserves Crystal's exact formulas where they exist, but provides an unbiased primitive for new mechanics:
+The `next_u64()` implementation MUST use explicit sequencing:
+
+```cpp
+// REQUIRED implementation shape
+uint64_t next_u64() {
+    uint64_t hi = next_u32();  // First draw → high bits
+    uint64_t lo = next_u32();  // Second draw → low bits
+    return (hi << 32) | lo;
+}
+```
+
+The following are FORBIDDEN due to unsequenced evaluation:
+```cpp
+// FORBIDDEN: Unsequenced - compiler may evaluate in either order
+return next_u32() | (static_cast<uint64_t>(next_u32()) << 32);
+return (next_u32() << 32) | next_u32();
+```
+
+A golden test MUST pin this ordering with known-answer vectors.
+
+### bounded() Contract
 
 ```cpp
 // Lemire's fast unbiased bounded random (2019)
+// PRECONDITION: range > 0
+// DRAWS: 1+ (typically 1, rejection loop if unlucky)
 uint32_t GameplayRng::bounded(uint32_t range) {
-    uint64_t random = next_u32();
+    // PROGRAMMER ERROR: range == 0
+    if (range == 0) {
+        // Implementation must fail explicitly here
+        // Options: assert, throw, or trap
+        // Do NOT silently return 0 or consume a draw
+        assert(false && "bounded(0) is invalid");
+    }
+    
+    uint64_t random = next_u32();  // Draw 1
     uint64_t product = random * static_cast<uint64_t>(range);
     uint32_t low = static_cast<uint32_t>(product);
     
     if (low < range) {
         uint32_t threshold = (-range) % range;  // 2^32 mod range
         while (low < threshold) {
-            random = next_u32();
+            random = next_u32();  // Draw 2, 3, ... (rejection)
             product = random * static_cast<uint64_t>(range);
             low = static_cast<uint32_t>(product);
         }
@@ -186,16 +244,34 @@ uint32_t GameplayRng::bounded(uint32_t range) {
 }
 ```
 
-### Crystal Compatibility Mode
+**bounded(0) behavior**: Programmer error. Consumes 0 draws. Fails explicitly (assert/throw/trap). NOT silent.
+
+### chance() — DEFERRED
+
+The `chance(numerator, denominator)` API is **deferred** from this milestone.
+
+**Reason**: If implemented via `bounded(denominator)`, it would consume 1+ draws (not exactly 1), which creates a contract mismatch with naive expectations. Crystal-derived mechanics don't need this primitive—they use `next_u8()` with explicit threshold comparisons.
+
+**If implemented later**, the contract must be:
+- `chance(n, 0)` → programmer error, 0 draws, explicit failure
+- `chance(n, d)` where n > d → programmer error OR defined behavior (document which)
+- `chance(n, d)` otherwise → 1+ draws (same as bounded)
+
+**Crystal-derived mechanics**: Use `next_u8()` + source threshold logic directly.
+**Native/mod mechanics**: May use `bounded()` directly with explicit awareness of 1+ draw consumption.
+
+### Crystal Mechanics Translation
 
 For exact Crystal formula translation, mechanics use raw byte output:
 
 ```cpp
 // Crystal: call BattleRandom, compare against threshold
+// Maps to: 1 draw via next_u8()
 uint8_t roll = rng.next_u8();
 bool crit = (roll < crit_threshold);
 
 // Crystal: damage = damage * (217..255) / 255
+// Maps to: 1+ draws (rejection loop)
 uint8_t variation;
 do {
     variation = rng.next_u8();
@@ -203,7 +279,7 @@ do {
 damage = damage * variation / 255;
 ```
 
-The `next_u8()` call maps directly to Crystal's `BattleRandom` return value.
+The `next_u8()` call is the 8-bit gameplay draw used by Crystal-derived mechanics. It does NOT produce Crystal-identical byte sequences—only structurally equivalent consumption.
 
 
 ---
@@ -254,7 +330,6 @@ Semantic mechanics IR should make RNG explicit and handle the threshold==255 cas
 enum class RngOp {
     RandomByte,           // Consume 1 draw, return 0-255
     RandomBounded,        // Consume 1+ draws, return 0..(n-1)
-    RandomChance,         // Consume 1 draw, return bool
 };
 
 struct Sem_AccuracyCheck {
@@ -399,23 +474,50 @@ This is achieved by:
 
 ## 7. Initial Seeding
 
+### Terminology: Seed vs State
+
+| Term | Definition |
+|------|------------|
+| **seed** | Initialization input value (used once at new game) |
+| **state** | Current 64-bit PCG internal state (evolves with each draw) |
+
+These are distinct concepts:
+- `seed(value)` → O'Neill canonical initialization → produces initial state
+- `state()` → returns current internal state
+- `restore_state(s)` → directly sets internal state (for save/load)
+
+**CRITICAL**: Save/load restores raw current state via `restore_state()`. It MUST NOT pass serialized state back through `seed()`—that would apply the initialization sequence again and produce wrong continuation.
+
 ### Seeding vs. Evolution
 
-- **Seeding**: Choosing the initial RNG state (one-time, may use entropy)
-- **Evolution**: Advancing RNG state during gameplay (deterministic)
+- **Seeding**: Choosing the initial RNG state (one-time, may use external entropy)
+- **Evolution**: Advancing RNG state during gameplay (deterministic, internal)
 
-These are strictly separated.
+These are strictly separated. After seeding is complete, external entropy sources are never touched again.
+
+### External Entropy Boundary
+
+**Permitted (one-time only)**:
+- `std::random_device` to generate new-game seed
+- System entropy to generate multiplayer session seed
+
+**FORBIDDEN after initialization**:
+- `std::random_device`
+- Wall clock / frame timing
+- DIV/VBlank proxies
+- Any non-deterministic input
+
+Once `seed()` or `restore_state()` has been called, ALL gameplay randomness comes from deterministic PCG evolution. External entropy is completely outside authoritative RNG evolution.
 
 ### Seeding Policies by Context
 
-| Context | Seeding Policy |
-|---------|----------------|
-| Normal play | std::random_device or system entropy once at new game |
-| Deterministic tests | Explicit fixed seed (e.g., 0xDEADBEEF) |
-| Replay | Recorded seed from save/replay file |
-| Multiplayer | Agreed session seed (host generates, clients receive) |
-| Save resume | Deserialize saved RNG state |
-
+| Context | Method | Notes |
+|---------|--------|-------|
+| New game | `seed(entropy)` | System entropy once, then deterministic |
+| Deterministic tests | `seed(0xDEADBEEF)` | Fixed known seed |
+| Replay | `seed(recorded_seed)` | From replay file header |
+| Multiplayer | `seed(session_seed)` | Host generates, clients receive |
+| Save resume | `restore_state(saved_state)` | Direct state restoration, NO re-seeding |
 
 ### Implementation
 
@@ -427,12 +529,17 @@ void GameplayRng::seed_from_entropy() {
     seed(entropy);  // Uses O'Neill canonical initialization
 }
 
-void GameplayRng::seed_deterministic(uint64_t seed_value) {
-    seed(seed_value);  // Uses O'Neill canonical initialization
+void GameplayRng::seed(uint64_t seed_value) {
+    // O'Neill canonical initialization
+    state_ = 0;
+    step();
+    state_ += seed_value;
+    step();
 }
 
-void GameplayRng::seed_from_save(const uint8_t* data) {
-    deserialize(data);  // Direct state restoration, no re-seeding
+void GameplayRng::restore_state(uint64_t saved_state) {
+    // Direct state restoration - NO initialization sequence
+    state_ = saved_state;
 }
 ```
 
@@ -455,7 +562,8 @@ struct RuntimeServices {
 
 // Mod code
 int my_mod_random_effect(RuntimeServices& services, int max_value) {
-    return services.rng.bounded(max_value);  // Uses canonical RNG
+    // bounded() consumes 1+ draws (rejection possible)
+    return services.rng.bounded(max_value);
 }
 ```
 
@@ -478,14 +586,18 @@ void also_bad() {
 ### Lua API
 
 ```lua
--- ctx.util.random() uses canonical RNG
-local roll = ctx.util.random(1, 100)  -- Consumes 1 draw
-
--- ctx.util.random_chance(n, d) uses canonical RNG
-if ctx.util:random_chance(30, 100) then
-    -- 30% chance, consumes 1 draw
+-- ctx.util:random_byte() → 1 draw, returns 0-255
+local roll = ctx.util:random_byte()
+if roll < 128 then
+    -- 50% chance
 end
+
+-- ctx.util:random_bounded(n) → 1+ draws, returns 0..(n-1)
+-- PRECONDITION: n > 0
+local slot = ctx.util:random_bounded(6)  -- 0-5, consumes 1+ draws
 ```
+
+**Note**: The Lua `random_bounded()` consumes 1+ draws due to rejection sampling. Mod authors must account for this in consumption-sensitive logic.
 
 ### Mod Composition Ordering
 
@@ -638,7 +750,7 @@ struct RngState {
 // Proposed (engine/include/engine/core/game_state.hpp)
 class GameplayRng {
 public:
-    // O'Neill canonical seeding
+    // O'Neill canonical seeding (new game / deterministic test)
     void seed(uint64_t s) {
         state_ = 0;
         step();
@@ -646,12 +758,12 @@ public:
         step();
     }
     
-    // Direct state restoration (for deserialization only)
-    void set_state(uint64_t s) { state_ = s; }
+    // Direct state restoration (save/load ONLY - no re-initialization)
+    void restore_state(uint64_t s) { state_ = s; }
     
     void seed_from_entropy();
     
-    // Core advance (PCG-XSH-RR)
+    // Core advance (PCG-XSH-RR) - 1 draw
     uint32_t next_u32() {
         uint64_t old = state_;
         state_ = old * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -661,16 +773,19 @@ public:
         return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
     }
     
-    // Crystal-compatible byte (most common usage)
+    // 8-bit draw for Crystal-derived mechanics (1 draw)
     uint8_t next_u8() { return static_cast<uint8_t>(next_u32()); }
     
-    // Unbiased bounded (Lemire's method)
-    uint32_t bounded(uint32_t range);
-    
-    // Probability check
-    bool chance(uint32_t numerator, uint32_t denominator) {
-        return bounded(denominator) < numerator;
+    // 64-bit draw with defined sequencing (2 draws)
+    uint64_t next_u64() {
+        uint64_t hi = next_u32();  // Draw 1 → high bits
+        uint64_t lo = next_u32();  // Draw 2 → low bits
+        return (hi << 32) | lo;
     }
+    
+    // Unbiased bounded (Lemire's method) - 1+ draws
+    // PRECONDITION: range > 0
+    uint32_t bounded(uint32_t range);
     
     // State access
     uint64_t state() const { return state_; }
@@ -834,6 +949,41 @@ TEST(rng_bounded_unbiased) {
 }
 ```
 
+**Test 5b: bounded(0) Explicit Failure**
+```cpp
+TEST(rng_bounded_zero_fails) {
+    GameplayRng rng;
+    rng.seed(0x6666);
+    uint64_t state_before = rng.state();
+    
+    // bounded(0) must fail explicitly and consume 0 draws
+    ASSERT_THROWS(rng.bounded(0));  // Or ASSERT_DEATH for assert()
+    
+    // State must be unchanged (0 draws consumed)
+    ASSERT_EQ(rng.state(), state_before);
+}
+```
+
+**Test 5c: next_u64 Ordering**
+```cpp
+TEST(rng_next_u64_ordering) {
+    GameplayRng rng;
+    rng.seed(0x7777);
+    
+    // Get u64 via combined call
+    uint64_t combined = rng.next_u64();
+    
+    // Reset and get same values via separate calls
+    rng.seed(0x7777);
+    uint64_t hi = rng.next_u32();  // First draw
+    uint64_t lo = rng.next_u32();  // Second draw
+    uint64_t manual = (hi << 32) | lo;
+    
+    // Must match: first draw = high bits, second draw = low bits
+    ASSERT_EQ(combined, manual);
+}
+```
+
 **Test 6: Accuracy Check Zero-Draw on Threshold 255**
 ```cpp
 TEST(accuracy_check_255_zero_draws) {
@@ -889,26 +1039,21 @@ TEST(rng_consumption_documented) {
 }
 ```
 
-### State Hash Integration
+### Determinism Hash Policy
 
-RNG state should contribute to canonical simulation hash:
+**Requirement**: GameplayRng state MUST be represented in canonical authoritative serialization.
 
-```cpp
-uint64_t GameState::state_hash() const {
-    uint64_t hash = 0;
-    
-    // Include RNG state
-    hash ^= rng.state();
-    hash = hash * 0x9E3779B97F4A7C15ULL;  // Mix
-    
-    // Include other state...
-    hash ^= static_cast<uint64_t>(player.x) << 0;
-    hash ^= static_cast<uint64_t>(player.y) << 8;
-    // ...
-    
-    return hash;
-}
-```
+**Correct approach**: The eventual authoritative determinism hash should derive from canonical serialized authoritative state (GameState.serialize()), rather than maintaining a second manual field list.
+
+**Rationale**:
+- Checkpoint hashing of full canonical state is the correctness-first design
+- A manual `state_hash()` that lists fields separately will diverge from serialization
+- Per-tick/incremental hashing may be profiled and designed later if performance requires it
+
+**NOT in this RNG milestone**:
+- Do not expand the current narrow diagnostic state_hash()
+- Do not create a parallel field list for hashing
+- Defer hash design to the serialization/replay milestone
 
 
 ---
@@ -962,33 +1107,44 @@ GameState
 └── GameplayRng (single canonical instance)
     ├── Algorithm: PCG-XSH-RR (64-bit state, 32-bit output)
     ├── Seeding: O'Neill canonical (state=0; step; state+=seed; step)
+    ├── State: uint64 internal, deterministic integer-only evolution
     ├── Serialized: 8 bytes (little-endian uint64)
     └── API:
-        ├── next_u32()                    // Core advance
-        ├── next_u8()                     // Crystal-compatible byte
-        ├── bounded(uint32_t)             // Unbiased range
-        ├── chance(num, denom)            // Probability
-        ├── state() / set_state()         // Direct access
-        └── serialize() / deserialize()   // Persistence
+        ├── next_u32()              // 1 draw
+        ├── next_u8()               // 1 draw
+        ├── next_u64()              // 2 draws (hi=first, lo=second)
+        ├── bounded(n)              // 1+ draws, n>0 required
+        ├── state()                 // Read current state
+        ├── restore_state(s)        // Direct state restoration (save/load)
+        ├── seed(s)                 // O'Neill initialization (new game)
+        └── serialize/deserialize   // Canonical persistence
 
 RuntimeServices
-├── gameplay_rng → GameState.rng         // Authoritative, serialized
-└── presentation_rng                      // Optional, non-authoritative
+├── gameplay_rng → GameState.rng    // Authoritative, serialized
+└── presentation_rng                 // Optional, non-authoritative
 
-Crystal Mechanics
-├── Source-faithful formulas             // Thresholds, ranges, branching
-├── Source-faithful call ordering        // Consumption per branch
-├── Gen 2 accuracy fix                   // threshold==255 → 0 draws
-└── Modern entropy source                // PCG instead of DIV
+Crystal-Derived Mechanics
+├── Preserve formulas               // Thresholds, ranges, calculations
+├── Preserve threshold comparisons  // roll < threshold semantics
+├── Preserve branch structure       // Conditional RNG consumption
+├── Preserve consumption ordering   // Which branch consumes how many draws
+└── NOT preserved: exact RNG values // Native PCG, not Crystal DIV/VBlank
+
+Intentionally NOT Preserved
+├── DIV register entropy
+├── VBlank RNG churn
+├── hRandomAdd/Sub hardware state
+└── Link-cable 10-byte PRNG implementation
 
 Mod API
-└── ctx.util:random() → gameplay_rng     // All mods use canonical RNG
+└── ctx.util:random_byte()          // 1 draw
+└── ctx.util:random_bounded(n)      // 1+ draws
 
 Battle Compiler
-├── Crystal bytecode → MechanicsIR       // Preserves random operations
-├── Sem_AccuracyCheck { threshold }      // 0 or 1 draw based on threshold
-├── Sem_DamageVariation { }              // Rejection loop
-└── Runtime → gameplay_rng.next_u8()     // Modernized execution
+├── Crystal bytecode → MechanicsIR  // Preserves random operations
+├── Sem_AccuracyCheck { threshold } // 0 or 1 draw based on threshold
+├── Sem_DamageVariation { }         // 1+ draws (rejection loop)
+└── Runtime → gameplay_rng.next_u8()// Native execution
 ```
 
 
@@ -1000,15 +1156,19 @@ Battle Compiler
 |--------|----------|
 | PRNG | PCG-XSH-RR (64-bit state, 32-bit output) |
 | Seeding | O'Neill canonical initialization |
-| State size | 8 bytes |
-| Primary output | next_u8() for Crystal compatibility |
-| Bounded sampling | Lemire's unbiased method |
-| Stream count | One canonical stream |
+| State size | 8 bytes (uint64) |
+| next_u32() | 1 draw |
+| next_u8() | 1 draw (8-bit draw for Crystal-derived mechanics) |
+| next_u64() | 2 draws (first=high, second=low) |
+| bounded(n) | 1+ draws (Lemire unbiased, n>0 required) |
+| bounded(0) | Programmer error, 0 draws, explicit failure |
+| chance(n,d) | **DEFERRED** (would be 1+ draws if via bounded) |
+| Stream count | One canonical authoritative stream |
 | Crystal formulas | Preserved exactly |
 | Crystal call ordering | Preserved exactly |
-| Crystal hardware entropy | Not reproduced |
-| Gen 2 accuracy fix | **Preserved** (threshold==255 → 0 draws) |
-| Serialization | Little-endian uint64 |
+| Crystal RNG values | NOT preserved (native PCG, not Crystal DIV) |
+| Gen 2 accuracy fix | Preserved (threshold==255 → 0 draws) |
+| Serialization | Little-endian uint64 via restore_state() |
 | Mod RNG | Must use canonical API |
 | Presentation RNG | Optional separate non-authoritative |
 
@@ -1026,6 +1186,38 @@ Battle Compiler
 
 4. **Secondary effect 1/256 bug**: Verified in `effect_commands.asm` that `BattleCommand_EffectChance` does NOT have the threshold==255 skip. Source comment explicitly states: `; BUG: Moves with a 100% secondary effect chance will not trigger it in 1/256 uses`. This bug IS real and correctly preserved (distinct from accuracy check which was patched).
 
+5. **chance() contract**: Fixed from "consumes exactly one draw" to **DEFERRED**. If implemented via `bounded()`, it would consume 1+ draws. Crystal-derived mechanics use `next_u8()` directly.
+
+6. **bounded(0)**: Defined as programmer error, 0 draws consumed, explicit failure required.
+
+7. **next_u64() sequencing**: Added explicit required implementation shape with first draw = high bits, second draw = low bits.
+
+8. **API naming**: Changed `set_state()` to `restore_state()` to clarify it's for save/load restoration, not re-seeding.
+
+9. **State hash**: Removed hand-written `state_hash()` recommendation. Deferred to serialization milestone; canonical hash should derive from serialized state.
+
+10. **Crystal compatibility terminology**: Clarified that "Crystal-faithful" means formula/consumption preservation, NOT RNG sequence reproduction.
+
 ---
 
-**End of Design Audit**
+## Implementation Checklist
+
+The following tasks are required when implementing this design:
+
+- [ ] Replace Numerical Recipes LCG with PCG-XSH-RR
+- [ ] Migrate all authoritative RNG callers to new API
+- [ ] Remove inaccurate "pokecrystal RNG" comments from code
+- [ ] Preserve GameState ownership of RNG
+- [ ] Update save schema if required (version increment)
+- [ ] Migrate legacy serialized RNG state explicitly (old saves)
+- [ ] Add PCG known-answer test vectors
+- [ ] Test next_u64() ordering (first=high, second=low)
+- [ ] Test bounded(0) explicit failure
+- [ ] Test bounded(1) returns 0 always
+- [ ] Test serialize/restore_state continuation
+- [ ] Test deterministic Pokémon creation (DVs, item)
+- [ ] Run canonical verifier (golden fixtures)
+
+---
+
+**End of Design Audit — Implementation Ready**
