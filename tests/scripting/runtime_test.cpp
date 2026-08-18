@@ -10843,6 +10843,172 @@ TEST(wait_seconds_zero_duration) {
 }
 
 //=============================================================================
+// WAITSECONDS PRECISION TESTS - Integer tick conversion
+// Verify: wait_ticks = ceil(seconds * 60) for deterministic timing
+// No floating-point subtraction drift
+//=============================================================================
+
+// WaitSeconds(0.05) = ceil(0.05 * 60) = 3 ticks exactly
+TEST(wait_seconds_precision_0_05s_is_3_ticks) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_seconds",0.05) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    
+    // Tick 1, 2: should NOT resume
+    TickResult r1 = loop.tick();
+    ASSERT_FALSE(r1.script_resumed);
+    TickResult r2 = loop.tick();
+    ASSERT_FALSE(r2.script_resumed);
+    
+    // Tick 3: should resume
+    TickResult r3 = loop.tick();
+    ASSERT_TRUE(r3.script_resumed);
+    ASSERT_TRUE(r3.script_complete);
+    std::cout << "  [WaitSeconds(0.05s) = 3 ticks exactly ✓]\n";
+}
+
+// WaitSeconds(0.1) = ceil(0.1 * 60) = 6 ticks exactly
+TEST(wait_seconds_precision_0_1s_is_6_ticks) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_seconds",0.1) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    
+    // Tick 1-5: should NOT resume
+    for (int i = 0; i < 5; i++) {
+        TickResult r = loop.tick();
+        ASSERT_FALSE(r.script_resumed);
+    }
+    
+    // Tick 6: should resume
+    TickResult r6 = loop.tick();
+    ASSERT_TRUE(r6.script_resumed);
+    ASSERT_TRUE(r6.script_complete);
+    std::cout << "  [WaitSeconds(0.1s) = 6 ticks exactly ✓]\n";
+}
+
+// WaitSeconds(1.0) = ceil(1.0 * 60) = 60 ticks exactly
+TEST(wait_seconds_precision_1_0s_is_60_ticks) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_seconds",1.0) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    
+    // Tick 1-59: should NOT resume
+    for (int i = 0; i < 59; i++) {
+        TickResult r = loop.tick();
+        ASSERT_FALSE(r.script_resumed);
+    }
+    
+    // Tick 60: should resume
+    TickResult r60 = loop.tick();
+    ASSERT_TRUE(r60.script_resumed);
+    ASSERT_TRUE(r60.script_complete);
+    std::cout << "  [WaitSeconds(1.0s) = 60 ticks exactly ✓]\n";
+}
+
+//=============================================================================
+// COROUTINE IDENTITY TESTS - Correct resume attribution
+// Verify: script_resumed = true IFF active_coroutine was resumed
+//=============================================================================
+
+// Unrelated coroutine resumes -> active script_resumed == false
+TEST(unrelated_coroutine_resume_does_not_set_script_resumed) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Active script: waits 10 frames
+    const char* active_script = R"(script={main=function(ctx) coroutine.yield("wait_frames",10) return true end})";
+    loop.set_script_loader([&](const std::string&) { return active_script; });
+    
+    loop.start_script("test");
+    uint32_t active_id = loop.active_coroutine();
+    ASSERT_TRUE(active_id != 0);
+    
+    // Start an unrelated coroutine directly in the runtime (waits 1 frame)
+    runtime.execute_string(R"(unrelated={main=function(ctx) coroutine.yield("wait_frames",1) return true end})", "unrelated");
+    uint32_t unrelated_id = runtime.start_script("unrelated");
+    ASSERT_TRUE(unrelated_id != 0);
+    ASSERT_TRUE(unrelated_id != active_id);
+    
+    // Tick 1: unrelated coroutine should resume, but active should NOT
+    TickResult r1 = loop.tick();
+    // script_resumed should be FALSE because the ACTIVE coroutine didn't resume
+    ASSERT_FALSE(r1.script_resumed);
+    
+    // Verify: unrelated coroutine finished, active still yielded
+    ASSERT_TRUE(runtime.get_state(unrelated_id) == ScriptState::Finished);
+    ASSERT_TRUE(runtime.get_state(active_id) == ScriptState::Yielded);
+    
+    std::cout << "  [Unrelated coroutine resume: script_resumed=false ✓]\n";
+}
+
+// Active timed coroutine resumes -> script_resumed == true
+TEST(active_coroutine_timed_resume_sets_script_resumed) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Active script: waits 2 frames
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_frames",2) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    
+    // Tick 1: should NOT resume
+    TickResult r1 = loop.tick();
+    ASSERT_FALSE(r1.script_resumed);
+    
+    // Tick 2: should resume (timed resume of active coroutine)
+    TickResult r2 = loop.tick();
+    ASSERT_TRUE(r2.script_resumed);
+    ASSERT_TRUE(r2.script_complete);
+    
+    std::cout << "  [Active coroutine timed resume: script_resumed=true ✓]\n";
+}
+
+// Active coroutine resumes and re-yields -> script_resumed == true
+TEST(active_coroutine_resume_reyield_sets_script_resumed) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script yields twice: first wait 1 frame, then wait 100 frames
+    const char* script_code = R"(script={main=function(ctx)
+        coroutine.yield("wait_frames",1)
+        coroutine.yield("wait_frames",100)
+        return true
+    end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    
+    // Tick 1: first yield expires, resumes, re-yields with 100 frames
+    TickResult r1 = loop.tick();
+    ASSERT_TRUE(r1.script_resumed);  // Resume happened
+    ASSERT_FALSE(r1.script_complete);  // But script re-yielded, not complete
+    
+    // Verify still yielded
+    ASSERT_TRUE(runtime.get_state(loop.active_coroutine()) == ScriptState::Yielded);
+    
+    std::cout << "  [Active coroutine resume+re-yield: script_resumed=true ✓]\n";
+}
+
+//=============================================================================
 // SCRIPT LIFECYCLE TESTS - Completion vs Error distinction, reset cleanup
 //=============================================================================
 
@@ -11482,6 +11648,16 @@ int main(int argc, char* argv[]) {
     RUN_TEST(wait_seconds_resumes_after_duration);
     RUN_TEST(wait_seconds_resume_sets_flag);
     RUN_TEST(wait_seconds_zero_duration);
+    
+    // WaitSeconds precision tests - integer tick conversion
+    RUN_TEST(wait_seconds_precision_0_05s_is_3_ticks);
+    RUN_TEST(wait_seconds_precision_0_1s_is_6_ticks);
+    RUN_TEST(wait_seconds_precision_1_0s_is_60_ticks);
+    
+    // Coroutine identity tests - correct resume attribution
+    RUN_TEST(unrelated_coroutine_resume_does_not_set_script_resumed);
+    RUN_TEST(active_coroutine_timed_resume_sets_script_resumed);
+    RUN_TEST(active_coroutine_resume_reyield_sets_script_resumed);
     
     // Script lifecycle tests - completion vs error distinction, reset cleanup
     RUN_TEST(script_finishes_normally_sets_complete);

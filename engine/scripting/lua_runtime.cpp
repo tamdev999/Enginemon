@@ -7,6 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <cmath>  // For std::ceil in WaitSeconds tick conversion
 
 namespace enginemon {
 
@@ -537,13 +538,20 @@ void LuaRuntime::resume_first(uint32_t coroutine_id) {
             if (yield_type == "wait_frames") {
                 co.yield_reason = YieldReason::WaitFrames;
                 if (nres > 1 && lua_isinteger(co.thread, -nres + 1)) {
-                    co.wait_frames = static_cast<int>(lua_tointeger(co.thread, -nres + 1));
+                    // WaitFrames: direct integer tick count
+                    co.wait_ticks = static_cast<int>(lua_tointeger(co.thread, -nres + 1));
                 }
             }
             else if (yield_type == "wait_seconds") {
                 co.yield_reason = YieldReason::WaitSeconds;
                 if (nres > 1 && lua_isnumber(co.thread, -nres + 1)) {
-                    co.wait_seconds = static_cast<float>(lua_tonumber(co.thread, -nres + 1));
+                    // WaitSeconds: convert to integer ticks using ceil()
+                    // ceil() ensures coroutine never resumes earlier than requested
+                    // 0.05s → ceil(0.05 * 60) = ceil(3.0) = 3 ticks
+                    // 0.1s  → ceil(0.1 * 60)  = ceil(6.0) = 6 ticks
+                    // 1.0s  → ceil(1.0 * 60)  = ceil(60.0) = 60 ticks
+                    float seconds = static_cast<float>(lua_tonumber(co.thread, -nres + 1));
+                    co.wait_ticks = static_cast<int>(std::ceil(seconds * SIM_TICKS_PER_SECOND));
                 }
             }
             else if (yield_type == "wait_button") {
@@ -646,13 +654,16 @@ void LuaRuntime::resume(uint32_t coroutine_id) {
             if (yield_type == "wait_frames") {
                 co.yield_reason = YieldReason::WaitFrames;
                 if (nres > 1 && lua_isinteger(co.thread, -nres + 1)) {
-                    co.wait_frames = static_cast<int>(lua_tointeger(co.thread, -nres + 1));
+                    // WaitFrames: direct integer tick count
+                    co.wait_ticks = static_cast<int>(lua_tointeger(co.thread, -nres + 1));
                 }
             }
             else if (yield_type == "wait_seconds") {
                 co.yield_reason = YieldReason::WaitSeconds;
                 if (nres > 1 && lua_isnumber(co.thread, -nres + 1)) {
-                    co.wait_seconds = static_cast<float>(lua_tonumber(co.thread, -nres + 1));
+                    // WaitSeconds: convert to integer ticks using ceil()
+                    float seconds = static_cast<float>(lua_tonumber(co.thread, -nres + 1));
+                    co.wait_ticks = static_cast<int>(std::ceil(seconds * SIM_TICKS_PER_SECOND));
                 }
             }
             else if (yield_type == "wait_button") {
@@ -737,13 +748,16 @@ void LuaRuntime::resume_with_result(uint32_t coroutine_id, int result) {
             if (yield_type == "wait_frames") {
                 co.yield_reason = YieldReason::WaitFrames;
                 if (nres > 1 && lua_isinteger(co.thread, -nres + 1)) {
-                    co.wait_frames = static_cast<int>(lua_tointeger(co.thread, -nres + 1));
+                    // WaitFrames: direct integer tick count
+                    co.wait_ticks = static_cast<int>(lua_tointeger(co.thread, -nres + 1));
                 }
             }
             else if (yield_type == "wait_seconds") {
                 co.yield_reason = YieldReason::WaitSeconds;
                 if (nres > 1 && lua_isnumber(co.thread, -nres + 1)) {
-                    co.wait_seconds = static_cast<float>(lua_tonumber(co.thread, -nres + 1));
+                    // WaitSeconds: convert to integer ticks using ceil()
+                    float seconds = static_cast<float>(lua_tonumber(co.thread, -nres + 1));
+                    co.wait_ticks = static_cast<int>(std::ceil(seconds * SIM_TICKS_PER_SECOND));
                 }
             }
             else if (yield_type == "wait_button" || yield_type == "dialog") {
@@ -802,7 +816,10 @@ void LuaRuntime::resume_with_error(uint32_t coroutine_id, const std::string& err
     cleanup_coroutine(coroutine_id);
 }
 
-void LuaRuntime::update(float delta_time) {
+std::vector<uint32_t> LuaRuntime::update(float delta_time) {
+    // Clear previous update's resumed IDs
+    resumed_ids_this_update_.clear();
+    
     std::vector<uint32_t> to_resume;
     
     for (auto& [id, co] : coroutines_) {
@@ -810,15 +827,11 @@ void LuaRuntime::update(float delta_time) {
         
         switch (co.yield_reason) {
             case YieldReason::WaitFrames:
-                co.wait_frames--;
-                if (co.wait_frames <= 0) {
-                    to_resume.push_back(id);
-                }
-                break;
-                
             case YieldReason::WaitSeconds:
-                co.wait_seconds -= delta_time;
-                if (co.wait_seconds <= 0) {
+                // Both use unified integer tick counter
+                // Decrement and check <= 0 for resume
+                co.wait_ticks--;
+                if (co.wait_ticks <= 0) {
                     to_resume.push_back(id);
                 }
                 break;
@@ -830,16 +843,12 @@ void LuaRuntime::update(float delta_time) {
     }
     
     for (uint32_t id : to_resume) {
-        // Mark that a resume is about to occur - this captures timed resumes
-        resumes_occurred_this_update_ = true;
+        // Record the identity of this resumed coroutine
+        resumed_ids_this_update_.push_back(id);
         resume(id);
     }
-}
-
-bool LuaRuntime::consume_resumes_occurred() {
-    bool result = resumes_occurred_this_update_;
-    resumes_occurred_this_update_ = false;
-    return result;
+    
+    return resumed_ids_this_update_;
 }
 
 ScriptState LuaRuntime::get_state(uint32_t coroutine_id) const {

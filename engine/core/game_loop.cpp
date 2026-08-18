@@ -451,26 +451,26 @@ bool HeadlessGameLoop::update_script() {
         YieldReason reason = lua_runtime_->get_yield_reason(active_coroutine_);
         
         // Define simulation delta: 1/60 second per tick (60 FPS fixed rate)
+        // Note: delta_time is passed to update() but integer tick timing is used internally
         constexpr float SIMULATION_DELTA = 1.0f / 60.0f;
         
         switch (reason) {
             case YieldReason::WaitFrames:
-                // Let lua_runtime update handle the frame countdown
-                lua_runtime_->update(SIMULATION_DELTA);
-                // Capture any timed resumes that occurred inside update()
-                if (lua_runtime_->consume_resumes_occurred()) {
-                    script_resumed_this_tick_ = true;
-                }
-                break;
-                
             case YieldReason::WaitSeconds:
-                // Let lua_runtime update handle the seconds countdown
-                // Uses same deterministic simulation delta as WaitFrames
-                // Conversion: WaitSeconds(s) waits for s * 60 ticks
+                // Let lua_runtime update handle the tick countdown
+                // update() returns IDs of coroutines that were resumed
                 lua_runtime_->update(SIMULATION_DELTA);
-                // Capture any timed resumes that occurred inside update()
-                if (lua_runtime_->consume_resumes_occurred()) {
-                    script_resumed_this_tick_ = true;
+                
+                // Check if OUR active coroutine was among the resumed IDs
+                // This prevents false positives when unrelated coroutines resume
+                {
+                    const auto& resumed_ids = lua_runtime_->get_resumed_ids();
+                    for (uint32_t id : resumed_ids) {
+                        if (id == active_coroutine_) {
+                            script_resumed_this_tick_ = true;
+                            break;
+                        }
+                    }
                 }
                 break;
                 

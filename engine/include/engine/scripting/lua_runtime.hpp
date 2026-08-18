@@ -182,9 +182,10 @@ struct ScriptCoroutine {
     YieldReason yield_reason = YieldReason::None;
     int registry_ref = LUA_NOREF;   // luaL_ref handle for GC protection
     
-    // Yield-specific data
-    int wait_frames = 0;
-    float wait_seconds = 0.0f;
+    // Yield-specific data - INTEGER TICKS for deterministic timing
+    // WaitFrames: remaining ticks (1 tick = 1 frame)
+    // WaitSeconds: converted to integer ticks using ceil(seconds * SIM_TICKS_PER_SECOND)
+    int wait_ticks = 0;             // Unified integer tick counter for WaitFrames/WaitSeconds
     std::any yield_data;            // Custom yield context
     
     // Source info for debugging
@@ -192,6 +193,11 @@ struct ScriptCoroutine {
     std::string source_file;
     int source_line = 0;
 };
+
+// Simulation timing constants
+// All timing uses integer ticks for deterministic behavior
+// No wall clock, no renderer frame rate, no floating-point subtraction
+constexpr int SIM_TICKS_PER_SECOND = 60;  // 60 Hz simulation rate
 
 // Manages the Lua environment and script execution
 class LuaRuntime {
@@ -225,13 +231,12 @@ public:
     
     // Update all running scripts (call each frame)
     // Handles WaitFrames, WaitSeconds automatically
-    // Returns true if any coroutine was resumed during this update
-    void update(float delta_time);
+    // Returns set of coroutine IDs that were resumed during this update
+    std::vector<uint32_t> update(float delta_time);
     
-    // Consume the resume-occurred flag from the last update() call
-    // Returns true if update() resumed any coroutine, then clears the flag
-    // This allows external code to observe timed resumes that happen inside update()
-    bool consume_resumes_occurred();
+    // Get IDs of coroutines resumed during the last update() call
+    // This allows external code to check if a specific coroutine was resumed
+    const std::vector<uint32_t>& get_resumed_ids() const { return resumed_ids_this_update_; }
     
     // Query script state
     ScriptState get_state(uint32_t coroutine_id) const;
@@ -285,9 +290,9 @@ private:
     std::unordered_map<uint32_t, ScriptCoroutine> coroutines_;
     std::unordered_map<uint32_t, ScriptState> completed_states_;  // Final states for cleaned-up coroutines
     
-    // Tracks whether update() resumed any coroutine
-    // Set to true before each resume() call inside update(), consumed by consume_resumes_occurred()
-    bool resumes_occurred_this_update_ = false;
+    // Tracks which coroutine IDs were resumed during the last update() call
+    // Enables identity-preserving resume reporting instead of a global bool
+    std::vector<uint32_t> resumed_ids_this_update_;
     
     ErrorHandler error_handler_;
     
