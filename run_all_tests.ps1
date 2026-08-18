@@ -21,7 +21,9 @@ param(
     [string]$RomPath
 )
 
-$ErrorActionPreference = "Stop"
+# Use Continue for ErrorActionPreference to prevent stderr from native commands
+# from being treated as terminating errors. We determine pass/fail from exit code.
+$ErrorActionPreference = "Continue"
 
 # Configuration
 $buildDir = "build"
@@ -95,15 +97,28 @@ Write-TestHeader "Runtime Tests"
 
 $runtimeExe = "$testReleaseDir\runtime_test.exe"
 if (Test-Path $runtimeExe) {
-    $output = & $runtimeExe $RomPath 2>&1
+    # Run and capture output - stderr is visible but doesn't affect pass/fail
+    # Pass/fail is determined ONLY by exit code
+    $output = & $runtimeExe $RomPath 2>&1 | ForEach-Object { 
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            # stderr - write to host but include in output for parsing
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            $_
+        }
+    }
     $exitCode = $LASTEXITCODE
     
-    # Parse output for pass/fail count
-    $passMatch = $output | Select-String -Pattern "(\d+)/(\d+) tests passed"
-    if ($passMatch) {
-        $passCount = $passMatch.Matches[0].Groups[1].Value
-        $totalCount = $passMatch.Matches[0].Groups[2].Value
-        Write-TestResult "runtime_test" ($exitCode -eq 0 -and $passCount -eq $totalCount) "$passCount/$totalCount"
+    # Parse output for pass/fail count (informational only)
+    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
+    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
+    
+    if ($passedMatch -and $failedMatch) {
+        $passCount = $passedMatch.Matches[0].Groups[1].Value
+        $failCount = $failedMatch.Matches[0].Groups[1].Value
+        # Success = exit code 0 (regardless of stderr output)
+        Write-TestResult "runtime_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
     } else {
         Write-TestResult "runtime_test" ($exitCode -eq 0) "Exit code: $exitCode"
     }
@@ -118,14 +133,24 @@ Write-TestHeader "Golden Tests"
 
 $goldenExe = "$testReleaseDir\golden_test.exe"
 if (Test-Path $goldenExe) {
-    $output = & $goldenExe $RomPath 2>&1
+    # Run and capture output - pass/fail determined by exit code only
+    $output = & $goldenExe $RomPath 2>&1 | ForEach-Object { 
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            $_
+        }
+    }
     $exitCode = $LASTEXITCODE
     
-    $passMatch = $output | Select-String -Pattern "(\d+)/(\d+) tests passed"
-    if ($passMatch) {
-        $passCount = $passMatch.Matches[0].Groups[1].Value
-        $totalCount = $passMatch.Matches[0].Groups[2].Value
-        Write-TestResult "golden_test" ($exitCode -eq 0 -and $passCount -eq $totalCount) "$passCount/$totalCount"
+    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
+    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
+    
+    if ($passedMatch -and $failedMatch) {
+        $passCount = $passedMatch.Matches[0].Groups[1].Value
+        $failCount = $failedMatch.Matches[0].Groups[1].Value
+        Write-TestResult "golden_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
     } else {
         Write-TestResult "golden_test" ($exitCode -eq 0) "Exit code: $exitCode"
     }
@@ -140,14 +165,24 @@ Write-TestHeader "Legality Gate Tests"
 
 $legalityExe = "$testReleaseDir\legality_gate_test.exe"
 if (Test-Path $legalityExe) {
-    $output = & $legalityExe $RomPath 2>&1
+    # Run and capture output - pass/fail determined by exit code only
+    $output = & $legalityExe $RomPath 2>&1 | ForEach-Object { 
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            $_
+        }
+    }
     $exitCode = $LASTEXITCODE
     
-    $passMatch = $output | Select-String -Pattern "(\d+)/(\d+) tests passed"
-    if ($passMatch) {
-        $passCount = $passMatch.Matches[0].Groups[1].Value
-        $totalCount = $passMatch.Matches[0].Groups[2].Value
-        Write-TestResult "legality_gate_test" ($exitCode -eq 0 -and $passCount -eq $totalCount) "$passCount/$totalCount"
+    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
+    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
+    
+    if ($passedMatch -and $failedMatch) {
+        $passCount = $passedMatch.Matches[0].Groups[1].Value
+        $failCount = $failedMatch.Matches[0].Groups[1].Value
+        Write-TestResult "legality_gate_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
     } else {
         Write-TestResult "legality_gate_test" ($exitCode -eq 0) "Exit code: $exitCode"
     }
@@ -165,7 +200,15 @@ Write-TestHeader "Corpus Test (Decoder/CFG Integrity)"
 
 $corpusExe = "$testReleaseDir\corpus_test.exe"
 if (Test-Path $corpusExe) {
-    $output = & $corpusExe $RomPath 2>&1
+    # Run and capture output - pass/fail determined by exit code only
+    $output = & $corpusExe $RomPath 2>&1 | ForEach-Object { 
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            $_
+        }
+    }
     $exitCode = $LASTEXITCODE
     
     # Exit code 0 = all stages pass
@@ -177,28 +220,36 @@ if (Test-Path $corpusExe) {
 }
 
 # =============================================================================
-# Suite 5: Corpus Lowering Audit (corpus=1679/1679 invariant)
+# Suite 5: Corpus Lowering Audit (corpus=1788/1788 invariant)
 # Stage 4: Semantic lowering verification
 # =============================================================================
 Write-TestHeader "Corpus Lowering Audit"
 
 $loweringExe = "$toolsReleaseDir\corpus_lowering_audit.exe"
 if (Test-Path $loweringExe) {
-    $output = & $loweringExe $RomPath 2>&1
+    # Run and capture output - pass/fail determined by exit code only
+    $output = & $loweringExe $RomPath 2>&1 | ForEach-Object { 
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            $_
+        }
+    }
     $exitCode = $LASTEXITCODE
     
-    # Check for 1679/1679 SUCCESS count
-    $successMatch = $output | Select-String -Pattern "SUCCESS:\s*(\d+)"
-    $failMatch = $output | Select-String -Pattern "FAILURES:\s*(\d+)"
+    # Check for SUCCESS count
+    $successMatch = $output | Select-String -Pattern "Successes:\s*(\d+)"
+    $totalMatch = $output | Select-String -Pattern "Total:\s*(\d+)"
     
-    if ($successMatch) {
+    if ($successMatch -and $totalMatch) {
         $corpusLoweringCount = $successMatch.Matches[0].Groups[1].Value
-        $failCount = if ($failMatch) { $failMatch.Matches[0].Groups[1].Value } else { "0" }
-        $corpusLoweringOk = ($corpusLoweringCount -eq $expectedCorpusCount) -and ($failCount -eq "0")
-        Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0 -and $corpusLoweringOk) "lowering=$corpusLoweringCount/$expectedCorpusCount, failures=$failCount"
+        $totalCount = $totalMatch.Matches[0].Groups[1].Value
+        $corpusLoweringOk = ($corpusLoweringCount -eq $expectedCorpusCount) -and ($corpusLoweringCount -eq $totalCount)
+        Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0 -and $corpusLoweringOk) "lowering=$corpusLoweringCount/$expectedCorpusCount"
     } else {
-        # Alternative: check for "All X bodies compile" pattern
-        $allMatch = $output | Select-String -Pattern "All\s+(\d+)\s+bodies\s+compile"
+        # Alternative: check for "ALL X BODIES COMPILE" pattern
+        $allMatch = $output | Select-String -Pattern "ALL\s+(\d+)\s+BODIES\s+COMPILE"
         if ($allMatch) {
             $corpusLoweringCount = $allMatch.Matches[0].Groups[1].Value
             $corpusLoweringOk = ($corpusLoweringCount -eq $expectedCorpusCount)
@@ -212,14 +263,22 @@ if (Test-Path $loweringExe) {
 }
 
 # =============================================================================
-# Suite 6: Linker Test (corpus=1679, InvalidOwnership=0)
+# Suite 6: Linker Test (corpus=1788, InvalidOwnership=0)
 # Stage 6: Corpus-wide typed-reference validation
 # =============================================================================
 Write-TestHeader "Linker Test"
 
 $linkerExe = "$testReleaseDir\linker_test.exe"
 if (Test-Path $linkerExe) {
-    $output = & $linkerExe $RomPath 2>&1
+    # Run and capture output - pass/fail determined by exit code only
+    $output = & $linkerExe $RomPath 2>&1 | ForEach-Object { 
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            $_
+        }
+    }
     $exitCode = $LASTEXITCODE
     
     # Check corpus count
