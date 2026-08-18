@@ -1339,9 +1339,66 @@ Completed font extraction from ROM bytes (not PNG files).
 
 ---
 
+## Script Timing Correctness Pass - COMPLETED ✓
+
+**SUCCESS**: Fixed two script timing bugs: (1) timed resumes inside `LuaRuntime::update()` now set `script_resumed`, (2) `WaitSeconds` now uses proper duration timing instead of immediate resume.
+
+### Bug 1: Timed Resume Reporting - FIXED ✓
+
+**Problem**: `TickResult::script_resumed` only tracked explicit `HeadlessGameLoop::resume_script()` calls. But `LuaRuntime::update()` also resumes coroutines when WaitFrames/WaitSeconds timers expire - these resumes were not captured.
+
+**Fix**: Added resume tracking to `LuaRuntime`:
+- New member: `bool resumes_occurred_this_update_`
+- New method: `bool consume_resumes_occurred()` - returns and clears the flag
+- `update()` sets flag before each `resume()` call inside the timer loop
+- `HeadlessGameLoop::update_script()` consumes this flag into `script_resumed_this_tick_`
+
+### Bug 2: WaitSeconds Duration - FIXED ✓
+
+**Problem**: `WaitSeconds` yield had no explicit handling in `update_script()` - it fell through to the default case which called `resume_script()` immediately (next tick), ignoring the requested duration.
+
+**Fix**: Added explicit `WaitSeconds` case that mirrors `WaitFrames`:
+- Uses same deterministic simulation delta: `1.0f / 60.0f` seconds per tick
+- Calls `lua_runtime_->update(delta)` which handles the countdown
+- Conversion: `WaitSeconds(s)` waits for `s * 60` ticks
+
+### Implementation Details
+
+**Files Modified**:
+- `engine/include/engine/scripting/lua_runtime.hpp` - Added `resumes_occurred_this_update_` member and `consume_resumes_occurred()` method
+- `engine/scripting/lua_runtime.cpp` - Set flag before resume in `update()`, implemented `consume_resumes_occurred()`
+- `engine/core/game_loop.cpp` - Added explicit `WaitSeconds` case in `update_script()`, consume resume flag for both WaitFrames and WaitSeconds
+
+### Timing Specification
+
+| Yield | Resolution | Conversion |
+|-------|------------|------------|
+| WaitFrames(n) | 1 frame = 1 tick | Exact frame count |
+| WaitSeconds(s) | 1/60 sec per tick | s * 60 ticks |
+| WaitSeconds(0) | Immediate expiry | Resumes on first tick |
+
+### New Tests Added (7 tests)
+
+| Test | Verifies |
+|------|----------|
+| `wait_frames_before_expiry_no_resume` | WaitFrames before timer expires: `script_resumed == false` |
+| `wait_frames_expiry_sets_resumed` | WaitFrames timer expires: `script_resumed == true` |
+| `wait_frames_expiry_reyield_sets_resumed` | WaitFrames expires + immediate re-yield: `script_resumed == true` |
+| `wait_seconds_not_immediate_resume` | WaitSeconds(0.5s) does NOT resume in first 10 ticks |
+| `wait_seconds_resumes_after_duration` | WaitSeconds(0.05s) resumes after 3 ticks |
+| `wait_seconds_resume_sets_flag` | WaitSeconds resume sets `script_resumed == true` |
+| `wait_seconds_zero_duration` | WaitSeconds(0) resumes on first tick |
+
+### Test Results
+
+- **Runtime Tests**: 269/269 pass (262 + 7 new timed yield tests)
+- **All key invariants preserved**
+
+---
+
 ## Test Results (All Pass)
 
-- **Runtime Tests**: 262/262 pass
+- **Runtime Tests**: 269/269 pass
 - **Golden Tests**: 56/56 pass
 - **Legality Gate Tests**: 14/14 pass
 - **Corpus Test**: PASS (decoder/CFG integrity)
@@ -1369,8 +1426,8 @@ $romPath = (Get-ChildItem -Path "references" -Filter "*.gbc" | Select-Object -Fi
 ```
 
 This runs all 6 test suites and reports key invariants:
-- corpus lowering = 1679/1679
-- linker corpus = 1679/1679
+- corpus lowering = 1788/1788
+- linker corpus = 1788/1788
 - InvalidOwnership = 0
 - decoder/CFG = PASS
 

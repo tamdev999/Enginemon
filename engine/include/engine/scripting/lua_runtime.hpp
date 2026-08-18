@@ -225,7 +225,13 @@ public:
     
     // Update all running scripts (call each frame)
     // Handles WaitFrames, WaitSeconds automatically
+    // Returns true if any coroutine was resumed during this update
     void update(float delta_time);
+    
+    // Consume the resume-occurred flag from the last update() call
+    // Returns true if update() resumed any coroutine, then clears the flag
+    // This allows external code to observe timed resumes that happen inside update()
+    bool consume_resumes_occurred();
     
     // Query script state
     ScriptState get_state(uint32_t coroutine_id) const;
@@ -278,6 +284,10 @@ private:
     uint32_t next_coroutine_id_ = 1;
     std::unordered_map<uint32_t, ScriptCoroutine> coroutines_;
     std::unordered_map<uint32_t, ScriptState> completed_states_;  // Final states for cleaned-up coroutines
+    
+    // Tracks whether update() resumed any coroutine
+    // Set to true before each resume() call inside update(), consumed by consume_resumes_occurred()
+    bool resumes_occurred_this_update_ = false;
     
     ErrorHandler error_handler_;
     

@@ -830,8 +830,16 @@ void LuaRuntime::update(float delta_time) {
     }
     
     for (uint32_t id : to_resume) {
+        // Mark that a resume is about to occur - this captures timed resumes
+        resumes_occurred_this_update_ = true;
         resume(id);
     }
+}
+
+bool LuaRuntime::consume_resumes_occurred() {
+    bool result = resumes_occurred_this_update_;
+    resumes_occurred_this_update_ = false;
+    return result;
 }
 
 ScriptState LuaRuntime::get_state(uint32_t coroutine_id) const {

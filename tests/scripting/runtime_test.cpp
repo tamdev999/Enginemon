@@ -10709,6 +10709,139 @@ TEST(script_resumed_yielded_to_yielded) {
     std::cout << "  [Second resume completes script ✓]\n";
 }
 
+//=============================================================================
+// TIMED YIELD TESTS - WaitFrames / WaitSeconds script_resumed tracking
+//=============================================================================
+
+// Helper to create a loop with collision callback for timed yield tests
+static HeadlessGameLoop create_timed_test_loop() {
+    HeadlessGameLoop loop;
+    loop.spawn_player(5, 5, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass { 
+        return CollisionClass::Floor; 
+    });
+    return loop;
+}
+
+// WaitFrames before expiry: script_resumed == false
+TEST(wait_frames_before_expiry_no_resume) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_frames",5) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    for (int i = 0; i < 4; i++) {
+        TickResult r = loop.tick();
+        ASSERT_FALSE(r.script_resumed);
+    }
+    std::cout << "  [WaitFrames before expiry: script_resumed=false ✓]\n";
+}
+
+// WaitFrames expiry: script_resumed == true
+TEST(wait_frames_expiry_sets_resumed) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_frames",3) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    loop.tick(); loop.tick();
+    TickResult r = loop.tick();
+    ASSERT_TRUE(r.script_resumed);
+    ASSERT_TRUE(r.script_complete);
+    std::cout << "  [WaitFrames expiry: script_resumed=true ✓]\n";
+}
+
+// WaitFrames expiry + immediate re-yield: script_resumed == true
+TEST(wait_frames_expiry_reyield_sets_resumed) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_frames",2) coroutine.yield("wait_frames",2) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    loop.tick();
+    TickResult r2 = loop.tick();
+    ASSERT_TRUE(r2.script_resumed);
+    ASSERT_FALSE(r2.script_complete);
+    std::cout << "  [WaitFrames re-yield: script_resumed=true, complete=false ✓]\n";
+}
+
+// WaitSeconds does NOT resume on next tick
+TEST(wait_seconds_not_immediate_resume) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_seconds",0.5) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    for (int i = 0; i < 10; i++) {
+        TickResult r = loop.tick();
+        ASSERT_FALSE(r.script_resumed);
+    }
+    std::cout << "  [WaitSeconds(0.5s): not resumed in first 10 ticks ✓]\n";
+}
+
+// WaitSeconds resumes after duration (60 FPS)
+TEST(wait_seconds_resumes_after_duration) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // 0.05s = 3 ticks at 60 FPS
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_seconds",0.05) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    loop.tick(); loop.tick();
+    TickResult r3 = loop.tick();
+    ASSERT_TRUE(r3.script_resumed);
+    ASSERT_TRUE(r3.script_complete);
+    std::cout << "  [WaitSeconds(0.05s) resumes after 3 ticks ✓]\n";
+}
+
+// WaitSeconds resume sets script_resumed flag
+TEST(wait_seconds_resume_sets_flag) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // ~1 tick duration
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_seconds",0.017) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    loop.tick();
+    TickResult r2 = loop.tick();
+    ASSERT_TRUE(r2.script_resumed);
+    std::cout << "  [WaitSeconds resume sets script_resumed=true ✓]\n";
+}
+
+// Zero-duration WaitSeconds resumes on first tick
+TEST(wait_seconds_zero_duration) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_seconds",0) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    TickResult r1 = loop.tick();
+    ASSERT_TRUE(r1.script_resumed);
+    ASSERT_TRUE(r1.script_complete);
+    std::cout << "  [WaitSeconds(0) resumes on first tick ✓]\n";
+}
+
 // Coord event script roots appear in corpus
 TEST(coord_event_scripts_in_corpus) {
     // Coord events should contribute their scripts to the corpus discovery
@@ -11113,6 +11246,16 @@ int main(int argc, char* argv[]) {
     RUN_TEST(script_resumed_no_resume_attempt);
     RUN_TEST(script_resumed_yielded_to_completed);
     RUN_TEST(script_resumed_yielded_to_yielded);
+    
+    // Timed yield tests - WaitFrames / WaitSeconds script_resumed tracking
+    RUN_TEST(wait_frames_before_expiry_no_resume);
+    RUN_TEST(wait_frames_expiry_sets_resumed);
+    RUN_TEST(wait_frames_expiry_reyield_sets_resumed);
+    RUN_TEST(wait_seconds_not_immediate_resume);
+    RUN_TEST(wait_seconds_resumes_after_duration);
+    RUN_TEST(wait_seconds_resume_sets_flag);
+    RUN_TEST(wait_seconds_zero_duration);
+    
     RUN_TEST(coord_event_scripts_in_corpus);
     
     // Summary

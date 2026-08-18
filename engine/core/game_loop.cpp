@@ -432,10 +432,28 @@ bool HeadlessGameLoop::update_script() {
     if (script_state == ScriptState::Yielded) {
         YieldReason reason = lua_runtime_->get_yield_reason(active_coroutine_);
         
+        // Define simulation delta: 1/60 second per tick (60 FPS fixed rate)
+        constexpr float SIMULATION_DELTA = 1.0f / 60.0f;
+        
         switch (reason) {
             case YieldReason::WaitFrames:
                 // Let lua_runtime update handle the frame countdown
-                lua_runtime_->update(1.0f / 60.0f);
+                lua_runtime_->update(SIMULATION_DELTA);
+                // Capture any timed resumes that occurred inside update()
+                if (lua_runtime_->consume_resumes_occurred()) {
+                    script_resumed_this_tick_ = true;
+                }
+                break;
+                
+            case YieldReason::WaitSeconds:
+                // Let lua_runtime update handle the seconds countdown
+                // Uses same deterministic simulation delta as WaitFrames
+                // Conversion: WaitSeconds(s) waits for s * 60 ticks
+                lua_runtime_->update(SIMULATION_DELTA);
+                // Capture any timed resumes that occurred inside update()
+                if (lua_runtime_->consume_resumes_occurred()) {
+                    script_resumed_this_tick_ = true;
+                }
                 break;
                 
             case YieldReason::Dialog:
