@@ -1907,24 +1907,280 @@ end
     std::cout << "  [ScriptYielded input locking verified ✓]\n";
 }
 
-TEST(tileset_id_bounds_1_through_36) {
-    // REGRESSION TEST: Tileset IDs must be 1..36 (Crystal 1-indexed), not 0..35
-    // Previously loops used i = 0; i < num_tilesets which accepted 0 and rejected 36.
+TEST(tileset_id_bounds_0_1_36_37) {
+    // ADVERSARIAL TEST: Prove tileset extraction bounds are 1..36 (Crystal 1-indexed)
+    // - tileset 0 → rejected (invalid, Crystal tilesets are 1-indexed)
+    // - tileset 1 → accepted (johto_outdoor)
+    // - tileset 36 → accepted and identifies "aerodactyl_word_room"
+    // - tileset 37 → rejected (out of range)
     
     TilesetExtractor extractor(*g_rom, *g_profile);
     
+    // Tileset 0 - MUST be rejected (Crystal is 1-indexed)
+    auto result0 = extractor.extract_tileset(static_cast<uint8_t>(0));
+    ASSERT_FALSE(result0.success);
+    std::cout << "  [Tileset 0: rejected ✓]\n";
+    
     // Tileset 1 (johto_outdoor) - MUST succeed
-    auto result1 = extractor.extract_tileset("johto_outdoor");
+    auto result1 = extractor.extract_tileset(static_cast<uint8_t>(1));
     ASSERT_TRUE(result1.success);
     ASSERT_TRUE(result1.tileset.tiles.size() > 0);
+    std::cout << "  [Tileset 1: accepted ✓]\n";
     
-    // Verify we can extract a high-numbered tileset
-    // ice_path = 20
-    auto result_ice = extractor.extract_tileset("ice_path");
-    ASSERT_TRUE(result_ice.success);
-    ASSERT_TRUE(result_ice.tileset.tiles.size() > 0);
+    // Tileset 36 - MUST succeed and be "aerodactyl_word_room"
+    auto result36 = extractor.extract_tileset(static_cast<uint8_t>(36));
+    ASSERT_TRUE(result36.success);
+    ASSERT_TRUE(result36.tileset.tiles.size() > 0);
+    std::cout << "  [Tileset 36: accepted ✓]\n";
     
-    std::cout << "  [Tileset ID bounds 1..36 verified ✓]\n";
+    // Also verify by name
+    auto result_aerodactyl = extractor.extract_tileset("aerodactyl_word_room");
+    ASSERT_TRUE(result_aerodactyl.success);
+    ASSERT_TRUE(result_aerodactyl.tileset.tiles.size() > 0);
+    std::cout << "  [Tileset 36 = aerodactyl_word_room ✓]\n";
+    
+    // Tileset 37 - MUST be rejected (out of range, Crystal has 36 tilesets)
+    auto result37 = extractor.extract_tileset(static_cast<uint8_t>(37));
+    ASSERT_FALSE(result37.success);
+    std::cout << "  [Tileset 37: rejected ✓]\n";
+}
+
+//=============================================================================
+// BG CONDITION FLAG EVALUATION ADVERSARIAL TESTS
+// These tests prove IFSET/IFNOTSET/hidden-item flags are evaluated at runtime
+//=============================================================================
+
+TEST(bg_event_ifset_unset_blocked) {
+    // ADVERSARIAL: IFSET event with flag UNSET must NOT trigger
+    
+    Interaction interaction;
+    
+    // Create map with collision callback
+    InteractionMap map;
+    map.width = 10;
+    map.height = 10;
+    map.get_collision = [](int32_t, int32_t) { return CollisionClass::Floor; };
+    
+    // No objects
+    std::vector<InteractableObject> objects;
+    
+    // BG event at (5, 4) - IFSET type with flag "test_flag"
+    std::vector<InteractableBgEvent> bg_events;
+    InteractableBgEvent bg;
+    bg.x = 5;
+    bg.y = 4;
+    bg.type = BgEventTypeId::IfSet;
+    bg.script_id = "test_script";
+    bg.condition_flag = "test_flag";
+    bg_events.push_back(bg);
+    
+    // Player at (5, 5) facing up (toward 5, 4)
+    int32_t px = 5, py = 5;
+    enginemon::Direction facing = enginemon::Direction::Up;
+    
+    // Flag checker returns FALSE (flag not set)
+    auto flag_checker = [](const std::string& flag) -> bool {
+        return false;  // Flag is NOT set
+    };
+    
+    auto result = interaction.check(map, objects, bg_events, px, py, facing, flag_checker);
+    
+    // IFSET with unset flag must NOT trigger
+    ASSERT_EQ(result.type, InteractionType::None);
+    
+    std::cout << "  [IFSET unset: blocked ✓]\n";
+}
+
+TEST(bg_event_ifset_set_triggers) {
+    // ADVERSARIAL: IFSET event with flag SET must trigger
+    
+    Interaction interaction;
+    
+    InteractionMap map;
+    map.width = 10;
+    map.height = 10;
+    map.get_collision = [](int32_t, int32_t) { return CollisionClass::Floor; };
+    
+    std::vector<InteractableObject> objects;
+    
+    std::vector<InteractableBgEvent> bg_events;
+    InteractableBgEvent bg;
+    bg.x = 5;
+    bg.y = 4;
+    bg.type = BgEventTypeId::IfSet;
+    bg.script_id = "test_script";
+    bg.condition_flag = "test_flag";
+    bg_events.push_back(bg);
+    
+    int32_t px = 5, py = 5;
+    enginemon::Direction facing = enginemon::Direction::Up;
+    
+    // Flag checker returns TRUE (flag IS set)
+    auto flag_checker = [](const std::string& flag) -> bool {
+        return true;  // Flag IS set
+    };
+    
+    auto result = interaction.check(map, objects, bg_events, px, py, facing, flag_checker);
+    
+    // IFSET with set flag must trigger
+    ASSERT_EQ(result.type, InteractionType::BgEvent);
+    ASSERT_STR_EQ(result.bg_script_id, "test_script");
+    
+    std::cout << "  [IFSET set: triggers ✓]\n";
+}
+
+TEST(bg_event_ifnotset_unset_triggers) {
+    // ADVERSARIAL: IFNOTSET event with flag UNSET must trigger
+    
+    Interaction interaction;
+    
+    InteractionMap map;
+    map.width = 10;
+    map.height = 10;
+    map.get_collision = [](int32_t, int32_t) { return CollisionClass::Floor; };
+    
+    std::vector<InteractableObject> objects;
+    
+    std::vector<InteractableBgEvent> bg_events;
+    InteractableBgEvent bg;
+    bg.x = 5;
+    bg.y = 4;
+    bg.type = BgEventTypeId::IfNotSet;
+    bg.script_id = "test_script";
+    bg.condition_flag = "test_flag";
+    bg_events.push_back(bg);
+    
+    int32_t px = 5, py = 5;
+    enginemon::Direction facing = enginemon::Direction::Up;
+    
+    // Flag checker returns FALSE (flag not set)
+    auto flag_checker = [](const std::string& flag) -> bool {
+        return false;
+    };
+    
+    auto result = interaction.check(map, objects, bg_events, px, py, facing, flag_checker);
+    
+    // IFNOTSET with unset flag must trigger
+    ASSERT_EQ(result.type, InteractionType::BgEvent);
+    ASSERT_STR_EQ(result.bg_script_id, "test_script");
+    
+    std::cout << "  [IFNOTSET unset: triggers ✓]\n";
+}
+
+TEST(bg_event_ifnotset_set_blocked) {
+    // ADVERSARIAL: IFNOTSET event with flag SET must NOT trigger
+    
+    Interaction interaction;
+    
+    InteractionMap map;
+    map.width = 10;
+    map.height = 10;
+    map.get_collision = [](int32_t, int32_t) { return CollisionClass::Floor; };
+    
+    std::vector<InteractableObject> objects;
+    
+    std::vector<InteractableBgEvent> bg_events;
+    InteractableBgEvent bg;
+    bg.x = 5;
+    bg.y = 4;
+    bg.type = BgEventTypeId::IfNotSet;
+    bg.script_id = "test_script";
+    bg.condition_flag = "test_flag";
+    bg_events.push_back(bg);
+    
+    int32_t px = 5, py = 5;
+    enginemon::Direction facing = enginemon::Direction::Up;
+    
+    // Flag checker returns TRUE (flag IS set)
+    auto flag_checker = [](const std::string& flag) -> bool {
+        return true;
+    };
+    
+    auto result = interaction.check(map, objects, bg_events, px, py, facing, flag_checker);
+    
+    // IFNOTSET with set flag must NOT trigger
+    ASSERT_EQ(result.type, InteractionType::None);
+    
+    std::cout << "  [IFNOTSET set: blocked ✓]\n";
+}
+
+TEST(bg_event_hidden_item_uncollected_triggers) {
+    // ADVERSARIAL: Hidden item with flag UNSET (uncollected) must trigger
+    
+    Interaction interaction;
+    
+    InteractionMap map;
+    map.width = 10;
+    map.height = 10;
+    map.get_collision = [](int32_t, int32_t) { return CollisionClass::Floor; };
+    
+    std::vector<InteractableObject> objects;
+    
+    std::vector<InteractableBgEvent> bg_events;
+    InteractableBgEvent bg;
+    bg.x = 5;
+    bg.y = 4;
+    bg.type = BgEventTypeId::ItemIfSet;  // Hidden item type
+    bg.script_id = "";
+    bg.item_id = "potion";
+    bg.quantity = 1;
+    bg.condition_flag = "hidden_item_flag";
+    bg_events.push_back(bg);
+    
+    int32_t px = 5, py = 5;
+    enginemon::Direction facing = enginemon::Direction::Up;
+    
+    // Flag checker returns FALSE (item NOT collected yet)
+    auto flag_checker = [](const std::string& flag) -> bool {
+        return false;  // Item has NOT been collected
+    };
+    
+    auto result = interaction.check(map, objects, bg_events, px, py, facing, flag_checker);
+    
+    // Hidden item with uncollected flag must trigger
+    ASSERT_EQ(result.type, InteractionType::HiddenItem);
+    ASSERT_STR_EQ(result.bg_item_id, "potion");
+    
+    std::cout << "  [Hidden item uncollected: triggers ✓]\n";
+}
+
+TEST(bg_event_hidden_item_collected_blocked) {
+    // ADVERSARIAL: Hidden item with flag SET (already collected) must NOT trigger
+    
+    Interaction interaction;
+    
+    InteractionMap map;
+    map.width = 10;
+    map.height = 10;
+    map.get_collision = [](int32_t, int32_t) { return CollisionClass::Floor; };
+    
+    std::vector<InteractableObject> objects;
+    
+    std::vector<InteractableBgEvent> bg_events;
+    InteractableBgEvent bg;
+    bg.x = 5;
+    bg.y = 4;
+    bg.type = BgEventTypeId::ItemIfSet;  // Hidden item type
+    bg.script_id = "";
+    bg.item_id = "potion";
+    bg.quantity = 1;
+    bg.condition_flag = "hidden_item_flag";
+    bg_events.push_back(bg);
+    
+    int32_t px = 5, py = 5;
+    enginemon::Direction facing = enginemon::Direction::Up;
+    
+    // Flag checker returns TRUE (item already collected)
+    auto flag_checker = [](const std::string& flag) -> bool {
+        return true;  // Item HAS been collected
+    };
+    
+    auto result = interaction.check(map, objects, bg_events, px, py, facing, flag_checker);
+    
+    // Hidden item with collected flag must NOT trigger
+    ASSERT_EQ(result.type, InteractionType::None);
+    
+    std::cout << "  [Hidden item collected: blocked ✓]\n";
 }
 
 TEST(duplicate_physical_binding_release) {
@@ -11940,9 +12196,17 @@ int main(int argc, char* argv[]) {
     
     // Pre-RNG correctness regression tests
     RUN_TEST(script_yielded_locks_input);
-    RUN_TEST(tileset_id_bounds_1_through_36);
+    RUN_TEST(tileset_id_bounds_0_1_36_37);
     RUN_TEST(duplicate_physical_binding_release);
     RUN_TEST(special_tileset_fixed_palette_extracted);
+    
+    // BG condition flag evaluation adversarial tests
+    RUN_TEST(bg_event_ifset_unset_blocked);
+    RUN_TEST(bg_event_ifset_set_triggers);
+    RUN_TEST(bg_event_ifnotset_unset_triggers);
+    RUN_TEST(bg_event_ifnotset_set_blocked);
+    RUN_TEST(bg_event_hidden_item_uncollected_triggers);
+    RUN_TEST(bg_event_hidden_item_collected_blocked);
     
     // Summary
     std::cout << "\n=== Results ===\n";
