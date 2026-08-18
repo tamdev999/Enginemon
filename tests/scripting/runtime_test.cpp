@@ -12213,7 +12213,7 @@ TEST(semantic_fix_getstring_preserves_text_pointer) {
     ASSERT_EQ(pta->buffer_slot, 1);
     ASSERT_EQ(pta->arg_type, TextArgType::String);
     
-    std::cout << "  [getstring preserves text_pointer=0x" << std::hex << pta->text_pointer << " ✓]\n";
+    std::cout << "  [getstring preserves text_pointer=0x" << std::hex << pta->text_pointer << std::dec << " ✓]\n";
 }
 
 // Finding 3: getmoney preserves account operand
@@ -13021,7 +13021,7 @@ int main(int argc, char* argv[]) {
     
     // Summary
     std::cout << "\n=== Results ===\n";
-    std::cout << "Passed: " << g_tests_passed << "\n";
+    std::cout << std::dec << "Passed: " << g_tests_passed << "\n";
     std::cout << "Failed: " << g_tests_failed << "\n";
     
     return g_tests_failed > 0 ? 1 : 0;
