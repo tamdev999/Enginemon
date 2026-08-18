@@ -295,6 +295,41 @@ ConnectionResult WorldManager::resolve_connection(
         return result;
     }
     
+    // CRITICAL: Enforce connection strip bounds
+    // The connection only exists for a portion of the edge defined by:
+    //   strip_offset (starting position in collision cells)
+    //   strip_length (length in collision cells)
+    //
+    // For North/South connections: check player X against strip bounds
+    // For East/West connections: check player Y against strip bounds
+    //
+    // Reference: Crystal map connection format - strip defines which tiles connect
+    // Strip offset is in blocks, converted to collision cells (*2)
+    int strip_start_cells = conn->strip_offset * 2;
+    int strip_length_cells = conn->strip_length * 2;  // Length is also in blocks
+    int strip_end_cells = strip_start_cells + strip_length_cells;
+    
+    // Determine which coordinate to check based on direction
+    int check_coord = 0;
+    switch (facing) {
+        case Direction::Up:
+        case Direction::Down:
+            // North/South: strip is along X axis
+            check_coord = player_x;
+            break;
+        case Direction::Left:
+        case Direction::Right:
+            // East/West: strip is along Y axis
+            check_coord = player_y;
+            break;
+    }
+    
+    // Reject if player is outside the connection strip
+    if (check_coord < strip_start_cells || check_coord >= strip_end_cells) {
+        result.error = "Outside connection strip bounds";
+        return result;
+    }
+    
     // Calculate landing position
     int32_t land_x = 0, land_y = 0;
     if (!calculate_connection_landing(*conn, player_x, player_y, facing, land_x, land_y)) {

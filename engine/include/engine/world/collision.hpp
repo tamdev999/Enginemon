@@ -102,11 +102,12 @@ public:
                            int32_t& out_x, int32_t& out_y);
     
     // Check if an entity occupies a cell (current or target during movement)
-    // Returns the blocking entity's ID, or 0 if none
-    static uint16_t get_occupant(
+    // Returns the blocking entity's ID, or std::nullopt if no occupant
+    // NOTE: ID 0 is a valid entity (player), so we use optional instead of sentinel
+    static std::optional<uint16_t> get_occupant(
         const std::vector<CollisionEntity>& entities,
         int32_t x, int32_t y,
-        uint16_t ignore_id = 0
+        uint16_t ignore_id
     );
 
 private:

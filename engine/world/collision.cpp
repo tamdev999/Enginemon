@@ -24,7 +24,7 @@ void Collision::get_target(int32_t x, int32_t y, Direction dir,
     out_y = y + dy;
 }
 
-uint16_t Collision::get_occupant(
+std::optional<uint16_t> Collision::get_occupant(
     const std::vector<CollisionEntity>& entities,
     int32_t x, int32_t y,
     uint16_t ignore_id
@@ -46,7 +46,7 @@ uint16_t Collision::get_occupant(
         }
     }
     
-    return 0;  // No occupant
+    return std::nullopt;  // No occupant
 }
 
 CollisionResult Collision::check_tile(const CollisionMap& map, int32_t x, int32_t y,
@@ -122,13 +122,13 @@ CollisionResult Collision::check_side_walls(const CollisionMap& map,
 CollisionResult Collision::check_occupancy(const std::vector<CollisionEntity>& entities,
                                            int32_t x, int32_t y,
                                            uint16_t mover_id) const {
-    uint16_t occupant = get_occupant(entities, x, y, mover_id);
+    auto occupant = get_occupant(entities, x, y, mover_id);
     
-    if (occupant != 0) {
+    if (occupant.has_value()) {
         CollisionResult result;
         result.allowed = false;
         result.reason = MoveBlockReason::Entity;
-        result.blocking_entity = occupant;
+        result.blocking_entity = occupant.value();
         return result;
     }
     

@@ -3880,6 +3880,481 @@ TEST(load_map_owns_copy_prevents_dangling) {
     std::cout << "  [HeadlessGameLoop owns map copy - no dangling pointer]\n";
 }
 
+// =============================================================================
+// PRE-RNG RUNTIME CORRECTNESS PASS - Fix regression tests
+// =============================================================================
+
+TEST(typechart_immunity_is_zero_not_unset) {
+    // REGRESSION TEST for Fix 1: TypeChart immunity representation
+    // Verifies: 0 = immune, 10 = neutral, other values = explicit effectiveness
+    
+    TypeChart chart;
+    
+    // Before any set_effectiveness calls, all matchups should be neutral (10)
+    // Chart is pre-filled with 10 in constructor
+    ASSERT_EQ(chart.get_effectiveness(1, 2), 10);  // Unset pair → neutral
+    ASSERT_EQ(chart.get_effectiveness(5, 5), 10);  // Unset pair → neutral
+    
+    // Set explicit immunity (0)
+    chart.set_effectiveness(1, 2, 0);  // Type 1 → Type 2 = immune
+    ASSERT_EQ(chart.get_effectiveness(1, 2), 0);   // Should return 0, NOT 10
+    
+    // Set super effective (20)
+    chart.set_effectiveness(3, 4, 20);
+    ASSERT_EQ(chart.get_effectiveness(3, 4), 20);
+    
+    // Set not very effective (5)
+    chart.set_effectiveness(5, 6, 5);
+    ASSERT_EQ(chart.get_effectiveness(5, 6), 5);
+    
+    std::cout << "  [TypeChart: 0=immune (not unset), unset=10 (neutral)]\n";
+}
+
+TEST(typechart_dual_type_immunity_remains_zero) {
+    // REGRESSION TEST for Fix 1: Dual-type immunity
+    // If either defending type is immune, result must be 0
+    
+    TypeChart chart;
+    
+    // Set up: Type 1 → Type 10 = immune (0)
+    // Type 1 → Type 11 = super effective (20)
+    chart.set_effectiveness(1, 10, 0);   // Immune
+    chart.set_effectiveness(1, 11, 20);  // Super effective
+    
+    // Dual-type: Type 10 + Type 11
+    // One type immune → result is immune (0)
+    uint8_t dual_eff = chart.get_effectiveness(1, 10, 11);
+    ASSERT_EQ(dual_eff, 0);  // Immune takes priority
+    
+    // Reverse order should also be immune
+    uint8_t dual_eff_rev = chart.get_effectiveness(1, 11, 10);
+    ASSERT_EQ(dual_eff_rev, 0);
+    
+    std::cout << "  [Dual-type: immunity (0) takes priority over super effective (20)]\n";
+}
+
+TEST(typechart_explicit_values_survive_lookup) {
+    // REGRESSION TEST for Fix 1: Explicit values survive lookup unchanged
+    
+    TypeChart chart;
+    
+    // Set various explicit values
+    chart.set_effectiveness(1, 1, 0);   // 0 = immune
+    chart.set_effectiveness(2, 2, 5);   // 5 = resist (0.5x)
+    chart.set_effectiveness(3, 3, 10);  // 10 = neutral (1x)
+    chart.set_effectiveness(4, 4, 20);  // 20 = super (2x)
+    
+    // All values must survive lookup unchanged
+    ASSERT_EQ(chart.get_effectiveness(1, 1), 0);
+    ASSERT_EQ(chart.get_effectiveness(2, 2), 5);
+    ASSERT_EQ(chart.get_effectiveness(3, 3), 10);
+    ASSERT_EQ(chart.get_effectiveness(4, 4), 20);
+    
+    std::cout << "  [All explicit effectiveness values survive lookup unchanged]\n";
+}
+
+TEST(pcstorage_deposit_moves_pokemon_exactly_once) {
+    // REGRESSION TEST for Fix 2: PCStorage deposit repeated-move bug
+    // Verifies: Pokemon with nontrivial fields is deposited intact to first free slot
+    
+    PCStorage pc;
+    
+    // Occupy slot 0 in current box
+    Pokemon blocker;
+    blocker.species = 1;
+    blocker.nickname = "BLOCKER";
+    pc.box(0).deposit(0, std::move(blocker));
+    
+    // Create Pokemon with nontrivial fields that would be corrupted by double-move
+    Pokemon test_mon;
+    test_mon.species = 25;
+    test_mon.nickname = "PIKACHU";
+    test_mon.ot_name = "ASH";
+    test_mon.ot_id = 12345;
+    test_mon.level = 50;
+    test_mon.current_hp = 100;
+    test_mon.max_hp = 100;
+    test_mon.friendship = 255;
+    test_mon.moves[0].id = 10;
+    test_mon.moves[0].pp = 35;
+    test_mon.moves[0].pp_ups = 3;
+    
+    // Deposit - should go to slot 1 (slot 0 is occupied)
+    bool success = pc.deposit(std::move(test_mon));
+    ASSERT_TRUE(success);
+    
+    // Verify Pokemon is in slot 1 with all fields intact
+    const Pokemon* deposited = pc.box(0).get(1);
+    ASSERT_TRUE(deposited != nullptr);
+    ASSERT_EQ(deposited->species, 25);
+    ASSERT_STR_EQ(deposited->nickname.c_str(), "PIKACHU");
+    ASSERT_STR_EQ(deposited->ot_name.c_str(), "ASH");
+    ASSERT_EQ(deposited->ot_id, 12345);
+    ASSERT_EQ(deposited->level, 50);
+    ASSERT_EQ(deposited->current_hp, 100);
+    ASSERT_EQ(deposited->friendship, 255);
+    ASSERT_EQ(deposited->moves[0].id, 10);
+    ASSERT_EQ(deposited->moves[0].pp, 35);
+    ASSERT_EQ(deposited->moves[0].pp_ups, 3);
+    
+    std::cout << "  [Pokemon deposited intact to first free slot (slot 1)]\n";
+}
+
+TEST(pokemon_move_slots_initialized_to_defaults) {
+    // REGRESSION TEST for Fix 3: Pokemon move-slot initialization
+    // Verifies: All 4 move slots have structural defaults after construction
+    
+    Pokemon mon;  // Default construction
+    
+    // All 4 slots must have valid empty defaults
+    for (size_t i = 0; i < 4; i++) {
+        ASSERT_EQ(mon.moves[i].id, MOVE_NONE);
+        ASSERT_EQ(mon.moves[i].pp, 0);
+        ASSERT_EQ(mon.moves[i].pp_ups, 0);
+    }
+    
+    std::cout << "  [All 4 move slots initialized: id=MOVE_NONE, pp=0, pp_ups=0]\n";
+}
+
+TEST(connection_strip_first_valid_coordinate) {
+    // REGRESSION TEST for Fix 4: Connection strip bounds - first valid coordinate
+    
+    WorldManager wm;
+    GameState state;
+    
+    // Create source map 10x10 blocks (20x20 collision cells)
+    RuntimeMap source;
+    source.map_id = "source";
+    source.width = 10;
+    source.height = 10;
+    
+    // Create west connection with strip_offset=2, strip_length=3
+    // Strip covers cells 4-9 (offset*2=4, length*2=6)
+    RuntimeConnection conn;
+    conn.direction = ConnectionDirection::West;
+    conn.target_map_id = "dest";
+    conn.strip_offset = 2;
+    conn.strip_length = 3;
+    source.connections.push_back(conn);
+    
+    // Create destination map
+    RuntimeMap dest;
+    dest.map_id = "dest";
+    dest.width = 10;
+    dest.height = 10;
+    
+    wm.set_map_loader([&](const std::string& map_id) -> std::optional<RuntimeMap> {
+        if (map_id == "source") return source;
+        if (map_id == "dest") return dest;
+        return std::nullopt;
+    });
+    
+    wm.load_map("source");
+    
+    // First valid Y coordinate in strip (strip_offset*2 = 4)
+    auto result = wm.resolve_connection(0, 4, enginemon::Direction::Left);
+    ASSERT_TRUE(result.success);
+    
+    std::cout << "  [First valid strip coordinate (y=4) succeeds]\n";
+}
+
+TEST(connection_strip_last_valid_coordinate) {
+    // REGRESSION TEST for Fix 4: Connection strip bounds - last valid coordinate
+    
+    WorldManager wm;
+    GameState state;
+    
+    RuntimeMap source;
+    source.map_id = "source";
+    source.width = 10;
+    source.height = 10;
+    
+    // Strip_offset=2, strip_length=3 → cells 4-9 (exclusive: 4,5,6,7,8,9)
+    RuntimeConnection conn;
+    conn.direction = ConnectionDirection::West;
+    conn.target_map_id = "dest";
+    conn.strip_offset = 2;
+    conn.strip_length = 3;
+    source.connections.push_back(conn);
+    
+    RuntimeMap dest;
+    dest.map_id = "dest";
+    dest.width = 10;
+    dest.height = 10;
+    
+    wm.set_map_loader([&](const std::string& map_id) -> std::optional<RuntimeMap> {
+        if (map_id == "source") return source;
+        if (map_id == "dest") return dest;
+        return std::nullopt;
+    });
+    
+    wm.load_map("source");
+    
+    // Last valid Y coordinate in strip (strip_offset*2 + strip_length*2 - 1 = 9)
+    auto result = wm.resolve_connection(0, 9, enginemon::Direction::Left);
+    ASSERT_TRUE(result.success);
+    
+    std::cout << "  [Last valid strip coordinate (y=9) succeeds]\n";
+}
+
+TEST(connection_strip_before_strip_rejected) {
+    // REGRESSION TEST for Fix 4: Connection strip bounds - before strip rejected
+    
+    WorldManager wm;
+    GameState state;
+    
+    RuntimeMap source;
+    source.map_id = "source";
+    source.width = 10;
+    source.height = 10;
+    
+    // Strip_offset=2, strip_length=3 → cells 4-9
+    RuntimeConnection conn;
+    conn.direction = ConnectionDirection::West;
+    conn.target_map_id = "dest";
+    conn.strip_offset = 2;
+    conn.strip_length = 3;
+    source.connections.push_back(conn);
+    
+    RuntimeMap dest;
+    dest.map_id = "dest";
+    dest.width = 10;
+    dest.height = 10;
+    
+    wm.set_map_loader([&](const std::string& map_id) -> std::optional<RuntimeMap> {
+        if (map_id == "source") return source;
+        if (map_id == "dest") return dest;
+        return std::nullopt;
+    });
+    
+    wm.load_map("source");
+    
+    // Y=3 is one cell BEFORE the strip (strip starts at 4)
+    auto result = wm.resolve_connection(0, 3, enginemon::Direction::Left);
+    ASSERT_FALSE(result.success);
+    ASSERT_STR_CONTAINS(result.error.c_str(), "strip");
+    
+    std::cout << "  [Before strip (y=3) correctly rejected]\n";
+}
+
+TEST(connection_strip_after_strip_rejected) {
+    // REGRESSION TEST for Fix 4: Connection strip bounds - after strip rejected
+    
+    WorldManager wm;
+    GameState state;
+    
+    RuntimeMap source;
+    source.map_id = "source";
+    source.width = 10;
+    source.height = 10;
+    
+    // Strip_offset=2, strip_length=3 → cells 4-9
+    RuntimeConnection conn;
+    conn.direction = ConnectionDirection::West;
+    conn.target_map_id = "dest";
+    conn.strip_offset = 2;
+    conn.strip_length = 3;
+    source.connections.push_back(conn);
+    
+    RuntimeMap dest;
+    dest.map_id = "dest";
+    dest.width = 10;
+    dest.height = 10;
+    
+    wm.set_map_loader([&](const std::string& map_id) -> std::optional<RuntimeMap> {
+        if (map_id == "source") return source;
+        if (map_id == "dest") return dest;
+        return std::nullopt;
+    });
+    
+    wm.load_map("source");
+    
+    // Y=10 is one cell AFTER the strip (strip ends at 9)
+    auto result = wm.resolve_connection(0, 10, enginemon::Direction::Left);
+    ASSERT_FALSE(result.success);
+    ASSERT_STR_CONTAINS(result.error.c_str(), "strip");
+    
+    std::cout << "  [After strip (y=10) correctly rejected]\n";
+}
+
+TEST(player_destination_reserved_against_npc) {
+    // REGRESSION TEST for Fix 5: Reserve moving player's destination against NPC movement
+    
+    HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(42);
+    loop.set_game_state(&game_state);
+    
+    RuntimeMap rtmap;
+    rtmap.width = 10;
+    rtmap.height = 10;
+    rtmap.blocks.resize(100, 0x01);
+    
+    loop.load_map(rtmap);
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        return CollisionClass::Floor;
+    });
+    
+    // Player at (5,5), moving right toward (6,5)
+    loop.spawn_player(5, 5, enginemon::Direction::Right);
+    
+    // Start player movement toward (6,5)
+    auto input_result = loop.process_input(InputAction::MoveRight);
+    ASSERT_TRUE(input_result.accepted);
+    ASSERT_FALSE(input_result.blocked);
+    
+    // Now player is mid-step: x=5, target_x=6
+    ASSERT_TRUE(loop.player().is_moving);
+    ASSERT_EQ(loop.player().x, 5);
+    ASSERT_EQ(loop.player().target_x, 6);
+    
+    // Add NPC at (7,5) trying to move left into (6,5) - player's destination
+    NpcState npc;
+    npc.id = 1;
+    npc.x = 7;
+    npc.y = 5;
+    npc.facing = enginemon::Direction::Left;
+    npc.behavior = NpcMovementBehavior::RandomWalkX;
+    npc.idle_timer = 0;
+    npc.radius_x = 5;
+    npc.radius_y = 0;
+    npc.init_x = 7;
+    npc.init_y = 5;
+    npc.visible = true;
+    npc.frozen = false;
+    loop.add_npc(npc);
+    
+    // Tick once - NPC should NOT be able to move into (6,5) because player is moving there
+    // Force NPC to try moving left by manipulating the test
+    // The RNG will choose a direction - we check the result
+    
+    // Tick several times while player is still moving
+    for (int i = 0; i < 8; i++) {  // Player takes 16 ticks, so we're partway through
+        loop.tick();
+        
+        const NpcState* updated_npc = loop.get_npc(1);
+        
+        // NPC should never occupy (6,5) while player is moving there
+        if (loop.player().is_moving) {
+            // If NPC moved, it should NOT have moved to player's destination
+            if (updated_npc->x != 7) {
+                ASSERT_FALSE(updated_npc->x == 6 && updated_npc->y == 5);
+            }
+        }
+    }
+    
+    std::cout << "  [NPC cannot move into player's in-progress destination]\n";
+}
+
+TEST(npc_cannot_cross_side_wall_from_forbidden_direction) {
+    // REGRESSION TEST for Fix 6: NPC directional side-wall collision
+    
+    HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(12345);
+    loop.set_game_state(&game_state);
+    
+    RuntimeMap rtmap;
+    rtmap.width = 10;
+    rtmap.height = 10;
+    rtmap.blocks.resize(100, 0x01);
+    
+    loop.load_map(rtmap);
+    
+    // Create collision map with side walls
+    // SideWallN at (5,5) - blocks movement from south to north
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        if (x == 5 && y == 5) return CollisionClass::SideWallN;
+        return CollisionClass::Floor;
+    });
+    
+    // NPC at (5,6) trying to move up into (5,5) - should be blocked by SideWallN
+    NpcState npc;
+    npc.id = 1;
+    npc.x = 5;
+    npc.y = 6;  // Below the side wall
+    npc.facing = enginemon::Direction::Up;
+    npc.behavior = NpcMovementBehavior::RandomWalkY;
+    npc.idle_timer = 0;
+    npc.radius_x = 0;
+    npc.radius_y = 5;
+    npc.init_x = 5;
+    npc.init_y = 6;
+    npc.visible = true;
+    npc.frozen = false;
+    loop.add_npc(npc);
+    
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    
+    // Tick many times - NPC should never enter (5,5) from below
+    for (int i = 0; i < 500; i++) {
+        loop.tick();
+        
+        const NpcState* updated = loop.get_npc(1);
+        
+        // NPC should never be at (5,5) if it came from (5,6)
+        // Since it's RandomWalkY starting at (5,6), it can only reach (5,5) by moving up
+        // which should be blocked by SideWallN
+        ASSERT_FALSE(updated->x == 5 && updated->y == 5);
+    }
+    
+    std::cout << "  [NPC cannot cross SideWallN from forbidden direction (south→north)]\n";
+}
+
+TEST(npc_can_traverse_side_wall_from_allowed_direction) {
+    // REGRESSION TEST for Fix 6: NPC can traverse side wall from allowed direction
+    
+    HeadlessGameLoop loop;
+    GameState game_state;
+    game_state.rng.set_seed(99);
+    loop.set_game_state(&game_state);
+    
+    RuntimeMap rtmap;
+    rtmap.width = 10;
+    rtmap.height = 10;
+    rtmap.blocks.resize(100, 0x01);
+    
+    loop.load_map(rtmap);
+    
+    // SideWallN at (5,5) - blocks movement from south, allows from north
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass {
+        if (x == 5 && y == 5) return CollisionClass::SideWallN;
+        return CollisionClass::Floor;
+    });
+    
+    // NPC at (5,4) - north of the side wall, can move down into (5,5)
+    NpcState npc;
+    npc.id = 1;
+    npc.x = 5;
+    npc.y = 4;  // Above the side wall
+    npc.facing = enginemon::Direction::Down;
+    npc.behavior = NpcMovementBehavior::RandomWalkY;
+    npc.idle_timer = 0;
+    npc.radius_x = 0;
+    npc.radius_y = 2;  // Can move down 2 tiles
+    npc.init_x = 5;
+    npc.init_y = 4;
+    npc.visible = true;
+    npc.frozen = false;
+    loop.add_npc(npc);
+    
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    
+    // Tick until NPC reaches (5,5) or we timeout
+    bool reached_side_wall = false;
+    for (int i = 0; i < 1000 && !reached_side_wall; i++) {
+        loop.tick();
+        
+        const NpcState* updated = loop.get_npc(1);
+        if (updated->x == 5 && updated->y == 5) {
+            reached_side_wall = true;
+        }
+    }
+    
+    ASSERT_TRUE(reached_side_wall);
+    std::cout << "  [NPC can traverse SideWallN from allowed direction (north→south)]\n";
+}
+
 TEST(connection_newbark_to_route29) {
     // Test connection crossing from New Bark Town to Route 29
     WorldManager wm;
@@ -10071,6 +10546,20 @@ int main(int argc, char* argv[]) {
     RUN_TEST(warp_target_map_no_warps_fails);
     RUN_TEST(warp_valid_index_succeeds);
     RUN_TEST(load_map_owns_copy_prevents_dangling);
+    
+    // Pre-RNG runtime correctness pass regression tests
+    RUN_TEST(typechart_immunity_is_zero_not_unset);
+    RUN_TEST(typechart_dual_type_immunity_remains_zero);
+    RUN_TEST(typechart_explicit_values_survive_lookup);
+    RUN_TEST(pcstorage_deposit_moves_pokemon_exactly_once);
+    RUN_TEST(pokemon_move_slots_initialized_to_defaults);
+    RUN_TEST(connection_strip_first_valid_coordinate);
+    RUN_TEST(connection_strip_last_valid_coordinate);
+    RUN_TEST(connection_strip_before_strip_rejected);
+    RUN_TEST(connection_strip_after_strip_rejected);
+    RUN_TEST(player_destination_reserved_against_npc);
+    RUN_TEST(npc_cannot_cross_side_wall_from_forbidden_direction);
+    RUN_TEST(npc_can_traverse_side_wall_from_allowed_direction);
     
     RUN_TEST(connection_newbark_to_route29);
     RUN_TEST(connection_landing_math);

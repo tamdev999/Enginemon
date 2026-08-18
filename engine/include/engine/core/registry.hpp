@@ -79,9 +79,19 @@ private:
 // Type effectiveness lookup (separate from registry pattern)
 class TypeChart {
 public:
+    // Initialize all type matchups to neutral (10) by default
+    TypeChart() {
+        // Fill entire chart with neutral effectiveness (10)
+        // This ensures unset pairs return neutral, not immune
+        for (auto& row : chart_) {
+            row.fill(10);
+        }
+    }
+    
     void set_effectiveness(TypeId attacking, TypeId defending, uint8_t multiplier);
     
     // Returns multiplier: 0=immune, 5=resist, 10=normal, 20=super
+    // NO translation: returns exactly what was stored (or neutral 10 if never set)
     uint8_t get_effectiveness(TypeId attacking, TypeId defending) const;
     
     // Combined effectiveness for dual types

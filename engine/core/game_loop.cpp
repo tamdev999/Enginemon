@@ -694,30 +694,57 @@ bool HeadlessGameLoop::check_npc_can_move(const NpcState& npc, Direction dir) {
         return false;
     }
     
-    // Check tile collision using semantic CollisionClass
-    CollisionClass tile_coll = get_collision_(target_x, target_y);
-    if (!collision_is_walkable(tile_coll)) {
-        return false;
-    }
+    // Use the authoritative collision system - same as player movement
+    // This ensures NPCs respect side walls, ledges, and all directional collision
+    CollisionMap cmap;
+    cmap.width = current_map_->collision_width();
+    cmap.height = current_map_->collision_height();
+    cmap.get_collision = get_collision_;
     
-    // Check collision with player
-    if (target_x == player_.x && target_y == player_.y) {
-        return false;
-    }
+    // Build entity list for collision checking
+    std::vector<CollisionEntity> entities;
     
-    // Check collision with other NPCs
+    // Add player as collision entity
+    CollisionEntity player_entity;
+    player_entity.id = 0;
+    player_entity.x = player_.x;
+    player_entity.y = player_.y;
+    player_entity.target_x = player_.target_x;
+    player_entity.target_y = player_.target_y;
+    player_entity.is_moving = player_.is_moving;
+    player_entity.is_passable = false;
+    entities.push_back(player_entity);
+    
+    // Add other NPCs as collision entities
     for (const auto& other : npcs_) {
-        if (other.id == npc.id) continue;
+        if (other.id == npc.id) continue;  // Skip self
         if (!other.visible) continue;
         
-        // Check current position
-        if (target_x == other.x && target_y == other.y) {
-            return false;
-        }
-        // Check target position (if other NPC is moving)
-        if (other.is_moving && target_x == other.target_x && target_y == other.target_y) {
-            return false;
-        }
+        CollisionEntity entity;
+        entity.id = other.id;
+        entity.x = other.x;
+        entity.y = other.y;
+        entity.target_x = other.target_x;
+        entity.target_y = other.target_y;
+        entity.is_moving = other.is_moving;
+        entity.is_passable = false;
+        entities.push_back(entity);
+    }
+    
+    // Build NPC entity for collision check
+    CollisionEntity npc_entity;
+    npc_entity.id = npc.id;
+    npc_entity.x = npc.x;
+    npc_entity.y = npc.y;
+    npc_entity.target_x = npc.x;
+    npc_entity.target_y = npc.y;
+    npc_entity.is_moving = false;
+    npc_entity.is_passable = false;
+    
+    // Use the authoritative collision checker (same rules as player movement)
+    CollisionResult result = collision_.can_move(cmap, entities, npc_entity, dir);
+    if (!result.allowed) {
+        return false;
     }
     
     // Don't walk onto warps (Reference: Gen2Recomped NPC.lua)

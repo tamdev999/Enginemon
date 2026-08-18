@@ -237,13 +237,16 @@ void PCStorage::set_current_box(size_t index) {
 }
 
 bool PCStorage::deposit(Pokemon pokemon) {
-    // Find first empty slot in current box
+    // Find first empty slot in current box BEFORE moving the Pokemon
+    // This prevents the repeated-move bug where we might move-from the Pokemon
+    // multiple times while probing occupied slots
     for (size_t i = 0; i < PCBox::BOX_SIZE; ++i) {
-        if (boxes_[current_box_].deposit(i, std::move(pokemon))) {
-            return true;
+        if (!boxes_[current_box_].get(i)) {
+            // Found empty slot - deposit exactly once
+            return boxes_[current_box_].deposit(i, std::move(pokemon));
         }
     }
-    return false;
+    return false; // Box is full
 }
 
 std::optional<std::pair<size_t, size_t>> PCStorage::find_empty_slot() const {

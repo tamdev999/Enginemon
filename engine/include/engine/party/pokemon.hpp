@@ -51,13 +51,13 @@ struct Pokemon {
         uint16_t special;       // Shared for SpAtk/SpDef
     } stat_exp;
     
-    // Moves
+    // Moves - each slot has semantic defaults
     struct Move {
-        MoveId id;
-        uint8_t pp;
-        uint8_t pp_ups;         // 0-3, each adds 20% PP
+        MoveId id = MOVE_NONE;   // Empty slot
+        uint8_t pp = 0;          // No PP when empty
+        uint8_t pp_ups = 0;      // No PP Ups
     };
-    std::array<Move, 4> moves;
+    std::array<Move, 4> moves{};  // Value-initialized to defaults
     
     // Status
     Status status = Status::None;
