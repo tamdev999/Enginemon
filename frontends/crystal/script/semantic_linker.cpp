@@ -896,17 +896,20 @@ void SemanticLinker::extract_and_validate_from_op(
         }
         
         // === Text argument preparation ===
-        // Note: TrainerName in Sem_PrepareTextArg doesn't have full (group, id)
-        // It uses a single id that might be the trainer index or encoded differently
+        // Text arg ops have complete operand preservation (Finding 3 fix)
+        // - id: ItemId, SpeciesId, LandmarkId depending on arg_type
+        // - trainer_group + id2: for trainer_name
+        // - text_pointer: ROM provenance for getstring
+        // - account: money source (player=0, mom=1, coins=2, var=3)
         else if constexpr (std::is_same_v<T, Sem_PrepareTextArg>) {
             if (sem_op.arg_type == TextArgType::ItemName) {
                 add_ref(ReferenceType::Item, sem_op.id, "PrepareTextArg.Item");
             } else if (sem_op.arg_type == TextArgType::PokemonName) {
                 add_ref(ReferenceType::Species, sem_op.id, "PrepareTextArg.Pokemon");
-            } else if (sem_op.arg_type == TextArgType::Number) {
-                add_ref(ReferenceType::Var, sem_op.source_var, "PrepareTextArg.Var");
             }
-            // TrainerName skipped - different encoding than Sem_LoadTrainer
+            // Note: Number args (money/coins/var) don't reference game data IDs
+            // TrainerName uses trainer_group + id2 - not a simple trainer ID reference
+            // Landmark uses id with NameSourceType::Location - landmark table reference
         }
         
     }, op);

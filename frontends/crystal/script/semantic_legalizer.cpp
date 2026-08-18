@@ -422,6 +422,11 @@ RuleResult rule_call(LoweringContext& ctx) {
 // sdefer schedules a script to execute after the current scene script completes.
 // The target IS discovered and compiled as its own body by the TypedScriptDecoder.
 // Here we just emit a semantic marker with the target script_id.
+//
+// CRITICAL: The pointer in Cmd_Sdefer is bank-relative (16-bit).
+// We MUST resolve it to a flat address using the same formula as corpus_discovery:
+//   flat = bank * 0x4000 + (ptr - 0x4000) for ptr >= 0x4000
+// The bank is inferred from the source script's entry_address.
 RuleResult rule_sdefer(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
@@ -431,16 +436,29 @@ RuleResult rule_sdefer(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         
-        // The deferred target is a local pointer resolved via script_bank
-        // TypedScriptDecoder already followed this via ctx.pending
-        // We generate a semantic script_id based on the resolved address
-        uint32_t target_addr = sdef->pointer;
+        // Compute script bank from entry address
+        // Bank = entry_address / 0x4000
+        uint8_t script_bank = 0;
+        if (ctx.source_ir && ctx.source_ir->entry_address != 0) {
+            script_bank = static_cast<uint8_t>(ctx.source_ir->entry_address / 0x4000);
+        }
+        
+        // Resolve sdefer pointer to flat address (same formula as corpus_discovery.cpp)
+        // INVARIANT: discovery target == semantic target
+        uint32_t flat_addr;
+        if (sdef->pointer >= 0x4000) {
+            flat_addr = static_cast<uint32_t>(script_bank) * 0x4000 + 
+                       (sdef->pointer - 0x4000);
+        } else {
+            flat_addr = sdef->pointer;  // Bank 0 pointer (rare)
+        }
         
         enginemon::Sem_Sdefer op;
-        // Generate script_id based on resolved address
-        // The target is a separate compiled body discovered by the decoder
-        auto label = make_label_ref(target_addr, ctx);
-        op.target_script_id = label.name;
+        // Generate script_id based on RESOLVED flat address
+        // This matches how corpus_discovery discovers deferred targets
+        std::ostringstream ss;
+        ss << "deferred_" << std::hex << flat_addr;
+        op.target_script_id = ss.str();
         
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
@@ -2921,12 +2939,17 @@ RuleResult rule_reanchor_map(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    if (std::holds_alternative<Cmd_Reanchormap>(cmd->data)) {
+    if (auto* p = std::get_if<Cmd_Reanchormap>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        // reanchormap resets the map view anchor - maps to ReloadMap semantically
-        r.instructions.push_back(make_inst(enginemon::Sem_RefreshMap{}));
+        // reanchormap is DISTINCT from refreshmap:
+        // - reanchormap (0x48): calls ReanchorMap, consumes dummy byte
+        // - refreshmap (0x7C): BGMapMode→0, UpdateSprites, DelayFrame
+        // They are NOT interchangeable - must remain distinct
+        enginemon::Sem_ReanchorMap op;
+        op.dummy = p->dummy;  // Preserve dummy byte for round-trip
+        r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     return {};
@@ -2967,11 +2990,14 @@ RuleResult rule_string_format(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
+    // ==========================================================================
     // String formatting commands prepare values for text substitution
-    // These emit semantic operations that prepare text arguments
-    // The text system uses typed arguments instead of GB RAM/string-buffer
+    // CRITICAL: Every operand MUST be preserved - dropping operands is corruption
+    // ==========================================================================
     
     // getmonname - prepare Pokemon species name
+    // Source: Script_getmonname reads pokemon, then strbuf
+    // ROM layout: opcode, strbuf, pokemon (decoder verified)
     if (auto* p = std::get_if<Cmd_Getmonname>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
@@ -2983,6 +3009,8 @@ RuleResult rule_string_format(LoweringContext& ctx) {
     }
     
     // getitemname - prepare item name
+    // Source: Script_getitemname reads item, then strbuf
+    // ROM layout: opcode, strbuf, item (decoder verified)
     if (auto* p = std::get_if<Cmd_Getitemname>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
@@ -2993,66 +3021,159 @@ RuleResult rule_string_format(LoweringContext& ctx) {
         return r;
     }
     
-    // gettrainername - prepare trainer name
+    // gettrainername - prepare trainer name from group+id
+    // Source: Script_gettrainername reads trainer_group, trainer_id, then strbuf
+    // ROM layout: opcode, trainer_group, trainer_id, strbuf (decoder verified)
+    // BOTH group AND id are required for correct trainer lookup
     if (auto* p = std::get_if<Cmd_Gettrainername>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
         auto op = enginemon::Sem_PrepareTextArg::trainer_name(
-            p->trainer_id, p->strbuf);
+            p->trainer_group, p->trainer_id, p->strbuf);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     
-    // getstring - prepare generic string
+    // getstring - prepare string from ROM pointer
+    // Source: Script_getstring reads text_pointer (2 bytes), then strbuf
+    // ROM layout: opcode, strbuf, pointer_lo, pointer_hi
+    // The text_pointer references a text resource - resolve at lowering time
     if (auto* p = std::get_if<Cmd_Getstring>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        auto op = enginemon::Sem_PrepareTextArg::string("", p->strbuf);  // Resolved at runtime
+        
+        // Resolve the text pointer to flat address using script bank
+        // The pointer is local to the script's bank
+        uint8_t script_bank = 0;
+        if (ctx.source_ir && ctx.source_ir->entry_address != 0) {
+            script_bank = static_cast<uint8_t>(ctx.source_ir->entry_address / 0x4000);
+        }
+        
+        uint32_t flat_addr = 0;
+        if (p->text_pointer >= 0x4000) {
+            flat_addr = static_cast<uint32_t>(script_bank) * 0x4000 + 
+                       (p->text_pointer - 0x4000);
+        } else {
+            flat_addr = p->text_pointer;  // Bank 0 pointer
+        }
+        
+        // Extract text content through registry if available
+        std::string resolved_text;
+        if (ctx.text_registry && flat_addr != 0) {
+            auto text_id = ctx.text_registry->extract(flat_addr);
+            if (text_id != enginemon::TEXT_NONE) {
+                const auto* def = ctx.text_registry->get(text_id);
+                if (def) {
+                    // Get display text from sequence
+                    for (const auto& elem : def->sequence.elements) {
+                        if (elem.op == TextOp::Text) {
+                            resolved_text += elem.text;
+                        }
+                    }
+                }
+            }
+        }
+        
+        auto op = enginemon::Sem_PrepareTextArg::string_from_pointer(
+            flat_addr, resolved_text, p->strbuf);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     
-    // getmoney - prepare money amount (from player's money)
-    if (std::holds_alternative<Cmd_Getmoney>(cmd->data)) {
+    // getmoney - prepare money amount (account specifies player vs mom)
+    // Source: Script_getmoney reads account, then strbuf
+    // ROM layout: opcode, account, strbuf (SWAPPED from macro - decoder verified)
+    if (auto* p = std::get_if<Cmd_Getmoney>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        auto op = enginemon::Sem_PrepareTextArg::number(enginemon::VarId{0}, 0);  // Player money
+        auto op = enginemon::Sem_PrepareTextArg::money(p->account, p->strbuf);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     
-    // getcoins - prepare coin amount
-    if (std::holds_alternative<Cmd_Getcoins>(cmd->data)) {
+    // getcoins - prepare coin amount (always player's coins)
+    // Source: Script_getcoins reads strbuf only
+    // ROM layout: opcode, strbuf
+    if (auto* p = std::get_if<Cmd_Getcoins>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        auto op = enginemon::Sem_PrepareTextArg::number(enginemon::VarId{1}, 0);  // Player coins
+        auto op = enginemon::Sem_PrepareTextArg::coins(p->strbuf);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     
     // getnum - prepare number from wScriptVar
-    if (std::holds_alternative<Cmd_Getnum>(cmd->data)) {
+    // Source: Script_getnum reads strbuf only, formats wScriptVar
+    // ROM layout: opcode, strbuf
+    if (auto* p = std::get_if<Cmd_Getnum>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        auto op = enginemon::Sem_PrepareTextArg::number(enginemon::VarId{0}, 0);  // wScriptVar
+        auto op = enginemon::Sem_PrepareTextArg::number_from_var(p->strbuf);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     
-    // Other string formatting commands (landmark name, trainer class, etc.)
-    if (std::holds_alternative<Cmd_Getcurlandmarkname>(cmd->data) ||
-        std::holds_alternative<Cmd_Getlandmarkname>(cmd->data) ||
-        std::holds_alternative<Cmd_Gettrainerclassname>(cmd->data) ||
-        std::holds_alternative<Cmd_Getname>(cmd->data)) {
+    // getcurlandmarkname - prepare current map's landmark name
+    // Source: Script_getcurlandmarkname reads strbuf, uses current map's landmark
+    // ROM layout: opcode, strbuf
+    if (auto* p = std::get_if<Cmd_Getcurlandmarkname>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        auto op = enginemon::Sem_PrepareTextArg::string("", 0);  // Resolved at runtime
+        auto op = enginemon::Sem_PrepareTextArg::current_landmark_name(p->strbuf);
+        r.instructions.push_back(make_inst(std::move(op)));
+        return r;
+    }
+    
+    // getlandmarkname - prepare landmark name by ID
+    // Source: Script_getlandmarkname reads landmark_id, then strbuf
+    // ROM layout: opcode, strbuf, landmark_id (decoder verified)
+    if (auto* p = std::get_if<Cmd_Getlandmarkname>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        auto op = enginemon::Sem_PrepareTextArg::landmark_name(p->landmark_id, p->strbuf);
+        r.instructions.push_back(make_inst(std::move(op)));
+        return r;
+    }
+    
+    // gettrainerclassname - prepare trainer class name
+    // Source: Script_gettrainerclassname reads trainer_group, then strbuf
+    // ROM layout: opcode, strbuf, trainer_group (decoder verified)
+    if (auto* p = std::get_if<Cmd_Gettrainerclassname>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        auto op = enginemon::Sem_PrepareTextArg::trainer_class_name(p->trainer_group, p->strbuf);
+        r.instructions.push_back(make_inst(std::move(op)));
+        return r;
+    }
+    
+    // getname - generic name lookup by type and ID
+    // Source: Script_getname reads type, then id, then strbuf
+    // ROM layout: opcode, strbuf, type, id (decoder verified)
+    if (auto* p = std::get_if<Cmd_Getname>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        
+        // Map Crystal NAME_* type to semantic NameSourceType
+        enginemon::NameSourceType name_type;
+        switch (p->type) {
+            case 1: name_type = enginemon::NameSourceType::Pokemon; break;
+            case 2: name_type = enginemon::NameSourceType::Move; break;
+            case 3: name_type = enginemon::NameSourceType::Item; break;
+            case 4: name_type = enginemon::NameSourceType::Trainer; break;
+            case 5: name_type = enginemon::NameSourceType::Location; break;
+            default: name_type = enginemon::NameSourceType::Pokemon; break;
+        }
+        
+        auto op = enginemon::Sem_PrepareTextArg::name_by_type(name_type, p->id, p->strbuf);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -3156,8 +3277,10 @@ RuleResult rule_misc_control(LoweringContext& ctx) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        // Play encounter music
-        r.instructions.push_back(make_inst(enginemon::Sem_PlayMapMusic{}));
+        // encountermusic plays trainer-class-specific music
+        // DISTINCT from playmapmusic which plays the map's background music
+        // Source: Script_encountermusic calls PlayTrainerEncounterMusic with wOtherTrainerClass
+        r.instructions.push_back(make_inst(enginemon::Sem_PlayEncounterMusic{}));
         return r;
     }
     return {};
@@ -3188,17 +3311,20 @@ RuleResult rule_verbose_give_item_var(LoweringContext& ctx) {
 
 // newloadmap: Load map with specific method (0-3)
 // Reference: pokecrystal/engine/overworld/scripting.asm Script_newloadmap
-// Semantics: triggers map reload with entry method - maps to ReloadMap
+// Semantics: triggers map reload with entry method - MUST preserve method byte
 RuleResult rule_new_load_map(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    if (std::holds_alternative<Cmd_Newloadmap>(cmd->data)) {
+    if (auto* p = std::get_if<Cmd_Newloadmap>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        // newloadmap triggers a map reload - semantic equivalent
-        r.instructions.push_back(make_inst(enginemon::Sem_ReloadMap{}));
+        // newloadmap entry method affects spawn, fade, music, and other behaviors
+        // Method is NOT optional - it must be preserved for correct runtime behavior
+        enginemon::Sem_NewLoadMap op;
+        op.method = static_cast<enginemon::MapEntryMethod>(p->method);
+        r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     return {};

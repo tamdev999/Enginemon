@@ -29,6 +29,7 @@
 #include "crystal/script/ir.hpp"
 #include "crystal/script/semantic_legalizer.hpp"
 #include "crystal/script/crystal_command.hpp"
+#include "crystal/script/text_registry.hpp"
 #include "crystal/world/collision_classifier.hpp"
 #include "crystal/extract/sprite_ids.hpp"
 #include "engine/core/registry.hpp"
@@ -12099,6 +12100,486 @@ TEST(coord_event_scripts_in_corpus) {
 }
 
 //=============================================================================
+// SEMANTIC CORRECTNESS FIX TESTS - August 2026
+// Verifies fixes for confirmed active vanilla semantic corruption:
+//   - Finding 3: String formatting operands preserved
+//   - Finding 7: encountermusic ≠ playmapmusic
+//   - Finding 8: newloadmap method preserved
+//   - Finding 9: reanchormap ≠ refreshmap
+//   - Finding 5: sdefer bank resolution
+//=============================================================================
+
+// Finding 3: gettrainername preserves BOTH trainer_group AND trainer_id
+TEST(semantic_fix_gettrainername_preserves_both_operands) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    // Build Cmd_Gettrainername with distinct operands
+    CrystalCommand cmd;
+    Cmd_Gettrainername gtn;
+    gtn.trainer_group = 5;   // Distinct value
+    gtn.trainer_id = 7;      // Distinct value
+    gtn.strbuf = 2;          // Destination buffer
+    cmd.data = gtn;
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x44, 5, 7, 2};  // gettrainername opcode + operands
+    
+    CrystalScriptIR ir;
+    ir.name = "test_gettrainername";
+    ir.entry_address = 0x10000;
+    ir.rom_start = 0;
+    ir.rom_end = 4;
+    ir.commands.push_back(cmd);
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_gettrainername";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 4;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.ir.blocks.size(), 1);
+    ASSERT_EQ(result.ir.blocks[0].instructions.size(), 1);
+    
+    // Get the semantic op
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
+    ASSERT_TRUE(pta != nullptr);
+    
+    // CRITICAL: Both operands must be preserved
+    ASSERT_EQ(pta->trainer_group, 5);
+    ASSERT_EQ(pta->id2, 7);  // trainer_id stored in id2
+    ASSERT_EQ(pta->buffer_slot, 2);
+    ASSERT_EQ(pta->arg_type, TextArgType::TrainerName);
+    
+    std::cout << "  [gettrainername preserves group=" << (int)pta->trainer_group 
+              << ", id=" << (int)pta->id2 << " ✓]\n";
+}
+
+// Finding 3: getstring preserves text_pointer provenance
+TEST(semantic_fix_getstring_preserves_text_pointer) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    CrystalCommand cmd;
+    Cmd_Getstring gs;
+    gs.text_pointer = 0x4123;  // Bank-relative pointer
+    gs.strbuf = 1;
+    cmd.data = gs;
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x45, 1, 0x23, 0x41};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_getstring";
+    ir.entry_address = 0x1c000;  // Bank 7, so flat = 7*0x4000 + 0x123 = 0x1c123
+    ir.rom_start = 0;
+    ir.rom_end = 4;
+    ir.commands.push_back(cmd);
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_getstring";
+    cfg.entry_address = 0x1c000;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 4;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.ir.blocks[0].instructions.size(), 1);
+    
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
+    ASSERT_TRUE(pta != nullptr);
+    
+    // CRITICAL: text_pointer must be resolved to flat address
+    // Bank 7 * 0x4000 + (0x4123 - 0x4000) = 0x1c000 + 0x123 = 0x1c123
+    ASSERT_EQ(pta->text_pointer, 0x1c123);
+    ASSERT_EQ(pta->buffer_slot, 1);
+    ASSERT_EQ(pta->arg_type, TextArgType::String);
+    
+    std::cout << "  [getstring preserves text_pointer=0x" << std::hex << pta->text_pointer << " ✓]\n";
+}
+
+// Finding 3: getmoney preserves account operand
+TEST(semantic_fix_getmoney_preserves_account) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    CrystalCommand cmd;
+    Cmd_Getmoney gm;
+    gm.account = 1;  // Mom's money (distinct from player=0)
+    gm.strbuf = 3;
+    cmd.data = gm;
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x3D, 1, 3};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_getmoney";
+    ir.entry_address = 0x10000;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_getmoney";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    
+    ASSERT_TRUE(result.success);
+    
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
+    ASSERT_TRUE(pta != nullptr);
+    
+    // CRITICAL: account must be preserved (1 = Mom's money)
+    ASSERT_EQ(pta->account, 1);
+    ASSERT_EQ(pta->buffer_slot, 3);
+    
+    std::cout << "  [getmoney preserves account=" << (int)pta->account << " ✓]\n";
+}
+
+// Finding 7: encountermusic produces Sem_PlayEncounterMusic, NOT Sem_PlayMapMusic
+TEST(semantic_fix_encountermusic_distinct_from_playmapmusic) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    // Test encountermusic
+    CrystalCommand cmd_enc;
+    cmd_enc.data = Cmd_Encountermusic{};
+    cmd_enc.span.rom_address = 0;
+    cmd_enc.span.raw_bytes = {0x73};  // encountermusic opcode
+    
+    CrystalScriptIR ir;
+    ir.name = "test_encountermusic";
+    ir.entry_address = 0x10000;
+    ir.rom_start = 0;
+    ir.rom_end = 1;
+    ir.commands.push_back(cmd_enc);
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_encountermusic";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 1;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.ir.blocks[0].instructions.size(), 1);
+    
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    
+    // CRITICAL: Must produce Sem_PlayEncounterMusic, NOT Sem_PlayMapMusic
+    auto* enc = std::get_if<Sem_PlayEncounterMusic>(&inst.op);
+    ASSERT_TRUE(enc != nullptr);
+    
+    // Verify it's NOT Sem_PlayMapMusic
+    auto* map = std::get_if<Sem_PlayMapMusic>(&inst.op);
+    ASSERT_TRUE(map == nullptr);
+    
+    std::cout << "  [encountermusic → Sem_PlayEncounterMusic (not PlayMapMusic) ✓]\n";
+}
+
+// Finding 8: newloadmap preserves method operand
+TEST(semantic_fix_newloadmap_preserves_method) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    // Test with multiple method values
+    for (uint8_t method : {0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xFC}) {
+        CrystalCommand cmd;
+        Cmd_Newloadmap nlm;
+        nlm.method = method;
+        cmd.data = nlm;
+        cmd.span.rom_address = 0;
+        cmd.span.raw_bytes = {0x8A, method};
+        
+        CrystalScriptIR ir;
+        ir.name = "test_newloadmap";
+        ir.entry_address = 0x10000;
+        ir.rom_start = 0;
+        ir.rom_end = 2;
+        ir.commands.push_back(cmd);
+        
+        CrystalCFG cfg;
+        cfg.script_name = "test_newloadmap";
+        cfg.entry_address = 0x10000;
+        BasicBlock block;
+        block.id = 0;
+        block.start_address = 0;
+        block.end_address = 2;
+        block.command_start = 0;
+        block.command_count = 1;
+        cfg.blocks.push_back(block);
+        cfg.source_ir = &ir;
+        
+        SemanticLegalizer legalizer;
+        LoweringResult result = legalizer.lower(ir, cfg);
+        
+        ASSERT_TRUE(result.success);
+        
+        const auto& inst = result.ir.blocks[0].instructions[0];
+        auto* nlm_op = std::get_if<Sem_NewLoadMap>(&inst.op);
+        ASSERT_TRUE(nlm_op != nullptr);
+        
+        // CRITICAL: method must be preserved exactly
+        ASSERT_EQ(static_cast<uint8_t>(nlm_op->method), method);
+    }
+    
+    std::cout << "  [newloadmap preserves method (0xF1..0xFC tested) ✓]\n";
+}
+
+// Finding 9: reanchormap produces Sem_ReanchorMap, NOT Sem_RefreshMap
+TEST(semantic_fix_reanchormap_distinct_from_refreshmap) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    // Test reanchormap
+    CrystalCommand cmd_re;
+    Cmd_Reanchormap ra;
+    ra.dummy = 0x42;  // Dummy byte
+    cmd_re.data = ra;
+    cmd_re.span.rom_address = 0;
+    cmd_re.span.raw_bytes = {0x48, 0x42};  // reanchormap opcode + dummy
+    
+    CrystalScriptIR ir;
+    ir.name = "test_reanchormap";
+    ir.entry_address = 0x10000;
+    ir.rom_start = 0;
+    ir.rom_end = 2;
+    ir.commands.push_back(cmd_re);
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_reanchormap";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 2;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    
+    ASSERT_TRUE(result.success);
+    
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    
+    // CRITICAL: Must produce Sem_ReanchorMap, NOT Sem_RefreshMap
+    auto* reanchor = std::get_if<Sem_ReanchorMap>(&inst.op);
+    ASSERT_TRUE(reanchor != nullptr);
+    
+    // Verify dummy byte is preserved
+    ASSERT_EQ(reanchor->dummy, 0x42);
+    
+    // Verify it's NOT Sem_RefreshMap
+    auto* refresh = std::get_if<Sem_RefreshMap>(&inst.op);
+    ASSERT_TRUE(refresh == nullptr);
+    
+    std::cout << "  [reanchormap → Sem_ReanchorMap (not RefreshMap), dummy=0x42 ✓]\n";
+}
+
+// Finding 9: refreshmap produces Sem_RefreshMap (distinct from reanchormap)
+TEST(semantic_fix_refreshmap_distinct_from_reanchormap) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    CrystalCommand cmd_rf;
+    cmd_rf.data = Cmd_Refreshmap{};
+    cmd_rf.span.rom_address = 0;
+    cmd_rf.span.raw_bytes = {0x7C};  // refreshmap opcode
+    
+    CrystalScriptIR ir;
+    ir.name = "test_refreshmap";
+    ir.entry_address = 0x10000;
+    ir.rom_start = 0;
+    ir.rom_end = 1;
+    ir.commands.push_back(cmd_rf);
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_refreshmap";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 1;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    
+    ASSERT_TRUE(result.success);
+    
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    
+    // CRITICAL: Must produce Sem_RefreshMap
+    auto* refresh = std::get_if<Sem_RefreshMap>(&inst.op);
+    ASSERT_TRUE(refresh != nullptr);
+    
+    // Verify it's NOT Sem_ReanchorMap
+    auto* reanchor = std::get_if<Sem_ReanchorMap>(&inst.op);
+    ASSERT_TRUE(reanchor == nullptr);
+    
+    std::cout << "  [refreshmap → Sem_RefreshMap (not ReanchorMap) ✓]\n";
+}
+
+// Finding 5: sdefer resolves bank-relative pointer correctly
+TEST(semantic_fix_sdefer_bank_resolution) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    // Script at bank 0x1A, sdefer pointer = 0x4500 (bank-relative)
+    // Expected flat = 0x1A * 0x4000 + (0x4500 - 0x4000) = 0x68000 + 0x500 = 0x68500
+    CrystalCommand cmd;
+    Cmd_Sdefer sd;
+    sd.pointer = 0x4500;  // Bank-relative pointer
+    cmd.data = sd;
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x8D, 0x00, 0x45};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_sdefer";
+    ir.entry_address = 0x68100;  // Bank 0x1A (0x1A * 0x4000 = 0x68000)
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_sdefer";
+    cfg.entry_address = 0x68100;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    
+    ASSERT_TRUE(result.success);
+    
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* sdef = std::get_if<Sem_Sdefer>(&inst.op);
+    ASSERT_TRUE(sdef != nullptr);
+    
+    // CRITICAL: target_script_id must be based on resolved flat address
+    // "deferred_68500" (hex for 0x1A * 0x4000 + (0x4500 - 0x4000))
+    ASSERT_STR_EQ(sdef->target_script_id, "deferred_68500");
+    
+    std::cout << "  [sdefer bank resolution: 0x4500 @ bank 0x1A → deferred_68500 ✓]\n";
+}
+
+// Finding 2: TextDefinition identity_string distinguishes control codes
+TEST(semantic_fix_text_identity_distinguishes_controls) {
+    using namespace crystal;
+    
+    // Create two text definitions with same literal but different controls
+    TextDefinition def1, def2, def3;
+    
+    // def1: "Hello" + LINE
+    def1.source_rom_address = 0x1000;
+    def1.sequence.elements.push_back(TextElement::make_text("Hello"));
+    def1.sequence.elements.push_back(TextElement::make_line());
+    
+    // def2: "Hello" + PARA (different control)
+    def2.source_rom_address = 0x2000;
+    def2.sequence.elements.push_back(TextElement::make_text("Hello"));
+    def2.sequence.elements.push_back(TextElement::make_para());
+    
+    // def3: "Hello" + LINE (same as def1)
+    def3.source_rom_address = 0x3000;
+    def3.sequence.elements.push_back(TextElement::make_text("Hello"));
+    def3.sequence.elements.push_back(TextElement::make_line());
+    
+    std::string id1 = def1.identity_string();
+    std::string id2 = def2.identity_string();
+    std::string id3 = def3.identity_string();
+    
+    // CRITICAL: LINE vs PARA must produce different identities
+    ASSERT_TRUE(id1 != id2);
+    
+    // Same content should produce same identity
+    ASSERT_STR_EQ(id1, id3);
+    
+    // Identity should contain control markers
+    ASSERT_STR_CONTAINS(id1, "<LINE>");
+    ASSERT_STR_CONTAINS(id2, "<PARA>");
+    
+    std::cout << "  [TextDefinition: LINE vs PARA → distinct identities ✓]\n";
+}
+
+// Finding 2: TextDefinition identity distinguishes TX_RAM addresses
+TEST(semantic_fix_text_identity_distinguishes_ram_addresses) {
+    using namespace crystal;
+    
+    TextDefinition def1, def2;
+    
+    // def1: "Name: " + RAM(0xD47D)
+    def1.source_rom_address = 0x1000;
+    def1.sequence.elements.push_back(TextElement::make_text("Name: "));
+    def1.sequence.elements.push_back(TextElement::make_text_ram(0xD47D));
+    
+    // def2: "Name: " + RAM(0xD47E) - different address
+    def2.source_rom_address = 0x2000;
+    def2.sequence.elements.push_back(TextElement::make_text("Name: "));
+    def2.sequence.elements.push_back(TextElement::make_text_ram(0xD47E));
+    
+    std::string id1 = def1.identity_string();
+    std::string id2 = def2.identity_string();
+    
+    // CRITICAL: Different RAM addresses must produce different identities
+    ASSERT_TRUE(id1 != id2);
+    
+    // Both should contain RAM markers with addresses
+    ASSERT_STR_CONTAINS(id1, "<RAM:");
+    ASSERT_STR_CONTAINS(id2, "<RAM:");
+    
+    std::cout << "  [TextDefinition: RAM(0xD47D) vs RAM(0xD47E) → distinct ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -12525,6 +13006,18 @@ int main(int argc, char* argv[]) {
     // Final pre-RNG correctness tests (semantic gap closure)
     RUN_TEST(sprite_id_mapping_authoritative);
     RUN_TEST(directional_ledge_semantic_preservation);
+    
+    // Semantic correctness fix tests (August 2026)
+    RUN_TEST(semantic_fix_gettrainername_preserves_both_operands);
+    RUN_TEST(semantic_fix_getstring_preserves_text_pointer);
+    RUN_TEST(semantic_fix_getmoney_preserves_account);
+    RUN_TEST(semantic_fix_encountermusic_distinct_from_playmapmusic);
+    RUN_TEST(semantic_fix_newloadmap_preserves_method);
+    RUN_TEST(semantic_fix_reanchormap_distinct_from_refreshmap);
+    RUN_TEST(semantic_fix_refreshmap_distinct_from_reanchormap);
+    RUN_TEST(semantic_fix_sdefer_bank_resolution);
+    RUN_TEST(semantic_fix_text_identity_distinguishes_controls);
+    RUN_TEST(semantic_fix_text_identity_distinguishes_ram_addresses);
     
     // Summary
     std::cout << "\n=== Results ===\n";

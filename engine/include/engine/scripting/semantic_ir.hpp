@@ -445,29 +445,182 @@ struct Sem_ShowBalanceOverlay {
     BalanceContent contents;
 };
 
+// =============================================================================
 // Text argument preparation (semantic replacement for getXXXname commands)
-// Consolidated into a single type to reduce variant size
+// =============================================================================
+// CRITICAL: Each Crystal getXXXname command has specific operands that MUST be
+// preserved for runtime-equivalent behavior. Dropping operands while returning
+// success is SILENT CORRUPTION.
+//
+// Source-proven operands from pokecrystal/engine/overworld/scripting.asm:
+//   getmonname:          pokemon_id, strbuf
+//   getitemname:         item_id, strbuf  
+//   gettrainername:      trainer_group, trainer_id, strbuf
+//   getstring:           text_pointer, strbuf
+//   getmoney:            account, strbuf
+//   getcoins:            strbuf
+//   getnum:              strbuf (reads wScriptVar)
+//   getlandmarkname:     landmark_id, strbuf
+//   gettrainerclassname: trainer_group, strbuf
+//   getname:             type, id, strbuf
+//
+// Consolidated into a single type with all required fields.
+// =============================================================================
+
+// Source type for getname command (Crystal's NAME_* constants)
+enum class NameSourceType : uint8_t {
+    Pokemon = 1,      // NAME_POKEMON - species name
+    Move = 2,         // NAME_MOVE - move name
+    Item = 3,         // NAME_ITEM - item name  
+    Trainer = 4,      // NAME_TRAINER - trainer name (actually trainer CLASS name)
+    Location = 5,     // NAME_LOCATION - landmark/location name
+    // Others exist but are not used in vanilla corpus
+};
+
+// Money account types for getmoney
+enum class MoneyAccount : uint8_t {
+    Player = 0,       // wMoney - player's money
+    Mom = 1,          // wMomsMoney - mom's savings
+};
+
 struct Sem_PrepareTextArg {
     TextArgType arg_type;
-    uint8_t buffer_slot;        // Which text argument slot to populate
-    uint16_t id = 0;            // ItemId, SpeciesId, TrainerId, etc. depending on arg_type
-    VarId source_var = 0;       // For Number type (reads from variable)
-    std::string str_value;      // For String type
+    uint8_t buffer_slot;        // Which text argument slot to populate (0-4)
+    
+    // Type-specific operands - only the relevant ones are used per arg_type
+    uint16_t id = 0;            // ItemId, SpeciesId, LandmarkId, etc.
+    uint16_t id2 = 0;           // Secondary ID (trainer_id for trainer_name)
+    uint8_t trainer_group = 0;  // Trainer group for trainer_name/trainer_class_name
+    uint8_t account = 0;        // Money account (0=player, 1=mom)
+    uint32_t text_pointer = 0;  // ROM pointer for getstring (source provenance)
+    std::string str_value;      // Resolved string content (for getstring)
+    NameSourceType name_type = NameSourceType::Pokemon;  // For getname
+    
+    // Factory methods with complete operand preservation
     
     static Sem_PrepareTextArg item_name(ItemId item, uint8_t slot) {
-        Sem_PrepareTextArg p; p.arg_type = TextArgType::ItemName; p.id = item; p.buffer_slot = slot; return p;
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::ItemName; 
+        p.id = item; 
+        p.buffer_slot = slot; 
+        return p;
     }
+    
     static Sem_PrepareTextArg pokemon_name(SpeciesId species, uint8_t slot) {
-        Sem_PrepareTextArg p; p.arg_type = TextArgType::PokemonName; p.id = species; p.buffer_slot = slot; return p;
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::PokemonName; 
+        p.id = species; 
+        p.buffer_slot = slot; 
+        return p;
     }
-    static Sem_PrepareTextArg trainer_name(uint16_t trainer, uint8_t slot) {
-        Sem_PrepareTextArg p; p.arg_type = TextArgType::TrainerName; p.id = trainer; p.buffer_slot = slot; return p;
+    
+    // gettrainername: trainer_group + trainer_id → trainer name lookup
+    // BOTH operands are required - group selects trainer class, id selects individual
+    static Sem_PrepareTextArg trainer_name(uint8_t group, uint8_t trainer_id, uint8_t slot) {
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::TrainerName; 
+        p.trainer_group = group;
+        p.id2 = trainer_id;  // trainer_id as secondary
+        p.buffer_slot = slot; 
+        return p;
     }
+    
+    // getmoney: account specifies which money pool (player vs mom)
+    static Sem_PrepareTextArg money(uint8_t account, uint8_t slot) {
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::Number; 
+        p.account = account;
+        p.buffer_slot = slot; 
+        return p;
+    }
+    
+    // getcoins: always player's coins, no account operand
+    static Sem_PrepareTextArg coins(uint8_t slot) {
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::Number;
+        p.account = 2;  // Magic value indicating coins (not money)
+        p.buffer_slot = slot; 
+        return p;
+    }
+    
+    // getnum: reads wScriptVar (no source operand, always current script result)
+    static Sem_PrepareTextArg number_from_var(uint8_t slot) {
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::Number;
+        p.account = 3;  // Magic value indicating wScriptVar
+        p.buffer_slot = slot; 
+        return p;
+    }
+    
+    // getstring: source text pointer preserved for provenance
+    // str_value contains resolved text content
+    static Sem_PrepareTextArg string_from_pointer(uint32_t rom_pointer, 
+                                                   const std::string& resolved, 
+                                                   uint8_t slot) {
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::String; 
+        p.text_pointer = rom_pointer;
+        p.str_value = resolved; 
+        p.buffer_slot = slot; 
+        return p;
+    }
+    
+    // getlandmarkname: landmark_id → location name
+    static Sem_PrepareTextArg landmark_name(uint8_t landmark_id, uint8_t slot) {
+        Sem_PrepareTextArg p;
+        p.arg_type = TextArgType::String;  // Result is a string
+        p.id = landmark_id;
+        p.name_type = NameSourceType::Location;
+        p.buffer_slot = slot;
+        return p;
+    }
+    
+    // getcurlandmarkname: uses current map's landmark (no explicit operand)
+    static Sem_PrepareTextArg current_landmark_name(uint8_t slot) {
+        Sem_PrepareTextArg p;
+        p.arg_type = TextArgType::String;
+        p.id = 0xFFFF;  // Sentinel: use current map's landmark
+        p.name_type = NameSourceType::Location;
+        p.buffer_slot = slot;
+        return p;
+    }
+    
+    // gettrainerclassname: trainer_group → class name (e.g., "YOUNGSTER")
+    static Sem_PrepareTextArg trainer_class_name(uint8_t trainer_group, uint8_t slot) {
+        Sem_PrepareTextArg p;
+        p.arg_type = TextArgType::String;
+        p.trainer_group = trainer_group;
+        p.name_type = NameSourceType::Trainer;  // Actually trainer CLASS
+        p.buffer_slot = slot;
+        return p;
+    }
+    
+    // getname: generic name lookup by type
+    static Sem_PrepareTextArg name_by_type(NameSourceType type, uint8_t id, uint8_t slot) {
+        Sem_PrepareTextArg p;
+        p.arg_type = TextArgType::String;
+        p.name_type = type;
+        p.id = id;
+        p.buffer_slot = slot;
+        return p;
+    }
+    
+    // DEPRECATED: Old factories that lose operands - DO NOT USE
+    // Keeping for temporary backward compatibility, will remove
     static Sem_PrepareTextArg number(VarId var, uint8_t slot) {
-        Sem_PrepareTextArg p; p.arg_type = TextArgType::Number; p.source_var = var; p.buffer_slot = slot; return p;
+        // WARNING: This loses source identity
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::Number; 
+        p.buffer_slot = slot; 
+        return p;
     }
     static Sem_PrepareTextArg string(const std::string& s, uint8_t slot) {
-        Sem_PrepareTextArg p; p.arg_type = TextArgType::String; p.str_value = s; p.buffer_slot = slot; return p;
+        // WARNING: This loses source pointer
+        Sem_PrepareTextArg p; 
+        p.arg_type = TextArgType::String; 
+        p.str_value = s; 
+        p.buffer_slot = slot; 
+        return p;
     }
 };
 
@@ -590,6 +743,103 @@ struct Sem_ModifyWarp { uint8_t warp_id; MapId target_map; };
 struct Sem_SetBlackoutPoint { MapId map; };
 struct Sem_ReloadMap {};
 struct Sem_RefreshMap {};
+
+// =============================================================================
+// Sem_ReanchorMap - Re-anchor map view
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/overworld/scripting.asm:
+//   Script_reanchormap:
+//     call ReanchorMap
+//     call GetScriptByte  ; consumes dummy byte
+//
+// ReanchorMap (home/map.asm):
+//   - Resets camera/scroll position to player
+//   - Updates visible map area
+//   - Does NOT reload map data
+//
+// This is DISTINCT from Sem_RefreshMap:
+//   refreshmap (0x7C): BGMapMode → 0, UpdateSprites, DelayFrame
+//   reanchormap (0x48): ReanchorMap call, then consume dummy byte
+//
+// The dummy byte is source-proven Crystal behavior (GetScriptByte consumes it).
+// Runtime may ignore it, but it must be preserved for round-trip decode.
+//
+// What is NOT encoded:
+//   - Crystal opcode number (0x48)
+//   - ReanchorMap routine address
+//   - hBGMapMode RAM address
+// =============================================================================
+struct Sem_ReanchorMap {
+    uint8_t dummy = 0;  // Source-proven dummy byte (consumed by Crystal, preserved for round-trip)
+};
+
+// =============================================================================
+// Sem_NewLoadMap - Load map with specific entry method
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/overworld/scripting.asm:
+//   Script_newloadmap:
+//     call GetScriptByte
+//     ldh [hMapEntryMethod], a
+//
+// Entry methods (constants/map_setup_constants.asm):
+//   MAPSETUP_WARP       = 0xF1  ; Standard warp
+//   MAPSETUP_CONTINUE   = 0xF2  ; Continue/resume
+//   MAPSETUP_RELOADMAP  = 0xF3  ; Reload current map
+//   MAPSETUP_TELEPORT   = 0xF4  ; Teleport (Fly return)
+//   MAPSETUP_DOOR       = 0xF5  ; Door/building entry
+//   MAPSETUP_FALL       = 0xF6  ; Fall from above
+//   MAPSETUP_CONNECTION = 0xF7  ; Map connection crossing
+//   MAPSETUP_LINKRETURN = 0xF8  ; Return from link (trade/battle)
+//   MAPSETUP_TRAIN      = 0xF9  ; Magnet Train
+//   MAPSETUP_SUBMENU    = 0xFA  ; Return from submenu
+//   MAPSETUP_BADWARP    = 0xFB  ; Invalid warp recovery
+//   MAPSETUP_FLY        = 0xFC  ; Fly destination
+//
+// Semantic contract:
+//   Trigger map reload with specified entry method. The method affects:
+//   - Spawn point/position
+//   - Fade/transition animation
+//   - Music handling
+//   - Sprite loading sequence
+//   - Other entry-specific behavior
+//
+// Vanilla usage (11 occurrences):
+//   MAPSETUP_DOOR (0xF5):       Most common, standard door/building entry
+//   MAPSETUP_WARP (0xF1):       Standard warps
+//   MAPSETUP_FLY (0xFC):        Fly field move completion
+//   MAPSETUP_TRAIN (0xF9):      Magnet Train arrival
+//   MAPSETUP_LINKRETURN (0xF8): Return from link trade/battle
+//   MAPSETUP_TELEPORT (0xF4):   Teleport/Dig field move
+//   MAPSETUP_FALL (0xF6):       Fall through pit
+//
+// This is DISTINCT from Sem_ReloadMap which has no method parameter.
+// newloadmap: specific entry method affects presentation/behavior
+// reloadmap:  generic reload with default behavior
+//
+// What is NOT encoded:
+//   - Crystal opcode number (0x8A)
+//   - hMapEntryMethod RAM address
+//   - MapSetupScripts ROM table address
+// =============================================================================
+enum class MapEntryMethod : uint8_t {
+    Warp       = 0xF1,
+    Continue   = 0xF2,
+    ReloadMap  = 0xF3,
+    Teleport   = 0xF4,
+    Door       = 0xF5,
+    Fall       = 0xF6,
+    Connection = 0xF7,
+    LinkReturn = 0xF8,
+    Train      = 0xF9,
+    Submenu    = 0xFA,
+    BadWarp    = 0xFB,
+    Fly        = 0xFC,
+};
+
+struct Sem_NewLoadMap {
+    MapEntryMethod method;
+};
+
 struct Sem_ChangeBlock { uint8_t x; uint8_t y; uint8_t block; };
 
 // --- Command Queue (Map Behavior Registration) ---
@@ -694,6 +944,36 @@ struct Sem_RestartMapMusic {};  // Restart stored map music without querying map
 struct Sem_WarpSound {};
 struct Sem_SpecialSound {};
 struct Sem_SetMusicRestartFlag { bool prevent_restart; };  // Controls music restart on map load
+
+// =============================================================================
+// Sem_PlayEncounterMusic - Play trainer encounter music
+// =============================================================================
+// Source-proven contract from pokecrystal/engine/overworld/scripting.asm:
+//   Script_encountermusic:
+//     ld a, [wOtherTrainerClass]
+//     ld e, a
+//     farcall PlayTrainerEncounterMusic
+//
+// Source: audio/engine.asm PlayTrainerEncounterMusic:
+//   - Looks up wOtherTrainerClass in TrainerEncounterMusic table
+//   - TrainerEncounterMusic (data/trainers/encounter_music.asm) maps trainer class → music
+//   - Different trainer classes play different music (rocket, gym leader, rival, etc.)
+//
+// Semantic contract:
+//   Play trainer-class-appropriate encounter music using the currently
+//   loaded trainer's class. Runtime looks up music from trainer context.
+//
+// This is DISTINCT from Sem_PlayMapMusic which plays the map's default music.
+// encountermusic: context-dependent trainer music
+// playmapmusic:   map-specific background music
+//
+// What is NOT encoded:
+//   - Crystal opcode number (0x80)
+//   - wOtherTrainerClass RAM address
+//   - TrainerEncounterMusic ROM table address
+//   - PlayTrainerEncounterMusic routine address
+// =============================================================================
+struct Sem_PlayEncounterMusic {};  // Uses current trainer context for music selection
 
 // --- Time/Wait ---
 struct Sem_Wait { uint8_t duration; };
@@ -988,7 +1268,7 @@ using SemanticOp = std::variant<
     Sem_Warp, Sem_WarpFacing, Sem_WarpToBackup, Sem_WarpToBackupFacing,
     Sem_SetScene, Sem_CheckScene,
     Sem_SetMapScene, Sem_CheckMapScene, Sem_ModifyWarp, Sem_SetBlackoutPoint,
-    Sem_ReloadMap, Sem_RefreshMap, Sem_ChangeBlock,
+    Sem_ReloadMap, Sem_RefreshMap, Sem_ReanchorMap, Sem_NewLoadMap, Sem_ChangeBlock,
     Sem_WriteCmdQueue, Sem_DeleteCmdQueue,
     
     // Battle
@@ -998,8 +1278,8 @@ using SemanticOp = std::variant<
     
     // Audio
     Sem_PlayMusic, Sem_PlaySound, Sem_PlayCry, Sem_PlaySlowCry, Sem_WaitSound,
-    Sem_FadeOutMusic, Sem_FadeToSilence, Sem_PlayMapMusic, Sem_RestartMapMusic,
-    Sem_WarpSound, Sem_SpecialSound, Sem_SetMusicRestartFlag,
+    Sem_FadeOutMusic, Sem_FadeToSilence, Sem_PlayMapMusic, Sem_PlayEncounterMusic,
+    Sem_RestartMapMusic, Sem_WarpSound, Sem_SpecialSound, Sem_SetMusicRestartFlag,
     
     // Time/Wait/RTC
     Sem_Wait, Sem_Pause, Sem_CheckTime, Sem_SetDaylightSaving,

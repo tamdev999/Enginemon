@@ -3,27 +3,99 @@
 
 #include "crystal/script/text_registry.hpp"
 #include <sstream>
+#include <iomanip>
 
 namespace crystal {
 
 std::string TextDefinition::identity_string() const {
-    // Flatten text elements to a canonical string for identity comparison
+    // Canonical structural identity from typed text operation sequence
+    // CRITICAL: Must distinguish all source-semantic differences:
+    // - Different control codes (Line, Next, Para, Cont, Scroll, Done, Prompt)
+    // - Different TX_RAM/TX_DECIMAL/TX_BCD addresses
+    // - Different TX_STRINGBUFFER IDs
+    // - Different TX_FAR pointers
+    // - Different TX_BOX dimensions
+    //
+    // DO NOT normalize semantically distinct controls to '\n'
+    
     std::ostringstream ss;
     for (const auto& elem : sequence.elements) {
         switch (elem.op) {
             case TextOp::Text:
-                ss << elem.text;
+                ss << "T[" << elem.text << "]";
                 break;
             case TextOp::Line:
+                ss << "<LINE>";
+                break;
             case TextOp::Next:
+                ss << "<NEXT>";
+                break;
             case TextOp::Para:
+                ss << "<PARA>";
+                break;
             case TextOp::Cont:
+                ss << "<CONT>";
+                break;
             case TextOp::Scroll:
-                ss << '\n';
+                ss << "<SCROLL>";
                 break;
             case TextOp::Done:
+                ss << "<DONE>";
+                break;
             case TextOp::Prompt:
-                // Terminal codes don't contribute to identity
+                ss << "<PROMPT>";
+                break;
+            case TextOp::TextRam:
+                ss << "<RAM:" << std::hex << elem.addr << ">";
+                break;
+            case TextOp::TextBcd:
+                ss << "<BCD:" << std::hex << elem.addr << "," << (int)elem.param1 << ">";
+                break;
+            case TextOp::TextDecimal:
+                ss << "<DEC:" << std::hex << elem.addr << "," << (int)elem.param1 << ">";
+                break;
+            case TextOp::TextStringBuffer:
+                ss << "<BUF:" << (int)elem.param1 << ">";
+                break;
+            case TextOp::TextFar:
+                ss << "<FAR:" << std::hex << elem.addr << "," << (int)elem.param1 << ">";
+                break;
+            case TextOp::TextBox:
+                ss << "<BOX:" << std::hex << elem.addr << "," 
+                   << (int)elem.param1 << "x" << (int)elem.param2 << ">";
+                break;
+            case TextOp::TextMove:
+                ss << "<MOVE:" << std::hex << elem.addr << ">";
+                break;
+            case TextOp::TextLow:
+                ss << "<LOW>";
+                break;
+            case TextOp::TextPause:
+                ss << "<PAUSE>";
+                break;
+            case TextOp::TextPromptButton:
+                ss << "<WAITBTN>";
+                break;
+            case TextOp::TextDay:
+                ss << "<DAY>";
+                break;
+            case TextOp::TextAsm:
+                ss << "<ASM>";
+                break;
+            case TextOp::TextSoundItem:
+                ss << "<SND_ITEM>";
+                break;
+            case TextOp::TextSoundCaught:
+                ss << "<SND_CAUGHT>";
+                break;
+            case TextOp::TextSoundFanfare:
+                ss << "<SND_FANFARE>";
+                break;
+            case TextOp::TextRaw:
+                ss << "<RAW:" << elem.raw_bytes.size() << ">";
+                break;
+            default:
+                ss << "<UNK>";
                 break;
         }
     }

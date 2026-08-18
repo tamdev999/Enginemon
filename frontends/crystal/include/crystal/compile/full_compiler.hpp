@@ -84,7 +84,10 @@ namespace crystal {
 // 2.1.0: sprite ID mapping 1-102, directional ledge semantics, connection offset fix
 // 2.2.0: BG event type exhaustive mapping, condition_flag propagation fix
 // 2.3.0: Semantic stabilization pass - operand order fix, flag namespaces, text commands, movement commands, round-trip wiring
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.3.0";
+// 2.4.0: Semantic fidelity fixes - string formatting operands, encountermusic/playmapmusic distinction,
+//        newloadmap method preservation, reanchormap/refreshmap distinction, sdefer bank resolution,
+//        TextDefinition identity with explicit control markers
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.4.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================

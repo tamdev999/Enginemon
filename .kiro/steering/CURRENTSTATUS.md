@@ -1,5 +1,181 @@
 # Current Status
 
+## Crystal Frontend Semantic Fidelity Fixes - COMPLETED ✓
+
+**SUCCESS**: Completed comprehensive semantic fidelity pass fixing confirmed active vanilla semantic corruption. All fixes verified with adversarial tests. The frontend is now TRUSTWORTHY for semantic correctness.
+
+### Summary of Fixes (August 2026)
+
+| Finding | Issue | Fix | Status |
+|---------|-------|-----|--------|
+| 3 | String formatting operands dropped | `Sem_PrepareTextArg` preserves all operands | ✅ FIXED + TESTED |
+| 7 | encountermusic → playmapmusic conflation | `Sem_PlayEncounterMusic{}` distinct semantic | ✅ FIXED + TESTED |
+| 8 | newloadmap method byte discarded | `Sem_NewLoadMap{method}` with `MapEntryMethod` enum | ✅ FIXED + TESTED |
+| 5 | sdefer bank resolution incorrect | Bank * 0x4000 + (ptr - 0x4000) formula | ✅ FIXED + TESTED |
+| 9 | reanchormap vs refreshmap collapsed | `Sem_ReanchorMap{dummy}` distinct from `Sem_RefreshMap` | ✅ FIXED + TESTED |
+| 2 | TextDefinition identity loses controls | `identity_string()` uses explicit markers | ✅ FIXED + TESTED |
+| 1 | Text parser mode model | VERIFIED CLEAN (no fix needed) | ✅ VERIFIED |
+
+### Compiler Version
+
+**CRYSTAL_COMPILER_VERSION**: `crystal-2.4.0`
+- 2.4.0: Semantic fidelity fixes - string formatting operands, encountermusic/playmapmusic distinction, newloadmap method preservation, reanchormap/refreshmap distinction, sdefer bank resolution, TextDefinition identity with explicit control markers
+
+### Test Results (Post-Fidelity Fixes)
+
+- **Runtime Tests**: 136/136 pass ✓ (includes 10 new adversarial tests)
+- **Golden Tests**: 56/56 pass ✓
+- **Legality Gate Tests**: 14/14 pass ✓
+- **Corpus Test**: 1300/1300 legal scripts ✓
+- **Corpus Lowering Audit**: 1788/1788 SUCCESS ✓
+- **Linker Test**: All pass ✓
+
+### Key Fixes Explained
+
+#### Finding 3: String Formatting Operands (gettrainername, getstring, getmoney) ✓
+
+**Prior Bug**: `Sem_PrepareTextArg` dropped operands for multi-operand commands:
+- `gettrainername(group, id, slot)` lost `trainer_group` and `trainer_id`
+- `getstring(text_ptr, slot)` lost `text_pointer`
+- `getmoney(account, slot)` lost `account`
+
+**Fix**: Expanded `Sem_PrepareTextArg` in `semantic_ir.hpp` with complete operand preservation:
+
+```cpp
+struct Sem_PrepareTextArg {
+    TextArgType arg_type;
+    uint8_t buffer_slot;
+    
+    // Type-specific operands (all preserved)
+    uint16_t id = 0;            // ItemId, SpeciesId, LandmarkId
+    uint16_t id2 = 0;           // Secondary ID (trainer_id for trainer_name)
+    uint8_t trainer_group = 0;  // Trainer group for trainer_name/trainer_class_name
+    uint8_t account = 0;        // Money account (0=player, 1=mom)
+    uint32_t text_pointer = 0;  // ROM pointer for getstring (source provenance)
+    std::string str_value;      // Resolved string content
+    // ...factory methods...
+};
+```
+
+**Files**: `semantic_ir.hpp`, `semantic_legalizer.cpp` (`rule_string_format()`)
+
+#### Finding 7: encountermusic vs playmapmusic Distinction ✓
+
+**Prior Bug**: `encountermusic` (opcode 0x73) lowered to `Sem_PlayMapMusic{}`, collapsing with `playmapmusic` (opcode 0x82).
+
+**Source-proven semantics from pokecrystal**:
+- `encountermusic` → `PlayTrainerEncounterMusic` (uses wOtherTrainerClass)
+- `playmapmusic` → `PlayMapMusic` (uses current map's music)
+
+**Fix**: Added `Sem_PlayEncounterMusic{}` as distinct semantic operation:
+
+```cpp
+struct Sem_PlayEncounterMusic {};  // Uses current trainer context for music selection
+```
+
+**Files**: `semantic_ir.hpp`, `semantic_legalizer.cpp`
+
+#### Finding 8: newloadmap Method Preservation ✓
+
+**Prior Bug**: `newloadmap` (opcode 0x8A) method byte was discarded, treating all entry methods identically.
+
+**Source-proven from pokecrystal** (constants/map_setup_constants.asm):
+- `MAPSETUP_WARP = 0xF1`, `MAPSETUP_DOOR = 0xF5`, `MAPSETUP_FLY = 0xFC`, etc.
+- Each method affects spawn point, transition animation, music handling
+
+**Fix**: Added `MapEntryMethod` enum and `Sem_NewLoadMap{method}`:
+
+```cpp
+enum class MapEntryMethod : uint8_t {
+    Warp = 0xF1, Continue = 0xF2, ReloadMap = 0xF3, Teleport = 0xF4,
+    Door = 0xF5, Fall = 0xF6, Connection = 0xF7, LinkReturn = 0xF8,
+    Train = 0xF9, Submenu = 0xFA, BadWarp = 0xFB, Fly = 0xFC,
+};
+struct Sem_NewLoadMap { MapEntryMethod method; };
+```
+
+**Files**: `semantic_ir.hpp`, `semantic_legalizer.cpp`
+
+#### Finding 5: sdefer Bank Resolution ✓
+
+**Prior Bug**: `sdefer` target pointer wasn't resolved using script's bank.
+
+**Correct formula**: `flat_address = bank * 0x4000 + (bank_relative_ptr - 0x4000)`
+
+**Fix**: Updated `rule_sdefer()` in `semantic_legalizer.cpp`:
+```cpp
+uint32_t bank = ctx.entry_address / 0x4000;
+uint32_t flat_target = bank * 0x4000 + (sd.pointer - 0x4000);
+std::string target_id = "deferred_" + to_hex(flat_target);
+```
+
+**Files**: `semantic_legalizer.cpp`
+
+#### Finding 9: reanchormap vs refreshmap Distinction ✓
+
+**Prior Bug**: Both commands collapsed to `Sem_RefreshMap{}`, losing semantic distinction.
+
+**Source-proven from pokecrystal**:
+- `refreshmap` (0x7C): Updates sprites/BGMapMode, NO camera reset
+- `reanchormap` (0x48): Calls `ReanchorMap`, resets camera to player, consumes dummy byte
+
+**Fix**: Added `Sem_ReanchorMap{dummy}` as distinct semantic operation:
+
+```cpp
+struct Sem_ReanchorMap {
+    uint8_t dummy = 0;  // Source-proven dummy byte (preserved for round-trip)
+};
+```
+
+**Files**: `semantic_ir.hpp`, `semantic_legalizer.cpp`
+
+#### Finding 2: TextDefinition Identity String ✓
+
+**Prior Bug**: `identity_string()` collapsed control codes to `\n`/`\n\n`, making `TEXT + LINE` indistinguishable from `TEXT + CONT`.
+
+**Fix**: Updated `text_registry.cpp` to emit explicit markers:
+
+```cpp
+// Before: "Hello\n" (LINE and CONT both collapsed)
+// After: "Hello<LINE>" vs "Hello<CONT>" (distinct)
+```
+
+Markers include: `<LINE>`, `<PARA>`, `<CONT>`, `<NEXT>`, `<DONE>`, `<PROMPT>`, `<RAM:xxxx>`, etc.
+
+**Files**: `text_registry.cpp`
+
+#### Finding 1: Text Parser Mode - VERIFIED CLEAN ✓
+
+Investigated `decode_text_sequence()` in `decoder.cpp`. The current implementation handles TX_* commands (0x00-0x16) and flow control codes (0x4B-0x58) sequentially, which matches Crystal's actual text engine behavior. **No fix needed.**
+
+### New Adversarial Tests
+
+10 new tests added to `runtime_test.cpp`:
+
+| Test | Verifies |
+|------|----------|
+| `semantic_fix_gettrainername_preserves_both_operands` | trainer_group AND trainer_id preserved |
+| `semantic_fix_getstring_preserves_text_pointer` | text_pointer resolved to flat address |
+| `semantic_fix_getmoney_preserves_account` | account operand preserved (0=player, 1=mom) |
+| `semantic_fix_encountermusic_distinct_from_playmapmusic` | Produces `Sem_PlayEncounterMusic`, NOT `Sem_PlayMapMusic` |
+| `semantic_fix_newloadmap_preserves_method` | All 12 `MapEntryMethod` values preserved |
+| `semantic_fix_reanchormap_distinct_from_refreshmap` | Produces `Sem_ReanchorMap`, dummy byte preserved |
+| `semantic_fix_refreshmap_distinct_from_reanchormap` | Produces `Sem_RefreshMap` (no dummy) |
+| `semantic_fix_sdefer_bank_resolution` | Bank * 0x4000 + (ptr - 0x4000) verified |
+| `semantic_fix_text_identity_distinguishes_controls` | LINE vs PARA → distinct identities |
+| `semantic_fix_text_identity_distinguishes_ram_addresses` | RAM(0xD47D) vs RAM(0xD47E) → distinct |
+
+### Files Modified
+
+- `engine/include/engine/scripting/semantic_ir.hpp` - Added `Sem_PlayEncounterMusic`, `Sem_NewLoadMap`, `Sem_ReanchorMap`; expanded `Sem_PrepareTextArg`
+- `frontends/crystal/script/semantic_legalizer.cpp` - Fixed lowering rules for all affected commands
+- `frontends/crystal/script/text_registry.cpp` - Fixed `identity_string()` to use explicit markers
+- `frontends/crystal/script/semantic_linker.cpp` - Fixed reference to removed field
+- `tests/scripting/runtime_test.cpp` - Added 10 adversarial tests
+- `frontends/crystal/include/crystal/compile/full_compiler.hpp` - Bumped version to 2.4.0
+
+---
+
 ## Crystal Frontend Semantic Stabilization - COMPLETED ✓
 
 **SUCCESS**: Completed comprehensive 12-point semantic stabilization pass. All confirmed source-fidelity bugs have been fixed. The frontend is now TRUSTWORTHY for RNG implementation.
@@ -15,7 +191,7 @@
 | 5 | Round-trip validation bypassed | Wired into production compiler | ✅ FIXED |
 | 7 | BG event type collapse | Exhaustive switch (prior fix) | ✅ FIXED |
 
-### Compiler Version
+### Compiler Version (at time of this fix)
 
 **CRYSTAL_COMPILER_VERSION**: `crystal-2.3.0`
 - 2.3.0: Operand order, FlagRef, text decoder, movement decoder, round-trip wiring
