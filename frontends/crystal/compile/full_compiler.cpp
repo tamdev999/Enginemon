@@ -949,6 +949,12 @@ bool FullGameCompiler::link_scripts(const std::map<uint32_t, enginemon::MapId>& 
         return false;
     }
     
+    if (linked_corpus_.stats.total_invalid_domain() > 0) {
+        std::cerr << "FATAL: " << linked_corpus_.stats.total_invalid_domain() << " invalid-domain references\n";
+        linked_corpus_.print_report();
+        return false;
+    }
+    
     // Report success
     std::cout << "  Linked: " << linked_corpus_.total_bodies << "/" << linked_corpus_.total_bodies << "\n";
     

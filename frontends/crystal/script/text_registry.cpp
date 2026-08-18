@@ -7,6 +7,72 @@
 
 namespace crystal {
 
+enginemon::SemanticTextSequence TextDefinition::to_semantic_sequence() const {
+    enginemon::SemanticTextSequence sem;
+    for (const auto& elem : sequence.elements) {
+        switch (elem.op) {
+            case TextOp::Text:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_text(elem.text));
+                break;
+            case TextOp::Line:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_line());
+                break;
+            case TextOp::Next:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_next());
+                break;
+            case TextOp::Para:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_para());
+                break;
+            case TextOp::Cont:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_cont());
+                break;
+            case TextOp::Scroll:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_scroll());
+                break;
+            case TextOp::Done:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_done());
+                break;
+            case TextOp::Prompt:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_prompt());
+                break;
+            // Dynamic text commands: preserve as text with marker for now
+            // Runtime substitution is a future implementation concern.
+            case TextOp::TextRam:
+            case TextOp::TextBcd:
+            case TextOp::TextDecimal:
+            case TextOp::TextStringBuffer:
+            case TextOp::TextFar:
+            case TextOp::TextBox:
+            case TextOp::TextMove:
+            case TextOp::TextLow:
+            case TextOp::TextPause:
+            case TextOp::TextPromptButton:
+            case TextOp::TextDay:
+            case TextOp::TextAsm:
+            case TextOp::TextSoundItem:
+            case TextOp::TextSoundCaught:
+            case TextOp::TextSoundFanfare:
+            case TextOp::TextRaw:
+            default:
+                // Preserve dynamic/unknown elements as empty text placeholders
+                // so the sequence structure is not lost
+                sem.elements.push_back(enginemon::SemanticTextElement::make_text(""));
+                break;
+        }
+    }
+    return sem;
+}
+
+std::string TextDefinition::plain_text() const {
+    std::string result;
+    for (const auto& elem : sequence.elements) {
+        if (elem.op == TextOp::Text) {
+            result += elem.text;
+        }
+    }
+    return result;
+}
+
 std::string TextDefinition::identity_string() const {
     // Canonical structural identity from typed text operation sequence
     // CRITICAL: Must distinguish all source-semantic differences:

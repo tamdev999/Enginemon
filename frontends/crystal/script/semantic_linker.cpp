@@ -987,7 +987,8 @@ LinkedCorpus SemanticLinker::link_full_corpus(
             
             if (ref.validation == ValidationClass::Unresolved ||
                 ref.validation == ValidationClass::InvalidOwnership ||
-                ref.validation == ValidationClass::WrongType) {
+                ref.validation == ValidationClass::WrongType ||
+                ref.validation == ValidationClass::InvalidDomain) {
                 has_error = true;
                 
                 LinkerDiagnostic diag;
@@ -1032,7 +1033,8 @@ LinkedCorpus SemanticLinker::link_full_corpus(
             
             if (ref.validation == ValidationClass::Unresolved ||
                 ref.validation == ValidationClass::InvalidOwnership ||
-                ref.validation == ValidationClass::WrongType) {
+                ref.validation == ValidationClass::WrongType ||
+                ref.validation == ValidationClass::InvalidDomain) {
                 has_error = true;
                 
                 LinkerDiagnostic diag;

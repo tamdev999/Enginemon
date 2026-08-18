@@ -20,6 +20,9 @@ if(ENGINEMON_ENABLE_ENGINE)
         enginemon_crystal
         enginemon_engine
     )
+    if(MSVC)
+        target_compile_options(runtime_test PRIVATE /bigobj)
+    endif()
     # Not added to ctest - requires ROM path argument
 endif()
 

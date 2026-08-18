@@ -15,6 +15,7 @@
 // Two identical text strings at different ROM addresses get the same TextId.
 
 #include "engine/core/types.hpp"
+#include "engine/scripting/semantic_ir.hpp"
 #include "crystal/script/ir.hpp"
 #include <unordered_map>
 #include <vector>
@@ -35,6 +36,16 @@ struct TextDefinition {
     
     // Get flattened text for identity comparison (ignores control codes)
     std::string identity_string() const;
+    
+    // Convert Crystal TextSequence to engine SemanticTextSequence for lowering
+    // Maps all TextOp variants to their SemanticTextOp equivalents.
+    // Dynamic text commands (TextRam, TextDecimal, etc.) are preserved as Text
+    // with a placeholder until runtime text substitution is implemented.
+    enginemon::SemanticTextSequence to_semantic_sequence() const;
+    
+    // Extract plain text content (for nickname/OT name resolution)
+    // Concatenates all Text elements; ignores control codes.
+    std::string plain_text() const;
     
     // Identity is based on semantic content, not ROM address
     bool operator==(const TextDefinition& other) const {

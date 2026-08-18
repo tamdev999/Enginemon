@@ -1435,6 +1435,71 @@ int main(int argc, char* argv[]) {
             std::cout << "\n*** ALL BOUNDARY TESTS PASSED ***\n";
         }
         
+        // === Finding 10 Adversarial: InvalidDomain is a hard linker gate ===
+        // Prove that a species out of domain (300 > 251) makes scripts_with_errors > 0
+        // and all_linked() = false.
+        std::cout << "\n=== Finding 10: InvalidDomain Hard Gate Tests ===\n";
+        {
+            std::cout << "Test: invalid_domain_species_gates_corpus... ";
+            
+            // Build a fake script with species 300 (out of [1,251] vanilla domain)
+            SemanticScriptIR fake_ir;
+            fake_ir.script_id = "test_invalid_domain_species";
+            
+            SemanticBasicBlock block;
+            block.id = 0;
+            block.is_entry = true;
+            
+            Sem_GivePokemon give;
+            give.species = SpeciesId{300};  // Out of domain
+            give.level = 5;
+            give.held_item = ItemId{0};
+            give.has_nickname = false;
+            
+            SemanticInstruction inst;
+            inst.op = give;
+            block.instructions.push_back(inst);
+            fake_ir.blocks.push_back(block);
+            
+            SemanticLinker test_linker;
+            test_linker.set_game_data(&game_data);
+            
+            // Per-script check
+            auto refs = test_linker.link_script(fake_ir);
+            bool found_invalid_domain = false;
+            for (const auto& ref : refs) {
+                if (ref.type == ReferenceType::Species && 
+                    ref.value == 300 &&
+                    ref.validation == ValidationClass::InvalidDomain) {
+                    found_invalid_domain = true;
+                }
+            }
+            
+            if (!found_invalid_domain) {
+                std::cout << "FAIL (species 300 not flagged as InvalidDomain)\n";
+                success = false;
+            } else {
+                // Full corpus check: scripts_with_errors > 0
+                std::vector<SemanticScriptIR> fake_corpus = {fake_ir};
+                std::vector<SemanticScriptIR> empty_std;
+                LinkedCorpus bad_corpus = test_linker.link_full_corpus(fake_corpus, empty_std);
+                
+                if (bad_corpus.scripts_with_errors > 0 && bad_corpus.stats.total_invalid_domain() > 0) {
+                    std::cout << "PASS (species 300 → scripts_with_errors=" 
+                              << bad_corpus.scripts_with_errors 
+                              << ", total_invalid_domain=" 
+                              << bad_corpus.stats.total_invalid_domain() << ")\n";
+                } else {
+                    std::cout << "FAIL (expected scripts_with_errors>0 and total_invalid_domain>0)\n";
+                    success = false;
+                }
+            }
+        }
+        
+        if (success) {
+            std::cout << "\n*** ALL TESTS INCLUDING FINDING 10 GATE PASSED ***\n";
+        }
+        
         return success ? 0 : 1;
 }
 

@@ -119,7 +119,32 @@ struct SemanticLabelRef {
 // =============================================================================
 
 // --- Control Flow ---
-struct Sem_End {};                      // Script termination
+struct Sem_End {};                      // Script termination (pops one call-stack frame)
+// =============================================================================
+// Sem_EndAll - Unconditional full call-stack clear
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm Script_endall (0x93):
+//   xor a
+//   ld [wScriptStackSize], a   ; ← clears ENTIRE call stack, not just top frame
+//   ld [wScriptRunning], a
+//   ld a, SCRIPT_OFF
+//   ld [wScriptMode], a
+//   call StopScript
+//   ret
+//
+// Semantic contract:
+//   Terminate ALL pending script calls/subroutines unconditionally.
+//   Script cannot resume. Caller cannot continue.
+//   DISTINCT from Sem_End which pops only one frame.
+//
+// Vanilla occurrence: 1 (Pokémon League final sequence)
+//
+// What is NOT encoded:
+//   Crystal opcode 0x93
+//   wScriptStackSize RAM address
+//   StopScript routine address
+// =============================================================================
+struct Sem_EndAll {};                   // Clear entire script call stack and stop
 struct Sem_Return {};                   // Return from subroutine
 struct Sem_Jump { SemanticLabelRef target; };
 struct Sem_JumpIf {
@@ -401,7 +426,97 @@ struct Sem_ShowText { SemanticTextSequence sequence; };
 struct Sem_ShowTextAndEnd { SemanticTextSequence sequence; };       // jumptext equivalent
 struct Sem_FacePlayerAndShowText { SemanticTextSequence sequence; }; // jumptextfaceplayer
 struct Sem_WaitButton {};
+
+// =============================================================================
+// Sem_PromptButton - Wait for button with BG map synchronization
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm Script_promptbutton (0x55):
+//   ldh a, [hOAMUpdate]
+//   push af
+//   ld a, $1
+//   ldh [hOAMUpdate], a
+//   call WaitBGMap        ; waits for BG map DMA transfer to complete
+//   call PromptButton     ; different input-wait routine from WaitButton
+//   pop af
+//   ldh [hOAMUpdate], a
+//   ret
+//
+// Semantic contract:
+//   Wait for button press, with a prior synchronization point ensuring the
+//   current visual/text state is fully committed before input is accepted.
+//   DISTINCT from Sem_WaitButton which skips the sync step.
+//
+// Vanilla occurrences: 734
+//
+// Runtime translation:
+//   Native renderer: emit a frame sync point before accepting input.
+//   Do NOT model hOAMUpdate or hBGMapMode — translate the sync intent only.
+//
+// What is NOT encoded:
+//   Crystal opcode 0x55
+//   hOAMUpdate hardware register
+//   WaitBGMap / PromptButton routine addresses
+// =============================================================================
+struct Sem_PromptButton {};             // Button wait with prior BG sync
+
 struct Sem_YesNo {};                    // Sets result to true/false
+
+// =============================================================================
+// Menu semantic operations
+// =============================================================================
+// Crystal has three distinct menu commands:
+//   loadmenu (0x4F): Loads menu via menu-header pointer; runs full menu.
+//                    Result written by LoadMenuHeader (internal to menu).
+//   verticalmenu (0x59): Runs VerticalMenu, writes wMenuCursorY to wScriptVar.
+//   _2dmenu (0x58): Runs _2DMenu, writes wMenuCursorPosition to wScriptVar.
+//
+// These are NOT equivalent: different routines, different result registers,
+// different menu formats. All three preserved as distinct operations.
+//
+// Source: pokecrystal/engine/overworld/scripting.asm Script_loadmenu,
+//         Script_verticalmenu, Script__2dmenu
+
+// =============================================================================
+// Sem_LoadMenu - Load and execute menu from header
+// =============================================================================
+// Source-proven: Script_loadmenu reads 2-byte pointer local to wScriptBank,
+// calls LoadMenuHeader with that data. Menu definition is at the pointer.
+// Result is stored implicitly in Crystal menu state (not wScriptVar directly).
+//
+// header_pointer: Resolved flat ROM address of the menu header data.
+// Vanilla occurrences: 16
+// =============================================================================
+struct Sem_LoadMenu {
+    uint32_t header_pointer;  // Flat ROM address of menu header (compiler-resolved)
+};
+
+// =============================================================================
+// Sem_VerticalMenu - Run vertical list menu, write cursor Y to wScriptVar
+// =============================================================================
+// Source-proven: Script_verticalmenu calls VerticalMenu with wScriptBank,
+// reads wMenuCursorY (NOT wMenuCursorPosition), writes to wScriptVar.
+// On cancel (carry set), result is 0.
+//
+// No operands — menu configuration implied by call context.
+// Vanilla occurrences: 15
+// =============================================================================
+struct Sem_VerticalMenu {};
+
+// =============================================================================
+// Sem_2DMenu - Run 2D grid menu, write cursor position to wScriptVar
+// =============================================================================
+// Source-proven: Script__2dmenu calls _2DMenu with wScriptBank,
+// reads wMenuCursorPosition (NOT wMenuCursorY), writes to wScriptVar.
+// On cancel (carry set), result is 0.
+// DISTINCT from Sem_VerticalMenu (different result register).
+//
+// No operands — menu configuration implied by call context.
+// Vanilla occurrences: 1
+// =============================================================================
+struct Sem_2DMenu {};
+
+// Legacy Sem_Choice preserved for any Lua-emitter paths still using it,
+// but no new lowering should produce it.
 struct Sem_Choice { std::vector<std::string> options; };
 
 // =============================================================================
@@ -468,13 +583,30 @@ struct Sem_ShowBalanceOverlay {
 // =============================================================================
 
 // Source type for getname command (Crystal's NAME_* constants)
+// Source-proven from pokecrystal/constants/text_constants.asm:
+//   const MON_NAME              ; 1
+//   const MOVE_NAME             ; 2
+//   const DUMMY_NAME            ; 3  (no meaningful resource — dummy/reserved)
+//   const ITEM_NAME             ; 4
+//   const PARTY_OT_NAME         ; 5
+//   const ENEMY_OT_NAME         ; 6
+//   const TRAINER_NAME          ; 7
+//   const MOVE_DESC_NAME_BROKEN ; 8  (broken special case in Crystal source)
+//
+// Only types 1, 2, 4, 5, 6, 7 have well-defined resource domains.
+// Types 3 (DUMMY) and 8 (MOVE_DESC_BROKEN) are represented explicitly
+// so the legalizer can handle them without mis-routing to a wrong domain.
 enum class NameSourceType : uint8_t {
-    Pokemon = 1,      // NAME_POKEMON - species name
-    Move = 2,         // NAME_MOVE - move name
-    Item = 3,         // NAME_ITEM - item name  
-    Trainer = 4,      // NAME_TRAINER - trainer name (actually trainer CLASS name)
-    Location = 5,     // NAME_LOCATION - landmark/location name
-    // Others exist but are not used in vanilla corpus
+    Pokemon     = 1,  // MON_NAME - species name
+    Move        = 2,  // MOVE_NAME - move name
+    Dummy       = 3,  // DUMMY_NAME - no resource; reserved/dummy in Crystal
+    Item        = 4,  // ITEM_NAME - item name
+    PartyOT     = 5,  // PARTY_OT_NAME - original trainer of party member
+    EnemyOT     = 6,  // ENEMY_OT_NAME - original trainer of enemy Pokemon
+    Trainer     = 7,  // TRAINER_NAME - trainer name (trainer class)
+    MoveDescBroken = 8, // MOVE_DESC_NAME_BROKEN - broken/special case in Crystal source
+    // Non-Crystal supplementary type for getlandmarkname path:
+    Location    = 9,  // Internal: landmark/location name (not a getname type code)
 };
 
 // Money account types for getmoney
@@ -629,6 +761,53 @@ struct Sem_GiveItem { ItemId item; uint8_t quantity; };
 struct Sem_TakeItem { ItemId item; uint8_t quantity; };
 struct Sem_CheckItem { ItemId item; };   // Sets result
 struct Sem_GiveItemVerbose { ItemId item; uint8_t quantity; };  // With notification
+
+// =============================================================================
+// Sem_GiveItemVerboseVar - Give item with notification, quantity from script var
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm
+// Script_verbosegiveitemvar (0x9F):
+//   call GetScriptByte          ; first byte
+//   cp ITEM_FROM_MEM            ; ITEM_FROM_MEM = 0
+//   jr nz, .ok
+//   ld a, [wScriptVar]          ; if item==0, read item from wScriptVar
+//   .ok
+//   ld [wCurItem], a
+//   call GetScriptByte          ; second byte = quantity variable index
+//   call GetVarAction           ; GetVarAction(var_index) → wram pointer in de
+//   ld a, [de]                  ; read quantity from that wram address
+//   ld [wItemQuantityChange], a
+//   ...calls ReceiveItem + GiveItemScript...
+//   ld [wScriptVar], a          ; result: TRUE=given, FALSE=full
+//
+// Semantic contract:
+//   Give item to player with notification message.
+//   item_source:
+//     Literal(id) = item ID from first operand
+//     FromScriptVar = item ID comes from wScriptVar at runtime (first byte = 0)
+//   quantity_var = variable index (second operand), quantity read from game var at runtime
+//   Writes wScriptVar: TRUE=given, FALSE=bag full
+//
+// DISTINCT from Sem_GiveItemVerbose which takes a literal quantity.
+//
+// Vanilla occurrences: 7
+//
+// What is NOT encoded:
+//   Crystal opcode 0x9F
+//   ITEM_FROM_MEM constant value (0)
+//   GetVarAction wram pointer lookup
+//   ReceiveItem / GiveItemScript routine addresses
+// =============================================================================
+enum class ItemSource : uint8_t {
+    Literal,         // Item ID is a literal value from operand
+    FromScriptVar,   // Item ID comes from wScriptVar at runtime (source byte was ITEM_FROM_MEM=0)
+};
+
+struct Sem_GiveItemVerboseVar {
+    ItemSource item_source;  // Where the item ID comes from
+    ItemId item;             // Literal item ID (valid when item_source==Literal, 0 when FromScriptVar)
+    uint8_t quantity_var;    // Variable index: quantity = value(game_var[quantity_var])
+};
 struct Sem_GiveMoney { uint32_t amount; uint8_t account; };
 struct Sem_TakeMoney { uint32_t amount; uint8_t account; };
 struct Sem_CheckMoney { uint32_t amount; uint8_t account; };
@@ -859,6 +1038,38 @@ struct Sem_LoadWildMon { SpeciesId species; uint8_t level; };
 struct Sem_LoadTrainer { uint8_t trainer_group; uint8_t trainer_id; };
 struct Sem_StartBattle {};
 struct Sem_ReloadMapAfterBattle {};
+
+// =============================================================================
+// Sem_CatchTutorial - Run the catching tutorial battle sequence
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm
+// Script_catchtutorial (0x61):
+//   call GetScriptByte
+//   ld [wBattleType], a     ; tutorial variant from operand
+//   call BufferScreen
+//   farcall CatchTutorial   ; special tutorial routine (not normal battle entry)
+//   jp Script_reloadmap     ; implicit map reload on completion
+//
+// Semantic contract:
+//   Run catching tutorial battle with the specified tutorial mode byte.
+//   DISTINCT from Sem_StartBattle: uses CatchTutorial entry not normal battle.
+//   After tutorial completes, the map is reloaded (implicit post-tutorial effect).
+//
+// Vanilla occurrences: 3 (Elm's Lab intro sequence)
+//
+// Runtime translation:
+//   Run tutorial-flagged battle entry, then trigger map reload.
+//   Do NOT map to Sem_StartBattle — tutorial initialization differs.
+//   Execution may be deferred; semantic identity must be preserved.
+//
+// What is NOT encoded:
+//   Crystal opcode 0x61
+//   wBattleType RAM address
+//   CatchTutorial / BufferScreen routine addresses
+// =============================================================================
+struct Sem_CatchTutorial {
+    uint8_t tutorial_type;  // Value set in wBattleType; determines tutorial variant
+};
 // Win/Loss text uses semantic TextId references, NOT ROM address strings.
 // TextId values are resolved by the frontend during compilation.
 // Absence (Crystal's "0" operand) is modeled as std::nullopt, NOT a magic sentinel.
@@ -981,6 +1192,43 @@ struct Sem_Pause { uint8_t length; };
 struct Sem_CheckTime { uint8_t time_flags; };  // Sets result
 
 // =============================================================================
+// Sem_DeactivateFacing - Suspend script for N frames via SCRIPT_WAIT mode
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm
+// Script_deactivatefacing (0x8C):
+//   call GetScriptByte
+//   and a
+//   jr z, .no_time           ; if time==0, skip storing delay
+//   ld [wScriptDelay], a     ; set frame delay
+//   .no_time
+//   ld a, SCRIPT_WAIT
+//   ld [wScriptMode], a      ; suspend script engine
+//   call StopScript
+//   ret
+//
+// Semantic contract:
+//   Suspend script execution for `duration` frames using the SCRIPT_WAIT path.
+//   If duration == 0: mode is set to SCRIPT_WAIT but delay is NOT stored
+//   (previous wScriptDelay value may remain, behavior is timer-inherited).
+//   DISTINCT from Sem_Pause: uses SCRIPT_WAIT/StopScript suspension model.
+//
+// Vanilla occurrences: 1
+//
+// Runtime translation:
+//   Pause simulation for `duration` ticks. If duration==0, the scheduler
+//   should not add any new delay (distinct from Pause(0) which is instant).
+//
+// What is NOT encoded:
+//   Crystal opcode 0x8C
+//   wScriptDelay / wScriptMode RAM addresses
+//   SCRIPT_WAIT constant value
+//   StopScript routine address
+// =============================================================================
+struct Sem_DeactivateFacing {
+    uint8_t duration;  // Frame delay (0 = no stored delay, SCRIPT_WAIT mode still set)
+};
+
+// =============================================================================
 // Sem_SetDaylightSaving - Set player's daylight-saving time preference
 // =============================================================================
 // Source-proven contract from pokecrystal/engine/rtc/timeset.asm:
@@ -1020,6 +1268,45 @@ struct Sem_DeletePhoneNumber { uint8_t person; };
 struct Sem_CheckPhoneNumber { uint8_t person; };
 struct Sem_CheckPhoneCall {};  // Checks if a phone call is pending (sets wScriptVar)
 struct Sem_SpecialPhoneCall { uint16_t call_id; };  // Trigger special phone call event
+
+// =============================================================================
+// Sem_AskForPhoneNumber - Prompt player to register a phone number
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm
+// Script_askforphonenumber (0x97):
+//   call YesNoBox               ; prompt player
+//   jr c, .refused
+//       farcall AddPhoneNumber  ; conditionally add on acceptance
+//       jr c, .phonefull
+//       xor a                   ; result = PHONE_CONTACT_GOT (0)
+//       jr .done
+//   .phonefull
+//       ld a, PHONE_CONTACTS_FULL
+//       jr .done
+//   .refused
+//       ld a, PHONE_CONTACT_REFUSED
+//   .done
+//       ld [wScriptVar], a      ; 3-way result
+//
+// Semantic contract:
+//   Present YesNo prompt to player. If accepted, add contact.
+//   Write 3-way result to wScriptVar:
+//     0 = PHONE_CONTACT_GOT        (accepted, added)
+//     PHONE_CONTACTS_FULL = full   (accepted, but list full)
+//     PHONE_CONTACT_REFUSED = no   (declined)
+//
+// DISTINCT from Sem_AddPhoneNumber which is unconditional (no prompt).
+//
+// Vanilla occurrences: 30
+//
+// What is NOT encoded:
+//   Crystal opcode 0x97
+//   YesNoBox / AddPhoneNumber routine addresses
+//   Specific result enum values (runtime defines its own)
+// =============================================================================
+struct Sem_AskForPhoneNumber {
+    uint8_t person;  // Phone contact ID
+};
 
 // --- Decoration ---
 struct Sem_DescribeDecoration { uint8_t decoration_id; };  // Show decoration description text
@@ -1239,7 +1526,7 @@ struct UnloweredDiagnostic {
 
 using SemanticOp = std::variant<
     // Control flow
-    Sem_End, Sem_Return, Sem_Jump, Sem_JumpIf, Sem_Call, Sem_Sdefer,
+    Sem_End, Sem_EndAll, Sem_Return, Sem_Jump, Sem_JumpIf, Sem_Call, Sem_Sdefer,
     
     // Flags/Variables
     Sem_SetFlag, Sem_ClearFlag, Sem_CheckFlag,
@@ -1247,12 +1534,14 @@ using SemanticOp = std::variant<
     
     // UI/Text
     Sem_OpenText, Sem_CloseText, Sem_ShowText, Sem_ShowTextAndEnd,
-    Sem_FacePlayerAndShowText, Sem_WaitButton, Sem_YesNo, Sem_Choice,
+    Sem_FacePlayerAndShowText, Sem_WaitButton, Sem_PromptButton, Sem_YesNo,
+    Sem_LoadMenu, Sem_VerticalMenu, Sem_2DMenu, Sem_Choice,
     Sem_PrepareTextArg,  // Consolidated text argument preparation
     Sem_ShowBalanceOverlay,  // Currency balance display overlay
     
     // Inventory
     Sem_GiveItem, Sem_TakeItem, Sem_CheckItem, Sem_GiveItemVerbose,
+    Sem_GiveItemVerboseVar,  // verbosegiveitemvar: item/quantity from variables
     Sem_GiveMoney, Sem_TakeMoney, Sem_CheckMoney,
     Sem_GiveCoins, Sem_TakeCoins, Sem_CheckCoins,
     
@@ -1272,7 +1561,8 @@ using SemanticOp = std::variant<
     Sem_WriteCmdQueue, Sem_DeleteCmdQueue,
     
     // Battle
-    Sem_LoadWildMon, Sem_LoadTrainer, Sem_StartBattle, Sem_ReloadMapAfterBattle,
+    Sem_LoadWildMon, Sem_LoadTrainer, Sem_StartBattle, Sem_CatchTutorial,
+    Sem_ReloadMapAfterBattle,
     Sem_SetWinLossText, Sem_TrainerText, Sem_TrainerFlagAction,
     Sem_CheckJustBattled, Sem_EndIfJustBattled,
     
@@ -1282,10 +1572,11 @@ using SemanticOp = std::variant<
     Sem_RestartMapMusic, Sem_WarpSound, Sem_SpecialSound, Sem_SetMusicRestartFlag,
     
     // Time/Wait/RTC
-    Sem_Wait, Sem_Pause, Sem_CheckTime, Sem_SetDaylightSaving,
+    Sem_Wait, Sem_Pause, Sem_DeactivateFacing, Sem_CheckTime, Sem_SetDaylightSaving,
     
     // Phone
-    Sem_AddPhoneNumber, Sem_DeletePhoneNumber, Sem_CheckPhoneNumber, Sem_CheckPhoneCall,
+    Sem_AddPhoneNumber, Sem_AskForPhoneNumber,
+    Sem_DeletePhoneNumber, Sem_CheckPhoneNumber, Sem_CheckPhoneCall,
     Sem_SpecialPhoneCall,  // Special phone call events
     
     // Decoration

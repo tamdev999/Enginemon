@@ -301,12 +301,20 @@ RuleResult rule_end(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    if (std::holds_alternative<Cmd_End>(cmd->data) ||
-        std::holds_alternative<Cmd_Endall>(cmd->data)) {
+    if (std::holds_alternative<Cmd_End>(cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_End{}));
+        return r;
+    }
+    // endall (0x93): clears entire call stack — distinct from end which pops one frame
+    // Source: Script_endall sets wScriptStackSize=0 unconditionally
+    if (std::holds_alternative<Cmd_Endall>(cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        r.instructions.push_back(make_inst(enginemon::Sem_EndAll{}));
         return r;
     }
     return {};
@@ -934,19 +942,48 @@ RuleResult rule_write_text(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    // writetext and farwritetext - shows text in current textbox
-    // For Stage 4, we mark these as unlowered because we need ROM access
-    // to decode the text pointer. The runtime pipeline handles this.
-    // In the future, the compiler would pre-decode and embed text.
+    // writetext (0x4C): shows text from local bank pointer in current textbox
+    // farwritetext (0x4B): shows text from explicit bank:pointer in current textbox
+    // Both must resolve the text pointer to a stable TextId — not an empty sequence.
+    // Source: Script_writetext uses wScriptBank:HL; Script_farwritetext uses explicit bank
     
-    if (std::holds_alternative<Cmd_Writetext>(cmd->data) ||
-        std::holds_alternative<Cmd_Farwritetext>(cmd->data)) {
-        // Emit as ShowText with empty sequence (text not resolved at lowering time)
+    if (auto* p = std::get_if<Cmd_Writetext>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_ShowText op;
-        // Text would be resolved from package at runtime
+        // Resolve bank-local text pointer to flat address using caller's bank
+        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
+        const uint32_t flat_addr = crystal_local_ptr_to_flat(entry, p->text_pointer);
+        if (ctx.text_registry && flat_addr != 0) {
+            auto text_id = ctx.text_registry->extract(flat_addr);
+            if (text_id != enginemon::TEXT_NONE) {
+                const auto* def = ctx.text_registry->get(text_id);
+                if (def) {
+                    op.sequence = def->to_semantic_sequence();
+                }
+            }
+        }
+        r.instructions.push_back(make_inst(std::move(op)));
+        return r;
+    }
+    
+    if (auto* p = std::get_if<Cmd_Farwritetext>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        enginemon::Sem_ShowText op;
+        // farwritetext carries explicit bank:pointer — resolve directly
+        const uint32_t flat_addr = crystal_bank_to_flat(p->bank, p->pointer);
+        if (ctx.text_registry && flat_addr != 0) {
+            auto text_id = ctx.text_registry->extract(flat_addr);
+            if (text_id != enginemon::TEXT_NONE) {
+                const auto* def = ctx.text_registry->get(text_id);
+                if (def) {
+                    op.sequence = def->to_semantic_sequence();
+                }
+            }
+        }
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -958,12 +995,45 @@ RuleResult rule_jump_text(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    if (std::holds_alternative<Cmd_Jumptext>(cmd->data) ||
-        std::holds_alternative<Cmd_Farjumptext>(cmd->data)) {
+    // jumptext (0x53): opentext + text + waitbutton + closetext + end, bank-local pointer
+    // farjumptext (0x52): same but with explicit bank:pointer
+    // Both must resolve the text pointer — see rule_write_text for pattern.
+    
+    if (auto* p = std::get_if<Cmd_Jumptext>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_ShowTextAndEnd op;
+        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
+        const uint32_t flat_addr = crystal_local_ptr_to_flat(entry, p->text_pointer);
+        if (ctx.text_registry && flat_addr != 0) {
+            auto text_id = ctx.text_registry->extract(flat_addr);
+            if (text_id != enginemon::TEXT_NONE) {
+                const auto* def = ctx.text_registry->get(text_id);
+                if (def) {
+                    op.sequence = def->to_semantic_sequence();
+                }
+            }
+        }
+        r.instructions.push_back(make_inst(std::move(op)));
+        return r;
+    }
+    
+    if (auto* p = std::get_if<Cmd_Farjumptext>(&cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        enginemon::Sem_ShowTextAndEnd op;
+        const uint32_t flat_addr = crystal_bank_to_flat(p->bank, p->pointer);
+        if (ctx.text_registry && flat_addr != 0) {
+            auto text_id = ctx.text_registry->extract(flat_addr);
+            if (text_id != enginemon::TEXT_NONE) {
+                const auto* def = ctx.text_registry->get(text_id);
+                if (def) {
+                    op.sequence = def->to_semantic_sequence();
+                }
+            }
+        }
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -974,11 +1044,24 @@ RuleResult rule_jump_text_face_player(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    if (std::holds_alternative<Cmd_Jumptextfaceplayer>(cmd->data)) {
+    // jumptextfaceplayer (0x51): faceplayer + jumptext semantics, bank-local pointer
+    
+    if (auto* p = std::get_if<Cmd_Jumptextfaceplayer>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_FacePlayerAndShowText op;
+        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
+        const uint32_t flat_addr = crystal_local_ptr_to_flat(entry, p->text_pointer);
+        if (ctx.text_registry && flat_addr != 0) {
+            auto text_id = ctx.text_registry->extract(flat_addr);
+            if (text_id != enginemon::TEXT_NONE) {
+                const auto* def = ctx.text_registry->get(text_id);
+                if (def) {
+                    op.sequence = def->to_semantic_sequence();
+                }
+            }
+        }
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -989,12 +1072,22 @@ RuleResult rule_wait_button(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    if (std::holds_alternative<Cmd_Waitbutton>(cmd->data) ||
-        std::holds_alternative<Cmd_Promptbutton>(cmd->data)) {
+    // waitbutton (0x54): wait for any button press — jp WaitButton
+    if (std::holds_alternative<Cmd_Waitbutton>(cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_WaitButton{}));
+        return r;
+    }
+    
+    // promptbutton (0x55): WaitBGMap sync THEN PromptButton — distinct from waitbutton
+    // Source: Script_promptbutton calls WaitBGMap then PromptButton (not WaitButton)
+    if (std::holds_alternative<Cmd_Promptbutton>(cmd->data)) {
+        RuleResult r;
+        r.matched = true;
+        r.consumed = 1;
+        r.instructions.push_back(make_inst(enginemon::Sem_PromptButton{}));
         return r;
     }
     return {};
@@ -1172,6 +1265,44 @@ RuleResult rule_give_pokemon(LoweringContext& ctx) {
         op.level = p->level;
         op.held_item = enginemon::ItemId{p->item};
         op.has_nickname = p->has_extra_data;
+        
+        // Resolve nickname and OT name if present
+        // Source: Script_givepoke reads 4 extra bytes when trainer byte != 0:
+        //   - 2 bytes: nickname pointer (bank-local)
+        //   - 2 bytes: OT name pointer (bank-local)
+        // Both are text resources in the script's bank.
+        if (p->has_extra_data) {
+            const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
+            
+            // Resolve nickname pointer to text content
+            if (p->nickname_ptr != 0) {
+                const uint32_t nick_flat = crystal_local_ptr_to_flat(entry, p->nickname_ptr);
+                if (ctx.text_registry && nick_flat != 0) {
+                    auto text_id = ctx.text_registry->extract(nick_flat);
+                    if (text_id != enginemon::TEXT_NONE) {
+                        const auto* def = ctx.text_registry->get(text_id);
+                        if (def) {
+                            op.nickname = def->plain_text();
+                        }
+                    }
+                }
+            }
+            
+            // Resolve OT name pointer to text content
+            if (p->ot_name_ptr != 0) {
+                const uint32_t ot_flat = crystal_local_ptr_to_flat(entry, p->ot_name_ptr);
+                if (ctx.text_registry && ot_flat != 0) {
+                    auto text_id = ctx.text_registry->extract(ot_flat);
+                    if (text_id != enginemon::TEXT_NONE) {
+                        const auto* def = ctx.text_registry->get(text_id);
+                        if (def) {
+                            op.ot_name = def->plain_text();
+                        }
+                    }
+                }
+            }
+        }
+        
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -2950,28 +3081,44 @@ RuleResult rule_menu_ops(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    // loadmenu/verticalmenu/2dmenu are menu display operations
+    // loadmenu (0x4F): Loads menu via bank-local menu-header pointer.
+    // Source: Script_loadmenu reads 2-byte pointer, calls LoadMenuHeader(wScriptBank:HL).
+    // The menu header data is at that pointer and defines items, cursor, layout.
+    // Result is stored implicitly in Crystal menu state (wMenuCursorY etc).
+    // DISTINCT from verticalmenu/2dmenu: uses LoadMenuHeader, not VerticalMenu/_2DMenu.
     if (auto* p = std::get_if<Cmd_Loadmenu>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        enginemon::Sem_Choice op;
-        // Menu header would be resolved at compile time
+        enginemon::Sem_LoadMenu op;
+        // Resolve bank-local menu-header pointer to flat ROM address
+        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
+        op.header_pointer = crystal_local_ptr_to_flat(entry, p->menu_header);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
+    
+    // verticalmenu (0x59): Runs VerticalMenu, writes wMenuCursorY to wScriptVar.
+    // Source: Script_verticalmenu calls VerticalMenu, reads wMenuCursorY (not wMenuCursorPosition).
+    // On cancel (carry set), result is 0.
+    // DISTINCT from _2dmenu: reads different result register.
     if (std::holds_alternative<Cmd_Verticalmenu>(cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        r.instructions.push_back(make_inst(enginemon::Sem_Choice{}));
+        r.instructions.push_back(make_inst(enginemon::Sem_VerticalMenu{}));
         return r;
     }
+    
+    // _2dmenu (0x58): Runs _2DMenu, writes wMenuCursorPosition to wScriptVar.
+    // Source: Script__2dmenu calls _2DMenu, reads wMenuCursorPosition (not wMenuCursorY).
+    // On cancel (carry set), result is 0.
+    // DISTINCT from verticalmenu: reads different result register.
     if (std::holds_alternative<Cmd_2dmenu>(cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        r.instructions.push_back(make_inst(enginemon::Sem_Choice{}));
+        r.instructions.push_back(make_inst(enginemon::Sem_2DMenu{}));
         return r;
     }
     return {};
@@ -3139,20 +3286,30 @@ RuleResult rule_string_format(LoweringContext& ctx) {
     // getname - generic name lookup by type and ID
     // Source: Script_getname reads type, then id, then strbuf
     // ROM layout: opcode, strbuf, type, id (decoder verified)
+    // Authoritative type mapping from pokecrystal/constants/text_constants.asm:
+    //   1 = MON_NAME, 2 = MOVE_NAME, 3 = DUMMY_NAME, 4 = ITEM_NAME,
+    //   5 = PARTY_OT_NAME, 6 = ENEMY_OT_NAME, 7 = TRAINER_NAME,
+    //   8 = MOVE_DESC_NAME_BROKEN
     if (auto* p = std::get_if<Cmd_Getname>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
         
-        // Map Crystal NAME_* type to semantic NameSourceType
+        // Map Crystal NAME_* constant directly to NameSourceType enum value
+        // NameSourceType values are defined to match Crystal constants exactly.
+        // Types outside [1,8] or reserved (3=DUMMY, 8=MOVE_DESC_BROKEN) are
+        // preserved with their explicit enum values — not mapped to a random domain.
         enginemon::NameSourceType name_type;
         switch (p->type) {
-            case 1: name_type = enginemon::NameSourceType::Pokemon; break;
-            case 2: name_type = enginemon::NameSourceType::Move; break;
-            case 3: name_type = enginemon::NameSourceType::Item; break;
-            case 4: name_type = enginemon::NameSourceType::Trainer; break;
-            case 5: name_type = enginemon::NameSourceType::Location; break;
-            default: name_type = enginemon::NameSourceType::Pokemon; break;
+            case 1: name_type = enginemon::NameSourceType::Pokemon;      break; // MON_NAME
+            case 2: name_type = enginemon::NameSourceType::Move;         break; // MOVE_NAME
+            case 3: name_type = enginemon::NameSourceType::Dummy;        break; // DUMMY_NAME (reserved)
+            case 4: name_type = enginemon::NameSourceType::Item;         break; // ITEM_NAME
+            case 5: name_type = enginemon::NameSourceType::PartyOT;      break; // PARTY_OT_NAME
+            case 6: name_type = enginemon::NameSourceType::EnemyOT;      break; // ENEMY_OT_NAME
+            case 7: name_type = enginemon::NameSourceType::Trainer;      break; // TRAINER_NAME
+            case 8: name_type = enginemon::NameSourceType::MoveDescBroken; break; // MOVE_DESC_NAME_BROKEN
+            default: name_type = enginemon::NameSourceType::Dummy; break; // Unknown → dummy, don't guess
         }
         
         auto op = enginemon::Sem_PrepareTextArg::name_by_type(name_type, p->id, p->strbuf);
@@ -3237,8 +3394,11 @@ RuleResult rule_misc_control(LoweringContext& ctx) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        enginemon::Sem_Pause op;
-        op.length = p->time;
+        // deactivatefacing uses SCRIPT_WAIT/StopScript suspension — distinct from Sem_Pause
+        // Source: Script_deactivatefacing sets wScriptMode=SCRIPT_WAIT, calls StopScript
+        // If time==0: delay NOT stored (wScriptDelay unchanged), but SCRIPT_WAIT still set
+        enginemon::Sem_DeactivateFacing op;
+        op.duration = p->time;
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -3270,9 +3430,13 @@ RuleResult rule_misc_control(LoweringContext& ctx) {
 
 // --- Additional Misc Rules ---
 
-// verbosegiveitemvar: Give item with message, item from wScriptVar
+// verbosegiveitemvar: Give item with message, item/quantity from variables
 // Reference: pokecrystal/engine/overworld/scripting.asm Script_verbosegiveitemvar
-// Semantics: gives item from variable with notification - maps to verbose give
+// Semantics:
+//   first byte == ITEM_FROM_MEM (0) → item ID comes from wScriptVar at runtime
+//   first byte != 0               → literal item ID
+//   second byte = quantity variable index (via GetVarAction table, NOT a literal)
+// Writes wScriptVar: TRUE=given, FALSE=bag full
 RuleResult rule_verbose_give_item_var(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
@@ -3281,10 +3445,18 @@ RuleResult rule_verbose_give_item_var(LoweringContext& ctx) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        enginemon::Sem_GiveItemVerbose op;
-        // Item comes from variable or wScriptVar (ITEM_FROM_MEM = 0)
-        op.item = enginemon::ItemId{p->item};
-        op.quantity = p->var;  // Second byte is actually quantity variable
+        enginemon::Sem_GiveItemVerboseVar op;
+        // ITEM_FROM_MEM = 0: item ID read from wScriptVar at runtime
+        if (p->item == 0) {
+            op.item_source = enginemon::ItemSource::FromScriptVar;
+            op.item = enginemon::ItemId{0};  // Not used when FromScriptVar
+        } else {
+            op.item_source = enginemon::ItemSource::Literal;
+            op.item = enginemon::ItemId{p->item};
+        }
+        // Second byte is a variable INDEX, not a literal quantity
+        // GetVarAction(var_index) → wram pointer → quantity read at runtime
+        op.quantity_var = p->var;
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -3334,7 +3506,11 @@ RuleResult rule_describe_decoration(LoweringContext& ctx) {
 
 // askforphonenumber: Ask player to register phone number
 // Reference: pokecrystal/engine/overworld/scripting.asm Script_askforphonenumber
-// Semantics: yes/no prompt, if yes adds phone number, result in wScriptVar
+// Semantics: YesNo prompt → conditional add → 3-way result in wScriptVar
+//   0 = PHONE_CONTACT_GOT (accepted, added)
+//   PHONE_CONTACTS_FULL (accepted, list full)
+//   PHONE_CONTACT_REFUSED (declined)
+// DISTINCT from Sem_AddPhoneNumber which is unconditional (no prompt, no result)
 RuleResult rule_ask_phone_number(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
@@ -3343,9 +3519,8 @@ RuleResult rule_ask_phone_number(LoweringContext& ctx) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        // This is a compound: YesNo + conditional AddPhoneNumber + result
-        // Maps to AddPhoneNumber semantic (handles the prompt internally)
-        enginemon::Sem_AddPhoneNumber op;
+        // Preserve the compound semantics (prompt + conditional add + result)
+        enginemon::Sem_AskForPhoneNumber op;
         op.person = p->number;
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
@@ -3441,18 +3616,22 @@ RuleResult rule_check_version(LoweringContext& ctx) {
 
 // catchtutorial: Run catch tutorial battle
 // Reference: pokecrystal/engine/overworld/scripting.asm Script_catchtutorial
-// Semantics: special battle type, then reloads map
+// Semantics: sets wBattleType from byte operand, calls CatchTutorial, then reloads map
+// DISTINCT from Sem_StartBattle — uses tutorial entry path, not normal battle entry
+// Post-tutorial map reload is implicit in Crystal (jp Script_reloadmap after CatchTutorial)
 RuleResult rule_catch_tutorial(LoweringContext& ctx) {
     const auto* cmd = ctx.peek();
     if (!cmd) return {};
     
-    if (std::holds_alternative<Cmd_Catchtutorial>(cmd->data)) {
+    if (auto* p = std::get_if<Cmd_Catchtutorial>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        // Catch tutorial sets battle type and runs special sequence
-        // Semantically: start battle (tutorial mode implied)
-        r.instructions.push_back(make_inst(enginemon::Sem_StartBattle{}));
+        // Preserve tutorial type byte — this is NOT Sem_StartBattle
+        // Source: Script_catchtutorial ld [wBattleType], a (byte operand)
+        enginemon::Sem_CatchTutorial op;
+        op.tutorial_type = p->byte;
+        r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
     return {};

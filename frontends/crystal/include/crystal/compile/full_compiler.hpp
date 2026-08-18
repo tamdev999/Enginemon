@@ -87,7 +87,19 @@ namespace crystal {
 // 2.4.0: Semantic fidelity fixes - string formatting operands, encountermusic/playmapmusic distinction,
 //        newloadmap method preservation, reanchormap/refreshmap distinction, sdefer bank resolution,
 //        TextDefinition identity with explicit control markers
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.4.0";
+// 2.5.0: Full semantic distinction preservation pass - Finding 1-11:
+//        writetext/jumptext text pointer resolution via TextRegistry,
+//        givepoke nickname/OT string resolution,
+//        Sem_CatchTutorial distinct from Sem_StartBattle,
+//        Sem_EndAll distinct from Sem_End,
+//        Sem_LoadMenu/Sem_VerticalMenu/Sem_2DMenu distinct (not Sem_Choice),
+//        Sem_DeactivateFacing distinct from Sem_Pause,
+//        Sem_GiveItemVerboseVar with variable semantics (not literal quantity),
+//        Sem_AskForPhoneNumber distinct from Sem_AddPhoneNumber,
+//        Sem_PromptButton distinct from Sem_WaitButton,
+//        getname type mapping corrected to pokecrystal constants,
+//        InvalidDomain is now a hard linker gate
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.5.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================

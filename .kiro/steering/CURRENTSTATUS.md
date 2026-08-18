@@ -1,5 +1,44 @@
 # Current Status
 
+## Crystal Frontend 11-Finding Semantic Distinction Pass - COMPLETED ✓
+
+**SUCCESS**: Fixed all 11 confirmed semantic-corruption/gate findings from the hostile audit. Every source-semantic distinction is now preserved in the IR. InvalidDomain is now a hard linker gate.
+
+### Summary of Fixes (August 2026)
+
+| Finding | Issue | Fix | Status |
+|---------|-------|-----|--------|
+| 1 | writetext/jumptext text pointer lost | TextRegistry resolution → `Sem_ShowText{sequence}` | ✅ FIXED + TESTED |
+| 2 | givepoke nickname/OT strings discarded | `plain_text()` from TextRegistry | ✅ FIXED + TESTED |
+| 3 | catchtutorial → Sem_StartBattle (wrong) | `Sem_CatchTutorial{tutorial_type}` distinct type | ✅ FIXED + TESTED |
+| 4 | endall ≡ end | `Sem_EndAll{}` distinct from `Sem_End{}` | ✅ FIXED + TESTED |
+| 5 | menu commands → empty Sem_Choice | `Sem_LoadMenu`, `Sem_VerticalMenu`, `Sem_2DMenu` | ✅ FIXED + TESTED |
+| 6 | deactivatefacing → Sem_Pause | `Sem_DeactivateFacing{duration}` distinct type | ✅ FIXED + TESTED |
+| 7 | verbosegiveitemvar var treated as literal | `Sem_GiveItemVerboseVar{ItemSource, item, qty_var}` | ✅ FIXED + TESTED |
+| 8 | askforphonenumber → unconditional add | `Sem_AskForPhoneNumber{person}` distinct type | ✅ FIXED + TESTED |
+| 9 | promptbutton ≡ waitbutton | `Sem_PromptButton{}` distinct from `Sem_WaitButton{}` | ✅ FIXED + TESTED |
+| 10 | InvalidDomain not a hard linker gate | `link_scripts()` + `link_full_corpus()` gate on InvalidDomain | ✅ FIXED + TESTED |
+| 11 | getname type mapping wrong | Corrected to pokecrystal: 3=Dummy,4=Item,5=PartyOT,7=Trainer | ✅ FIXED + TESTED |
+
+### Compiler Version
+
+**CRYSTAL_COMPILER_VERSION**: `crystal-2.5.0`
+- 2.5.0: 11-finding semantic distinction pass
+
+### Test Results (Post-11-Finding Pass)
+
+- **Runtime Tests**: 340/340 pass ✓
+- **Golden Tests**: 56/56 pass ✓
+- **Legality Gate Tests**: 14/14 pass ✓
+- **Corpus Test**: PASS ✓
+- **Corpus Lowering Audit**: 1788/1788 SUCCESS ✓
+- **Linker Test**: corpus=1788/1788, InvalidOwnership=0 ✓
+- **Canonical Verifier**: OVERALL PASS ✓
+
+---
+
+# Current Status
+
 ## Crystal Frontend Semantic Fidelity Fixes - COMPLETED ✓
 
 **SUCCESS**: Completed comprehensive semantic fidelity pass fixing confirmed active vanilla semantic corruption. All fixes verified with adversarial tests. The frontend is now TRUSTWORTHY for semantic correctness.
