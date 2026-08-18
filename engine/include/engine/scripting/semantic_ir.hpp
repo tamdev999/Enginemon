@@ -160,9 +160,11 @@ struct Sem_Sdefer {
 };
 
 // --- Flags and Variables ---
-struct Sem_SetFlag { FlagId flag; };
-struct Sem_ClearFlag { FlagId flag; };
-struct Sem_CheckFlag { FlagId flag; };  // Sets result
+// CRITICAL: EventFlags and EngineFlags are DISTINCT namespaces
+// EventFlag{5} != EngineFlag{5} - they are stored in separate arrays
+struct Sem_SetFlag { FlagRef flag; };
+struct Sem_ClearFlag { FlagRef flag; };
+struct Sem_CheckFlag { FlagRef flag; };  // Sets result
 // SetVar uses VarValueSource (typed variant), NOT -1 sentinel for script result copy.
 // Use VarValueSource::literal(v) for immediate values, VarValueSource::script_result() for copying wScriptVar.
 struct Sem_SetVar { VarId var; VarValueSource source; };

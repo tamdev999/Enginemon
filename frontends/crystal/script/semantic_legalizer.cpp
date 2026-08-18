@@ -491,7 +491,7 @@ RuleResult rule_set_flag(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_SetFlag op;
-        op.flag = enginemon::FlagId{p->event_flag};
+        op.flag = enginemon::FlagRef::event_flag(p->event_flag);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -500,7 +500,7 @@ RuleResult rule_set_flag(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_SetFlag op;
-        op.flag = enginemon::FlagId{p->engine_flag};
+        op.flag = enginemon::FlagRef::engine_flag(p->engine_flag);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -516,7 +516,7 @@ RuleResult rule_clear_flag(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_ClearFlag op;
-        op.flag = enginemon::FlagId{p->event_flag};
+        op.flag = enginemon::FlagRef::event_flag(p->event_flag);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -525,7 +525,7 @@ RuleResult rule_clear_flag(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_ClearFlag op;
-        op.flag = enginemon::FlagId{p->engine_flag};
+        op.flag = enginemon::FlagRef::engine_flag(p->engine_flag);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -542,7 +542,7 @@ RuleResult rule_check_flag(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_CheckFlag op;
-        op.flag = enginemon::FlagId{p->event_flag};
+        op.flag = enginemon::FlagRef::event_flag(p->event_flag);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -551,7 +551,7 @@ RuleResult rule_check_flag(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_CheckFlag op;
-        op.flag = enginemon::FlagId{p->engine_flag};
+        op.flag = enginemon::FlagRef::engine_flag(p->engine_flag);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }

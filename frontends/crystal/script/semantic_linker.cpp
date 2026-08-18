@@ -572,11 +572,33 @@ ValidatedReference SemanticLinker::validate_reference(
         // === RangeOnly types - semantic scalar domains ===
         // These are NOT resource references - they are domain values
         
-        case ReferenceType::Flag:
-            // Event flags are a semantic domain, not resource references
-            // Crystal has ~2000+ event flags
-            ref.validation = ValidationClass::RangeOnly;
+        case ReferenceType::Flag: {
+            // Flag values are encoded: (namespace << 16) | value
+            // EventFlags (ns=0): 2048 flags (0-2047) - see pokecrystal/constants/event_flags.asm
+            // EngineFlags (ns=1): 190 flags (0-189) - see pokecrystal/constants/engine_flags.asm
+            uint8_t ns = static_cast<uint8_t>((value >> 16) & 0xFF);
+            uint16_t flag_value = static_cast<uint16_t>(value & 0xFFFF);
+            
+            if (ns == 0) {  // EventFlag
+                if (flag_value < 2048) {
+                    ref.validation = ValidationClass::RangeOnly;
+                } else {
+                    ref.validation = ValidationClass::InvalidDomain;
+                    ref.error_reason = "EventFlag " + std::to_string(flag_value) + " out of range (0-2047)";
+                }
+            } else if (ns == 1) {  // EngineFlag
+                if (flag_value < 190) {
+                    ref.validation = ValidationClass::RangeOnly;
+                } else {
+                    ref.validation = ValidationClass::InvalidDomain;
+                    ref.error_reason = "EngineFlag " + std::to_string(flag_value) + " out of range (0-189)";
+                }
+            } else {
+                ref.validation = ValidationClass::InvalidDomain;
+                ref.error_reason = "Unknown flag namespace: " + std::to_string(ns);
+            }
             break;
+        }
             
         case ReferenceType::Var:
             // Script variables are a semantic domain
@@ -624,6 +646,14 @@ void SemanticLinker::extract_and_validate_from_op(
     
     auto add_ref = [&](ReferenceType type, uint32_t value, const std::string& op_name) {
         refs.push_back(validate_reference(type, value, script_id, op_name,
+                                          block_idx, inst_idx));
+    };
+    
+    // Overload for FlagRef - encodes namespace in high bits
+    auto add_flag_ref = [&](const FlagRef& flag, const std::string& op_name) {
+        // Encode namespace in bits 16-17, value in bits 0-15
+        uint32_t encoded = (static_cast<uint32_t>(flag.ns) << 16) | flag.value;
+        refs.push_back(validate_reference(ReferenceType::Flag, encoded, script_id, op_name,
                                           block_idx, inst_idx));
     };
     
@@ -684,11 +714,11 @@ void SemanticLinker::extract_and_validate_from_op(
         
         // === Flag References ===
         else if constexpr (std::is_same_v<T, Sem_SetFlag>) {
-            add_ref(ReferenceType::Flag, sem_op.flag, "SetFlag");
+            add_flag_ref(sem_op.flag, "SetFlag");
         } else if constexpr (std::is_same_v<T, Sem_ClearFlag>) {
-            add_ref(ReferenceType::Flag, sem_op.flag, "ClearFlag");
+            add_flag_ref(sem_op.flag, "ClearFlag");
         } else if constexpr (std::is_same_v<T, Sem_CheckFlag>) {
-            add_ref(ReferenceType::Flag, sem_op.flag, "CheckFlag");
+            add_flag_ref(sem_op.flag, "CheckFlag");
         }
         
         // === Variable References ===

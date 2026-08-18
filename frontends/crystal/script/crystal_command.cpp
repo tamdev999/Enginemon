@@ -233,24 +233,31 @@ static void encode_events_flags_warp(std::vector<uint8_t>& out, const CrystalCom
 }
 
 // Group 5: String formatting + Item notify (0x3D-0x46)
+// AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/events.asm
+// ROM byte order differs from macro argument order - data operands come FIRST, strbuf LAST
 static void encode_string_itemnotify(std::vector<uint8_t>& out, const CrystalCommandData& data) {
     if (auto* c = std::get_if<Cmd_Getmoney>(&data)) {
-        push_byte(out, CrystalOp::getmoney); push_byte(out, c->strbuf); push_byte(out, c->account);
+        // ROM: db account, db strbuf
+        push_byte(out, CrystalOp::getmoney); push_byte(out, c->account); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Getcoins>(&data)) {
         push_byte(out, CrystalOp::getcoins); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Getnum>(&data)) {
         push_byte(out, CrystalOp::getnum); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Getmonname>(&data)) {
-        push_byte(out, CrystalOp::getmonname); push_byte(out, c->strbuf); push_byte(out, c->pokemon);
+        // ROM: db pokemon, db strbuf
+        push_byte(out, CrystalOp::getmonname); push_byte(out, c->pokemon); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Getitemname>(&data)) {
-        push_byte(out, CrystalOp::getitemname); push_byte(out, c->strbuf); push_byte(out, c->item);
+        // ROM: db item, db strbuf
+        push_byte(out, CrystalOp::getitemname); push_byte(out, c->item); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Getcurlandmarkname>(&data)) {
         push_byte(out, CrystalOp::getcurlandmarkname); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Gettrainername>(&data)) {
-        push_byte(out, CrystalOp::gettrainername); push_byte(out, c->strbuf);
-        push_byte(out, c->trainer_group); push_byte(out, c->trainer_id);
+        // ROM: db trainer_group, db trainer_id, db strbuf
+        push_byte(out, CrystalOp::gettrainername);
+        push_byte(out, c->trainer_group); push_byte(out, c->trainer_id); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Getstring>(&data)) {
-        push_byte(out, CrystalOp::getstring); push_byte(out, c->strbuf); push_word(out, c->text_pointer);
+        // ROM: dw text_pointer, db strbuf
+        push_byte(out, CrystalOp::getstring); push_word(out, c->text_pointer); push_byte(out, c->strbuf);
     } else if (std::get_if<Cmd_Itemnotify>(&data)) {
         push_byte(out, CrystalOp::itemnotify);
     } else if (std::get_if<Cmd_Pocketisfull>(&data)) {
@@ -469,6 +476,8 @@ static void encode_commerce(std::vector<uint8_t>& out, const CrystalCommandData&
 }
 
 // Group 12: End game + Unknown (0xA0-0xA9+)
+// AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/events.asm
+// ROM byte order: data operands come FIRST, strbuf LAST
 static void encode_endgame(std::vector<uint8_t>& out, const CrystalCommandData& data) {
     if (auto* c = std::get_if<Cmd_Swarm>(&data)) {
         push_byte(out, CrystalOp::swarm); push_byte(out, c->flag); push_map_id(out, c->map);
@@ -482,11 +491,14 @@ static void encode_endgame(std::vector<uint8_t>& out, const CrystalCommandData& 
     } else if (auto* c = std::get_if<Cmd_Battletowertext>(&data)) {
         push_byte(out, CrystalOp::battletowertext); push_byte(out, c->bttext_id);
     } else if (auto* c = std::get_if<Cmd_Getlandmarkname>(&data)) {
-        push_byte(out, CrystalOp::getlandmarkname); push_byte(out, c->strbuf); push_byte(out, c->landmark_id);
+        // ROM: db landmark_id, db strbuf
+        push_byte(out, CrystalOp::getlandmarkname); push_byte(out, c->landmark_id); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Gettrainerclassname>(&data)) {
-        push_byte(out, CrystalOp::gettrainerclassname); push_byte(out, c->strbuf); push_byte(out, c->trainer_group);
+        // ROM: db trainer_group, db strbuf
+        push_byte(out, CrystalOp::gettrainerclassname); push_byte(out, c->trainer_group); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Getname>(&data)) {
-        push_byte(out, CrystalOp::getname); push_byte(out, c->strbuf); push_byte(out, c->type); push_byte(out, c->id);
+        // ROM: db type, db id, db strbuf
+        push_byte(out, CrystalOp::getname); push_byte(out, c->type); push_byte(out, c->id); push_byte(out, c->strbuf);
     } else if (auto* c = std::get_if<Cmd_Wait>(&data)) {
         push_byte(out, CrystalOp::wait); push_byte(out, c->duration);
     } else if (std::get_if<Cmd_Checksave>(&data)) {

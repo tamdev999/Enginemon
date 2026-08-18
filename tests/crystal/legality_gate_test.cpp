@@ -830,7 +830,8 @@ bool test_reject_invalid_semantic_id() {
     
     SemanticInstruction inst;
     Sem_SetFlag set_flag;
-    set_flag.flag = 0xFFFF;  // Invalid flag ID
+    // Invalid: EventFlag 3000 is out of range (valid: 0-2047)
+    set_flag.flag = enginemon::FlagRef::event_flag(3000);
     inst.op = set_flag;
     sem_block.instructions.push_back(inst);
     

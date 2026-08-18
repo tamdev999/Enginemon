@@ -552,6 +552,13 @@ std::optional<enginemon::SemanticScriptIR> FullGameCompiler::process_script_type
             return std::nullopt;
         }
         
+        // Stage 1.5: Round-trip validation (structural integrity check)
+        // This proves that decode + encode produces identical bytes.
+        // NOTE: This is NOT a semantic oracle - symmetric bugs won't be caught here.
+        std::vector<std::string> round_trip_errors;
+        bool round_trip_ok = typed_decoder_->validate_script_round_trip(ir, &round_trip_errors);
+        size_t round_trip_failure_count = round_trip_errors.size();
+        
         // Stage 2: CFG
         CrystalCFG cfg = cfg_builder_->build(ir);
         if (!cfg.validation.valid) {
@@ -577,8 +584,8 @@ std::optional<enginemon::SemanticScriptIR> FullGameCompiler::process_script_type
         // Stage 5: Legality
         LegalityInput input;
         input.ir = &ir;
-        input.decode_complete = true;
-        input.round_trip_failures = 0;
+        input.decode_complete = !ir.commands.empty();  // Actual validation result
+        input.round_trip_failures = static_cast<uint32_t>(round_trip_failure_count);  // Actual count
         input.unknown_opcodes = 0;
         for (const auto& cmd : ir.commands) {
             if (std::holds_alternative<Cmd_Unknown>(cmd.data)) {

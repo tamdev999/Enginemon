@@ -37,13 +37,51 @@ using SpriteId = uint16_t;
 using MusicId = uint16_t;
 using SfxId = uint16_t;
 using ScriptId = uint32_t;
-using FlagId = uint16_t;
 using VarId = uint16_t;
 using TextId = uint32_t;
 using MovementId = uint32_t;
 using StateVarId = uint16_t;  // Semantic mini-game/puzzle state variable ID
 using PokeMailId = uint16_t;  // Semantic Pokemon mail ID (NOT ROM pointer)
 using StdScriptId = uint16_t; // Semantic standard script ID
+
+// Flag namespaces - Crystal has TWO distinct flag arrays that must NOT be conflated
+// EventFlags: 800 flags (0-799) for story/progress events
+// EngineFlags: 190 flags (0-189) for gameplay/engine state
+// These are SEPARATE storage arrays; EventFlag{5} != EngineFlag{5}
+enum class FlagNamespace : uint8_t {
+    Event = 0,    // wEventFlags (800 bits)
+    Engine = 1,   // wEngineFlags (190 bits)
+};
+
+// Typed flag reference that preserves namespace distinction
+struct FlagRef {
+    FlagNamespace ns;
+    uint16_t value;
+    
+    // Comparison operators - different namespaces are NEVER equal
+    bool operator==(const FlagRef& other) const {
+        return ns == other.ns && value == other.value;
+    }
+    bool operator!=(const FlagRef& other) const { return !(*this == other); }
+    bool operator<(const FlagRef& other) const {
+        if (ns != other.ns) return ns < other.ns;
+        return value < other.value;
+    }
+    
+    // Factory methods for clarity
+    static FlagRef event_flag(uint16_t v) { return {FlagNamespace::Event, v}; }
+    static FlagRef engine_flag(uint16_t v) { return {FlagNamespace::Engine, v}; }
+    
+    // Human-readable debug string
+    std::string to_string() const {
+        return (ns == FlagNamespace::Event ? "EventFlag{" : "EngineFlag{") + 
+               std::to_string(value) + "}";
+    }
+};
+
+// DEPRECATED: Legacy FlagId for backward compatibility during migration
+// New code should use FlagRef directly
+using FlagId = uint16_t;
 
 // Null/invalid markers
 inline constexpr SpeciesId SPECIES_NONE = 0;
@@ -272,44 +310,51 @@ enum class Direction : uint8_t {
 
 // Movement command types - semantic operations independent of Crystal encoding
 // These represent gameplay-visible movement behaviors
+// AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/movement.asm
 enum class MovementType : uint8_t {
-    // Directional steps (combine with Direction)
-    TurnHead,           // Turn to face direction without moving
-    TurnStep,           // Turn step (visual turn animation)
-    SlowStep,           // Slow walking step
-    Step,               // Normal walking step
-    BigStep,            // Larger step (visual)
-    SlowSlideStep,      // Slow sliding (ice)
-    SlideStep,          // Normal sliding
-    FastSlideStep,      // Fast sliding
-    TurnAway,           // Turn away from direction
-    TurnIn,             // Turn toward direction
-    TurnWaterfall,      // Waterfall turn
-    SlowJumpStep,       // Slow ledge jump
-    JumpStep,           // Normal ledge jump
-    FastJumpStep,       // Fast ledge jump
+    // Directional steps (combine with Direction) - 0x00-0x37
+    TurnHead,           // 0x00-0x03: Turn to face direction without moving
+    TurnStep,           // 0x04-0x07: Turn step (visual turn animation)
+    SlowStep,           // 0x08-0x0B: Slow walking step
+    Step,               // 0x0C-0x0F: Normal walking step
+    BigStep,            // 0x10-0x13: Larger step (visual)
+    SlowSlideStep,      // 0x14-0x17: Slow sliding (ice)
+    SlideStep,          // 0x18-0x1B: Normal sliding
+    FastSlideStep,      // 0x1C-0x1F: Fast sliding
+    TurnAway,           // 0x20-0x23: Turn away from direction
+    TurnIn,             // 0x24-0x27: Turn toward direction
+    TurnWaterfall,      // 0x28-0x2B: Waterfall turn
+    SlowJumpStep,       // 0x2C-0x2F: Slow ledge jump
+    JumpStep,           // 0x30-0x33: Normal ledge jump
+    FastJumpStep,       // 0x34-0x37: Fast ledge jump
     
-    // Non-directional control commands
-    RemoveSliding,      // Stop sliding state
-    SetSliding,         // Start sliding state
-    RemoveFixedFacing,  // Allow facing changes
-    FixFacing,          // Lock current facing
-    ShowObject,         // Make object visible
-    HideObject,         // Make object invisible
-    StepSleep,          // Wait frames (param = frame count)
-    StepEnd,            // End movement sequence
-    StepWaitEnd,        // Wait for input then end
-    RemoveObject,       // Remove from map
-    StepLoop,           // Loop back to start
-    StepStop,           // Stop and wait
-    TeleportFrom,       // Teleport departure effect
-    TeleportTo,         // Teleport arrival effect
-    Skyfall,            // Fall from sky effect
-    StepDig,            // Dig animation
-    StepBump,           // Bump animation
-    StepShake,          // Shake animation
-    TreeShake,          // Tree shake (cut)
-    RockSmash,          // Rock smash effect
+    // Non-directional control commands - 0x38+
+    RemoveSliding,      // 0x38: Stop sliding state
+    SetSliding,         // 0x39: Start sliding state
+    RemoveFixedFacing,  // 0x3A: Allow facing changes
+    FixFacing,          // 0x3B: Lock current facing
+    ShowObject,         // 0x3C: Make object visible
+    HideObject,         // 0x3D: Make object invisible
+    StepSleep,          // 0x3E-0x46: Wait frames (param = frame count)
+    StepEnd,            // 0x47: End movement sequence
+    StepWaitEnd,        // 0x48: Wait for input then end (has length param)
+    RemoveObject,       // 0x49: Remove from map
+    StepLoop,           // 0x4A: Loop back to start
+    StepStop,           // 0x4B: Stop and wait
+    TeleportFrom,       // 0x4C: Teleport departure effect
+    TeleportTo,         // 0x4D: Teleport arrival effect
+    Skyfall,            // 0x4E: Fall from sky effect
+    StepDig,            // 0x4F: Dig animation (has length param)
+    StepBump,           // 0x50: Bump animation
+    FishGotBite,        // 0x51: Fish got a bite animation
+    FishCastRod,        // 0x52: Fish cast rod animation
+    HideEmote,          // 0x53: Hide emote bubble
+    ShowEmote,          // 0x54: Show emote bubble
+    StepShake,          // 0x55: Shake animation (has displacement param)
+    TreeShake,          // 0x56: Tree shake (cut)
+    RockSmash,          // 0x57: Rock smash effect (has length param)
+    ReturnDig,          // 0x58: Return from dig animation (has length param)
+    SkyfallTop,         // 0x59: Fall from sky (top variant) - terminal
 };
 
 // Single semantic movement command

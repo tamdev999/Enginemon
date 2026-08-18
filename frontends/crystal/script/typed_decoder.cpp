@@ -461,50 +461,64 @@ CrystalCommandData TypedScriptDecoder::dispatch_decode(uint8_t opcode, TypedDeco
         }
         
         // String formatting (0x3D-0x44)
+        // AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/events.asm
+        // NOTE: The macro argument order (\1, \2) differs from ROM byte order!
+        //   Macro: getmonname STRING_BUFFER, POKEMON
+        //   ROM:   db getmonname_command, db \2 (pokemon), db \1 (strbuf)
+        // This pattern applies to: getmoney, getmonname, getitemname, gettrainername,
+        // getstring, getlandmarkname, gettrainerclassname, getname
         case CrystalOp::getmoney: {
+            // ROM: db account, db strbuf
             Cmd_Getmoney cmd;
-            cmd.strbuf = read_byte(ctx, span);
-            cmd.account = read_byte(ctx, span);
+            cmd.account = read_byte(ctx, span);  // \2 in macro = first in ROM
+            cmd.strbuf = read_byte(ctx, span);   // \1 in macro = second in ROM
             return cmd;
         }
         case CrystalOp::getcoins: {
+            // ROM: db strbuf (only one operand)
             Cmd_Getcoins cmd;
             cmd.strbuf = read_byte(ctx, span);
             return cmd;
         }
         case CrystalOp::getnum: {
+            // ROM: db strbuf (only one operand)
             Cmd_Getnum cmd;
             cmd.strbuf = read_byte(ctx, span);
             return cmd;
         }
         case CrystalOp::getmonname: {
+            // ROM: db pokemon, db strbuf
             Cmd_Getmonname cmd;
-            cmd.strbuf = read_byte(ctx, span);
-            cmd.pokemon = read_byte(ctx, span);
+            cmd.pokemon = read_byte(ctx, span);  // \2 in macro = first in ROM
+            cmd.strbuf = read_byte(ctx, span);   // \1 in macro = second in ROM
             return cmd;
         }
         case CrystalOp::getitemname: {
+            // ROM: db item, db strbuf
             Cmd_Getitemname cmd;
-            cmd.strbuf = read_byte(ctx, span);
-            cmd.item = read_byte(ctx, span);
+            cmd.item = read_byte(ctx, span);     // \2 in macro = first in ROM
+            cmd.strbuf = read_byte(ctx, span);   // \1 in macro = second in ROM
             return cmd;
         }
         case CrystalOp::getcurlandmarkname: {
+            // ROM: db strbuf (only one operand)
             Cmd_Getcurlandmarkname cmd;
             cmd.strbuf = read_byte(ctx, span);
             return cmd;
         }
         case CrystalOp::gettrainername: {
+            // ROM: db trainer_group, db trainer_id, db strbuf
             Cmd_Gettrainername cmd;
-            cmd.strbuf = read_byte(ctx, span);
-            cmd.trainer_group = read_byte(ctx, span);
-            cmd.trainer_id = read_byte(ctx, span);
+            cmd.trainer_group = read_byte(ctx, span);  // \2 in macro = first in ROM
+            cmd.trainer_id = read_byte(ctx, span);     // \3 in macro = second in ROM
+            cmd.strbuf = read_byte(ctx, span);         // \1 in macro = last in ROM
             return cmd;
         }
         case CrystalOp::getstring: {
+            // ROM: dw text_pointer, db strbuf
             Cmd_Getstring cmd;
-            cmd.strbuf = read_byte(ctx, span);
-            cmd.text_pointer = read_word(ctx, span);
+            cmd.text_pointer = read_word(ctx, span);   // \2 in macro = first in ROM
+            cmd.strbuf = read_byte(ctx, span);         // \1 in macro = last in ROM
             return cmd;
         }
         
@@ -981,22 +995,28 @@ CrystalCommandData TypedScriptDecoder::dispatch_decode(uint8_t opcode, TypedDeco
             return cmd;
         }
         case CrystalOp::getlandmarkname: {
+            // ROM: db landmark_id, db strbuf
+            // AUTHORITATIVE: pokecrystal events.asm: db \2 (landmark_id), db \1 (strbuf)
             Cmd_Getlandmarkname cmd;
-            cmd.strbuf = read_byte(ctx, span);
-            cmd.landmark_id = read_byte(ctx, span);
+            cmd.landmark_id = read_byte(ctx, span);  // \2 in macro = first in ROM
+            cmd.strbuf = read_byte(ctx, span);       // \1 in macro = second in ROM
             return cmd;
         }
         case CrystalOp::gettrainerclassname: {
+            // ROM: db trainer_group, db strbuf
+            // AUTHORITATIVE: pokecrystal events.asm: db \2 (trainer_group), db \1 (strbuf)
             Cmd_Gettrainerclassname cmd;
-            cmd.strbuf = read_byte(ctx, span);
-            cmd.trainer_group = read_byte(ctx, span);
+            cmd.trainer_group = read_byte(ctx, span);  // \2 in macro = first in ROM
+            cmd.strbuf = read_byte(ctx, span);         // \1 in macro = second in ROM
             return cmd;
         }
         case CrystalOp::getname: {
+            // ROM: db type, db id, db memory/strbuf
+            // AUTHORITATIVE: pokecrystal events.asm: db \2 (type), db \3 (id), db \1 (memory)
             Cmd_Getname cmd;
-            cmd.strbuf = read_byte(ctx, span);
-            cmd.type = read_byte(ctx, span);
-            cmd.id = read_byte(ctx, span);
+            cmd.type = read_byte(ctx, span);    // \2 in macro = first in ROM
+            cmd.id = read_byte(ctx, span);      // \3 in macro = second in ROM
+            cmd.strbuf = read_byte(ctx, span);  // \1 in macro = third in ROM
             return cmd;
         }
         case CrystalOp::wait: {
@@ -1165,6 +1185,13 @@ bool TypedScriptDecoder::validate_script_round_trip(const CrystalScriptIR& ir, s
 // =============================================================================
 
 std::vector<uint8_t> TypedScriptDecoder::decode_movement_data(uint32_t address) const {
+    // AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/movement.asm
+    // Decodes raw movement bytes including parameter bytes for commands that have them.
+    //
+    // Terminators: step_end (0x47), remove_object (0x49), step_loop (0x4A), 
+    //              step_stop (0x4B), skyfall_top (0x59)
+    // Note: step_wait_end (0x48) is ALSO a terminator but has a length param AFTER opcode
+    
     std::vector<uint8_t> movements;
     uint32_t pos = address;
     
@@ -1172,19 +1199,36 @@ std::vector<uint8_t> TypedScriptDecoder::decode_movement_data(uint32_t address) 
         uint8_t cmd = rom_.read_byte(pos++);
         movements.push_back(cmd);
         
-        // Movement terminators from pokecrystal/macros/scripts/movement.asm:
-        // step_end = 0x47, step_wait_end = 0x48, remove_object = 0x49, 
-        // step_stop = 0x4B, step_loop = 0x4A
-        if (cmd == 0x47 || cmd == 0x48 || cmd == 0x49 || cmd == 0x4A || cmd == 0x4B) break;
+        // Terminators without params
+        if (cmd == 0x47 || cmd == 0x49 || cmd == 0x4A || cmd == 0x4B || cmd == 0x59) {
+            break;
+        }
         
-        // Some commands have additional parameter bytes
-        // step_sleep with param (0x46) reads one more byte
+        // step_wait_end (0x48) - terminator WITH length param
+        if (cmd == 0x48) {
+            movements.push_back(rom_.read_byte(pos++));  // length param
+            break;  // It's still a terminator
+        }
+        
+        // Commands with parameter bytes (non-terminators)
+        // step_sleep with extended param (0x46)
         if (cmd == 0x46) {
             movements.push_back(rom_.read_byte(pos++));
         }
-        // step_dig (0x4F), step_shake (0x55), rock_smash (0x57)
-        // also read one param byte
-        if (cmd == 0x4F || cmd == 0x55 || cmd == 0x57) {
+        // step_dig (0x4F) - length param
+        if (cmd == 0x4F) {
+            movements.push_back(rom_.read_byte(pos++));
+        }
+        // step_shake (0x55) - displacement param
+        if (cmd == 0x55) {
+            movements.push_back(rom_.read_byte(pos++));
+        }
+        // rock_smash (0x57) - length param
+        if (cmd == 0x57) {
+            movements.push_back(rom_.read_byte(pos++));
+        }
+        // return_dig (0x58) - length param
+        if (cmd == 0x58) {
             movements.push_back(rom_.read_byte(pos++));
         }
         
@@ -1197,6 +1241,11 @@ std::vector<uint8_t> TypedScriptDecoder::decode_movement_data(uint32_t address) 
 
 // Parse raw movement bytes into semantic MovementCommand array
 // AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/movement.asm
+//
+// CRITICAL: No silent degradation. Unknown/invalid movement bytes MUST NOT
+// be converted to StepEnd. They must either:
+// 1. Be handled correctly with their full semantic meaning
+// 2. Throw an error that will be caught at a higher level
 std::vector<enginemon::MovementCommand> TypedScriptDecoder::parse_movement_commands(
     const std::vector<uint8_t>& raw) const {
     
@@ -1223,7 +1272,16 @@ std::vector<enginemon::MovementCommand> TypedScriptDecoder::parse_movement_comma
         }
         // Control commands (0x38-0x3D)
         else if (byte >= 0x38 && byte <= 0x3D) {
-            cmd.type = static_cast<MovementType>(byte);
+            // RemoveSliding=0x38, SetSliding=0x39, RemoveFixedFacing=0x3A, 
+            // FixFacing=0x3B, ShowObject=0x3C, HideObject=0x3D
+            switch (byte) {
+                case 0x38: cmd.type = MovementType::RemoveSliding; break;
+                case 0x39: cmd.type = MovementType::SetSliding; break;
+                case 0x3A: cmd.type = MovementType::RemoveFixedFacing; break;
+                case 0x3B: cmd.type = MovementType::FixFacing; break;
+                case 0x3C: cmd.type = MovementType::ShowObject; break;
+                case 0x3D: cmd.type = MovementType::HideObject; break;
+            }
         }
         // step_sleep 1-8 (0x3E-0x45)
         else if (byte >= 0x3E && byte <= 0x45) {
@@ -1241,9 +1299,12 @@ std::vector<enginemon::MovementCommand> TypedScriptDecoder::parse_movement_comma
         else if (byte == 0x47) {
             cmd.type = MovementType::StepEnd;
         }
-        // step_wait_end (0x48)
+        // step_wait_end (0x48) - has length param
         else if (byte == 0x48) {
             cmd.type = MovementType::StepWaitEnd;
+            if (i + 1 < raw.size()) {
+                cmd.param = raw[++i];  // length param
+            }
         }
         // remove_object (0x49)
         else if (byte == 0x49) {
@@ -1269,7 +1330,7 @@ std::vector<enginemon::MovementCommand> TypedScriptDecoder::parse_movement_comma
         else if (byte == 0x4E) {
             cmd.type = MovementType::Skyfall;
         }
-        // step_dig (0x4F)
+        // step_dig (0x4F) - has length param
         else if (byte == 0x4F) {
             cmd.type = MovementType::StepDig;
             if (i + 1 < raw.size()) {
@@ -1280,7 +1341,23 @@ std::vector<enginemon::MovementCommand> TypedScriptDecoder::parse_movement_comma
         else if (byte == 0x50) {
             cmd.type = MovementType::StepBump;
         }
-        // step_shake (0x55)
+        // fish_got_bite (0x51)
+        else if (byte == 0x51) {
+            cmd.type = MovementType::FishGotBite;
+        }
+        // fish_cast_rod (0x52)
+        else if (byte == 0x52) {
+            cmd.type = MovementType::FishCastRod;
+        }
+        // hide_emote (0x53)
+        else if (byte == 0x53) {
+            cmd.type = MovementType::HideEmote;
+        }
+        // show_emote (0x54)
+        else if (byte == 0x54) {
+            cmd.type = MovementType::ShowEmote;
+        }
+        // step_shake (0x55) - has displacement param
         else if (byte == 0x55) {
             cmd.type = MovementType::StepShake;
             if (i + 1 < raw.size()) {
@@ -1291,16 +1368,32 @@ std::vector<enginemon::MovementCommand> TypedScriptDecoder::parse_movement_comma
         else if (byte == 0x56) {
             cmd.type = MovementType::TreeShake;
         }
-        // rock_smash (0x57)
+        // rock_smash (0x57) - has length param
         else if (byte == 0x57) {
             cmd.type = MovementType::RockSmash;
             if (i + 1 < raw.size()) {
                 cmd.param = raw[++i];
             }
         }
-        // Unknown - treat as step_end for safety
+        // return_dig (0x58) - has length param
+        else if (byte == 0x58) {
+            cmd.type = MovementType::ReturnDig;
+            if (i + 1 < raw.size()) {
+                cmd.param = raw[++i];
+            }
+        }
+        // skyfall_top (0x59) - terminal
+        else if (byte == 0x59) {
+            cmd.type = MovementType::SkyfallTop;
+        }
+        // INVALID: byte >= 0x5A - no such movement command exists
+        // Per Item 4 requirements: NO silent degradation to StepEnd
         else {
-            cmd.type = MovementType::StepEnd;
+            // Movement opcode out of valid range [0x00, 0x59]
+            // This is a hard error - the decoder should have produced valid bytes only
+            throw std::runtime_error("Invalid movement opcode 0x" + 
+                std::to_string(static_cast<int>(byte)) + " at index " + std::to_string(i) +
+                " - valid range is 0x00-0x59");
         }
         
         commands.push_back(cmd);

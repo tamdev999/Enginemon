@@ -324,10 +324,14 @@ int main(int argc, char* argv[]) {
         }
         
         // Stage 5: Legality
+        // Perform actual round-trip validation (structural integrity)
+        std::vector<std::string> round_trip_errors;
+        decoder.validate_script_round_trip(ir, &round_trip_errors);
+        
         LegalityInput input;
         input.ir = &ir;
         input.decode_complete = true;
-        input.round_trip_failures = 0;
+        input.round_trip_failures = static_cast<uint32_t>(round_trip_errors.size());
         input.unknown_opcodes = 0;
         for (const auto& cmd : ir.commands) {
             if (std::holds_alternative<Cmd_Unknown>(cmd.data)) {

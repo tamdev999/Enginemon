@@ -200,7 +200,12 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
     // Preserves LINE/CONT/PARA/etc. as distinct operations, never flattening to whitespace.
     // This is the correct way to decode Crystal text for rendering.
     //
-    // Reference: pokecrystal/home/text.asm, macros/scripts/text.asm
+    // AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/text.asm, home/text.asm
+    //
+    // Text resources are COMMAND STREAMS, not just character data.
+    // Commands 0x00-0x16 are TX_* commands from text.asm with operands.
+    // Commands 0x4E-0x58 are flow control (<NEXT>, <LINE>, etc.)
+    // Characters 0x50+ are printable (with some exceptions)
     //
     // Example: NewBarkTownSignText in ROM:
     //   0x00 "NEW BARK TOWN" 0x51 "The Town Where the" 0x4F "Winds of a New" 0x55 "Beginning Blow" 0x57
@@ -231,12 +236,201 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
     while (true) {
         uint8_t ch = rom_.read_byte(pos++);
         
-        // Control codes - these are semantic operations, NOT whitespace
+        // TX_* commands (0x00-0x16) from pokecrystal/macros/scripts/text.asm
+        // These are dynamic text commands with operands
         switch (ch) {
-            case 0x50:  // @ - string terminator (legacy, rare)
+            // TX_START (0x00) - should have been skipped above, but handle if embedded
+            case 0x00:
+                continue;
+            
+            // TX_RAM (0x01): text_ram - display RAM contents
+            // Operands: dw address
+            case 0x01: {
                 flush_text();
-                seq.elements.push_back(TextElement::make_done());
-                return seq;
+                uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
+                pos += 2;
+                seq.elements.push_back(TextElement::make_text_ram(addr));
+                continue;
+            }
+            
+            // TX_BCD (0x02): text_bcd - display BCD number
+            // Operands: dw address, db flags
+            case 0x02: {
+                flush_text();
+                uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
+                pos += 2;
+                uint8_t flags = rom_.read_byte(pos++);
+                seq.elements.push_back(TextElement::make_text_bcd(addr, flags));
+                continue;
+            }
+            
+            // TX_MOVE (0x03): text_move - move cursor
+            // Operands: dw position (tilemap address)
+            case 0x03: {
+                flush_text();
+                uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
+                pos += 2;
+                TextElement elem{TextOp::TextMove, ""};
+                elem.addr = addr;
+                seq.elements.push_back(elem);
+                continue;
+            }
+            
+            // TX_BOX (0x04): text_box - draw text box
+            // Operands: dw address, db width, db height
+            case 0x04: {
+                flush_text();
+                uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
+                pos += 2;
+                uint8_t width = rom_.read_byte(pos++);
+                uint8_t height = rom_.read_byte(pos++);
+                TextElement elem{TextOp::TextBox, ""};
+                elem.addr = addr;
+                elem.param1 = width;
+                elem.param2 = height;
+                seq.elements.push_back(elem);
+                continue;
+            }
+            
+            // TX_LOW (0x05): text_low - move to bottom of screen
+            case 0x05:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextLow, ""});
+                continue;
+            
+            // TX_PROMPT_BUTTON (0x06): text_promptbutton - wait for button
+            case 0x06:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextPromptButton, ""});
+                continue;
+            
+            // TX_SCROLL (0x07): text_scroll - scroll text up
+            case 0x07:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextScroll, ""});
+                continue;
+            
+            // TX_START_ASM (0x08): text_asm - start inline assembly
+            // This is a terminator - execution transfers to code following this
+            case 0x08:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextAsm, ""});
+                return seq;  // Terminates text parsing
+            
+            // TX_DECIMAL (0x09): text_decimal - display decimal number
+            // Operands: dw address, dn bytes|digits (packed nibble: upper=bytes, lower=digits)
+            case 0x09: {
+                flush_text();
+                uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
+                pos += 2;
+                uint8_t bytes_digits = rom_.read_byte(pos++);
+                seq.elements.push_back(TextElement::make_text_decimal(addr, bytes_digits));
+                continue;
+            }
+            
+            // TX_PAUSE (0x0a): text_pause - pause briefly
+            case 0x0a:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextPause, ""});
+                continue;
+            
+            // TX_SOUND_DEX_FANFARE_50_79 (0x0b) - sound effect (no operands, consume but preserve)
+            case 0x0b: {
+                flush_text();
+                std::vector<uint8_t> raw{0x0b};
+                seq.elements.push_back(TextElement::make_text_raw(raw));
+                continue;
+            }
+            
+            // TX_DOTS (0x0c): text_dots - display dots
+            // Operands: db count
+            case 0x0c: {
+                flush_text();
+                uint8_t count = rom_.read_byte(pos++);
+                std::vector<uint8_t> raw{0x0c, count};
+                seq.elements.push_back(TextElement::make_text_raw(raw));
+                continue;
+            }
+            
+            // TX_WAIT_BUTTON (0x0d): text_waitbutton - wait for button press
+            case 0x0d:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextPromptButton, ""});
+                continue;
+            
+            // TX_SOUND_DEX_FANFARE_20_49 (0x0e) - sound effect (no operands)
+            case 0x0e: {
+                flush_text();
+                std::vector<uint8_t> raw{0x0e};
+                seq.elements.push_back(TextElement::make_text_raw(raw));
+                continue;
+            }
+            
+            // TX_SOUND_ITEM (0x0f): sound_item - play item jingle
+            case 0x0f:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextSoundItem, ""});
+                continue;
+            
+            // TX_SOUND_CAUGHT_MON (0x10): sound_caught_mon
+            case 0x10:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextSoundCaught, ""});
+                continue;
+            
+            // TX_SOUND_DEX_FANFARE_80_109 (0x11) - sound effect (no operands)
+            case 0x11: {
+                flush_text();
+                std::vector<uint8_t> raw{0x11};
+                seq.elements.push_back(TextElement::make_text_raw(raw));
+                continue;
+            }
+            
+            // TX_SOUND_FANFARE (0x12): sound_fanfare
+            case 0x12:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextSoundFanfare, ""});
+                continue;
+            
+            // TX_SOUND_SLOT_MACHINE_START (0x13) - sound effect (no operands)
+            case 0x13: {
+                flush_text();
+                std::vector<uint8_t> raw{0x13};
+                seq.elements.push_back(TextElement::make_text_raw(raw));
+                continue;
+            }
+            
+            // TX_STRINGBUFFER (0x14): text_buffer - display string buffer
+            // Operands: db buffer_id
+            case 0x14: {
+                flush_text();
+                uint8_t buffer_id = rom_.read_byte(pos++);
+                seq.elements.push_back(TextElement::make_text_string_buffer(buffer_id));
+                continue;
+            }
+            
+            // TX_DAY (0x15): text_today - display current day
+            case 0x15:
+                flush_text();
+                seq.elements.push_back(TextElement{TextOp::TextDay, ""});
+                continue;
+            
+            // TX_FAR (0x16): text_far - far text pointer
+            // Operands: dw address, db bank
+            case 0x16: {
+                flush_text();
+                uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
+                pos += 2;
+                uint8_t bank = rom_.read_byte(pos++);
+                seq.elements.push_back(TextElement::make_text_far(addr, bank));
+                continue;
+            }
+            
+            // Flow control codes (0x4B-0x58)
+            case 0x4B:  // <SCROLL> / <_CONT> - scroll (internal alias)
+                flush_text();
+                seq.elements.push_back(TextElement::make_scroll());
+                continue;
                 
             case 0x4E:  // <NEXT> - clear and continue (similar to PARA but no wait)
                 flush_text();
@@ -247,6 +441,11 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
                 flush_text();
                 seq.elements.push_back(TextElement::make_line());
                 continue;
+            
+            case 0x50:  // @ (TX_END) - string terminator
+                flush_text();
+                seq.elements.push_back(TextElement::make_done());
+                return seq;
                 
             case 0x51:  // <PARA> - wait, clear, continue
                 flush_text();
@@ -254,7 +453,6 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
                 continue;
                 
             case 0x55:  // <CONT> - wait, scroll, continue
-            case 0x4B:  // <SCROLL> / <_CONT> - scroll (internal alias)
                 flush_text();
                 seq.elements.push_back(TextElement::make_cont());
                 continue;
@@ -278,7 +476,7 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
         if (it != charmap_.end()) {
             current_text += it->second;
         } else {
-            // Unknown character - emit placeholder
+            // Unknown character - emit placeholder with the actual byte value
             current_text += "?";
         }
         
@@ -308,12 +506,36 @@ std::string TextSequence::debug_string() const {
             case TextOp::Scroll: result += "[SCROLL]"; break;
             case TextOp::Done:   result += "[DONE]"; break;
             case TextOp::Prompt: result += "[PROMPT]"; break;
+            case TextOp::TextRam: result += "[RAM:0x" + std::to_string(elem.addr) + "]"; break;
+            case TextOp::TextBcd: result += "[BCD:0x" + std::to_string(elem.addr) + "]"; break;
+            case TextOp::TextMove: result += "[MOVE:0x" + std::to_string(elem.addr) + "]"; break;
+            case TextOp::TextBox: result += "[BOX]"; break;
+            case TextOp::TextLow: result += "[LOW]"; break;
+            case TextOp::TextPromptButton: result += "[WAITBUTTON]"; break;
+            case TextOp::TextScroll: result += "[TXSCROLL]"; break;
+            case TextOp::TextAsm: result += "[ASM]"; break;
+            case TextOp::TextDecimal: result += "[DEC:0x" + std::to_string(elem.addr) + "]"; break;
+            case TextOp::TextPause: result += "[PAUSE]"; break;
+            case TextOp::TextStringBuffer: result += "[BUF:" + std::to_string(elem.param1) + "]"; break;
+            case TextOp::TextDay: result += "[DAY]"; break;
+            case TextOp::TextFar: result += "[FAR:" + std::to_string(elem.param2) + ":0x" + std::to_string(elem.addr) + "]"; break;
+            case TextOp::TextSoundItem: result += "[SND:ITEM]"; break;
+            case TextOp::TextSoundCaught: result += "[SND:CAUGHT]"; break;
+            case TextOp::TextSoundFanfare: result += "[SND:FANFARE]"; break;
+            case TextOp::TextRaw: result += "[RAW]"; break;
         }
     }
     return result;
 }
 
 std::vector<uint8_t> ScriptDecoder::decode_movement_data(uint32_t address) {
+    // AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/movement.asm
+    // Decodes raw movement bytes including parameter bytes for commands that have them.
+    //
+    // Terminators: step_end (0x47), remove_object (0x49), step_loop (0x4A), 
+    //              step_stop (0x4B), skyfall_top (0x59)
+    // Note: step_wait_end (0x48) is ALSO a terminator but has a length param AFTER opcode
+    
     std::vector<uint8_t> movements;
     uint32_t pos = address;
     
@@ -321,19 +543,36 @@ std::vector<uint8_t> ScriptDecoder::decode_movement_data(uint32_t address) {
         uint8_t cmd = rom_.read_byte(pos++);
         movements.push_back(cmd);
         
-        // Movement terminators from pokecrystal/macros/scripts/movement.asm:
-        // step_end = 0x47, step_wait_end = 0x48, remove_object = 0x49, 
-        // step_stop = 0x4B, step_loop = 0x4A
-        if (cmd == 0x47 || cmd == 0x48 || cmd == 0x49 || cmd == 0x4A || cmd == 0x4B) break;
+        // Terminators without params
+        if (cmd == 0x47 || cmd == 0x49 || cmd == 0x4A || cmd == 0x4B || cmd == 0x59) {
+            break;
+        }
         
-        // Some commands have additional parameter bytes
-        // step_sleep with param (0x46) reads one more byte
+        // step_wait_end (0x48) - terminator WITH length param
+        if (cmd == 0x48) {
+            movements.push_back(rom_.read_byte(pos++));  // length param
+            break;  // It's still a terminator
+        }
+        
+        // Commands with parameter bytes (non-terminators)
+        // step_sleep with extended param (0x46)
         if (cmd == 0x46) {
             movements.push_back(rom_.read_byte(pos++));
         }
-        // step_wait_end (0x48), step_dig (0x4F), step_shake (0x55), rock_smash (0x57)
-        // also read one param byte
-        if (cmd == 0x48 || cmd == 0x4F || cmd == 0x55 || cmd == 0x57) {
+        // step_dig (0x4F) - length param
+        if (cmd == 0x4F) {
+            movements.push_back(rom_.read_byte(pos++));
+        }
+        // step_shake (0x55) - displacement param
+        if (cmd == 0x55) {
+            movements.push_back(rom_.read_byte(pos++));
+        }
+        // rock_smash (0x57) - length param
+        if (cmd == 0x57) {
+            movements.push_back(rom_.read_byte(pos++));
+        }
+        // return_dig (0x58) - length param
+        if (cmd == 0x58) {
             movements.push_back(rom_.read_byte(pos++));
         }
         
@@ -346,6 +585,11 @@ std::vector<uint8_t> ScriptDecoder::decode_movement_data(uint32_t address) {
 
 // Parse raw movement bytes into semantic MovementCommand array
 // AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/movement.asm
+//
+// CRITICAL: No silent degradation. Unknown/invalid movement bytes MUST NOT
+// be converted to StepEnd. They must either:
+// 1. Be handled correctly with their full semantic meaning
+// 2. Throw an error that will be caught at a higher level
 std::vector<MovementCommand> ScriptDecoder::parse_movement_commands(const std::vector<uint8_t>& raw) {
     std::vector<MovementCommand> commands;
     
@@ -364,62 +608,130 @@ std::vector<MovementCommand> ScriptDecoder::parse_movement_commands(const std::v
             cmd.direction = static_cast<Direction>(dir);
             cmd.type = static_cast<MovementType>(type);
         }
-        // Control commands (0x38-0x5F)
-        else if (byte < 0x46) {
-            // 0x38-0x45: control commands
-            cmd.type = static_cast<MovementType>(byte);
+        // Control commands (0x38-0x3D)
+        else if (byte >= 0x38 && byte <= 0x3D) {
+            // RemoveSliding=0x38, SetSliding=0x39, RemoveFixedFacing=0x3A, 
+            // FixFacing=0x3B, ShowObject=0x3C, HideObject=0x3D
+            switch (byte) {
+                case 0x38: cmd.type = MovementType::RemoveSliding; break;
+                case 0x39: cmd.type = MovementType::SetSliding; break;
+                case 0x3A: cmd.type = MovementType::RemoveFixedFacing; break;
+                case 0x3B: cmd.type = MovementType::FixFacing; break;
+                case 0x3C: cmd.type = MovementType::ShowObject; break;
+                case 0x3D: cmd.type = MovementType::HideObject; break;
+            }
         }
+        // step_sleep 1-8 (0x3E-0x45)
         else if (byte >= 0x3E && byte <= 0x45) {
-            // step_sleep 1-8
             cmd.type = MovementType::StepSleep;
             cmd.param = byte - 0x3E + 1;  // 1-8 frames
         }
+        // step_sleep with extended param (0x46)
         else if (byte == 0x46) {
-            // step_sleep with extended param
             cmd.type = MovementType::StepSleep;
             if (i + 1 < raw.size()) {
                 cmd.param = raw[++i];
             }
         }
+        // step_end (0x47)
         else if (byte == 0x47) {
             cmd.type = MovementType::StepEnd;
         }
+        // step_wait_end (0x48) - has length param
         else if (byte == 0x48) {
-            cmd.type = static_cast<MovementType>(byte);
+            cmd.type = MovementType::StepWaitEnd;
             if (i + 1 < raw.size()) {
-                cmd.param = raw[++i];  // wait length
+                cmd.param = raw[++i];  // length param
             }
         }
-        else if (byte >= 0x49 && byte <= 0x4E) {
-            cmd.type = static_cast<MovementType>(byte);
+        // remove_object (0x49)
+        else if (byte == 0x49) {
+            cmd.type = MovementType::RemoveObject;
         }
+        // step_loop (0x4A)
+        else if (byte == 0x4A) {
+            cmd.type = MovementType::StepLoop;
+        }
+        // step_stop (0x4B)
+        else if (byte == 0x4B) {
+            cmd.type = MovementType::StepStop;
+        }
+        // teleport_from (0x4C)
+        else if (byte == 0x4C) {
+            cmd.type = MovementType::TeleportFrom;
+        }
+        // teleport_to (0x4D)
+        else if (byte == 0x4D) {
+            cmd.type = MovementType::TeleportTo;
+        }
+        // skyfall (0x4E)
+        else if (byte == 0x4E) {
+            cmd.type = MovementType::Skyfall;
+        }
+        // step_dig (0x4F) - has length param
         else if (byte == 0x4F) {
             cmd.type = MovementType::StepDig;
             if (i + 1 < raw.size()) {
-                cmd.param = raw[++i];  // dig length
+                cmd.param = raw[++i];
             }
         }
+        // step_bump (0x50)
         else if (byte == 0x50) {
             cmd.type = MovementType::StepBump;
         }
+        // fish_got_bite (0x51)
+        else if (byte == 0x51) {
+            cmd.type = MovementType::FishGotBite;
+        }
+        // fish_cast_rod (0x52)
+        else if (byte == 0x52) {
+            cmd.type = MovementType::FishCastRod;
+        }
+        // hide_emote (0x53)
+        else if (byte == 0x53) {
+            cmd.type = MovementType::HideEmote;
+        }
+        // show_emote (0x54)
+        else if (byte == 0x54) {
+            cmd.type = MovementType::ShowEmote;
+        }
+        // step_shake (0x55) - has displacement param
         else if (byte == 0x55) {
             cmd.type = MovementType::StepShake;
             if (i + 1 < raw.size()) {
-                cmd.param = raw[++i];  // shake displacement
+                cmd.param = raw[++i];
             }
         }
+        // tree_shake (0x56)
         else if (byte == 0x56) {
             cmd.type = MovementType::TreeShake;
         }
+        // rock_smash (0x57) - has length param
         else if (byte == 0x57) {
             cmd.type = MovementType::RockSmash;
             if (i + 1 < raw.size()) {
-                cmd.param = raw[++i];  // smash length
+                cmd.param = raw[++i];
             }
         }
+        // return_dig (0x58) - has length param
+        else if (byte == 0x58) {
+            cmd.type = MovementType::ReturnDig;
+            if (i + 1 < raw.size()) {
+                cmd.param = raw[++i];
+            }
+        }
+        // skyfall_top (0x59) - terminal
+        else if (byte == 0x59) {
+            cmd.type = MovementType::SkyfallTop;
+        }
+        // INVALID: byte >= 0x5A - no such movement command exists
+        // Per Item 4 requirements: NO silent degradation to StepEnd
         else {
-            // Unknown - treat as raw
-            cmd.type = static_cast<MovementType>(byte);
+            // Movement opcode out of valid range [0x00, 0x59]
+            // This is a hard error - the decoder should have produced valid bytes only
+            throw std::runtime_error("Invalid movement opcode 0x" + 
+                std::to_string(static_cast<int>(byte)) + " at index " + std::to_string(i) +
+                " - valid range is 0x00-0x59");
         }
         
         commands.push_back(cmd);

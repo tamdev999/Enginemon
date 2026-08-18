@@ -417,13 +417,20 @@ std::vector<LegalityDiagnostic> LegalityGate::check_stage5_ir(const LegalityInpu
                 if constexpr (std::is_same_v<T, enginemon::Sem_SetFlag> ||
                               std::is_same_v<T, enginemon::Sem_ClearFlag> ||
                               std::is_same_v<T, enginemon::Sem_CheckFlag>) {
-                    // FlagId 0xFFFF is typically invalid/none
-                    if (op.flag == 0xFFFF) {
+                    // EventFlags: 0-2047 valid, EngineFlags: 0-189 valid
+                    // See pokecrystal/constants/event_flags.asm, engine_flags.asm
+                    bool invalid = false;
+                    if (op.flag.ns == enginemon::FlagNamespace::Event && op.flag.value >= 2048) {
+                        invalid = true;
+                    } else if (op.flag.ns == enginemon::FlagNamespace::Engine && op.flag.value >= 190) {
+                        invalid = true;
+                    }
+                    if (invalid) {
                         auto d = make_diagnostic(
                             LegalityFailureKind::InvalidSemanticReference,
                             script_id, "Stage5",
-                            "FlagId 0xFFFF",
-                            "Invalid flag ID in semantic operation");
+                            op.flag.to_string(),
+                            "Invalid flag ID - out of valid range for namespace");
                         diagnostics.push_back(std::move(d));
                     }
                 }

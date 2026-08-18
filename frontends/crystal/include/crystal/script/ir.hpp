@@ -31,26 +31,62 @@ struct LabelRef {
 
 // Text control codes from Crystal (preserved semantically, never flattened to whitespace)
 // Reference: pokecrystal/macros/scripts/text.asm, home/text.asm
+// AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/text.asm for command definitions
 enum class TextOp : uint8_t {
-    // Printable text run - the actual characters to display
+    // Printable text run - the actual character data to display
     Text,
     
-    // Flow control codes
+    // Flow control codes - presentation control
     Line,       // <LINE> (0x4F): Move cursor to line 2, no wait
     Next,       // <NEXT> (0x4E): Clear box and continue (like LINE but clears)
     Para,       // <PARA> (0x51): Wait for button, clear box, continue
     Cont,       // <CONT> (0x55): Wait for button, scroll up one line, continue
-    Scroll,     // <SCROLL> (0x4B): Scroll without wait (internal use)
+    Scroll,     // <SCROLL> (0x4B/0x07): Scroll without wait (internal use)
     
     // Terminators
     Done,       // <DONE> (0x57): End text processing, box stays open
     Prompt,     // <PROMPT> (0x58): Show cursor, wait for button, close
+    
+    // Dynamic text commands (TX_* commands from text.asm)
+    // These inject dynamic content into the text stream
+    TextRam,        // TX_RAM (0x01): Display RAM contents (dw address)
+    TextBcd,        // TX_BCD (0x02): Display BCD number (dw address, db flags)
+    TextMove,       // TX_MOVE (0x03): Move cursor (dw position)
+    TextBox,        // TX_BOX (0x04): Draw text box (dw address, db width, db height)
+    TextLow,        // TX_LOW (0x05): Move to bottom of screen
+    TextPromptButton, // TX_PROMPT_BUTTON (0x06): Wait for button press
+    TextScroll,     // TX_SCROLL (0x07): Scroll text up
+    TextAsm,        // TX_START_ASM (0x08): Start inline assembly
+    TextDecimal,    // TX_DECIMAL (0x09): Display decimal (dw address, dn bytes|digits)
+    TextPause,      // TX_PAUSE (0x0a): Pause briefly
+    TextStringBuffer, // TX_STRINGBUFFER (0x14): Display string buffer (db buffer_id)
+    TextDay,        // TX_DAY (0x15): Display current day of week
+    TextFar,        // TX_FAR (0x16): Far text pointer (dw address, db bank)
+    
+    // Sound effects in text (used sparingly)
+    TextSoundItem,  // TX_SOUND_ITEM (0x0f): Play item jingle
+    TextSoundCaught, // TX_SOUND_CAUGHT_MON (0x10): Play caught mon jingle
+    TextSoundFanfare, // TX_SOUND_FANFARE (0x12): Play fanfare
+    
+    // Placeholder for unsupported commands (lossless - preserves original bytes)
+    TextRaw,        // Unrecognized text command - stores opcode and operands
 };
 
 // A single element in a text sequence
+// CRITICAL: Elements preserve ALL semantic information from Crystal text commands.
+// For dynamic commands (TextRam, TextDecimal, etc.), the operands are stored
+// so they can be properly processed at runtime or re-encoded losslessly.
 struct TextElement {
     TextOp op;
-    std::string text;   // For TextOp::Text, the actual character data (UTF-8)
+    std::string text;       // For TextOp::Text, the actual character data (UTF-8)
+    
+    // Operand storage for dynamic text commands
+    uint16_t addr = 0;      // For TextRam, TextBcd, TextDecimal, TextFar
+    uint8_t param1 = 0;     // For TextBcd (flags), TextBox (width), TextDecimal (bytes|digits nibble), TextStringBuffer (buffer_id)
+    uint8_t param2 = 0;     // For TextBox (height), TextFar (bank)
+    
+    // Raw bytes for TextRaw (unrecognized commands) - enables lossless round-trip
+    std::vector<uint8_t> raw_bytes;
     
     // Convenience constructors
     static TextElement make_text(const std::string& s) { return {TextOp::Text, s}; }
@@ -61,6 +97,41 @@ struct TextElement {
     static TextElement make_scroll() { return {TextOp::Scroll, ""}; }
     static TextElement make_done() { return {TextOp::Done, ""}; }
     static TextElement make_prompt() { return {TextOp::Prompt, ""}; }
+    
+    // Dynamic text command constructors
+    static TextElement make_text_ram(uint16_t address) { 
+        TextElement e{TextOp::TextRam, ""}; 
+        e.addr = address; 
+        return e; 
+    }
+    static TextElement make_text_bcd(uint16_t address, uint8_t flags) { 
+        TextElement e{TextOp::TextBcd, ""}; 
+        e.addr = address; 
+        e.param1 = flags;
+        return e; 
+    }
+    static TextElement make_text_decimal(uint16_t address, uint8_t bytes_digits) { 
+        TextElement e{TextOp::TextDecimal, ""}; 
+        e.addr = address; 
+        e.param1 = bytes_digits;  // Upper nibble = bytes, lower nibble = digits
+        return e; 
+    }
+    static TextElement make_text_string_buffer(uint8_t buffer_id) { 
+        TextElement e{TextOp::TextStringBuffer, ""}; 
+        e.param1 = buffer_id;
+        return e; 
+    }
+    static TextElement make_text_far(uint16_t address, uint8_t bank) { 
+        TextElement e{TextOp::TextFar, ""}; 
+        e.addr = address;
+        e.param2 = bank;
+        return e; 
+    }
+    static TextElement make_text_raw(std::vector<uint8_t> bytes) { 
+        TextElement e{TextOp::TextRaw, ""}; 
+        e.raw_bytes = std::move(bytes);
+        return e; 
+    }
 };
 
 // A complete text sequence from Crystal ROM

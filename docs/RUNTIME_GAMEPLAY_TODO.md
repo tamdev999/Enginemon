@@ -401,128 +401,84 @@ Existing guards prevent most observable issues. Not RNG-dependent.
 
 ---
 
-## J. String Formatting Command Operand Order
+## J. String Formatting Command Operand Order - FIXED ✓
 
-**Status**: Deferred - CONFIRMED BUG (latent)
+**Status**: FIXED - August 2026
 
-**Current Behavior**:
-The typed decoder reads operands in wrong order for several string formatting commands:
-```cpp
-case CrystalOp::getmoney: {
-    cmd.strbuf = read_byte(ctx, span);    // WRONG - strbuf FIRST
-    cmd.account = read_byte(ctx, span);   // WRONG - account SECOND
-}
-```
+**Prior Bug**:
+The typed decoder read operands in wrong order for several string formatting commands.
 
-**Crystal ROM Layout** (from pokecrystal/macros/scripts/events.asm):
-```asm
-MACRO getmoney
-    db getmoney_command
-    db \2 ; account       <- FIRST byte
-    db \1 ; string_buffer <- SECOND byte
-ENDM
-```
+**Fix Applied**:
+Updated `typed_decoder.cpp` and `crystal_command.cpp` to match pokecrystal ROM layout:
+- getmoney (0x3D): ROM=[account, strbuf] - decoder now reads account first
+- getmonname (0x40): ROM=[pokemon, strbuf] - decoder now reads pokemon first
+- getitemname (0x41): ROM=[item, strbuf] - decoder now reads item first
+- gettrainername (0x43): ROM=[group, id, strbuf] - decoder now reads group, id first
+- getstring (0x44): ROM=[pointer(lo,hi), strbuf] - decoder now reads pointer first
 
-**Commands Affected**:
-- getmoney (0x3D): ROM=[account, strbuf], decoder=[strbuf, account]
-- getmonname (0x40): ROM=[pokemon, strbuf], decoder=[strbuf, pokemon]
-- getitemname (0x41): ROM=[item, strbuf], decoder=[strbuf, item]
-- gettrainername (0x43): ROM=[group, id, strbuf], decoder=[strbuf, group, id]
-- getstring (0x44): ROM=[pointer, strbuf], decoder=[strbuf, pointer]
+**Authoritative Source**: `pokecrystal/macros/scripts/events.asm`
 
-**Why Corpus Passes**:
-The encoder writes bytes in the same wrong order as the decoder reads them.
-Round-trip succeeds but semantic field assignments are swapped.
-
-**Reason Deferred**:
-Bug is latent - downstream semantic lowering doesn't distinguish which field is which
-for most use cases. Fix requires careful encoder+decoder sync.
-
-**Intended Milestone**: Frontend Correctness Hardening
-
-**Relevant Files**:
-- `frontends/crystal/script/typed_decoder.cpp` - decode order
-- `frontends/crystal/script/crystal_command.cpp` - encode order
-- `references/pokecrystal/macros/scripts/events.asm` - authoritative layout
-
-**Invariant**: Future fix must match exact ROM byte order per pokecrystal macros.
+**Files Modified**:
+- `frontends/crystal/script/typed_decoder.cpp` - Fixed decode order
+- `frontends/crystal/script/crystal_command.cpp` - Fixed encode order (already matched)
 
 ---
 
-## K. Round-Trip Validation Bypassed in Production
+## K. Round-Trip Validation - FIXED ✓
 
-**Status**: Deferred - CONFIRMED GAP
+**Status**: FIXED - August 2026
 
-**Current Behavior**:
-Production compiler manually sets validation inputs without invoking the validator:
+**Prior Gap**:
+Production compiler manually set validation inputs without invoking the validator:
 ```cpp
-// full_compiler.cpp
 input.decode_complete = true;
 input.round_trip_failures = 0;  // Set to 0 without validation
 ```
 
-The actual `validate_script_round_trip()` function exists and works correctly
-(used in corpus_test), but production bypasses it.
+**Fix Applied**:
+Updated `full_compiler.cpp` `process_script_typed()` to actually call 
+`typed_decoder_->validate_script_round_trip(ir)` and use the real results.
 
-**Why It Matters Less Than Expected**:
-Round-trip validation catches ASYMMETRIC bugs (encoder != decoder).
-The operand order bugs are SYMMETRIC (both wrong in same way), so would pass anyway.
-
-**Reason Deferred**:
-Fix requires either:
-1. Invoke validation in production (catches asymmetric bugs), OR
-2. Build independent RGBDS-based oracle (catches symmetric bugs)
-
-**Intended Milestone**: Frontend Correctness Hardening
-
-**Relevant Files**:
-- `frontends/crystal/compile/full_compiler.cpp` - bypassed validation
-- `frontends/crystal/script/typed_decoder.cpp` - validate_script_round_trip()
-- `tests/crystal/corpus_test.cpp` - working validation usage
-
-**Invariant**: Production must either validate round-trip or use external oracle.
+**Files Modified**:
+- `frontends/crystal/compile/full_compiler.cpp` - Added validation call
+- `tools/corpus_lowering_audit.cpp` - Same fix for audit tool
 
 ---
 
-## L. EventFlag vs EngineFlag Namespace Collapse
+## L. EventFlag vs EngineFlag Namespace - FIXED ✓
 
-**Status**: Deferred - ARCHITECTURAL GAP
+**Status**: FIXED - August 2026
 
-**Current Behavior**:
-Both checkevent (event_flag) and checkflag (engine_flag) lower to same type:
+**Prior Gap**:
+Both checkevent (event_flag) and checkflag (engine_flag) lowered to same type:
 ```cpp
-// semantic_legalizer.cpp
-if (auto* p = std::get_if<Cmd_Checkevent>(&cmd->data)) {
-    Sem_CheckFlag op;
-    op.flag = FlagId{p->event_flag};  // No namespace
-}
-if (auto* p = std::get_if<Cmd_Checkflag>(&cmd->data)) {
-    Sem_CheckFlag op;
-    op.flag = FlagId{p->engine_flag}; // Same type
-}
+Sem_CheckFlag op;
+op.flag = FlagId{p->event_flag};  // No namespace
 ```
 
-**Why It Works for Crystal**:
-Crystal allocates event_flag and engine_flag to non-overlapping numeric ranges.
-No collision occurs in vanilla.
+**Fix Applied**:
+Created `FlagRef` struct with `FlagNamespace` enum to preserve the distinction:
+```cpp
+enum class FlagNamespace : uint8_t {
+    Event = 0,    // wEventFlags (2048 bits)
+    Engine = 1,   // wEngineFlags (190 bits)
+};
 
-**Why It's a Gap**:
-Future mods or Gen1/Gen3 frontends could have overlapping flag namespaces,
-causing silent flag collisions.
+struct FlagRef {
+    FlagNamespace ns;
+    uint16_t value;
+};
+```
 
-**Reason Deferred**:
-Fix requires architectural decision:
-- Option A: Add FlagNamespace enum to Sem_CheckFlag
-- Option B: Encode namespace in high bits (0x8000 | engine_flag)
+Semantic operations (`Sem_SetFlag`, `Sem_ClearFlag`, `Sem_CheckFlag`) now use `FlagRef`.
+Linker validates ranges: EventFlags 0-2047, EngineFlags 0-189.
 
-**Intended Milestone**: Multi-Frontend Support / Semantic Model Expansion
-
-**Relevant Files**:
-- `engine/include/engine/core/types.hpp` - FlagId typedef
-- `frontends/crystal/script/semantic_legalizer.cpp` - lowering rules
-- `engine/include/engine/scripting/semantic_ir.hpp` - Sem_CheckFlag
-
-**Invariant**: Future fix must preserve namespace distinction through semantic model.
+**Files Modified**:
+- `engine/include/engine/core/types.hpp` - Added `FlagRef`, `FlagNamespace`
+- `engine/include/engine/scripting/semantic_ir.hpp` - Updated Sem_*Flag ops
+- `frontends/crystal/script/semantic_legalizer.cpp` - Create FlagRef with namespace
+- `frontends/crystal/script/legality_gate.cpp` - Validate flag ranges per namespace
+- `frontends/crystal/script/semantic_linker.cpp` - Encode/validate namespaced flags
 
 ---
 
@@ -539,6 +495,6 @@ Fix requires architectural decision:
 | G | Player-State Ownership | World/Save Cleanup | Deferred |
 | H | Connection Activation Range | Map Connections | Deferred |
 | I | Input Edge Consumption | Input Hardening | Deferred |
-| J | String Formatting Operand Order | Frontend Hardening | Deferred (latent bug) |
-| K | Round-Trip Validation Bypass | Frontend Hardening | Deferred (gap) |
-| L | Flag Namespace Collapse | Multi-Frontend | Deferred (architectural) |
+| J | String Formatting Operand Order | Frontend Hardening | **FIXED** ✓ |
+| K | Round-Trip Validation | Frontend Hardening | **FIXED** ✓ |
+| L | Flag Namespace Distinction | Multi-Frontend | **FIXED** ✓ |

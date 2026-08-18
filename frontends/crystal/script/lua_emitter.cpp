@@ -223,6 +223,77 @@ void LuaEmitter::emit_text_sequence(std::ostream& out, const TextSequence& seq) 
             case TextOp::Prompt:
                 table << "{op=\"prompt\"}";
                 break;
+            
+            // Dynamic text commands - emit with their parameters
+            // Runtime handles substitution of actual values
+            case TextOp::TextRam:
+                // Display RAM contents (address is semantic reference)
+                table << "{op=\"ram\", addr=" << elem.addr << "}";
+                break;
+            case TextOp::TextBcd:
+                // Display BCD number
+                table << "{op=\"bcd\", addr=" << elem.addr << ", flags=" << (int)elem.param1 << "}";
+                break;
+            case TextOp::TextMove:
+                // Move cursor position
+                table << "{op=\"move\", pos=" << elem.addr << "}";
+                break;
+            case TextOp::TextBox:
+                // Draw text box
+                table << "{op=\"box\", addr=" << elem.addr << ", w=" << (int)elem.param1 << ", h=" << (int)elem.param2 << "}";
+                break;
+            case TextOp::TextLow:
+                // Move to bottom of screen
+                table << "{op=\"low\"}";
+                break;
+            case TextOp::TextPromptButton:
+                // Wait for button press
+                table << "{op=\"waitbutton\"}";
+                break;
+            case TextOp::TextScroll:
+                // Scroll text up
+                table << "{op=\"txscroll\"}";
+                break;
+            case TextOp::TextAsm:
+                // Inline assembly - terminates text, runtime handles
+                table << "{op=\"asm\"}";
+                break;
+            case TextOp::TextDecimal:
+                // Display decimal number
+                table << "{op=\"decimal\", addr=" << elem.addr << ", param=" << (int)elem.param1 << "}";
+                break;
+            case TextOp::TextPause:
+                // Brief pause
+                table << "{op=\"pause\"}";
+                break;
+            case TextOp::TextStringBuffer:
+                // Display string buffer contents
+                table << "{op=\"buffer\", id=" << (int)elem.param1 << "}";
+                break;
+            case TextOp::TextDay:
+                // Display current day
+                table << "{op=\"day\"}";
+                break;
+            case TextOp::TextFar:
+                // Far text pointer - runtime resolves
+                table << "{op=\"far\", addr=" << elem.addr << ", bank=" << (int)elem.param2 << "}";
+                break;
+            case TextOp::TextSoundItem:
+                // Play item jingle
+                table << "{op=\"snd_item\"}";
+                break;
+            case TextOp::TextSoundCaught:
+                // Play caught mon jingle
+                table << "{op=\"snd_caught\"}";
+                break;
+            case TextOp::TextSoundFanfare:
+                // Play fanfare
+                table << "{op=\"snd_fanfare\"}";
+                break;
+            case TextOp::TextRaw:
+                // Raw bytes - for debugging/round-trip only
+                table << "{op=\"raw\"}";
+                break;
         }
     }
     table << "}";

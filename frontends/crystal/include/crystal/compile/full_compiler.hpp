@@ -83,7 +83,8 @@ namespace crystal {
 // to invalidate cached packages and force recompilation.
 // 2.1.0: sprite ID mapping 1-102, directional ledge semantics, connection offset fix
 // 2.2.0: BG event type exhaustive mapping, condition_flag propagation fix
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.2.0";
+// 2.3.0: Semantic stabilization pass - operand order fix, flag namespaces, text commands, movement commands, round-trip wiring
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.3.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================
