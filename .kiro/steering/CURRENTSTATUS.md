@@ -1396,9 +1396,78 @@ Completed font extraction from ROM bytes (not PNG files).
 
 ---
 
+## Script Lifecycle Correctness Pass - COMPLETED ✓
+
+**SUCCESS**: Fixed two script lifecycle bugs: (1) completion vs error distinction in terminal states, (2) `reset()` now cancels active coroutine to prevent orphaned timed resumes.
+
+### Bug 1: Completion vs Error Distinction - FIXED ✓
+
+**Problem**: `update_script()` returned `true` for both `Finished` (normal completion) and `Error` states. `start_script()` returned `true` even on immediate Lua error. This made it impossible to distinguish successful script completion from failure.
+
+**Fix**: Added explicit error tracking:
+- New `script_error` field in `TickResult` struct
+- New `script_error_this_tick_` member in `HeadlessGameLoop`
+- `start_script()` returns `false` on immediate Lua error (syntax or runtime)
+- `resume_script()` sets `script_error_this_tick_` when script enters Error state
+- `update_script()` returns `true` only for `Finished`, `false` for `Error`
+
+**Semantic Distinction**:
+| State | `script_complete` | `script_error` |
+|-------|------------------|----------------|
+| Normal completion | true | false |
+| Script error | false | true |
+| Still running/yielded | false | false |
+
+### Bug 2: reset() Cancels Active Coroutine - FIXED ✓
+
+**Problem**: `HeadlessGameLoop::reset()` cleared `active_coroutine_` but didn't cancel the coroutine in `LuaRuntime`. This left orphaned coroutines that could still fire timed resumes (WaitFrames/WaitSeconds) after reset.
+
+**Fix**: Modified `reset()` to call `lua_runtime_->cancel(active_coroutine_)` before clearing loop state:
+- Registry reference is released (coroutine won't prevent GC)
+- Coroutine is removed from `LuaRuntime::coroutines_` map
+- No timed resume can occur after reset
+
+### Implementation Details
+
+**Files Modified**:
+- `engine/include/engine/core/game_loop.hpp` - Added `script_error` to `TickResult`, added `script_error_this_tick_` member
+- `engine/core/game_loop.cpp` - Modified `start_script()`, `resume_script()`, `update_script()`, `tick()`, `reset()`
+
+### New Tests Added (9 tests)
+
+| Test | Verifies |
+|------|----------|
+| `script_finishes_normally_sets_complete` | Normal completion: `script_complete=true`, `script_error=false` |
+| `script_errors_after_resume_sets_error` | Error after resume: `script_error=true`, `script_complete=false` |
+| `script_errors_immediately_returns_false` | Immediate syntax error: `start_script()` returns `false` |
+| `script_runtime_error_during_start_returns_false` | Immediate runtime error: `start_script()` returns `false` |
+| `yielded_script_remains_nonterminal` | Yielded: both `script_complete` and `script_error` are `false` |
+| `reset_cancels_active_coroutine_no_timed_resume` | After reset, old coroutine does not fire timed resume |
+| `reset_when_no_script_active` | Reset succeeds safely when no script active |
+| `reset_after_script_completed` | Reset succeeds safely after script completed |
+| `reset_when_script_yielded` | Reset cancels yielded coroutine |
+
+### Lifecycle Contract (Final)
+
+| Terminal State | Meaning |
+|---------------|---------|
+| `Finished` | Completed normally |
+| `Error` | Failed with error |
+| `Cancelled/reset` | Cancelled, not completed |
+| `Yielded` | Still active |
+
+`script_resumed` remains independent from terminal status.
+
+### Test Results
+
+- **Runtime Tests**: 278/278 pass (269 + 9 new lifecycle tests)
+- **All key invariants preserved**
+
+---
+
 ## Test Results (All Pass)
 
-- **Runtime Tests**: 269/269 pass
+- **Runtime Tests**: 278/278 pass
 - **Golden Tests**: 56/56 pass
 - **Legality Gate Tests**: 14/14 pass
 - **Corpus Test**: PASS (decoder/CFG integrity)
