@@ -16,6 +16,12 @@
 // One host rising edge → at most one simulation edge event.
 // During catch-up (multiple simulation ticks per render), only the first
 // tick observes the pressed edge. Subsequent ticks see held=true but pressed=false.
+//
+// CRITICAL: Multiple physical binding aggregation (Audit 6)
+// When multiple physical keys (e.g., W and ArrowUp) map to the same logical button,
+// the logical button remains held as long as ANY physical source is held.
+// held_count_[btn] tracks how many physical sources are currently pressing btn.
+// This prevents phantom releases when one key is released while another is still held.
 
 #include "engine/input/input_system.hpp"
 #include <algorithm>
@@ -94,6 +100,7 @@ InputSystem::InputSystem() {
     // Clear all state
     for (int i = 0; i < static_cast<int>(InputButton::Count); i++) {
         held_[i] = false;
+        held_count_[i] = 0;
         pending_pressed_[i] = false;
         pending_released_[i] = false;
         latched_[i] = false;
@@ -121,20 +128,35 @@ void InputSystem::begin_frame() {
 void InputSystem::set_button(InputButton btn, bool down) {
     int idx = static_cast<int>(btn);
     
-    if (down && !held_[idx]) {
-        // Rising edge: key just pressed
-        pending_pressed_[idx] = true;
-        snapshot_.pressed[idx] = true;  // Immediately visible to queries
-        // Note: If press→release→press occurs before simulation tick,
-        // we keep pending_pressed true (latest state wins for Crystal semantics)
-    } else if (!down && held_[idx]) {
-        // Falling edge: key just released
-        pending_released_[idx] = true;
-        snapshot_.released[idx] = true;  // Immediately visible to queries
+    // Track held count for multiple physical sources (Audit 6)
+    // Invariant: held_[btn] = (held_count_[btn] > 0)
+    if (down) {
+        // Increment held count
+        held_count_[idx]++;
+        
+        if (!held_[idx]) {
+            // Rising edge: first physical source pressing this button
+            held_[idx] = true;
+            pending_pressed_[idx] = true;
+            snapshot_.pressed[idx] = true;
+        }
+        // If already held, no new pressed edge (just add to count)
+    } else {
+        // Decrement held count (clamp to 0 to handle redundant releases)
+        if (held_count_[idx] > 0) {
+            held_count_[idx]--;
+        }
+        
+        if (held_count_[idx] == 0 && held_[idx]) {
+            // Falling edge: last physical source released
+            held_[idx] = false;
+            pending_released_[idx] = true;
+            snapshot_.released[idx] = true;
+        }
+        // If other physical sources still held, no release edge
     }
     
-    held_[idx] = down;
-    snapshot_.held[idx] = down;
+    snapshot_.held[idx] = held_[idx];
 }
 
 void InputSystem::on_key_down(int scancode) {

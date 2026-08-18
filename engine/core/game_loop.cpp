@@ -95,8 +95,12 @@ InputResult HeadlessGameLoop::process_input(InputAction action) {
 bool HeadlessGameLoop::is_input_locked() const {
     // Input locked when:
     // 1. Player is mid-step (moving)
-    // 2. Script is running (not yielded for our input)
-    return state_ == LoopState::Moving || state_ == LoopState::ScriptRunning;
+    // 2. Script is active (running OR yielded)
+    //    A yielded coroutine is still the active event script - player cannot
+    //    move/interact while WaitFrames/WaitSeconds/dialog is pending
+    return state_ == LoopState::Moving || 
+           state_ == LoopState::ScriptRunning ||
+           state_ == LoopState::ScriptYielded;
 }
 
 InputResult HeadlessGameLoop::handle_movement(Direction dir) {
@@ -164,9 +168,18 @@ InputResult HeadlessGameLoop::handle_interact() {
         [](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; };
     
     // Check interaction
+    // Pass flag checker if GameState is available (for IFSET/IFNOTSET/hidden item evaluation)
+    Interaction::FlagChecker flag_checker = nullptr;
+    if (game_state_) {
+        flag_checker = [this](const std::string& flag_id) {
+            return game_state_->check_flag(flag_id);
+        };
+    }
+    
     InteractionResult interaction_result = interaction_.check(
         imap, objects, bg_events,
-        player_.x, player_.y, player_.facing
+        player_.x, player_.y, player_.facing,
+        flag_checker
     );
     
     if (on_interaction_) {
@@ -273,6 +286,7 @@ std::vector<InteractableBgEvent> HeadlessGameLoop::build_bg_events() const {
         event.script_id = bg.script_id;
         event.item_id = bg.item_id;
         event.quantity = bg.quantity;
+        event.condition_flag = bg.condition_flag;  // Propagate condition flag
         events.push_back(event);
     }
     

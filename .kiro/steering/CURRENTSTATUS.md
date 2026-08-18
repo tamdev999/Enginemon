@@ -1,5 +1,87 @@
 # Current Status
 
+## Pre-RNG Correctness Cleanup - COMPLETED ✓
+
+**SUCCESS**: All confirmed bugs from the pre-RNG audit have been fixed. The codebase is now ready for PCG RNG implementation.
+
+### Summary of Fixes
+
+| Item | Issue | Fix | Status |
+|------|-------|-----|--------|
+| Crystal Collision Classifier | Range-based inference misclassified sparse constants | Explicit switch-case mapping, source-traced | ✅ |
+| BG Condition Flag Propagation | IFSET/IFNOTSET flags not evaluated | Added `condition_flag` field, `FlagChecker` callback | ✅ |
+| ScriptYielded Input Locking | Input processed during script yield | `is_input_locked()` returns true for `ScriptYielded` | ✅ |
+| Tileset 1..36 Off-by-One | Tileset 0 accepted, tileset 36 rejected | Loop bounds: `i = 1; i <= num_tilesets` | ✅ |
+| Duplicate Physical Bindings | Multiple keys → same button caused toggle issues | Added `held_count_[]` for aggregation | ✅ |
+
+### Crystal Collision Classifier - Source-Traced ✓
+
+Replaced range-based classifier with explicit switch-case mapping.
+Source-traced from:
+- `pokecrystal/constants/collision_constants.asm`
+- `pokecrystal/data/collision/collision_permissions.asm`
+
+**File**: `frontends/crystal/include/crystal/world/collision_classifier.hpp`
+
+Previously misclassified IDs now correct:
+- `0x18` (TALL_GRASS) → `Grass` (was Water)
+- `0x29` (WATER) → `Water` (was SmashableRock)
+- `0x33` (WATERFALL) → `Waterfall` (was Grass)
+- `0x24` (WHIRLPOOL) → `Whirlpool` (was Ice/tree)
+- `0x27` (BUOY) → `Wall` (was Ice/tree)
+
+### BG Condition Flag Propagation ✓
+
+Added `condition_flag` to BG event handling:
+
+**Files**:
+- `engine/include/engine/world/interaction.hpp` - Added `condition_flag` to `InteractableBgEvent`
+- `engine/world/interaction.cpp` - Updated `build_bg_events()`, `try_bg_event()` evaluates flags
+- `engine/core/game_loop.cpp` - Added `FlagChecker` callback to `Interaction::check()`
+
+### ScriptYielded Input Locking ✓
+
+**File**: `engine/core/game_loop.cpp`
+
+`is_input_locked()` now returns `true` for `ScriptYielded` state, preventing input processing during script execution.
+
+### Tileset Extraction Off-by-One ✓
+
+**File**: `frontends/crystal/extract/tilesets.cpp`
+
+Changed loops from `i = 0; i < num_tilesets` to `i = 1; i <= num_tilesets`:
+- Tileset 0 is now rejected (invalid)
+- Tileset 36 is now accepted (valid)
+
+### Duplicate Physical Binding Aggregation ✓
+
+**Files**:
+- `engine/include/engine/input/input_system.hpp` - Added `held_count_[]` array
+- `engine/input/input_system.cpp` - Increment/decrement count instead of boolean toggle
+
+### Adversarial Tests Added
+
+Two new collision classifier tests:
+- `collision_classifier_adversarial_misclassified_ids` - Verifies previously misclassified IDs
+- `collision_classifier_source_proven_constants` - Verifies source-traced Crystal constants
+
+### Deferred Items (Documented in RUNTIME_GAMEPLAY_TODO.md)
+
+- DV RNG (requires PCG implementation)
+- NPC LCG movement bias (requires PCG)
+- Determinism hash (requires PCG + full mechanics)
+
+### Test Results
+
+- **Runtime Tests**: 284/284 pass (282 + 2 new collision classifier tests)
+- **Golden Tests**: 56/56 pass
+- **Legality Gate Tests**: 14/14 pass
+- **Corpus Test**: PASS (decoder/CFG integrity)
+- **Corpus Lowering Audit**: 1788/1788
+- **Linker Test**: 1788/1788, InvalidOwnership=0
+
+---
+
 ## Collision Boundary Migration - COMPLETED ✓
 
 **SUCCESS**: The collision system now operates ONLY on semantic `CollisionClass` values. All raw Crystal byte interpretation has been removed from the generic engine and runtime.
@@ -1467,7 +1549,7 @@ Completed font extraction from ROM bytes (not PNG files).
 
 ## Test Results (All Pass)
 
-- **Runtime Tests**: 278/278 pass
+- **Runtime Tests**: 284/284 pass
 - **Golden Tests**: 56/56 pass
 - **Legality Gate Tests**: 14/14 pass
 - **Corpus Test**: PASS (decoder/CFG integrity)

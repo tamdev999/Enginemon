@@ -110,7 +110,8 @@ std::optional<InteractionResult> Interaction::try_object(
 std::optional<InteractionResult> Interaction::try_bg_event(
     const std::vector<InteractableBgEvent>& bg_events,
     int32_t x, int32_t y,
-    Direction player_facing
+    Direction player_facing,
+    FlagChecker flag_checker
 ) const {
     for (const auto& evt : bg_events) {
         // Check coordinates match
@@ -120,6 +121,26 @@ std::optional<InteractionResult> Interaction::try_bg_event(
         auto required = bg_event_required_facing(evt.type);
         if (required.has_value() && *required != player_facing) {
             continue;
+        }
+        
+        // Evaluate condition flag for IFSET/IFNOTSET types
+        // Reference: pokecrystal/engine/overworld/events.asm BGEventJumptable
+        if (flag_checker && !evt.condition_flag.empty()) {
+            bool flag_is_set = flag_checker(evt.condition_flag);
+            
+            if (evt.type == BgEventTypeId::IfSet) {
+                // BGEVENT_IFSET: trigger only when flag IS set
+                if (!flag_is_set) continue;
+            }
+            else if (evt.type == BgEventTypeId::IfNotSet) {
+                // BGEVENT_IFNOTSET: trigger only when flag is NOT set
+                if (flag_is_set) continue;
+            }
+            else if (evt.type == BgEventTypeId::ItemIfSet && !evt.item_id.empty()) {
+                // BGEVENT_ITEMIFSET: hidden item - suppress if already collected
+                // The condition_flag represents the "item collected" flag
+                if (flag_is_set) continue;
+            }
         }
         
         // Found a valid BG event
@@ -160,7 +181,8 @@ InteractionResult Interaction::check(
     const std::vector<InteractableBgEvent>& bg_events,
     int32_t player_x,
     int32_t player_y,
-    Direction player_facing
+    Direction player_facing,
+    FlagChecker flag_checker
 ) const {
     // Calculate facing cell
     int32_t fx, fy;
@@ -197,7 +219,7 @@ InteractionResult Interaction::check(
     }
     
     // 2. TryBGEvent - signs/hidden items
-    auto bg_result = try_bg_event(bg_events, fx, fy, player_facing);
+    auto bg_result = try_bg_event(bg_events, fx, fy, player_facing, flag_checker);
     if (bg_result) {
         return *bg_result;
     }

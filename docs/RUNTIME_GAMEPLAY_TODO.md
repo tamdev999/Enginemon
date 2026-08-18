@@ -6,7 +6,7 @@ Deferred gameplay and runtime issues documented during pre-RNG correctness passe
 
 ## A. Pokémon DV RNG Consumption
 
-**Status**: Deferred
+**Status**: Deferred - Fix with PCG migration
 
 **Current Behavior**:
 `create_pokemon()` and `create_wild_pokemon()` consume **four** RNG draws for four DVs:
@@ -23,7 +23,8 @@ Crystal consumes **two** random bytes:
 - Byte 2: Speed (high nibble) / Special (low nibble)
 
 **Reason Deferred**:
-Fix during native RNG implementation so canonical draw accounting changes only once. Fixing now would require a second RNG accounting change when PCG is implemented.
+Fix during native RNG implementation (PCG) so canonical draw accounting changes only once.
+Fixing now would require a second RNG accounting change when PCG is implemented.
 
 **Intended Milestone**: Native RNG Migration (PCG-XSH-RR implementation)
 
@@ -34,38 +35,40 @@ Fix during native RNG implementation so canonical draw accounting changes only o
 
 ---
 
-## B. Duplicate Physical Bindings / Phantom Releases
+## B. NPC Random-Walk LCG Low-Bit Bias
 
-**Status**: Deferred
+**Status**: Deferred - Verify disappearance with PCG
 
 **Current Behavior**:
-Multiple physical inputs can map to one logical button. Releasing one physical source may clear the logical held state while another source remains held.
+Legacy LCG `state = state * 1664525 + 1013904223` has low-bit correlation.
+NPC direction choices use `r & 1`, `r & 3` which are the most biased bits.
 
 **Example**:
-- W and ↑ both map to `MoveUp`
-- User holds W, then holds ↑, then releases W
-- Current: `MoveUp` may become released despite ↑ still held
-- Expected: `MoveUp` remains held until all physical sources released
+- `choose_npc_direction()` uses `r & 1` for Y-only walk, `r & 3` for XY walk
+- LCG bit 0 alternates deterministically for certain seed classes
+- This creates observable directional bias in NPC movement
 
-**Intended Fix**:
-Track physical-source state or per-logical held-source count/set, then derive logical state.
+**Crystal Semantic Behavior**:
+Crystal uses Division result `([hRandomAdd] * [hRandomSub]) / 256` which extracts high bits,
+not low bits. The effective randomness quality differs.
 
 **Reason Deferred**:
-Input-system correctness cleanup after RNG unless it becomes blocking for gameplay testing.
+Do not introduce temporary "use high bits" patches for legacy LCG.
+PCG-XSH-RR produces high-quality low bits. After migration, verify the bias disappears.
 
-**Intended Milestone**: Input System Correctness Cleanup
+**Intended Milestone**: Native RNG Migration (PCG-XSH-RR implementation)
 
 **Relevant Files**:
-- `engine/input/input_system.cpp`
-- `engine/include/engine/input/input_system.hpp`
+- `engine/core/game_loop.cpp` - `choose_npc_direction()`, `next_random()`
+- `engine/include/engine/core/game_state.hpp` - `RngState::next()`
 
-**Invariant**: Logical button state must reflect the union of all physical source states.
+**Invariant**: After PCG, add adversarial random-walk distribution test.
 
 ---
 
 ## C. Surf / Whirlpool Capability Semantics
 
-**Status**: Deferred (Unfinished Feature)
+**Status**: Deferred - Unfinished Feature
 
 **Current Behavior**:
 - Player `surfing` state exists but is hardcoded `false` in active collision paths
@@ -93,44 +96,9 @@ Field-move mechanics are a larger feature set. Current collision system handles 
 
 ---
 
-## D. ScriptYielded Input Ownership
+## D. Determinism Hash Limitations
 
-**Status**: Deferred (API Footgun)
-
-**Current Behavior**:
-`ScriptYielded` remains an active coroutine state. Normal input gating checks for `ScriptRunning` but may not treat `ScriptYielded` identically.
-
-From `HeadlessGameLoop::is_input_locked()`:
-```cpp
-return state_ == LoopState::Moving || state_ == LoopState::ScriptRunning;
-// ScriptYielded is NOT included
-```
-
-**Current Mitigation**:
-Visual runtime handles this at the presentation layer.
-
-**Intended Fix**:
-Clarify whether `ScriptYielded` should block input (if script owns the interaction) or allow input (if yielding for user choice). The distinction matters for:
-- Dialog yields (script owns interaction)
-- Movement yields (may allow cancel?)
-- Choice yields (script waits for user input)
-
-**Reason Deferred**:
-Requires design decision on yield-type-specific input ownership. Current behavior works for typical dialog scripts.
-
-**Intended Milestone**: Script / Input Ownership Cleanup
-
-**Relevant Files**:
-- `engine/core/game_loop.cpp` - `is_input_locked()`
-- `engine/include/engine/core/game_loop.hpp` - `LoopState` enum
-
-**Invariant**: After fix, input ownership during yields must be explicitly defined per yield type.
-
----
-
-## E. Determinism Hash
-
-**Status**: Deferred (Not a Bug)
+**Status**: Documented - Not a Bug
 
 **Current Behavior**:
 `state_hash()` provides a narrow diagnostic hash of player position and loop state:
@@ -147,10 +115,12 @@ uint64_t HeadlessGameLoop::state_hash() const {
 ```
 
 **Intended Model**:
-Eventual authoritative determinism fingerprint derives from canonical authoritative serialization of the complete `GameState`, not a partial hash.
+Eventual authoritative determinism fingerprint derives from canonical authoritative serialization 
+of the complete `GameState`, not a partial hash.
 
-**Reason Deferred**:
-Current `state_hash()` is useful for quick sanity checks. Full determinism verification via serialization comparison exists.
+**Reason Not Changed**:
+Current `state_hash()` is useful for quick sanity checks. Full determinism verification via 
+serialization comparison exists.
 
 **Intended Milestone**: No specific milestone - enhancement when needed
 
@@ -164,12 +134,45 @@ Current `state_hash()` is useful for quick sanity checks. Full determinism verif
 
 ## Summary
 
-| ID | Issue | Milestone | Blocking |
-|----|-------|-----------|----------|
-| A | DV RNG Consumption | Native RNG | No |
-| B | Phantom Releases | Input Cleanup | No |
-| C | Surf/Whirlpool | Field Moves | No |
-| D | ScriptYielded Input | Script/Input | No |
-| E | Determinism Hash | Enhancement | No |
+| ID | Issue | Milestone | Status |
+|----|-------|-----------|--------|
+| A | DV RNG Consumption | Native RNG | Deferred |
+| B | NPC LCG Low-Bit Bias | Native RNG | Deferred |
+| C | Surf/Whirlpool | Field Moves | Unfinished |
+| D | Determinism Hash | Enhancement | Documented |
 
-None of these issues are blocking for the current development phase. All will be addressed in their respective milestone passes.
+None of these issues are blocking for the current development phase. Items A and B will be 
+addressed during the PCG RNG migration. Item C is a feature that remains incomplete.
+Item D is a known limitation, not a bug.
+
+---
+
+## Completed in Pre-RNG Correctness Pass
+
+The following items were identified and **fixed** in the pre-RNG correctness cleanup:
+
+### Fixed: Crystal Collision Classification
+- **Issue**: Range-based collision classifier misclassified sparse Crystal IDs
+- **Examples**: 0x18=TALL_GRASS (not water), 0x29=WATER, 0x33=WATERFALL, etc.
+- **Fix**: Explicit switch-case mapping from Crystal constants to CollisionClass
+- **File**: `frontends/crystal/include/crystal/world/collision_classifier.hpp`
+
+### Fixed: BG Condition Flag Propagation
+- **Issue**: IFSET/IFNOTSET/hidden-item flags not evaluated during interaction
+- **Fix**: Added `condition_flag` to `InteractableBgEvent`, flag evaluation in `try_bg_event()`
+- **Files**: `engine/include/engine/world/interaction.hpp`, `engine/world/interaction.cpp`
+
+### Fixed: ScriptYielded Input Locking
+- **Issue**: `is_input_locked()` only blocked for `ScriptRunning`, not `ScriptYielded`
+- **Fix**: Added `ScriptYielded` to locked states - yielded scripts own the interaction
+- **File**: `engine/core/game_loop.cpp`
+
+### Fixed: Tileset 1..36 Extraction
+- **Issue**: Loop extracted tilesets 0..35 instead of Crystal's 1-indexed 1..36
+- **Fix**: Changed loops to `i = 1; i <= num_tilesets`
+- **File**: `frontends/crystal/extract/tilesets.cpp`
+
+### Fixed: Duplicate Physical Binding Aggregation
+- **Issue**: Multiple keys mapping to same button caused phantom releases
+- **Fix**: Added `held_count_[]` to track physical sources per logical button
+- **Files**: `engine/input/input_system.cpp`, `engine/include/engine/input/input_system.hpp`

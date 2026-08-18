@@ -29,6 +29,7 @@
 #include "crystal/script/ir.hpp"
 #include "crystal/script/semantic_legalizer.hpp"
 #include "crystal/script/crystal_command.hpp"
+#include "crystal/world/collision_classifier.hpp"
 #include "engine/core/registry.hpp"
 
 #include <iostream>
@@ -1734,6 +1735,112 @@ TEST(collision_semantic_boundary_adversarial) {
     ASSERT_EQ(static_cast<uint8_t>(result.collision_class), static_cast<uint8_t>(CollisionClass::Floor));
     
     std::cout << "  [Collision boundary is 100% semantic CollisionClass - no raw Crystal bytes]\n";
+}
+
+TEST(collision_classifier_adversarial_misclassified_ids) {
+    // ADVERSARIAL TEST: Verify previously misclassified Crystal collision IDs
+    // are now correctly classified.
+    //
+    // These IDs were identified as misclassified by range-based inference:
+    //   0x18 = TALL_GRASS (was misclassified as Water)
+    //   0x29 = WATER (was misclassified as SmashableRock)
+    //   0x33 = WATERFALL (was misclassified as Grass)
+    //   0x24 = WHIRLPOOL (was misclassified as generic Ice/tree)
+    //   0x27 = BUOY (was misclassified as generic Ice/tree)
+    
+    // Import the Crystal collision classifier
+    // This is a frontend function, not runtime - it translates at package time
+    
+    // Test each previously misclassified ID
+    ASSERT_EQ(crystal::classify_crystal_collision(0x18), CollisionClass::Grass);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x29), CollisionClass::Water);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x33), CollisionClass::Waterfall);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x24), CollisionClass::Whirlpool);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x27), CollisionClass::Wall);  // Buoy is wall
+    
+    // Verify related IDs are also correct
+    ASSERT_EQ(crystal::classify_crystal_collision(0x10), CollisionClass::Grass);  // TALL_GRASS_10
+    ASSERT_EQ(crystal::classify_crystal_collision(0x14), CollisionClass::Grass);  // LONG_GRASS
+    ASSERT_EQ(crystal::classify_crystal_collision(0x1C), CollisionClass::Grass);  // LONG_GRASS_1C
+    
+    ASSERT_EQ(crystal::classify_crystal_collision(0x20), CollisionClass::Water);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x21), CollisionClass::Water);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x2D), CollisionClass::Water);
+    
+    ASSERT_EQ(crystal::classify_crystal_collision(0x30), CollisionClass::Waterfall);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x31), CollisionClass::Waterfall);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x32), CollisionClass::Waterfall);
+    
+    ASSERT_EQ(crystal::classify_crystal_collision(0x23), CollisionClass::Ice);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x2B), CollisionClass::Ice);
+    
+    ASSERT_EQ(crystal::classify_crystal_collision(0x2C), CollisionClass::Whirlpool);
+    
+    std::cout << "  [Collision classifier adversarial IDs all verified ✓]\n";
+}
+
+TEST(collision_classifier_source_proven_constants) {
+    // Verify collision classifier uses source-proven Crystal constants
+    // Reference: pokecrystal/constants/collision_constants.asm
+    
+    // Floor tiles
+    ASSERT_EQ(crystal::classify_crystal_collision(0x00), CollisionClass::Floor);
+    
+    // Wall tiles
+    ASSERT_EQ(crystal::classify_crystal_collision(0x07), CollisionClass::Wall);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x0F), CollisionClass::Wall);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xFF), CollisionClass::Wall);  // COLL_FF - WALL_TILE per collision_permissions.asm
+    
+    // Cut/Headbutt trees
+    ASSERT_EQ(crystal::classify_crystal_collision(0x12), CollisionClass::CuttableTree);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x1A), CollisionClass::CuttableTree);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x15), CollisionClass::Wall);  // Headbutt = wall
+    
+    // Pit tiles
+    ASSERT_EQ(crystal::classify_crystal_collision(0x60), CollisionClass::WarpPit);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x68), CollisionClass::WarpPit);
+    
+    // Warp carpets
+    ASSERT_EQ(crystal::classify_crystal_collision(0x70), CollisionClass::WarpCarpet);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x76), CollisionClass::WarpCarpet);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x78), CollisionClass::WarpCarpet);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x7E), CollisionClass::WarpCarpet);
+    
+    // Door warps
+    ASSERT_EQ(crystal::classify_crystal_collision(0x71), CollisionClass::WarpDoor);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x75), CollisionClass::WarpDoor);
+    
+    // Cave warps
+    ASSERT_EQ(crystal::classify_crystal_collision(0x74), CollisionClass::WarpCave);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x7B), CollisionClass::WarpCave);
+    
+    // Stair/ladder warps
+    ASSERT_EQ(crystal::classify_crystal_collision(0x72), CollisionClass::WarpStair);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x7A), CollisionClass::WarpStair);
+    
+    // Ledges
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA0), CollisionClass::Ledge);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA3), CollisionClass::Ledge);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA7), CollisionClass::Ledge);
+    
+    // Side walls
+    ASSERT_EQ(crystal::classify_crystal_collision(0xB0), CollisionClass::SideWallE);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xB1), CollisionClass::SideWallW);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xB2), CollisionClass::SideWallN);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xB3), CollisionClass::SideWallS);
+    
+    // Counters
+    ASSERT_EQ(crystal::classify_crystal_collision(0x90), CollisionClass::Counter);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x91), CollisionClass::Counter);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x93), CollisionClass::Counter);
+    
+    // Current tiles (treated as water)
+    ASSERT_EQ(crystal::classify_crystal_collision(0x38), CollisionClass::Water);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x39), CollisionClass::Water);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x3A), CollisionClass::Water);
+    ASSERT_EQ(crystal::classify_crystal_collision(0x3B), CollisionClass::Water);
+    
+    std::cout << "  [Collision classifier source-proven constants verified ✓]\n";
 }
 
 // =============================================================================
@@ -11671,6 +11778,10 @@ int main(int argc, char* argv[]) {
     RUN_TEST(reset_when_script_yielded);
     
     RUN_TEST(coord_event_scripts_in_corpus);
+    
+    // Collision classifier adversarial tests (Pre-RNG cleanup)
+    RUN_TEST(collision_classifier_adversarial_misclassified_ids);
+    RUN_TEST(collision_classifier_source_proven_constants);
     
     // Summary
     std::cout << "\n=== Results ===\n";

@@ -104,6 +104,7 @@ struct InteractableBgEvent {
     std::string script_id;      // For readable events
     std::string item_id;        // For hidden items
     uint8_t quantity;
+    std::string condition_flag; // For IFSET/IFNOTSET and hidden items
 };
 
 // Map interface for interaction checking
@@ -123,15 +124,20 @@ class Interaction {
 public:
     Interaction();
     
+    // Flag checker function type - returns true if flag is set
+    using FlagChecker = std::function<bool(const std::string&)>;
+    
     // Main entry point: check what player would interact with
     // Matches pokecrystal CheckAPressOW dispatch order
+    // flag_checker: optional callback to evaluate IFSET/IFNOTSET conditions
     InteractionResult check(
         const InteractionMap& map,
         const std::vector<InteractableObject>& objects,
         const std::vector<InteractableBgEvent>& bg_events,
         int32_t player_x,
         int32_t player_y,
-        Direction player_facing
+        Direction player_facing,
+        FlagChecker flag_checker = nullptr
     ) const;
     
     // Get facing cell coordinates
@@ -158,7 +164,8 @@ private:
     std::optional<InteractionResult> try_bg_event(
         const std::vector<InteractableBgEvent>& bg_events,
         int32_t x, int32_t y,
-        Direction player_facing
+        Direction player_facing,
+        FlagChecker flag_checker
     ) const;
 };
 

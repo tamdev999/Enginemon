@@ -283,9 +283,10 @@ std::string TilesetExtractor::make_tileset_id(uint8_t index) const {
 TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index) const {
     TilesetExtractionResult result;
     
-    // Validate index
-    if (tileset_index >= profile_.counts.num_tilesets) {
-        result.error = std::format("Invalid tileset index: {}", tileset_index);
+    // Validate index - Crystal tilesets are 1-indexed (1..num_tilesets)
+    if (tileset_index == 0 || tileset_index > profile_.counts.num_tilesets) {
+        result.error = std::format("Invalid tileset index: {} (valid range: 1-{})", 
+                                   tileset_index, profile_.counts.num_tilesets);
         return result;
     }
     
@@ -619,8 +620,8 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
 }
 
 TilesetExtractionResult TilesetExtractor::extract_tileset(const std::string& tileset_id) const {
-    // Reverse lookup
-    for (uint8_t i = 0; i < profile_.counts.num_tilesets; ++i) {
+    // Reverse lookup - Crystal tilesets are 1-indexed (1..num_tilesets)
+    for (uint8_t i = 1; i <= profile_.counts.num_tilesets; ++i) {
         if (make_tileset_id(i) == tileset_id) {
             return extract_tileset(i);
         }
@@ -634,7 +635,9 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(const std::string& til
 std::vector<ExtractedTileset> TilesetExtractor::extract_all_tilesets() const {
     std::vector<ExtractedTileset> tilesets;
     
-    for (uint8_t i = 0; i < profile_.counts.num_tilesets; ++i) {
+    // Crystal tilesets are 1-indexed (1..num_tilesets), not 0-indexed
+    // From constants/tileset_constants.asm: const_def 1 means first constant is 1
+    for (uint8_t i = 1; i <= profile_.counts.num_tilesets; ++i) {
         auto result = extract_tileset(i);
         if (result.success) {
             tilesets.push_back(std::move(result.tileset));

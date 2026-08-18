@@ -194,6 +194,12 @@ private:
     // Current physical held state (true while key is down)
     bool held_[static_cast<int>(InputButton::Count)] = {};
     
+    // Count of physical sources holding each button (Audit 6)
+    // When multiple physical keys map to the same logical button (e.g., W and ArrowUp both → Up),
+    // the logical button remains held as long as ANY physical source is held.
+    // held_[btn] = (held_count_[btn] > 0)
+    int held_count_[static_cast<int>(InputButton::Count)] = {};
+    
     // Pending edge flags (Audit 8)
     // These remain set until consumed by a simulation tick.
     // Render frame boundaries do NOT clear them.
