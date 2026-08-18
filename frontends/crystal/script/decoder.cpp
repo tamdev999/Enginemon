@@ -196,22 +196,34 @@ std::string ScriptDecoder::decode_text(uint32_t address) {
 }
 
 TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
-    // SEMANTIC TEXT DECODING
-    // Preserves LINE/CONT/PARA/etc. as distinct operations, never flattening to whitespace.
-    // This is the correct way to decode Crystal text for rendering.
+    // SEMANTIC TEXT DECODING — Crystal Outer-Command / Literal-Body architecture
     //
     // AUTHORITATIVE SOURCE: pokecrystal/macros/scripts/text.asm, home/text.asm
     //
-    // Text resources are COMMAND STREAMS, not just character data.
-    // Commands 0x00-0x16 are TX_* commands from text.asm with operands.
-    // Commands 0x4E-0x58 are flow control (<NEXT>, <LINE>, etc.)
-    // Characters 0x50+ are printable (with some exceptions)
+    // Crystal text resources use a two-mode parser:
+    //
+    //   OUTER COMMAND STREAM:
+    //     Bytes 0x00-0x16 → TX_* commands (dispatched via TextCommands jump table)
+    //     TX_START (0x00) → enter LITERAL BODY mode
+    //     Bytes 0x4B-0x58 → flow control (SCROLL/NEXT/LINE/PARA/CONT/DONE/PROMPT)
+    //
+    //   LITERAL BODY mode (PlaceString, entered by TX_START):
+    //     Bytes are interpreted as Crystal charmap characters / control codes
+    //     0x14 here = <PLAY_G> charmap entry (gendered player name), NOT TX_STRINGBUFFER
+    //     0x50 ('@') terminates literal body and returns to OUTER COMMAND STREAM
+    //     Other flow-control bytes (0x4E/0x4F/0x51/0x55/0x57/0x58) end the resource
+    //
+    // This prevents in-literal bytes whose numeric value overlaps TX opcodes (e.g. 0x14)
+    // from being incorrectly consumed as TX commands with operands.
+    //
+    // Reference: home/text.asm TextCommand_START / PlaceString / PlaceNextChar
     //
     // Example: NewBarkTownSignText in ROM:
     //   0x00 "NEW BARK TOWN" 0x51 "The Town Where the" 0x4F "Winds of a New" 0x55 "Beginning Blow" 0x57
-    // Becomes:
-    //   Text("NEW BARK TOWN"), Para, Text("The Town Where the"), Line,
-    //   Text("Winds of a New"), Cont, Text("Beginning Blow"), Done
+    // Outer: 0x00 = TX_START → literal body until '@'
+    //   "NEW BARK TOWN" → Text("NEW BARK TOWN")
+    //   0x51 → back in outer → Para
+    //   ... etc.
     
     TextSequence seq;
     seq.rom_address = address;
@@ -220,12 +232,6 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
     std::string current_text;
     current_text.reserve(128);
     
-    // Crystal text starts with TX_START (0x00)
-    uint8_t first = rom_.read_byte(pos);
-    if (first == 0x00) {
-        pos++;  // Skip TX_START
-    }
-    
     auto flush_text = [&]() {
         if (!current_text.empty()) {
             seq.elements.push_back(TextElement::make_text(current_text));
@@ -233,18 +239,64 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
         }
     };
     
-    while (true) {
+    // Helper: decode one literal/inner byte (PlaceString mode)
+    // Returns true if literal body continues, false if '@' was hit (return to outer)
+    // Flow-control terminators within a literal body end the resource and return false
+    auto decode_literal_byte = [&](uint8_t byte) -> bool {
+        if (byte == 0x50) {
+            // '@' (TX_END) — end of this literal segment, return to outer command stream
+            return false;
+        }
+        // Flow control codes that terminate the resource even inside a literal
+        if (byte == 0x57 || byte == 0x58) {
+            flush_text();
+            seq.elements.push_back(byte == 0x57 ? TextElement::make_done() : TextElement::make_prompt());
+            return false;  // terminates resource
+        }
+        // Printable/control bytes from the charmap — NOT TX commands
+        auto it = charmap_.find(byte);
+        if (it != charmap_.end() && !it->second.empty()) {
+            current_text += it->second;
+        } else if (byte != 0x00) {
+            // Unknown non-null byte in literal — emit placeholder
+            current_text += "?";
+        }
+        return true;
+    };
+    
+    // Outer command stream loop
+    bool running = true;
+    while (running) {
         uint8_t ch = rom_.read_byte(pos++);
         
-        // TX_* commands (0x00-0x16) from pokecrystal/macros/scripts/text.asm
-        // These are dynamic text commands with operands
         switch (ch) {
-            // TX_START (0x00) - should have been skipped above, but handle if embedded
-            case 0x00:
+            // TX_START (0x00): enter literal body mode
+            // Source: TextCommand_START in home/text.asm — calls PlaceString
+            // In the inline-text layout, TX_START is immediately followed by
+            // the character bytes of the literal string, terminated by '@' (0x50).
+            case 0x00: {
+                // Enter literal body: read characters until '@' returns to outer mode
+                while (true) {
+                    uint8_t lit = rom_.read_byte(pos++);
+                    bool continues = decode_literal_byte(lit);
+                    if (!continues) {
+                        // '@' hit: flush and return to outer stream
+                        // resource-terminating control codes also handled in decode_literal_byte
+                        flush_text();
+                        break;
+                    }
+                    if (current_text.size() > 2000) {
+                        flush_text();
+                        seq.elements.push_back(TextElement::make_done());
+                        return seq;
+                    }
+                }
+                // After '@': continue in outer command stream (not resource termination)
                 continue;
+            }
             
             // TX_RAM (0x01): text_ram - display RAM contents
-            // Operands: dw address
+            // Operands: dw address (little-endian)
             case 0x01: {
                 flush_text();
                 uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
@@ -277,17 +329,20 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
             }
             
             // TX_BOX (0x04): text_box - draw text box
-            // Operands: dw address, db width, db height
+            // Operands: dw address, db HEIGHT, db WIDTH
+            // Source-proven from home/text.asm TextCommand_BOX comment: "(height, width)"
+            //   third byte  → B register = height  (param1)
+            //   fourth byte → C register = width   (param2)
             case 0x04: {
                 flush_text();
                 uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
                 pos += 2;
-                uint8_t width = rom_.read_byte(pos++);
-                uint8_t height = rom_.read_byte(pos++);
+                uint8_t height = rom_.read_byte(pos++);  // first dimension byte = height
+                uint8_t width  = rom_.read_byte(pos++);  // second dimension byte = width
                 TextElement elem{TextOp::TextBox, ""};
-                elem.addr = addr;
-                elem.param1 = width;
-                elem.param2 = height;
+                elem.addr   = addr;
+                elem.param1 = height;  // param1 = height (first byte after address)
+                elem.param2 = width;   // param2 = width  (second byte after address)
                 seq.elements.push_back(elem);
                 continue;
             }
@@ -311,14 +366,14 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
                 continue;
             
             // TX_START_ASM (0x08): text_asm - start inline assembly
-            // This is a terminator - execution transfers to code following this
+            // Terminates text parsing — execution transfers to code after this
             case 0x08:
                 flush_text();
                 seq.elements.push_back(TextElement{TextOp::TextAsm, ""});
-                return seq;  // Terminates text parsing
+                return seq;
             
             // TX_DECIMAL (0x09): text_decimal - display decimal number
-            // Operands: dw address, dn bytes|digits (packed nibble: upper=bytes, lower=digits)
+            // Operands: dw address, dn bytes|digits (packed nibble)
             case 0x09: {
                 flush_text();
                 uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
@@ -334,11 +389,10 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
                 seq.elements.push_back(TextElement{TextOp::TextPause, ""});
                 continue;
             
-            // TX_SOUND_DEX_FANFARE_50_79 (0x0b) - sound effect (no operands, consume but preserve)
+            // TX_SOUND_DEX_FANFARE_50_79 (0x0b) - lossless preserve
             case 0x0b: {
                 flush_text();
-                std::vector<uint8_t> raw{0x0b};
-                seq.elements.push_back(TextElement::make_text_raw(raw));
+                seq.elements.push_back(TextElement::make_text_raw({0x0b}));
                 continue;
             }
             
@@ -347,60 +401,59 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
             case 0x0c: {
                 flush_text();
                 uint8_t count = rom_.read_byte(pos++);
-                std::vector<uint8_t> raw{0x0c, count};
-                seq.elements.push_back(TextElement::make_text_raw(raw));
+                seq.elements.push_back(TextElement::make_text_raw({0x0c, count}));
                 continue;
             }
             
-            // TX_WAIT_BUTTON (0x0d): text_waitbutton - wait for button press
+            // TX_WAIT_BUTTON (0x0d): text_waitbutton
             case 0x0d:
                 flush_text();
                 seq.elements.push_back(TextElement{TextOp::TextPromptButton, ""});
                 continue;
             
-            // TX_SOUND_DEX_FANFARE_20_49 (0x0e) - sound effect (no operands)
+            // TX_SOUND_DEX_FANFARE_20_49 (0x0e) - lossless preserve
             case 0x0e: {
                 flush_text();
-                std::vector<uint8_t> raw{0x0e};
-                seq.elements.push_back(TextElement::make_text_raw(raw));
+                seq.elements.push_back(TextElement::make_text_raw({0x0e}));
                 continue;
             }
             
-            // TX_SOUND_ITEM (0x0f): sound_item - play item jingle
+            // TX_SOUND_ITEM (0x0f)
             case 0x0f:
                 flush_text();
                 seq.elements.push_back(TextElement{TextOp::TextSoundItem, ""});
                 continue;
             
-            // TX_SOUND_CAUGHT_MON (0x10): sound_caught_mon
+            // TX_SOUND_CAUGHT_MON (0x10)
             case 0x10:
                 flush_text();
                 seq.elements.push_back(TextElement{TextOp::TextSoundCaught, ""});
                 continue;
             
-            // TX_SOUND_DEX_FANFARE_80_109 (0x11) - sound effect (no operands)
+            // TX_SOUND_DEX_FANFARE_80_109 (0x11) - lossless preserve
             case 0x11: {
                 flush_text();
-                std::vector<uint8_t> raw{0x11};
-                seq.elements.push_back(TextElement::make_text_raw(raw));
+                seq.elements.push_back(TextElement::make_text_raw({0x11}));
                 continue;
             }
             
-            // TX_SOUND_FANFARE (0x12): sound_fanfare
+            // TX_SOUND_FANFARE (0x12)
             case 0x12:
                 flush_text();
                 seq.elements.push_back(TextElement{TextOp::TextSoundFanfare, ""});
                 continue;
             
-            // TX_SOUND_SLOT_MACHINE_START (0x13) - sound effect (no operands)
+            // TX_SOUND_SLOT_MACHINE_START (0x13) - lossless preserve
             case 0x13: {
                 flush_text();
-                std::vector<uint8_t> raw{0x13};
-                seq.elements.push_back(TextElement::make_text_raw(raw));
+                seq.elements.push_back(TextElement::make_text_raw({0x13}));
                 continue;
             }
             
             // TX_STRINGBUFFER (0x14): text_buffer - display string buffer
+            // NOTE: 0x14 is ONLY TX_STRINGBUFFER in the outer command stream.
+            // In literal body mode (PlaceString), 0x14 = <PLAY_G> charmap char.
+            // This case only fires in outer mode — the mode distinction is correct.
             // Operands: db buffer_id
             case 0x14: {
                 flush_text();
@@ -409,14 +462,15 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
                 continue;
             }
             
-            // TX_DAY (0x15): text_today - display current day
+            // TX_DAY (0x15)
             case 0x15:
                 flush_text();
                 seq.elements.push_back(TextElement{TextOp::TextDay, ""});
                 continue;
             
             // TX_FAR (0x16): text_far - far text pointer
-            // Operands: dw address, db bank
+            // Operands: dw address (little-endian), db bank
+            // Source: macros/scripts/text.asm: db TX_FAR / dw \1 / db BANK(\1)
             case 0x16: {
                 flush_text();
                 uint16_t addr = rom_.read_byte(pos) | (rom_.read_byte(pos + 1) << 8);
@@ -426,69 +480,59 @@ TextSequence ScriptDecoder::decode_text_sequence(uint32_t address) {
                 continue;
             }
             
-            // Flow control codes (0x4B-0x58)
-            case 0x4B:  // <SCROLL> / <_CONT> - scroll (internal alias)
+            // Flow control codes (outer stream)
+            case 0x4B:  // <SCROLL>
                 flush_text();
                 seq.elements.push_back(TextElement::make_scroll());
                 continue;
                 
-            case 0x4E:  // <NEXT> - clear and continue (similar to PARA but no wait)
+            case 0x4E:  // <NEXT>
                 flush_text();
                 seq.elements.push_back(TextElement::make_next());
                 continue;
                 
-            case 0x4F:  // <LINE> - move to line 2, no wait
+            case 0x4F:  // <LINE>
                 flush_text();
                 seq.elements.push_back(TextElement::make_line());
                 continue;
             
-            case 0x50:  // @ (TX_END) - string terminator
+            case 0x50:  // '@' — TX_END — terminates resource in outer mode
                 flush_text();
                 seq.elements.push_back(TextElement::make_done());
                 return seq;
                 
-            case 0x51:  // <PARA> - wait, clear, continue
+            case 0x51:  // <PARA>
                 flush_text();
                 seq.elements.push_back(TextElement::make_para());
                 continue;
                 
-            case 0x55:  // <CONT> - wait, scroll, continue
+            case 0x55:  // <CONT>
                 flush_text();
                 seq.elements.push_back(TextElement::make_cont());
                 continue;
                 
-            case 0x57:  // <DONE> - end text processing
+            case 0x57:  // <DONE>
                 flush_text();
                 seq.elements.push_back(TextElement::make_done());
                 return seq;
                 
-            case 0x58:  // <PROMPT> - show cursor, wait, end
+            case 0x58:  // <PROMPT>
                 flush_text();
                 seq.elements.push_back(TextElement::make_prompt());
                 return seq;
                 
             default:
-                break;  // Fall through to character handling
-        }
-        
-        // Regular printable character - accumulate into current text run
-        auto it = charmap_.find(ch);
-        if (it != charmap_.end()) {
-            current_text += it->second;
-        } else {
-            // Unknown character - emit placeholder with the actual byte value
-            current_text += "?";
-        }
-        
-        // Safety limit
-        if (current_text.size() > 2000) {
-            flush_text();
-            seq.elements.push_back(TextElement::make_done());
-            return seq;
+                // In outer command stream, non-TX-command bytes that are not
+                // flow-control codes are unexpected. Preserve losslessly.
+                {
+                    flush_text();
+                    std::vector<uint8_t> raw{ch};
+                    seq.elements.push_back(TextElement::make_text_raw(raw));
+                    continue;
+                }
         }
     }
     
-    // Should never reach here
     flush_text();
     return seq;
 }

@@ -99,7 +99,12 @@ namespace crystal {
 //        Sem_PromptButton distinct from Sem_WaitButton,
 //        getname type mapping corrected to pokecrystal constants,
 //        InvalidDomain is now a hard linker gate
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.5.0";
+// 2.6.0: Crystal text frontend fidelity fixes:
+//        Finding 1: explicit outer-command vs literal-body parser mode (TX_START/PlaceString)
+//        Finding 2: TX_BOX param1=height/param2=width corrected (was transposed)
+//        Finding 3: TX_FAR identity includes bank (param2, was using wrong field param1=0)
+//        Finding 4: TextRaw identity uses hex byte content (not just length)
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.6.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================

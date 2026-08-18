@@ -52,7 +52,10 @@ enum class TextOp : uint8_t {
     TextRam,        // TX_RAM (0x01): Display RAM contents (dw address)
     TextBcd,        // TX_BCD (0x02): Display BCD number (dw address, db flags)
     TextMove,       // TX_MOVE (0x03): Move cursor (dw position)
-    TextBox,        // TX_BOX (0x04): Draw text box (dw address, db width, db height)
+    TextBox,        // TX_BOX (0x04): Draw text box (dw address, db height, db width)
+                    //   param1 = height (first dimension byte, Crystal B register)
+                    //   param2 = width  (second dimension byte, Crystal C register)
+                    //   Source: home/text.asm TextCommand_BOX comment "(height, width)"
     TextLow,        // TX_LOW (0x05): Move to bottom of screen
     TextPromptButton, // TX_PROMPT_BUTTON (0x06): Wait for button press
     TextScroll,     // TX_SCROLL (0x07): Scroll text up
@@ -81,9 +84,11 @@ struct TextElement {
     std::string text;       // For TextOp::Text, the actual character data (UTF-8)
     
     // Operand storage for dynamic text commands
-    uint16_t addr = 0;      // For TextRam, TextBcd, TextDecimal, TextFar
-    uint8_t param1 = 0;     // For TextBcd (flags), TextBox (width), TextDecimal (bytes|digits nibble), TextStringBuffer (buffer_id)
-    uint8_t param2 = 0;     // For TextBox (height), TextFar (bank)
+    uint16_t addr = 0;      // For TextRam, TextBcd, TextDecimal, TextFar: the address/pointer
+    uint8_t param1 = 0;     // TextBcd: flags  |  TextBox: HEIGHT (first byte, Crystal B reg)
+                             // TextDecimal: bytes|digits nibble  |  TextStringBuffer: buffer_id
+                             // TextFar: NOT USED (bank is in param2)
+    uint8_t param2 = 0;     // TextBox: WIDTH (second byte, Crystal C reg)  |  TextFar: BANK
     
     // Raw bytes for TextRaw (unrecognized commands) - enables lossless round-trip
     std::vector<uint8_t> raw_bytes;

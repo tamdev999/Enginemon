@@ -124,11 +124,17 @@ std::string TextDefinition::identity_string() const {
                 ss << "<BUF:" << (int)elem.param1 << ">";
                 break;
             case TextOp::TextFar:
-                ss << "<FAR:" << std::hex << elem.addr << "," << (int)elem.param1 << ">";
+                // TX_FAR: addr=local-address, param2=bank
+                // CRITICAL: bank is stored in param2, NOT param1.
+                // Both addr AND bank must be in the identity — different banks at the same
+                // local address are completely different text resources.
+                // Source: macros/scripts/text.asm: db TX_FAR / dw \1 / db BANK(\1)
+                ss << "<FAR:" << (int)elem.param2 << "," << std::hex << elem.addr << ">";
                 break;
             case TextOp::TextBox:
+                // param1=height, param2=width (source: home/text.asm TextCommand_BOX)
                 ss << "<BOX:" << std::hex << elem.addr << "," 
-                   << (int)elem.param1 << "x" << (int)elem.param2 << ">";
+                   << (int)elem.param1 << "h" << (int)elem.param2 << "w>";
                 break;
             case TextOp::TextMove:
                 ss << "<MOVE:" << std::hex << elem.addr << ">";
@@ -158,7 +164,15 @@ std::string TextDefinition::identity_string() const {
                 ss << "<SND_FANFARE>";
                 break;
             case TextOp::TextRaw:
-                ss << "<RAW:" << elem.raw_bytes.size() << ">";
+                // CRITICAL: identity must include the actual byte content, not just length.
+                // Two TextRaw elements with the same length but different bytes are
+                // semantically different (e.g. text_dots 2 vs text_dots 7).
+                ss << "<RAW:";
+                for (size_t i = 0; i < elem.raw_bytes.size(); ++i) {
+                    if (i > 0) ss << ",";
+                    ss << std::hex << std::setw(2) << std::setfill('0') << (int)elem.raw_bytes[i];
+                }
+                ss << ">";
                 break;
             default:
                 ss << "<UNK>";
