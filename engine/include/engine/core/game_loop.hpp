@@ -93,7 +93,8 @@ struct InputResult {
 // Result of ticking the loop
 struct TickResult {
     bool movement_complete = false;     // A movement finished this tick
-    bool script_complete = false;       // A script finished this tick
+    bool script_complete = false;       // A script finished normally this tick
+    bool script_error = false;          // A script failed with error this tick
     bool script_resumed = false;        // A yielded script was resumed
     std::vector<uint32_t> completed_coroutines;
 };
@@ -377,6 +378,7 @@ private:
     uint32_t active_coroutine_ = 0;
     std::string active_script_id_;
     bool script_resumed_this_tick_ = false;  // Set by resume_script(), reset each tick
+    bool script_error_this_tick_ = false;    // Set when script errors, reset each tick
     
     // Callbacks
     InteractionCallback on_interaction_;

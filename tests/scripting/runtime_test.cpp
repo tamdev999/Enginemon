@@ -10842,6 +10842,233 @@ TEST(wait_seconds_zero_duration) {
     std::cout << "  [WaitSeconds(0) resumes on first tick ✓]\n";
 }
 
+//=============================================================================
+// SCRIPT LIFECYCLE TESTS - Completion vs Error distinction, reset cleanup
+//=============================================================================
+
+// Script finishes normally: script_complete=true, script_error=false
+TEST(script_finishes_normally_sets_complete) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    const char* script_code = R"(script={main=function(ctx) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    bool started = loop.start_script("test");
+    ASSERT_TRUE(started);
+    // Script completed immediately during start
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    
+    std::cout << "  [Normal completion: start_script returns true ✓]\n";
+}
+
+// Script errors after resume: script_complete=false, script_error=true
+TEST(script_errors_after_resume_sets_error) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script yields then errors on resume
+    const char* script_code = R"(script={main=function(ctx) 
+        coroutine.yield("dialog")
+        error("intentional test error")
+    end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    bool started = loop.start_script("test");
+    ASSERT_TRUE(started);
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    
+    // Tick resumes (auto-advance dialog in headless mode), script errors
+    TickResult r = loop.tick();
+    ASSERT_TRUE(r.script_resumed);
+    ASSERT_FALSE(r.script_complete);  // NOT normal completion
+    ASSERT_TRUE(r.script_error);       // Error occurred
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    
+    std::cout << "  [Error after resume: script_error=true, script_complete=false ✓]\n";
+}
+
+// Script errors immediately during start: start_script returns false
+TEST(script_errors_immediately_returns_false) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script has syntax error
+    const char* script_code = R"(script={main=function(ctx) 
+        local x = -- syntax error, incomplete expression
+    end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    bool started = loop.start_script("test");
+    ASSERT_FALSE(started);  // Should return false on immediate error
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    
+    std::cout << "  [Immediate syntax error: start_script returns false ✓]\n";
+}
+
+// Script runtime error during start: start_script returns false
+TEST(script_runtime_error_during_start_returns_false) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script errors immediately on execution
+    const char* script_code = R"(script={main=function(ctx) error("immediate error") end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    bool started = loop.start_script("test");
+    ASSERT_FALSE(started);  // Should return false on runtime error during start
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    
+    std::cout << "  [Immediate runtime error: start_script returns false ✓]\n";
+}
+
+// Yielded script remains non-terminal
+TEST(yielded_script_remains_nonterminal) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script yields for long wait
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("wait_frames",100) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    
+    // Tick a few times, not enough to expire
+    for (int i = 0; i < 5; i++) {
+        TickResult r = loop.tick();
+        ASSERT_FALSE(r.script_complete);
+        ASSERT_FALSE(r.script_error);
+        ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    }
+    
+    std::cout << "  [Yielded script: script_complete=false, script_error=false ✓]\n";
+}
+
+// Reset cancels active coroutine - no later timed resume
+TEST(reset_cancels_active_coroutine_no_timed_resume) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Track if coroutine has effect
+    bool side_effect_occurred = false;
+    
+    // Script waits 5 frames then would set a flag
+    // We use a global variable to detect if it ever resumes
+    runtime.execute_string("test_side_effect = false", "init");
+    
+    const char* script_code = R"(script={main=function(ctx) 
+        coroutine.yield("wait_frames", 5)
+        test_side_effect = true
+        return true
+    end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    // Start script and verify it yields
+    loop.start_script("test");
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    
+    // Tick once (4 frames remaining)
+    loop.tick();
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    
+    // Reset the loop - should cancel coroutine
+    loop.reset();
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    ASSERT_TRUE(loop.active_coroutine() == 0);
+    
+    // Advance runtime well beyond the original wake time
+    for (int i = 0; i < 20; i++) {
+        runtime.update(1.0f / 60.0f);
+    }
+    
+    // Check that the side effect did NOT occur
+    lua_getglobal(runtime.get_state(), "test_side_effect");
+    side_effect_occurred = lua_toboolean(runtime.get_state(), -1);
+    lua_pop(runtime.get_state(), 1);
+    
+    ASSERT_FALSE(side_effect_occurred);
+    
+    std::cout << "  [Reset cancels coroutine: no timed resume occurs ✓]\n";
+}
+
+// Reset when no script active
+TEST(reset_when_no_script_active) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // No script started
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    ASSERT_TRUE(loop.active_coroutine() == 0);
+    
+    // Reset should succeed without error
+    loop.reset();
+    
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    ASSERT_TRUE(loop.active_coroutine() == 0);
+    
+    std::cout << "  [Reset when no script: succeeds safely ✓]\n";
+}
+
+// Reset when script already completed
+TEST(reset_after_script_completed) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script completes immediately
+    const char* script_code = R"(script={main=function(ctx) return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    ASSERT_TRUE(loop.state() == LoopState::Idle);  // Completed immediately
+    ASSERT_TRUE(loop.active_coroutine() == 0);
+    
+    // Reset should succeed
+    loop.reset();
+    
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    ASSERT_TRUE(loop.active_coroutine() == 0);
+    
+    std::cout << "  [Reset after completion: succeeds safely ✓]\n";
+}
+
+// Reset when script currently yielded
+TEST(reset_when_script_yielded) {
+    auto loop = create_timed_test_loop();
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script yields
+    const char* script_code = R"(script={main=function(ctx) coroutine.yield("dialog") return true end})";
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    loop.start_script("test");
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    uint32_t old_coro = loop.active_coroutine();
+    ASSERT_TRUE(old_coro != 0);
+    
+    // Reset should cancel the yielded coroutine
+    loop.reset();
+    
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    ASSERT_TRUE(loop.active_coroutine() == 0);
+    
+    // The old coroutine should be gone from runtime
+    ScriptState state = runtime.get_state(old_coro);
+    // Cancelled coroutines end in Finished state
+    ASSERT_TRUE(state == ScriptState::Finished || state == ScriptState::Error);
+    
+    std::cout << "  [Reset when yielded: coroutine cancelled ✓]\n";
+}
+
 // Coord event script roots appear in corpus
 TEST(coord_event_scripts_in_corpus) {
     // Coord events should contribute their scripts to the corpus discovery
@@ -11255,6 +11482,17 @@ int main(int argc, char* argv[]) {
     RUN_TEST(wait_seconds_resumes_after_duration);
     RUN_TEST(wait_seconds_resume_sets_flag);
     RUN_TEST(wait_seconds_zero_duration);
+    
+    // Script lifecycle tests - completion vs error distinction, reset cleanup
+    RUN_TEST(script_finishes_normally_sets_complete);
+    RUN_TEST(script_errors_after_resume_sets_error);
+    RUN_TEST(script_errors_immediately_returns_false);
+    RUN_TEST(script_runtime_error_during_start_returns_false);
+    RUN_TEST(yielded_script_remains_nonterminal);
+    RUN_TEST(reset_cancels_active_coroutine_no_timed_resume);
+    RUN_TEST(reset_when_no_script_active);
+    RUN_TEST(reset_after_script_completed);
+    RUN_TEST(reset_when_script_yielded);
     
     RUN_TEST(coord_event_scripts_in_corpus);
     

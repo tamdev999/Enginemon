@@ -376,7 +376,12 @@ bool HeadlessGameLoop::start_script(const std::string& script_id) {
         }
         
         // Script loader is expected to return code that creates global "script" table
-        lua_runtime_->execute_string(code, script_id);
+        try {
+            lua_runtime_->execute_string(code, script_id);
+        } catch (const std::exception&) {
+            // Lua syntax error during load
+            return false;
+        }
     }
     
     // Start the script
@@ -387,16 +392,23 @@ bool HeadlessGameLoop::start_script(const std::string& script_id) {
     ScriptState script_state = lua_runtime_->get_state(active_coroutine_);
     if (script_state == ScriptState::Yielded) {
         state_ = LoopState::ScriptYielded;
+        return true;
     } else if (script_state == ScriptState::Running) {
         state_ = LoopState::ScriptRunning;
-    } else {
-        // Finished immediately
+        return true;
+    } else if (script_state == ScriptState::Finished) {
+        // Finished immediately - successful completion
         active_coroutine_ = 0;
         active_script_id_.clear();
         state_ = LoopState::Idle;
+        return true;
+    } else {
+        // Error state - script failed during start
+        active_coroutine_ = 0;
+        active_script_id_.clear();
+        state_ = LoopState::Idle;
+        return false;  // Return false on immediate error
     }
-    
-    return true;
 }
 
 bool HeadlessGameLoop::resume_script() {
@@ -412,7 +424,13 @@ bool HeadlessGameLoop::resume_script() {
     
     // Check new state
     script_state = lua_runtime_->get_state(active_coroutine_);
-    if (script_state == ScriptState::Finished || script_state == ScriptState::Error) {
+    if (script_state == ScriptState::Finished) {
+        active_coroutine_ = 0;
+        active_script_id_.clear();
+        state_ = LoopState::Idle;
+        // Normal completion - script_error_this_tick_ remains false
+    } else if (script_state == ScriptState::Error) {
+        script_error_this_tick_ = true;  // Track the error
         active_coroutine_ = 0;
         active_script_id_.clear();
         state_ = LoopState::Idle;
@@ -473,19 +491,36 @@ bool HeadlessGameLoop::update_script() {
                 resume_script();
                 break;
         }
-        
-        // Check if script finished after resume
-        script_state = lua_runtime_->get_state(active_coroutine_);
     }
     
-    if (script_state == ScriptState::Finished || script_state == ScriptState::Error) {
+    // Check terminal state
+    // If resume_script() or lua_runtime_->update() already finalized, active_coroutine_ is 0
+    if (active_coroutine_ == 0) {
+        // Script terminated during this update
+        // script_error_this_tick_ was set by resume_script() if it was an error
+        // Return true for normal completion, false for error
+        return !script_error_this_tick_;
+    }
+    
+    // Re-check state in case lua_runtime_->update() changed it
+    script_state = lua_runtime_->get_state(active_coroutine_);
+    
+    if (script_state == ScriptState::Finished) {
         active_coroutine_ = 0;
         active_script_id_.clear();
         state_ = LoopState::Idle;
-        return true;  // Script completed
+        return true;  // Normal completion
     }
     
-    return false;
+    if (script_state == ScriptState::Error) {
+        script_error_this_tick_ = true;
+        active_coroutine_ = 0;
+        active_script_id_.clear();
+        state_ = LoopState::Idle;
+        return false;  // Error - not a normal completion
+    }
+    
+    return false;  // Still running or yielded
 }
 
 //=============================================================================
@@ -497,6 +532,7 @@ TickResult HeadlessGameLoop::tick() {
     
     // Reset per-tick tracking
     script_resumed_this_tick_ = false;
+    script_error_this_tick_ = false;
     
     // Update NPC autonomous movement
     // Reference: Gen2Recomped calls NPC:update() each frame
@@ -511,6 +547,9 @@ TickResult HeadlessGameLoop::tick() {
     // Update script
     if (state_ == LoopState::ScriptRunning || state_ == LoopState::ScriptYielded) {
         result.script_complete = update_script();
+        
+        // script_error = true if script failed (separate from completion)
+        result.script_error = script_error_this_tick_;
         
         // script_resumed = true when resume_script() was actually called and succeeded
         // This is set by resume_script() itself, independent of resulting state
@@ -527,6 +566,7 @@ TickResult HeadlessGameLoop::tick(int count) {
         TickResult r = tick();
         cumulative.movement_complete |= r.movement_complete;
         cumulative.script_complete |= r.script_complete;
+        cumulative.script_error |= r.script_error;
         cumulative.script_resumed |= r.script_resumed;
         for (auto id : r.completed_coroutines) {
             cumulative.completed_coroutines.push_back(id);
@@ -552,6 +592,15 @@ uint64_t HeadlessGameLoop::state_hash() const {
 }
 
 void HeadlessGameLoop::reset() {
+    // Cancel any active coroutine through LuaRuntime before clearing loop state
+    // This ensures:
+    // 1. Registry reference is released (coroutine won't prevent GC)
+    // 2. Coroutine is removed from LuaRuntime::coroutines_
+    // 3. No timed resume (WaitFrames/WaitSeconds) can occur later
+    if (lua_runtime_ && active_coroutine_ != 0) {
+        lua_runtime_->cancel(active_coroutine_);
+    }
+    
     state_ = LoopState::Idle;
     player_ = PlayerState{};
     current_map_owned_.reset();
@@ -561,7 +610,10 @@ void HeadlessGameLoop::reset() {
     movement_manager_.cancel_all();
     active_coroutine_ = 0;
     active_script_id_.clear();
+    script_resumed_this_tick_ = false;
+    script_error_this_tick_ = false;
     // Note: game_state_ pointer is NOT reset - caller owns that
+    // Note: lua_runtime_ pointer is NOT reset - caller owns that and may reuse it
 }
 
 //=============================================================================
