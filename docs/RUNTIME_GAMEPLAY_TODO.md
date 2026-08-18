@@ -271,3 +271,130 @@ Requires source-tracing pokecrystal's HP recalculation path:
 - **Fix**: Separate `LedgeRight`, `LedgeLeft`, `LedgeUp`, `LedgeDown` enum values
 - **Files**: `engine/include/engine/world/collision_types.hpp`, 
   `frontends/crystal/include/crystal/world/collision_classifier.hpp`
+
+---
+
+## G. Player-State Ownership Divergence
+
+**Status**: Deferred - Architectural Clarification Needed
+
+**Current Behavior**:
+Two authoritative player state structures exist:
+- `GameState::player` (PlayerSaveState): x, y, facing, current_map_id - used for persistence and WorldManager
+- `HeadlessGameLoop::player_` (PlayerState): x, y, facing, is_moving, target_x, target_y - used for simulation
+
+During normal gameplay:
+- HeadlessGameLoop updates player position/facing during movement
+- GameState::player is NOT synced during movement
+- WorldManager::execute_warp() reads GameState::player for backup warp coordinates
+- Result: backup warp (LAST_WARP) data may use stale position/facing
+
+**Example Scenario**:
+1. Player walks north 2 tiles: HeadlessGameLoop=(4,4), GameState=(4,6) stale
+2. Player steps on warp at (4,4)
+3. execute_warp() reads GameState::player=(4,6) for backup
+4. Interior exit via LAST_WARP returns to (4,6) instead of (4,4)
+
+**Reason Deferred**:
+Not RNG-dependent. Requires architectural decision:
+- Option A: Single authoritative player state (GameState only, HeadlessGameLoop derives)
+- Option B: Explicit sync boundary (sync HeadlessGameLoop→GameState before WorldManager ops)
+
+**Intended Milestone**: World/Save System Cleanup
+
+**Relevant Files**:
+- `engine/include/engine/core/game_state.hpp` - PlayerSaveState
+- `engine/include/engine/core/game_loop.hpp` - PlayerState
+- `engine/world/world_manager.cpp` - execute_warp(), remember_backup_warp()
+- `runtime/main_tiles.cpp` - transition_to_map()
+
+**Invariant**: Future fix must ensure backup warp coordinates match actual warp-trigger position.
+
+---
+
+## H. Connection Activation Range vs Landing Adjustment
+
+**Status**: Deferred - Semantic Conflation
+
+**Current Behavior**:
+`RuntimeConnection::strip_offset` is used for both:
+1. Source edge activation range: `strip_start_cells = strip_offset * 2`
+2. Landing position adjustment: `out_x/y = player_coord - offset_tiles`
+
+Crystal's serialized `_x`/`_y` values represent the landing adjustment (offset×-2),
+not the source strip activation start. The source strip is always `[0, strip_length)`.
+
+**Bug Effect**:
+Connections with non-zero offset have incorrect activation bounds check.
+For offset=-10: strip_start=-20, but the source strip actually starts at 0.
+
+**Correct Interpretation**:
+- Source strip activation: `[0, strip_length_cells)` along the source edge
+- Landing adjustment: `player_coord - (offset * 2)` on destination map
+
+**Reason Deferred**:
+Most connections use offset=0 where the bug is invisible.
+Not RNG-dependent. Fix requires separating source activation range from landing adjustment.
+
+**Intended Milestone**: Map Connection System Fix
+
+**Relevant Files**:
+- `frontends/crystal/extract/maps.cpp` - extract_connections()
+- `engine/world/world_manager.cpp` - resolve_connection(), calculate_connection_landing()
+- `references/pokecrystal/data/maps/attributes.asm` - connection macro definition
+
+**Invariant**: Future fix must verify activation range separately from landing calculation.
+
+---
+
+## I. Input Edge Consumption in Catch-Up Ticks
+
+**Status**: Deferred - API Footgun
+
+**Current Behavior**:
+Production code uses `was_pressed()` which queries the snapshot but does NOT consume the edge:
+```cpp
+if (input.snapshot().was_pressed(InputButton::A)) {
+    action = InputAction::Interact;
+}
+```
+
+The correct API `consume_pressed()` exists and is documented for single-consumption semantics:
+```cpp
+bool consume_pressed(InputButton btn);  // Returns true once per physical press
+```
+
+**Bug Effect**:
+During catch-up scenarios (multiple simulation ticks per render frame), the same pressed
+edge can be observed by multiple ticks. Mitigated by:
+- Dialog: `frame_counter > dialog_open_frame` check
+- Interaction: Script lock blocks subsequent interactions
+
+**Reason Deferred**:
+Bug is latent - only manifests during severe frame drops causing 3+ catch-up ticks.
+Existing guards prevent most observable issues. Not RNG-dependent.
+
+**Intended Milestone**: Input System Hardening
+
+**Relevant Files**:
+- `runtime/main_tiles.cpp` - input handling in fixed-step loop
+- `engine/include/engine/input/input_system.hpp` - consume_pressed() API
+- `engine/input/input_system.cpp` - edge consumption implementation
+
+**Invariant**: Future fix should use consume_pressed() for all edge-triggered actions.
+
+---
+
+## Updated Summary
+
+| ID | Issue | Milestone | Status |
+|----|-------|-----------|--------|
+| A | DV RNG Consumption | Native RNG | Deferred |
+| B | NPC LCG Low-Bit Bias | Native RNG | Deferred |
+| C | Surf/Whirlpool | Field Moves | Unfinished |
+| D | Determinism Hash | Enhancement | Documented |
+| E | Ledge Hop Execution | Movement System | Deferred (semantics preserved) |
+| F | HP Recalculation | Level-Up System | Deferred |
+| G | Player-State Ownership | World/Save Cleanup | Deferred |
+| H | Connection Activation Range | Map Connections | Deferred |
+| I | Input Edge Consumption | Input Hardening | Deferred |

@@ -79,7 +79,10 @@ class SymbolMap;
 namespace crystal {
 
 // Compiler version for cache compatibility
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.0.0";
+// Bump this version when compiler semantics change (extraction, lowering, linking)
+// to invalidate cached packages and force recompilation.
+// 2.1.0: sprite ID mapping 1-102, directional ledge semantics, connection offset fix
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.1.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================
