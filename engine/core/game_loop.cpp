@@ -407,6 +407,9 @@ bool HeadlessGameLoop::resume_script() {
     
     lua_runtime_->resume(active_coroutine_);
     
+    // Mark that a yielded script was actually resumed this tick
+    script_resumed_this_tick_ = true;
+    
     // Check new state
     script_state = lua_runtime_->get_state(active_coroutine_);
     if (script_state == ScriptState::Finished || script_state == ScriptState::Error) {
@@ -474,6 +477,9 @@ bool HeadlessGameLoop::update_script() {
 TickResult HeadlessGameLoop::tick() {
     TickResult result;
     
+    // Reset per-tick tracking
+    script_resumed_this_tick_ = false;
+    
     // Update NPC autonomous movement
     // Reference: Gen2Recomped calls NPC:update() each frame
     // This must happen regardless of player/script state
@@ -486,17 +492,11 @@ TickResult HeadlessGameLoop::tick() {
     
     // Update script
     if (state_ == LoopState::ScriptRunning || state_ == LoopState::ScriptYielded) {
-        // Track pre-update state to detect actual resume
-        LoopState pre_state = state_;
-        
         result.script_complete = update_script();
         
-        // script_resumed = true only when a yielded script was actually resumed
-        // (transitioned from Yielded to something else, or back to Yielded after processing)
-        // NOT just "state is currently Yielded"
-        if (pre_state == LoopState::ScriptYielded && state_ != LoopState::ScriptYielded) {
-            result.script_resumed = true;
-        }
+        // script_resumed = true when resume_script() was actually called and succeeded
+        // This is set by resume_script() itself, independent of resulting state
+        result.script_resumed = script_resumed_this_tick_;
     }
     
     return result;

@@ -1341,12 +1341,12 @@ Completed font extraction from ROM bytes (not PNG files).
 
 ## Test Results (All Pass)
 
-- **Runtime Tests**: 232/232 pass
+- **Runtime Tests**: 262/262 pass
 - **Golden Tests**: 56/56 pass
 - **Legality Gate Tests**: 14/14 pass
 - **Corpus Test**: PASS (decoder/CFG integrity)
-- **Corpus Lowering Audit**: 1679/1679 SUCCESS
-- **Linker Test**: corpus=1679/1679, InvalidOwnership=0
+- **Corpus Lowering Audit**: 1788/1788 SUCCESS
+- **Linker Test**: corpus=1788/1788, InvalidOwnership=0
 
 ---
 

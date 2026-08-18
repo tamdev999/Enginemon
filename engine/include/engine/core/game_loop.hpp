@@ -376,6 +376,7 @@ private:
     ScriptLoader script_loader_;
     uint32_t active_coroutine_ = 0;
     std::string active_script_id_;
+    bool script_resumed_this_tick_ = false;  // Set by resume_script(), reset each tick
     
     // Callbacks
     InteractionCallback on_interaction_;

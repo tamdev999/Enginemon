@@ -10589,32 +10589,124 @@ TEST(object_event_palette_type_decode) {
     }
 }
 
-// Script resumed only on actual transition out of Yielded
-TEST(script_resumed_transition_semantics) {
-    // script_resumed should be true only when transitioning FROM yielded state
-    // This test verifies the HeadlessGameLoop.tick() correctly tracks this field
+// script_resumed: no resume attempt => false
+TEST(script_resumed_no_resume_attempt) {
+    // script_resumed should be false when no script is running or yielded
     
-    // Create a basic game loop with collision
     HeadlessGameLoop loop;
     loop.spawn_player(5, 5, enginemon::Direction::Down);
-    
-    // Provide simple collision that's always walkable
     loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass { 
         (void)x; (void)y;
         return CollisionClass::Floor; 
     });
     
-    // Initial tick with no script: script_resumed should be false
+    // No script running: script_resumed = false
     TickResult tick1 = loop.tick();
-    ASSERT_FALSE(tick1.script_resumed);  // No script to resume
+    ASSERT_FALSE(tick1.script_resumed);
+    
+    // Still no script: script_resumed = false
+    TickResult tick2 = loop.tick();
+    ASSERT_FALSE(tick2.script_resumed);
     
     std::cout << "  [script_resumed=false when no script running ✓]\n";
+}
+
+// script_resumed: Yielded → resume → Completed => true
+TEST(script_resumed_yielded_to_completed) {
+    // script_resumed should be true when a yielded script is resumed and completes
     
-    // Tick again: still false (never was yielded)
+    HeadlessGameLoop loop;
+    loop.spawn_player(5, 5, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass { 
+        (void)x; (void)y;
+        return CollisionClass::Floor; 
+    });
+    
+    // Set up Lua runtime with a script that yields for dialog then completes
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script must create global "script" table with "main" function
+    // Use coroutine.yield("dialog") to yield for dialog input
+    const char* script_code = R"(
+        script = {
+            main = function(ctx)
+                coroutine.yield("dialog")  -- Yield for dialog
+                return true
+            end
+        }
+    )";
+    
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    // Start the script - it will yield on dialog
+    bool started = loop.start_script("test_yield_complete");
+    ASSERT_TRUE(started);
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    
+    // First tick with yielded script - headless mode auto-advances dialog
+    // This should resume the script and it will complete
+    TickResult tick1 = loop.tick();
+    
+    // The script was resumed (dialog auto-advanced in headless mode)
+    ASSERT_TRUE(tick1.script_resumed);
+    ASSERT_TRUE(tick1.script_complete);  // Script finished after resume
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    
+    std::cout << "  [Yielded → resume → Completed: script_resumed=true ✓]\n";
+}
+
+// script_resumed: Yielded → resume → Yielded => true
+TEST(script_resumed_yielded_to_yielded) {
+    // script_resumed should be true when a yielded script is resumed but yields again
+    
+    HeadlessGameLoop loop;
+    loop.spawn_player(5, 5, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t x, int32_t y) -> CollisionClass { 
+        (void)x; (void)y;
+        return CollisionClass::Floor; 
+    });
+    
+    // Set up Lua runtime with a script that yields twice
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Script must create global "script" table with "main" function
+    const char* script_code = R"(
+        script = {
+            main = function(ctx)
+                coroutine.yield("dialog")  -- First yield
+                coroutine.yield("dialog")  -- Second yield
+                return true
+            end
+        }
+    )";
+    
+    loop.set_script_loader([&](const std::string&) { return script_code; });
+    
+    // Start the script - yields on first dialog
+    bool started = loop.start_script("test_yield_twice");
+    ASSERT_TRUE(started);
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    
+    // Second tick - headless mode auto-advances dialog, script resumes and yields again
+    TickResult tick1 = loop.tick();
+    
+    // Script was resumed (from first dialog) but yielded again (on second dialog)
+    // Post-state is still ScriptYielded, but script_resumed should be TRUE
+    ASSERT_TRUE(tick1.script_resumed);
+    ASSERT_FALSE(tick1.script_complete);
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    
+    std::cout << "  [Yielded → resume → Yielded: script_resumed=true ✓]\n";
+    
+    // Third tick - resume again, should complete
     TickResult tick2 = loop.tick();
-    ASSERT_FALSE(tick2.script_resumed);  // Still no script
+    ASSERT_TRUE(tick2.script_resumed);
+    ASSERT_TRUE(tick2.script_complete);
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [script_resumed semantics verified ✓]\n";
+    std::cout << "  [Second resume completes script ✓]\n";
 }
 
 // Coord event script roots appear in corpus
@@ -11018,7 +11110,9 @@ int main(int argc, char* argv[]) {
     RUN_TEST(bg_event_hidden_item_semantic_decode);
     RUN_TEST(bg_event_conditional_script_decode);
     RUN_TEST(object_event_palette_type_decode);
-    RUN_TEST(script_resumed_transition_semantics);
+    RUN_TEST(script_resumed_no_resume_attempt);
+    RUN_TEST(script_resumed_yielded_to_completed);
+    RUN_TEST(script_resumed_yielded_to_yielded);
     RUN_TEST(coord_event_scripts_in_corpus);
     
     // Summary
