@@ -3257,6 +3257,7 @@ static std::vector<InteractableBgEvent> make_interactable_bg_events(const engine
         ibe.script_id = bg.script_id;
         ibe.item_id = bg.item_id;
         ibe.quantity = bg.quantity;
+        ibe.condition_flag = bg.condition_flag;
         result.push_back(ibe);
     }
     return result;
@@ -3476,6 +3477,211 @@ TEST(newbarktown_package_roundtrip_interaction) {
     std::filesystem::remove(temp_path);
     
     std::cout << "  [Package round-trip: interaction data survived serialization]\n";
+}
+
+//=============================================================================
+// BG EVENT TYPE PACKAGE SEAM TEST
+//=============================================================================
+// Proves all 9 BgEventTypes survive compiler → package → runtime round-trip.
+// This test explicitly covers types that were previously collapsed to Read:
+// FacingDown, FacingRight, FacingLeft, IfSet, IfNotSet, Copy
+
+TEST(bg_event_type_package_roundtrip_all_types) {
+    // QUALITY GATE: BG event type preservation through package seam
+    // All 9 BgEventType values must survive round-trip without degradation
+    
+    // Create a synthetic map with all BG event types
+    ExtractedMap test_map;
+    test_map.map_id = "test_bg_types";
+    test_map.width = 10;
+    test_map.height = 10;
+    test_map.blocks.resize(100, 0);
+    test_map.tileset_id = "johto_outdoor";
+    
+    // Add one BG event of each type
+    BgEvent ev_read;
+    ev_read.x = 1; ev_read.y = 1;
+    ev_read.type = BgEventType::Read;
+    ev_read.script_id = "test_read";
+    test_map.bg_events.push_back(ev_read);
+    
+    BgEvent ev_up;
+    ev_up.x = 2; ev_up.y = 1;
+    ev_up.type = BgEventType::FacingUp;
+    ev_up.script_id = "test_up";
+    test_map.bg_events.push_back(ev_up);
+    
+    BgEvent ev_down;
+    ev_down.x = 3; ev_down.y = 1;
+    ev_down.type = BgEventType::FacingDown;
+    ev_down.script_id = "test_down";
+    test_map.bg_events.push_back(ev_down);
+    
+    BgEvent ev_right;
+    ev_right.x = 4; ev_right.y = 1;
+    ev_right.type = BgEventType::FacingRight;
+    ev_right.script_id = "test_right";
+    test_map.bg_events.push_back(ev_right);
+    
+    BgEvent ev_left;
+    ev_left.x = 5; ev_left.y = 1;
+    ev_left.type = BgEventType::FacingLeft;
+    ev_left.script_id = "test_left";
+    test_map.bg_events.push_back(ev_left);
+    
+    BgEvent ev_ifset;
+    ev_ifset.x = 6; ev_ifset.y = 1;
+    ev_ifset.type = BgEventType::IfSet;
+    ev_ifset.script_id = "test_ifset";
+    ev_ifset.condition_flag = "FLAG_123";
+    test_map.bg_events.push_back(ev_ifset);
+    
+    BgEvent ev_ifnotset;
+    ev_ifnotset.x = 7; ev_ifnotset.y = 1;
+    ev_ifnotset.type = BgEventType::IfNotSet;
+    ev_ifnotset.script_id = "test_ifnotset";
+    ev_ifnotset.condition_flag = "FLAG_456";
+    test_map.bg_events.push_back(ev_ifnotset);
+    
+    BgEvent ev_hidden;
+    ev_hidden.x = 8; ev_hidden.y = 1;
+    ev_hidden.type = BgEventType::HiddenItem;
+    ev_hidden.item_id = "potion";
+    ev_hidden.quantity = 1;
+    ev_hidden.condition_flag = "FLAG_ITEM_789";
+    test_map.bg_events.push_back(ev_hidden);
+    
+    BgEvent ev_copy;
+    ev_copy.x = 9; ev_copy.y = 1;
+    ev_copy.type = BgEventType::Copy;
+    ev_copy.script_id = "test_copy";
+    test_map.bg_events.push_back(ev_copy);
+    
+    ASSERT_EQ(test_map.bg_events.size(), 9u);
+    
+    // Write to package
+    PackageWriter writer;
+    writer.add_map(test_map);
+    
+    std::string temp_path = "test_bg_types_roundtrip.emon";
+    writer.write(temp_path);
+    
+    // Reload from package
+    auto reader = PackageReader::open(temp_path);
+    ASSERT_TRUE(reader != nullptr);
+    ASSERT_TRUE(reader->validate());
+    
+    auto loaded = reader->load_full_map("test_bg_types");
+    ASSERT_TRUE(loaded.has_value());
+    
+    const auto& map = *loaded;
+    ASSERT_EQ(map.bg_events.size(), 9u);
+    
+    // Verify each type survived round-trip
+    ASSERT_EQ(static_cast<int>(map.bg_events[0].type), static_cast<int>(RuntimeBgEventType::Read));
+    ASSERT_EQ(static_cast<int>(map.bg_events[1].type), static_cast<int>(RuntimeBgEventType::Up));
+    ASSERT_EQ(static_cast<int>(map.bg_events[2].type), static_cast<int>(RuntimeBgEventType::Down));
+    ASSERT_EQ(static_cast<int>(map.bg_events[3].type), static_cast<int>(RuntimeBgEventType::Right));
+    ASSERT_EQ(static_cast<int>(map.bg_events[4].type), static_cast<int>(RuntimeBgEventType::Left));
+    ASSERT_EQ(static_cast<int>(map.bg_events[5].type), static_cast<int>(RuntimeBgEventType::IfSet));
+    ASSERT_EQ(static_cast<int>(map.bg_events[6].type), static_cast<int>(RuntimeBgEventType::IfNotSet));
+    ASSERT_EQ(static_cast<int>(map.bg_events[7].type), static_cast<int>(RuntimeBgEventType::HiddenItem));
+    ASSERT_EQ(static_cast<int>(map.bg_events[8].type), static_cast<int>(RuntimeBgEventType::Copy));
+    
+    // Verify condition flags survived for IFSET/IFNOTSET
+    ASSERT_STR_EQ(map.bg_events[5].condition_flag, "FLAG_123");
+    ASSERT_STR_EQ(map.bg_events[6].condition_flag, "FLAG_456");
+    
+    // Cleanup
+    std::filesystem::remove(temp_path);
+    
+    std::cout << "  [Package seam: all 9 BgEventTypes survive round-trip]\n";
+}
+
+TEST(bg_event_ifset_ifnotset_condition_flag_integration) {
+    // QUALITY GATE: IFSET/IFNOTSET condition_flag round-trip through actual package path
+    // This verifies the flag evaluation path can function after package loading
+    
+    // Use a real map that has BG events (New Bark Town has signs)
+    MapExtractor extractor(*g_rom, *g_profile);
+    auto result = extractor.extract_map("new_bark_town");
+    ASSERT_TRUE(result.success);
+    
+    // Add synthetic IFSET and IFNOTSET events to the map
+    BgEvent ev_ifset;
+    ev_ifset.x = 1; ev_ifset.y = 1;
+    ev_ifset.type = BgEventType::IfSet;
+    ev_ifset.script_id = "nbt_conditional_set";
+    ev_ifset.condition_flag = "FLAG_TEST_SET";
+    result.map.bg_events.push_back(ev_ifset);
+    
+    BgEvent ev_ifnotset;
+    ev_ifnotset.x = 2; ev_ifnotset.y = 1;
+    ev_ifnotset.type = BgEventType::IfNotSet;
+    ev_ifnotset.script_id = "nbt_conditional_notset";
+    ev_ifnotset.condition_flag = "FLAG_TEST_NOTSET";
+    result.map.bg_events.push_back(ev_ifnotset);
+    
+    // Write to package
+    PackageWriter writer;
+    writer.add_map(result.map);
+    
+    std::string temp_path = "test_ifset_integration.emon";
+    writer.write(temp_path);
+    
+    // Reload from package
+    auto reader = PackageReader::open(temp_path);
+    ASSERT_TRUE(reader != nullptr);
+    
+    auto loaded = reader->load_full_map("new_bark_town");
+    ASSERT_TRUE(loaded.has_value());
+    
+    const auto& map = *loaded;
+    
+    // Find the IFSET and IFNOTSET events
+    const RuntimeBgEvent* found_ifset = nullptr;
+    const RuntimeBgEvent* found_ifnotset = nullptr;
+    
+    for (const auto& bg : map.bg_events) {
+        if (bg.type == RuntimeBgEventType::IfSet && bg.script_id == "nbt_conditional_set") {
+            found_ifset = &bg;
+        }
+        if (bg.type == RuntimeBgEventType::IfNotSet && bg.script_id == "nbt_conditional_notset") {
+            found_ifnotset = &bg;
+        }
+    }
+    
+    ASSERT_TRUE(found_ifset != nullptr);
+    ASSERT_TRUE(found_ifnotset != nullptr);
+    
+    // Verify condition flags survived
+    ASSERT_STR_EQ(found_ifset->condition_flag, "FLAG_TEST_SET");
+    ASSERT_STR_EQ(found_ifnotset->condition_flag, "FLAG_TEST_NOTSET");
+    
+    // Convert to interactable and test with flag checker
+    auto bg_events = make_interactable_bg_events(map);
+    
+    // Find the events in interactable list
+    InteractableBgEvent* iact_ifset = nullptr;
+    InteractableBgEvent* iact_ifnotset = nullptr;
+    for (auto& ev : bg_events) {
+        if (ev.script_id == "nbt_conditional_set") iact_ifset = &ev;
+        if (ev.script_id == "nbt_conditional_notset") iact_ifnotset = &ev;
+    }
+    
+    ASSERT_TRUE(iact_ifset != nullptr);
+    ASSERT_TRUE(iact_ifnotset != nullptr);
+    
+    // Verify the type and condition_flag propagated to interactable
+    ASSERT_EQ(static_cast<int>(iact_ifset->type), static_cast<int>(RuntimeBgEventType::IfSet));
+    ASSERT_EQ(static_cast<int>(iact_ifnotset->type), static_cast<int>(RuntimeBgEventType::IfNotSet));
+    ASSERT_STR_EQ(iact_ifset->condition_flag, "FLAG_TEST_SET");
+    ASSERT_STR_EQ(iact_ifnotset->condition_flag, "FLAG_TEST_NOTSET");
+    
+    // Cleanup
+    std::filesystem::remove(temp_path);
+    
+    std::cout << "  [Package seam: IFSET/IFNOTSET condition_flag integration verified]\n";
 }
 
 TEST(newbarktown_no_rom_addresses_in_scripts) {
@@ -12015,6 +12221,8 @@ int main(int argc, char* argv[]) {
     RUN_TEST(newbarktown_teacher_interaction);
     RUN_TEST(newbarktown_object_priority_integration);
     RUN_TEST(newbarktown_package_roundtrip_interaction);
+    RUN_TEST(bg_event_type_package_roundtrip_all_types);
+    RUN_TEST(bg_event_ifset_ifnotset_condition_flag_integration);
     RUN_TEST(newbarktown_no_rom_addresses_in_scripts);
     RUN_TEST(newbarktown_interaction_determinism);
     

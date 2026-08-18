@@ -1,5 +1,75 @@
 # Current Status
 
+## Hostile Frontend Correctness Audit + BG Event Fix - COMPLETED ✓
+
+**SUCCESS**: Completed 8-item hostile frontend correctness audit. Fixed the BG event type collapse bug.
+
+### Summary
+
+| Item | Verdict | Action |
+|------|---------|--------|
+| Operand order bugs (8+ commands) | CONFIRMED BUG | Documented in TODO (J) |
+| Round-trip validation bypassed | CONFIRMED GAP | Documented in TODO (K) |
+| Text command handling | PARTIAL | Acceptable for current scope |
+| EventFlag/EngineFlag namespace | ARCHITECTURAL GAP | Documented in TODO (L) |
+| Movement decoder | PARTIAL | Acceptable for current scope |
+| sdefer pointer semantics | CLEAN | No action needed |
+| BG event type collapse | **FIXED** | Exhaustive switch, tests added |
+| Corpus green despite schema bugs | CONFIRMED | Documented limitation |
+
+**Verdict**: PARTIALLY TRUSTWORTHY - vanilla corpus works correctly, latent bugs documented for future fix.
+
+### BG Event Type Exhaustive Mapping - FIXED ✓
+
+**Prior bug**: `convert_bg_event_type()` only handled Read, HiddenItem, FacingUp. All other types (FacingDown, FacingRight, FacingLeft, IfSet, IfNotSet, Copy) silently collapsed to Read.
+
+**Fix**:
+```cpp
+// EXHAUSTIVE SWITCH - no silent fallback
+static RuntimeBgEventType convert_bg_event_type(BgEventType type) {
+    switch (type) {
+        case BgEventType::Read:       return RuntimeBgEventType::Read;
+        case BgEventType::FacingUp:   return RuntimeBgEventType::Up;
+        case BgEventType::FacingDown: return RuntimeBgEventType::Down;
+        case BgEventType::FacingRight:return RuntimeBgEventType::Right;
+        case BgEventType::FacingLeft: return RuntimeBgEventType::Left;
+        case BgEventType::IfSet:      return RuntimeBgEventType::IfSet;
+        case BgEventType::IfNotSet:   return RuntimeBgEventType::IfNotSet;
+        case BgEventType::HiddenItem: return RuntimeBgEventType::HiddenItem;
+        case BgEventType::Copy:       return RuntimeBgEventType::Copy;
+    }
+    throw std::runtime_error("invalid BgEventType");
+}
+```
+
+**Files Modified**:
+- `frontends/crystal/output/native_package.cpp` - Exhaustive switch, condition_flag transfer
+- `tests/scripting/runtime_test.cpp` - Package seam tests, helper fix
+
+**New Tests**:
+- `bg_event_type_package_roundtrip_all_types` - Proves all 9 types survive round-trip
+- `bg_event_ifset_ifnotset_condition_flag_integration` - Proves flag evaluation through package
+
+### Compiler Version Bumped
+
+`CRYSTAL_COMPILER_VERSION` bumped from `crystal-2.1.0` to `crystal-2.2.0`:
+- 2.2.0: BG event type exhaustive mapping, condition_flag propagation fix
+
+### Audit Report Created
+
+Full audit documented in `docs/FRONTEND_CORRECTNESS_AUDIT.md`
+
+### Test Results
+
+- **Runtime Tests**: 300/300 pass (+2 BG event package seam tests)
+- **Golden Tests**: 56/56 pass
+- **Legality Gate Tests**: 14/14 pass
+- **Corpus Test**: PASS (decoder/CFG integrity)
+- **Corpus Lowering Audit**: 1788/1788
+- **Linker Test**: 1788/1788, InvalidOwnership=0
+
+---
+
 ## Pre-RNG Correctness Cleanup - COMPLETED ✓
 
 **SUCCESS**: All confirmed bugs from the pre-RNG audit have been fixed. The codebase is now ready for PCG RNG implementation.

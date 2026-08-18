@@ -16,6 +16,7 @@
 #include <numeric>
 #include <array>
 #include <iostream>
+#include <stdexcept>
 
 namespace crystal {
 
@@ -1210,13 +1211,22 @@ std::vector<std::string> PackageReader::list_scripts() const {
 }
 
 // Helper to convert crystal::BgEventType to enginemon::RuntimeBgEventType
+// EXHAUSTIVE SWITCH - no silent fallback to Read
 static enginemon::RuntimeBgEventType convert_bg_event_type(BgEventType type) {
     switch (type) {
-        case BgEventType::Read: return enginemon::RuntimeBgEventType::Read;
+        case BgEventType::Read:       return enginemon::RuntimeBgEventType::Read;
+        case BgEventType::FacingUp:   return enginemon::RuntimeBgEventType::Up;
+        case BgEventType::FacingDown: return enginemon::RuntimeBgEventType::Down;
+        case BgEventType::FacingRight:return enginemon::RuntimeBgEventType::Right;
+        case BgEventType::FacingLeft: return enginemon::RuntimeBgEventType::Left;
+        case BgEventType::IfSet:      return enginemon::RuntimeBgEventType::IfSet;
+        case BgEventType::IfNotSet:   return enginemon::RuntimeBgEventType::IfNotSet;
         case BgEventType::HiddenItem: return enginemon::RuntimeBgEventType::HiddenItem;
-        case BgEventType::FacingUp: return enginemon::RuntimeBgEventType::Up;
-        default: return enginemon::RuntimeBgEventType::Read;
+        case BgEventType::Copy:       return enginemon::RuntimeBgEventType::Copy;
     }
+    // Unhandled enum value - hard fail package construction
+    throw std::runtime_error("convert_bg_event_type: invalid BgEventType value " + 
+                             std::to_string(static_cast<int>(type)));
 }
 
 // Helper to convert crystal::Direction to enginemon::ConnectionDirection
@@ -1345,6 +1355,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         rbg.script_id = std::move(bg.script_id);
         rbg.item_id = std::move(bg.item_id);
         rbg.quantity = bg.quantity;
+        rbg.condition_flag = std::move(bg.condition_flag);
         result.bg_events.push_back(std::move(rbg));
     }
     
