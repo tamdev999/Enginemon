@@ -6,6 +6,7 @@
 // semantic types before packaging. The runtime never sees raw Crystal IDs.
 
 #include <cstdint>
+#include "engine/core/types.hpp"  // For Direction enum
 
 namespace enginemon {
 
@@ -19,7 +20,14 @@ enum class CollisionClass : uint8_t {
     Floor = 0,          // Walkable floor tile
     Wall = 1,           // Solid wall, cannot pass
     Water = 2,          // Requires Surf to cross
-    Ledge = 3,          // One-way hop (directional)
+    
+    // Directional ledges (one-way hop)
+    // Player can hop DOWN (in the ledge direction) but not back up
+    // Source: pokecrystal COLL_HOP_RIGHT/LEFT/UP/DOWN = 0xA0-0xA3
+    LedgeRight = 3,     // Hop right (COLL_HOP_RIGHT = 0xA0)
+    LedgeLeft = 4,      // Hop left (COLL_HOP_LEFT = 0xA1)
+    LedgeUp = 5,        // Hop up (COLL_HOP_UP = 0xA2, unused in vanilla)
+    LedgeDown = 6,      // Hop down (COLL_HOP_DOWN = 0xA3)
     
     // Warp triggers
     WarpFloor = 10,     // Triggers warp when stepped on
@@ -84,6 +92,32 @@ inline bool collision_clears_warp_flag(CollisionClass c) {
 // Is this a side wall blocking from a specific direction?
 inline bool collision_is_side_wall(CollisionClass c) {
     return c >= CollisionClass::SideWallN && c <= CollisionClass::SideWallW;
+}
+
+// Is this a directional ledge?
+inline bool collision_is_ledge(CollisionClass c) {
+    return c >= CollisionClass::LedgeRight && c <= CollisionClass::LedgeDown;
+}
+
+// Get the direction a ledge allows hopping (e.g., LedgeDown allows hop when facing Down)
+// Returns the direction the player must be facing to hop over this ledge
+// For invalid/non-ledge input, returns Down as a safe default
+inline Direction collision_ledge_direction(CollisionClass c) {
+    switch (c) {
+        case CollisionClass::LedgeRight: return Direction::Right;
+        case CollisionClass::LedgeLeft:  return Direction::Left;
+        case CollisionClass::LedgeUp:    return Direction::Up;
+        case CollisionClass::LedgeDown:  return Direction::Down;
+        default: return Direction::Down;
+    }
+}
+
+// Can the player hop over this ledge when facing the given direction?
+// Ledges are passable ONLY when the player faces the ledge direction
+// Note: Full hop execution is NOT implemented - this only checks if hop is allowed
+inline bool collision_can_hop_ledge(CollisionClass c, Direction facing) {
+    if (!collision_is_ledge(c)) return false;
+    return collision_ledge_direction(c) == facing;
 }
 
 // Is this passable on foot (no special moves)?

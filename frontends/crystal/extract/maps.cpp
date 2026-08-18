@@ -7,6 +7,7 @@
 // All ROM reads are bounds-checked.
 
 #include "crystal/extract/map_extractor.hpp"
+#include "crystal/extract/sprite_ids.hpp"
 #include <format>
 #include <algorithm>
 #include <cctype>
@@ -156,75 +157,15 @@ std::string MapExtractor::make_tileset_id(uint8_t tileset_index) const {
 }
 
 std::string MapExtractor::make_sprite_id(uint8_t sprite_index) const {
-    // Sprite ID names from pokecrystal sprite_constants.asm
-    // These must match the sprite extractor's SPRITE_NAMES table
-    static const char* sprites[] = {
-        nullptr,            // 0 = SPRITE_NONE
-        "chris",            // 1
-        "chris_bike",       // 2
-        "gameboy_kid",      // 3
-        "rival",            // 4 (silver)
-        "oak",              // 5
-        "red",              // 6
-        "blue",             // 7
-        "bill",             // 8
-        "elder",            // 9
-        "janine",           // 10
-        "kurt",             // 11
-        "mom",              // 12
-        "blaine",           // 13
-        "reds_mom",         // 14
-        "daisy",            // 15
-        "elm",              // 16
-        "will",             // 17
-        "falkner",          // 18
-        "whitney",          // 19
-        "bugsy",            // 20
-        "morty",            // 21
-        "chuck",            // 22
-        "jasmine",          // 23
-        "pryce",            // 24
-        "clair",            // 25
-        "brock",            // 26
-        "karen",            // 27
-        "bruno",            // 28
-        "misty",            // 29
-        "lance",            // 30
-        "surge",            // 31
-        "erika",            // 32
-        "koga",             // 33
-        "sabrina",          // 34
-        "cooltrainer_m",    // 35
-        "cooltrainer_f",    // 36
-        "bug_catcher",      // 37
-        "twin",             // 38
-        "youngster",        // 39
-        "lass",             // 40
-        "teacher",          // 41 (0x29)
-        "beauty",           // 42
-        "super_nerd",       // 43
-        "rocker",           // 44
-        "pokefan_m",        // 45
-        "pokefan_f",        // 46
-        "gramps",           // 47
-        "granny",           // 48
-        "swimmer_guy",      // 49
-        "swimmer_girl",     // 50
-        "big_snorlax",      // 51
-        "surfing_pikachu",  // 52
-        "rocket",           // 53
-        "rocket_girl",      // 54
-        "nurse",            // 55
-        "link_receptionist", // 56
-        "clerk",            // 57
-        "fisher",           // 58 (0x3a)
-    };
-    constexpr size_t NUM_SPRITES = sizeof(sprites) / sizeof(sprites[0]);
-    
-    if (sprite_index < NUM_SPRITES && sprites[sprite_index]) {
-        return sprites[sprite_index];
+    // Use shared authoritative sprite ID mapping
+    // Valid Crystal sprite indices are 1..102
+    std::string id = crystal_sprite_index_to_id(sprite_index);
+    if (!id.empty()) {
+        return id;
     }
-    return std::format("sprite_{:02d}", sprite_index);
+    // Invalid index - return empty string to signal failure
+    // Caller should handle invalid sprite indices explicitly
+    return "";
 }
 
 std::string MapExtractor::make_music_id(uint8_t music_index) const {
@@ -865,17 +806,35 @@ bool MapExtractor::extract_connections(uint32_t map_attr_addr, uint8_t conn_byte
         // 0-1: map_id (group, map)
         // 2-3: blocks pointer offset in source map
         // 4-5: blocks pointer offset in target map  
-        // 6: strip length
+        // 6: strip length (_len - _src)
         // 7: target width
-        // 8: y offset
-        // 9: x offset
+        // 8: y offset (_y)
+        // 9: x offset (_x)
         // 10-11: window pointer offset
+        //
+        // CRITICAL: The semantic "strip offset" depends on direction:
+        // - North/South: player moves along X axis, strip_offset = _x = data[9]
+        // - East/West: player moves along Y axis, strip_offset = _y = data[8]
+        //
+        // From Crystal macro:
+        //   North: _y = dest_height*2-1 (landing row), _x = offset*-2 (X position adjust)
+        //   South: _y = 0 (landing row), _x = offset*-2 (X position adjust)
+        //   West:  _y = offset*-2 (Y position adjust), _x = dest_width*2-1 (landing col)
+        //   East:  _y = offset*-2 (Y position adjust), _x = 0 (landing col)
         
         uint8_t target_group = data[0];
         uint8_t target_index = data[1];
         conn.target_map_id = make_map_id(target_group, target_index);
-        conn.strip_offset = static_cast<int8_t>(data[8]);  // y or x offset
         conn.strip_length = data[6];
+        
+        // Select correct offset byte based on direction
+        // N/S: strip is along X axis, use X offset (data[9])
+        // E/W: strip is along Y axis, use Y offset (data[8])
+        if (dir == Direction::North || dir == Direction::South) {
+            conn.strip_offset = static_cast<int8_t>(data[9]);  // X offset for N/S
+        } else {
+            conn.strip_offset = static_cast<int8_t>(data[8]);  // Y offset for E/W
+        }
         
         out.push_back(conn);
         conn_ptr += fmt.connection_size;

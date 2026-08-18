@@ -30,6 +30,7 @@
 #include "crystal/script/semantic_legalizer.hpp"
 #include "crystal/script/crystal_command.hpp"
 #include "crystal/world/collision_classifier.hpp"
+#include "crystal/extract/sprite_ids.hpp"
 #include "engine/core/registry.hpp"
 
 #include <iostream>
@@ -1660,19 +1661,40 @@ TEST(collision_side_wall_blocks) {
 
 TEST(collision_ledge_detection) {
     // Test ledge detection using semantic CollisionClass
-    // Ledge collision is semantic - it's in CollisionClass::Ledge
-    // The direction is determined by the frontend classifier
+    // Ledges now preserve direction: LedgeRight, LedgeLeft, LedgeUp, LedgeDown
     
-    // CollisionClass::Ledge represents a ledge tile
-    // Ledges block movement in most directions but allow hops in specific direction
-    // For semantic collision, ledge detection is handled by collision_is_walkable which
-    // returns false for Ledge (since you can't walk normally onto a ledge)
+    // All directional ledges are detected by collision_is_ledge()
+    ASSERT_TRUE(collision_is_ledge(CollisionClass::LedgeRight));
+    ASSERT_TRUE(collision_is_ledge(CollisionClass::LedgeLeft));
+    ASSERT_TRUE(collision_is_ledge(CollisionClass::LedgeUp));
+    ASSERT_TRUE(collision_is_ledge(CollisionClass::LedgeDown));
+    ASSERT_FALSE(collision_is_ledge(CollisionClass::Floor));
+    ASSERT_FALSE(collision_is_ledge(CollisionClass::Wall));
     
-    ASSERT_FALSE(collision_is_walkable(CollisionClass::Ledge));
+    // Ledge direction is preserved in the semantic type
+    ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeRight), enginemon::Direction::Right);
+    ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeLeft), enginemon::Direction::Left);
+    ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeUp), enginemon::Direction::Up);
+    ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeDown), enginemon::Direction::Down);
+    
+    // Ledges allow hops ONLY when facing the ledge direction
+    ASSERT_TRUE(collision_can_hop_ledge(CollisionClass::LedgeDown, enginemon::Direction::Down));
+    ASSERT_FALSE(collision_can_hop_ledge(CollisionClass::LedgeDown, enginemon::Direction::Up));
+    ASSERT_FALSE(collision_can_hop_ledge(CollisionClass::LedgeDown, enginemon::Direction::Left));
+    ASSERT_FALSE(collision_can_hop_ledge(CollisionClass::LedgeDown, enginemon::Direction::Right));
+    
+    ASSERT_TRUE(collision_can_hop_ledge(CollisionClass::LedgeRight, enginemon::Direction::Right));
+    ASSERT_FALSE(collision_can_hop_ledge(CollisionClass::LedgeRight, enginemon::Direction::Left));
+    
+    // Ledges are NOT directly walkable (they require hop mechanics)
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::LedgeRight));
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::LedgeLeft));
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::LedgeUp));
+    ASSERT_FALSE(collision_is_walkable(CollisionClass::LedgeDown));
     ASSERT_FALSE(collision_is_walkable(CollisionClass::Wall));
     ASSERT_TRUE(collision_is_walkable(CollisionClass::Floor));
     
-    std::cout << "  [Ledge tiles correctly classified as non-walkable]\n";
+    std::cout << "  [Directional ledge detection working - direction preserved]\n";
 }
 
 TEST(collision_semantic_boundary_adversarial) {
@@ -1818,10 +1840,16 @@ TEST(collision_classifier_source_proven_constants) {
     ASSERT_EQ(crystal::classify_crystal_collision(0x72), CollisionClass::WarpStair);
     ASSERT_EQ(crystal::classify_crystal_collision(0x7A), CollisionClass::WarpStair);
     
-    // Ledges
-    ASSERT_EQ(crystal::classify_crystal_collision(0xA0), CollisionClass::Ledge);
-    ASSERT_EQ(crystal::classify_crystal_collision(0xA3), CollisionClass::Ledge);
-    ASSERT_EQ(crystal::classify_crystal_collision(0xA7), CollisionClass::Ledge);
+    // Ledges - now directional
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA0), CollisionClass::LedgeRight);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA1), CollisionClass::LedgeLeft);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA2), CollisionClass::LedgeUp);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA3), CollisionClass::LedgeDown);
+    // Diagonal ledges map to their primary direction
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA4), CollisionClass::LedgeDown);  // HOP_DOWN_RIGHT
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA5), CollisionClass::LedgeDown);  // HOP_DOWN_LEFT
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA6), CollisionClass::LedgeUp);    // HOP_UP_RIGHT
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA7), CollisionClass::LedgeUp);    // HOP_UP_LEFT
     
     // Side walls
     ASSERT_EQ(crystal::classify_crystal_collision(0xB0), CollisionClass::SideWallE);
@@ -2181,6 +2209,84 @@ TEST(bg_event_hidden_item_collected_blocked) {
     ASSERT_EQ(result.type, InteractionType::None);
     
     std::cout << "  [Hidden item collected: blocked ✓]\n";
+}
+
+//=============================================================================
+// FINAL PRE-RNG CORRECTNESS TESTS
+// Tests added during the final semantic gap closure pass
+//=============================================================================
+
+TEST(sprite_id_mapping_authoritative) {
+    // ADVERSARIAL TEST: Prove sprite ID mapping is authoritative across MapExtractor
+    // and SpriteExtractor using the shared sprite_ids.hpp
+    //
+    // Previously: MapExtractor had truncated table (0..58), SpriteExtractor had full (0..102)
+    // Now: Both use crystal_sprite_index_to_id() from sprite_ids.hpp
+    
+    // Boundary test: ID 58 (last valid in old truncated table)
+    ASSERT_STR_EQ(crystal::crystal_sprite_index_to_id(58), "fisher");
+    ASSERT_TRUE(crystal::crystal_sprite_index_valid(58));
+    
+    // Boundary test: ID 59 (first invalid in old truncated table, should be valid now)
+    ASSERT_STR_EQ(crystal::crystal_sprite_index_to_id(59), "fishing_guru");
+    ASSERT_TRUE(crystal::crystal_sprite_index_valid(59));
+    
+    // Middle of previously invalid range: ID 60
+    ASSERT_STR_EQ(crystal::crystal_sprite_index_to_id(60), "scientist");
+    ASSERT_TRUE(crystal::crystal_sprite_index_valid(60));
+    
+    // High end of valid range: ID 102
+    ASSERT_STR_EQ(crystal::crystal_sprite_index_to_id(102), "standing_youngster");
+    ASSERT_TRUE(crystal::crystal_sprite_index_valid(102));
+    
+    // Invalid: ID 103 (past valid range)
+    ASSERT_STR_EQ(crystal::crystal_sprite_index_to_id(103), "");  // Empty = invalid
+    ASSERT_FALSE(crystal::crystal_sprite_index_valid(103));
+    
+    // Invalid: ID 0 (SPRITE_NONE)
+    ASSERT_STR_EQ(crystal::crystal_sprite_index_to_id(0), "");  // Empty = invalid
+    ASSERT_FALSE(crystal::crystal_sprite_index_valid(0));
+    
+    // Reverse lookup works
+    ASSERT_EQ(crystal::crystal_sprite_id_to_index("chris"), 1);
+    ASSERT_EQ(crystal::crystal_sprite_id_to_index("fisher"), 58);
+    ASSERT_EQ(crystal::crystal_sprite_id_to_index("fishing_guru"), 59);
+    ASSERT_EQ(crystal::crystal_sprite_id_to_index("standing_youngster"), 102);
+    ASSERT_EQ(crystal::crystal_sprite_id_to_index("invalid_name"), 0);  // 0 = SPRITE_NONE = invalid
+    
+    std::cout << "  [Sprite ID mapping authoritative 1..102 ✓]\n";
+}
+
+TEST(directional_ledge_semantic_preservation) {
+    // ADVERSARIAL TEST: Prove ledge direction is NOT collapsed to a single value
+    // 
+    // Previously: All Crystal ledges (0xA0-0xA7) → CollisionClass::Ledge (direction lost)
+    // Now: 0xA0 → LedgeRight, 0xA1 → LedgeLeft, 0xA2 → LedgeUp, 0xA3 → LedgeDown
+    
+    // Basic ledge classification
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA0), CollisionClass::LedgeRight);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA1), CollisionClass::LedgeLeft);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA2), CollisionClass::LedgeUp);
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA3), CollisionClass::LedgeDown);
+    
+    // Diagonal ledges map to primary direction
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA4), CollisionClass::LedgeDown);  // DOWN_RIGHT → Down
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA5), CollisionClass::LedgeDown);  // DOWN_LEFT → Down
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA6), CollisionClass::LedgeUp);    // UP_RIGHT → Up
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA7), CollisionClass::LedgeUp);    // UP_LEFT → Up
+    
+    // Prove different ledge types are distinguishable
+    auto ledge_right = crystal::classify_crystal_collision(0xA0);
+    auto ledge_down = crystal::classify_crystal_collision(0xA3);
+    ASSERT_TRUE(ledge_right != ledge_down);  // They are NOT the same enum value
+    
+    // Semantic queries preserve direction
+    ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeRight), enginemon::Direction::Right);
+    ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeLeft), enginemon::Direction::Left);
+    ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeUp), enginemon::Direction::Up);
+    ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeDown), enginemon::Direction::Down);
+    
+    std::cout << "  [Directional ledge semantic preservation verified ✓]\n";
 }
 
 TEST(duplicate_physical_binding_release) {
@@ -12207,6 +12313,10 @@ int main(int argc, char* argv[]) {
     RUN_TEST(bg_event_ifnotset_set_blocked);
     RUN_TEST(bg_event_hidden_item_uncollected_triggers);
     RUN_TEST(bg_event_hidden_item_collected_blocked);
+    
+    // Final pre-RNG correctness tests (semantic gap closure)
+    RUN_TEST(sprite_id_mapping_authoritative);
+    RUN_TEST(directional_ledge_semantic_preservation);
     
     // Summary
     std::cout << "\n=== Results ===\n";

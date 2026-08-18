@@ -226,18 +226,26 @@ inline enginemon::CollisionClass classify_crystal_collision(uint8_t raw) {
             return CC::WarpFloor;
 
         //=====================================================================
-        // LEDGE/HOP TILES - one-way hop down
-        // Source: COLL_HOP_RIGHT/LEFT/UP/DOWN/etc = 0xA0-0xA7
+        // LEDGE/HOP TILES - one-way hop in specific direction
+        // Source: COLL_HOP_RIGHT/LEFT/UP/DOWN = 0xA0-0xA3
+        // Diagonal ledges (0xA4-0xA7) are mapped to their primary direction
         //=====================================================================
         case 0xA0:  // COLL_HOP_RIGHT
+            return CC::LedgeRight;
         case 0xA1:  // COLL_HOP_LEFT
-        case 0xA2:  // COLL_HOP_UP (unused)
+            return CC::LedgeLeft;
+        case 0xA2:  // COLL_HOP_UP (unused in vanilla)
+            return CC::LedgeUp;
         case 0xA3:  // COLL_HOP_DOWN
-        case 0xA4:  // COLL_HOP_DOWN_RIGHT
-        case 0xA5:  // COLL_HOP_DOWN_LEFT
-        case 0xA6:  // COLL_HOP_UP_RIGHT (unused)
-        case 0xA7:  // COLL_HOP_UP_LEFT (unused)
-            return CC::Ledge;
+            return CC::LedgeDown;
+        case 0xA4:  // COLL_HOP_DOWN_RIGHT - diagonal, use primary direction
+            return CC::LedgeDown;  // Down is primary for down-right
+        case 0xA5:  // COLL_HOP_DOWN_LEFT - diagonal, use primary direction
+            return CC::LedgeDown;  // Down is primary for down-left
+        case 0xA6:  // COLL_HOP_UP_RIGHT (unused) - diagonal
+            return CC::LedgeUp;
+        case 0xA7:  // COLL_HOP_UP_LEFT (unused) - diagonal
+            return CC::LedgeUp;
             
         //=====================================================================
         // SIDE WALLS - directional blocking on land

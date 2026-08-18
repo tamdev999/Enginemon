@@ -176,3 +176,98 @@ The following items were identified and **fixed** in the pre-RNG correctness cle
 - **Issue**: Multiple keys mapping to same button caused phantom releases
 - **Fix**: Added `held_count_[]` to track physical sources per logical button
 - **Files**: `engine/input/input_system.cpp`, `engine/include/engine/input/input_system.hpp`
+
+---
+
+## E. Ledge Hop Execution
+
+**Status**: Deferred - Semantic Identity Preserved
+
+**Current Behavior**:
+- Directional ledge identity is now preserved: LedgeRight, LedgeLeft, LedgeUp, LedgeDown
+- Ledges are classified as non-walkable (cannot walk onto directly)
+- `collision_can_hop_ledge(class, facing)` determines if hop is allowed
+- Full player/NPC hop animation and movement execution is NOT implemented
+
+**Crystal Semantic Behavior**:
+- Ledges are one-way passages: player can hop DOWN/across the ledge, but not back up
+- Crystal triggers a special hop animation when player attempts to move onto a valid ledge
+- NPC ledge traversal follows similar rules
+
+**Reason Deferred**:
+Semantic ledge direction is preserved. The actual hop execution (animation, movement, sound)
+requires additional animation and movement system work. The foundation is ready.
+
+**Intended Milestone**: Movement Animation System / Field Mechanics
+
+**Relevant Files**:
+- `engine/include/engine/world/collision_types.hpp` - LedgeRight/Left/Up/Down enums
+- `frontends/crystal/include/crystal/world/collision_classifier.hpp` - Crystal→semantic mapping
+- `engine/core/game_loop.cpp` - Would need hop execution logic
+
+**Invariant**: Future hop execution must use semantic ledge direction, not raw Crystal IDs.
+
+---
+
+## F. HP Recalculation Semantics
+
+**Status**: Deferred - Incomplete Feature
+
+**Current Behavior**:
+- HP preservation formula for level-up/evolution is not source-validated
+- Level-up and stat recalculation mechanics are incomplete
+- Current implementation may not match Crystal's HP preservation behavior
+
+**Crystal Semantic Behavior**:
+When stats change (level-up, evolution), HP is preserved proportionally:
+```
+new_current_hp = current_hp + (new_max_hp - old_max_hp)
+```
+Or depending on interpretation, ratio-based preservation.
+
+**Reason Deferred**:
+Requires source-tracing pokecrystal's HP recalculation path:
+- `_CalcPlayerStats` and related routines
+- Level-up flow vs evolution flow vs battle stat recalculation
+
+**Intended Milestone**: Battle Mechanics / Level-Up System
+
+**Relevant Files**:
+- `engine/party/pokemon.cpp` - stat calculation
+- References: `pokecrystal/engine/pokemon/stats.asm`, `pokecrystal/engine/battle/*`
+
+**Invariant**: HP preservation must match Crystal's exact formula for level-up and evolution.
+
+---
+
+## Updated Summary
+
+| ID | Issue | Milestone | Status |
+|----|-------|-----------|--------|
+| A | DV RNG Consumption | Native RNG | Deferred |
+| B | NPC LCG Low-Bit Bias | Native RNG | Deferred |
+| C | Surf/Whirlpool | Field Moves | Unfinished |
+| D | Determinism Hash | Enhancement | Documented |
+| E | Ledge Hop Execution | Movement System | Deferred (semantics preserved) |
+| F | HP Recalculation | Level-Up System | Deferred |
+
+---
+
+## Completed in Final Pre-RNG Pass
+
+### Fixed: Sprite ID Mapping 59-102
+- **Issue**: MapExtractor sprite table truncated at 58, valid IDs 59-102 unmapped
+- **Fix**: Created shared `sprite_ids.hpp` with authoritative 1-102 mapping
+- **Files**: `frontends/crystal/include/crystal/extract/sprite_ids.hpp` (new), 
+  `frontends/crystal/extract/sprites.cpp`, `frontends/crystal/extract/maps.cpp`
+
+### Fixed: Map Connection Direction-Specific Offset
+- **Issue**: `extract_connections()` used data[8] for all directions
+- **Fix**: N/S connections use data[9] (X offset), E/W use data[8] (Y offset)
+- **File**: `frontends/crystal/extract/maps.cpp`
+
+### Fixed: Directional Ledge Semantic Preservation
+- **Issue**: All Crystal ledges (0xA0-0xA7) collapsed to single `CollisionClass::Ledge`
+- **Fix**: Separate `LedgeRight`, `LedgeLeft`, `LedgeUp`, `LedgeDown` enum values
+- **Files**: `engine/include/engine/world/collision_types.hpp`, 
+  `frontends/crystal/include/crystal/world/collision_classifier.hpp`
