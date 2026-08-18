@@ -486,8 +486,15 @@ TickResult HeadlessGameLoop::tick() {
     
     // Update script
     if (state_ == LoopState::ScriptRunning || state_ == LoopState::ScriptYielded) {
+        // Track pre-update state to detect actual resume
+        LoopState pre_state = state_;
+        
         result.script_complete = update_script();
-        if (state_ == LoopState::ScriptYielded) {
+        
+        // script_resumed = true only when a yielded script was actually resumed
+        // (transitioned from Yielded to something else, or back to Yielded after processing)
+        // NOT just "state is currently Yielded"
+        if (pre_state == LoopState::ScriptYielded && state_ != LoopState::ScriptYielded) {
             result.script_resumed = true;
         }
     }

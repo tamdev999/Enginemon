@@ -44,6 +44,7 @@ namespace crystal {
 enum class ScriptRootType : uint8_t {
     Object,         // Object event script
     BgEvent,        // BG/sign event script
+    CoordEvent,     // Coordinate-triggered event script
     Scene,          // MapScripts scene script
     Callback,       // MapScripts callback script
     StdScript,      // StdScripts table entry
@@ -54,6 +55,7 @@ inline const char* script_root_type_name(ScriptRootType type) {
     switch (type) {
         case ScriptRootType::Object: return "object";
         case ScriptRootType::BgEvent: return "bg_event";
+        case ScriptRootType::CoordEvent: return "coord_event";
         case ScriptRootType::Scene: return "scene";
         case ScriptRootType::Callback: return "callback";
         case ScriptRootType::StdScript: return "std_script";
@@ -70,6 +72,7 @@ struct CorpusDiscoveryStats {
     // Initial root counts (before deferred discovery)
     uint32_t object_roots = 0;
     uint32_t bg_event_roots = 0;
+    uint32_t coord_event_roots = 0;
     uint32_t scene_roots = 0;
     uint32_t callback_roots = 0;
     uint32_t std_script_roots = 0;
@@ -82,7 +85,7 @@ struct CorpusDiscoveryStats {
     
     // Final counts
     uint32_t total_map_roots() const { 
-        return object_roots + bg_event_roots + scene_roots + callback_roots + deferred_new_roots;
+        return object_roots + bg_event_roots + coord_event_roots + scene_roots + callback_roots + deferred_new_roots;
     }
     uint32_t total_unique_bodies() const;
 };

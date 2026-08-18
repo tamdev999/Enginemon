@@ -3,8 +3,8 @@
 # Runs all test suites and reports unified pass/fail status
 #
 # Required invariants:
-#   - corpus lowering = 1679/1679
-#   - linker corpus   = 1679/1679
+#   - corpus lowering = 1788/1788
+#   - linker corpus   = 1788/1788
 #   - InvalidOwnership = 0
 #   - decoder/CFG integrity = PASS
 #   - All test suites pass
@@ -27,6 +27,9 @@ $ErrorActionPreference = "Stop"
 $buildDir = "build"
 $testReleaseDir = "$buildDir\tests\Release"
 $toolsReleaseDir = "$buildDir\tools\Release"
+
+# Expected corpus count - updated when new script roots are discovered
+$expectedCorpusCount = "1788"
 
 # Counters
 $passed = 0
@@ -191,15 +194,15 @@ if (Test-Path $loweringExe) {
     if ($successMatch) {
         $corpusLoweringCount = $successMatch.Matches[0].Groups[1].Value
         $failCount = if ($failMatch) { $failMatch.Matches[0].Groups[1].Value } else { "0" }
-        $corpusLoweringOk = ($corpusLoweringCount -eq "1679") -and ($failCount -eq "0")
-        Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0 -and $corpusLoweringOk) "lowering=$corpusLoweringCount/1679, failures=$failCount"
+        $corpusLoweringOk = ($corpusLoweringCount -eq $expectedCorpusCount) -and ($failCount -eq "0")
+        Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0 -and $corpusLoweringOk) "lowering=$corpusLoweringCount/$expectedCorpusCount, failures=$failCount"
     } else {
         # Alternative: check for "All X bodies compile" pattern
         $allMatch = $output | Select-String -Pattern "All\s+(\d+)\s+bodies\s+compile"
         if ($allMatch) {
             $corpusLoweringCount = $allMatch.Matches[0].Groups[1].Value
-            $corpusLoweringOk = ($corpusLoweringCount -eq "1679")
-            Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0 -and $corpusLoweringOk) "lowering=$corpusLoweringCount/1679"
+            $corpusLoweringOk = ($corpusLoweringCount -eq $expectedCorpusCount)
+            Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0 -and $corpusLoweringOk) "lowering=$corpusLoweringCount/$expectedCorpusCount"
         } else {
             Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0) "Exit code: $exitCode"
         }
@@ -223,7 +226,7 @@ if (Test-Path $linkerExe) {
     $corpusMatch = $output | Select-String -Pattern "Total unique bodies:\s*(\d+)"
     if ($corpusMatch) {
         $linkerCorpusCount = $corpusMatch.Matches[0].Groups[1].Value
-        $linkerCorpusOk = ($linkerCorpusCount -eq "1679")
+        $linkerCorpusOk = ($linkerCorpusCount -eq $expectedCorpusCount)
     }
     
     # Check InvalidOwnership count
@@ -238,7 +241,7 @@ if (Test-Path $linkerExe) {
     
     $linkerPass = ($exitCode -eq 0) -and $linkerCorpusOk -and $ownershipOk
     $ownerDisplay = if ($ownershipOk) { "0" } else { "ERROR" }
-    Write-TestResult "linker_test" $linkerPass "corpus=$linkerCorpusCount/1679, InvalidOwnership=$ownerDisplay"
+    Write-TestResult "linker_test" $linkerPass "corpus=$linkerCorpusCount/$expectedCorpusCount, InvalidOwnership=$ownerDisplay"
 } else {
     Write-TestResult "linker_test" $false "Executable not found"
 }
@@ -263,8 +266,8 @@ if ($failed -gt 0) {
 
 # Key invariants
 Write-Host "`n  Key Invariants:" -ForegroundColor Gray
-Write-Host "    corpus lowering   = $corpusLoweringCount/1679" -ForegroundColor $(if ($corpusLoweringOk) { "Green" } else { "Red" })
-Write-Host "    linker corpus     = $linkerCorpusCount/1679" -ForegroundColor $(if ($linkerCorpusOk) { "Green" } else { "Red" })
+Write-Host "    corpus lowering   = $corpusLoweringCount/$expectedCorpusCount" -ForegroundColor $(if ($corpusLoweringOk) { "Green" } else { "Red" })
+Write-Host "    linker corpus     = $linkerCorpusCount/$expectedCorpusCount" -ForegroundColor $(if ($linkerCorpusOk) { "Green" } else { "Red" })
 $ownerDisplay = if ($ownershipOk) { "0" } else { "ERROR" }
 Write-Host "    InvalidOwnership  = $ownerDisplay" -ForegroundColor $(if ($ownershipOk) { "Green" } else { "Red" })
 $decoderDisplay = if ($decoderCfgOk) { "PASS" } else { "FAIL" }

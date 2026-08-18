@@ -47,24 +47,33 @@ struct WarpPoint {
 struct CoordEvent {
     uint8_t x, y;
     std::string script_id;          // Script to run (semantic ID)
-    uint16_t scene_id;              // Scene script index (0 = always active)
+    uint16_t scene_id;              // Scene script index (0 = always active, -1/0xFF = always)
+    
+    // ROM address for script decoding (frontend use only, not serialized to package)
+    uint32_t script_rom_address = 0;
 };
 
 // Background event (signs, hidden items, etc.)
+// From pokecrystal constants/script_constants.asm BGEVENT_* constants
 enum class BgEventType {
-    Read,           // Sign, bookshelf
-    HiddenItem,     // Hidden item on ground
-    SecretBase,     // Pokemon Crystal doesn't have these, but for completeness
-    CounterItem,    // Item received over counter
-    FacingUp,       // Only triggers when facing up
+    Read = 0,           // BGEVENT_READ - any facing
+    FacingUp = 1,       // BGEVENT_UP - requires facing up
+    FacingDown = 2,     // BGEVENT_DOWN - requires facing down
+    FacingRight = 3,    // BGEVENT_RIGHT - requires facing right
+    FacingLeft = 4,     // BGEVENT_LEFT - requires facing left
+    IfSet = 5,          // BGEVENT_IFSET - conditional script (flag set)
+    IfNotSet = 6,       // BGEVENT_IFNOTSET - conditional script (flag not set)
+    HiddenItem = 7,     // BGEVENT_ITEM - hidden item on ground
+    Copy = 8,           // BGEVENT_COPY - copy tile (unused in Crystal)
 };
 
 struct BgEvent {
     uint8_t x, y;
     BgEventType type;
-    std::string script_id;          // For signs/readable
+    std::string script_id;          // For signs/readable/conditional
     std::string item_id;            // For hidden items (semantic ID)
     uint8_t quantity;
+    std::string condition_flag;     // For IFSET/IFNOTSET conditional scripts
     
     // ROM address for script decoding (frontend use only, not serialized to package)
     uint32_t script_rom_address = 0;
@@ -78,8 +87,8 @@ struct ObjectEvent {
     uint8_t movement_type;          // Movement behavior
     uint8_t movement_radius_x;
     uint8_t movement_radius_y;
-    uint8_t hour_start, hour_end;   // Active hours (0 = always)
-    uint8_t time_of_day;            // When visible (0 = always)
+    uint8_t hour_start, hour_end;   // Active hours (0 = always, or h1<h2 for range, etc.)
+    uint8_t palette;                // PAL_NPC_* palette (0 = sprite default)
     bool is_trainer;
     uint8_t trainer_sight_range;
     std::string script_id;          // Interaction script (semantic ID)
@@ -225,7 +234,8 @@ private:
     };
     bool read_events_header(uint32_t addr, EventCounts& counts, uint32_t& events_start) const;
     bool extract_warps(uint32_t ptr, uint8_t count, std::vector<WarpPoint>& out) const;
-    bool extract_coord_events(uint32_t ptr, uint8_t count, std::vector<CoordEvent>& out) const;
+    bool extract_coord_events(uint32_t ptr, uint8_t count, std::vector<CoordEvent>& out,
+                              uint8_t script_bank) const;
     bool extract_bg_events(uint32_t ptr, uint8_t count, std::vector<BgEvent>& out,
                            uint8_t script_bank) const;
     bool extract_objects(uint32_t ptr, uint8_t count, std::vector<ObjectEvent>& out,

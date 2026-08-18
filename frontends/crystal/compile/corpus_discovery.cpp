@@ -113,6 +113,24 @@ CorpusDiscoveryResult collect_initial_roots(
             ++bg_idx;
         }
         
+        // === Coord event scripts ===
+        uint8_t coord_idx = 0;
+        for (const auto& coord : map_result.map.coord_events) {
+            if (coord.script_rom_address != 0) {
+                if (!result.map_roots.contains(coord.script_rom_address)) {
+                    result.map_roots[coord.script_rom_address] = {
+                        coord.script_rom_address,
+                        ScriptRootType::CoordEvent,
+                        map_id,
+                        coord_idx,
+                        0
+                    };
+                    ++result.stats.coord_event_roots;
+                }
+            }
+            ++coord_idx;
+        }
+        
         // === Scene scripts and callbacks from MapScripts header ===
         uint32_t group_ptr_addr = o.map_group_pointers + ((ref.group - 1) * 2);
         if (group_ptr_addr + 2 > rom.size()) continue;

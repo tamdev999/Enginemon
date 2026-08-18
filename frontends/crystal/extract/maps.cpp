@@ -522,9 +522,17 @@ bool MapExtractor::extract_warps(uint32_t ptr, uint8_t count,
 }
 
 bool MapExtractor::extract_coord_events(uint32_t ptr, uint8_t count,
-                                         std::vector<CoordEvent>& out) const {
+                                         std::vector<CoordEvent>& out,
+                                         uint8_t script_bank) const {
     const auto& fmt = profile_.format.map;
     out.reserve(count);
+    
+    // coord_event macro from pokecrystal macros/scripts/maps.asm:
+    //   db \3, \2, \1    ; scene_id, y, x
+    //   db 0             ; filler
+    //   dw \4            ; script pointer
+    //   dw 0             ; filler
+    // Total: 8 bytes (COORD_EVENT_SIZE)
     
     for (uint8_t i = 0; i < count; ++i) {
         if (ptr + fmt.coord_event_size > rom_.size()) {
@@ -535,12 +543,16 @@ bool MapExtractor::extract_coord_events(uint32_t ptr, uint8_t count,
         auto data = rom_.read_bytes(ptr, fmt.coord_event_size);
         
         CoordEvent evt;
-        evt.y = data[0];
-        evt.x = data[1];
-        evt.scene_id = data[2];  // Scene script index
-        // bytes 3-4: unused
-        // bytes 5-7: script pointer (bank + addr)
-        // We'll resolve script_id later when we extract scripts
+        evt.scene_id = data[0];     // Scene script index (-1 = always active)
+        evt.y = data[1];
+        evt.x = data[2];
+        // byte 3: filler
+        // bytes 4-5: script pointer (local to script_bank)
+        uint16_t script_ptr = data[4] | (data[5] << 8);
+        // bytes 6-7: filler
+        
+        // Resolve to flat ROM address using script_bank
+        evt.script_rom_address = rom_.bank_to_flat(script_bank, script_ptr);
         evt.script_id = std::format("coord_event_{}", i);
         
         out.push_back(evt);
@@ -557,6 +569,22 @@ bool MapExtractor::extract_bg_events(uint32_t ptr, uint8_t count,
     const auto& fmt = profile_.format.map;
     out.reserve(count);
     
+    // bg_event macro from pokecrystal macros/scripts/maps.asm:
+    //   db \2, \1, \3    ; y, x, type
+    //   dw \4            ; script pointer OR pointer to secondary structure
+    // Total: 5 bytes (BG_EVENT_SIZE)
+    //
+    // BGEVENT types from constants/script_constants.asm:
+    //   0 = BGEVENT_READ     - script pointer
+    //   1 = BGEVENT_UP       - script pointer (requires facing up)
+    //   2 = BGEVENT_DOWN     - script pointer (requires facing down)
+    //   3 = BGEVENT_RIGHT    - script pointer (requires facing right)
+    //   4 = BGEVENT_LEFT     - script pointer (requires facing left)
+    //   5 = BGEVENT_IFSET    - pointer to conditional_event (flag, script)
+    //   6 = BGEVENT_IFNOTSET - pointer to conditional_event (flag, script)
+    //   7 = BGEVENT_ITEM     - pointer to hiddenitem (flag, item)
+    //   8 = BGEVENT_COPY     - unused in Crystal
+    
     for (uint8_t i = 0; i < count; ++i) {
         if (ptr + fmt.bg_event_size > rom_.size()) {
             stats_.bounds_check_failures++;
@@ -570,30 +598,83 @@ bool MapExtractor::extract_bg_events(uint32_t ptr, uint8_t count,
         evt.x = data[1];
         uint8_t bg_type = data[2];
         
-        // Map Crystal bg event types to our enum
-        switch (bg_type) {
-            case 0: evt.type = BgEventType::Read; break;
-            case 1: evt.type = BgEventType::FacingUp; break;
-            case 2:
-            case 3:
-            case 4: evt.type = BgEventType::Read; break;  // Bookshelves etc
-            case 5:
-            case 6:
-            case 7: evt.type = BgEventType::HiddenItem; break;
-            default: evt.type = BgEventType::Read; break;
-        }
+        // Pointer at bytes 3-4 (little-endian, local to script_bank)
+        uint16_t event_ptr = data[3] | (data[4] << 8);
+        uint32_t event_flat = rom_.bank_to_flat(script_bank, event_ptr);
         
-        // bytes 3-4: script pointer or item
-        if (evt.type == BgEventType::HiddenItem) {
-            evt.item_id = make_item_id(data[3]);
-            evt.quantity = data[4];
-            evt.script_rom_address = 0;  // No script for hidden items
-        } else {
-            // Script pointer at bytes 3-4 (local to script_bank)
-            uint16_t script_ptr = data[3] | (data[4] << 8);
-            evt.script_rom_address = rom_.bank_to_flat(script_bank, script_ptr);
-            evt.script_id = std::format("bg_event_{}", i);
-            evt.quantity = 0;
+        // Map Crystal bg event types to our enum and parse secondary structures
+        switch (bg_type) {
+            case 0:  // BGEVENT_READ
+                evt.type = BgEventType::Read;
+                evt.script_rom_address = event_flat;
+                evt.script_id = std::format("bg_event_{}", i);
+                break;
+                
+            case 1:  // BGEVENT_UP
+                evt.type = BgEventType::FacingUp;
+                evt.script_rom_address = event_flat;
+                evt.script_id = std::format("bg_event_{}", i);
+                break;
+                
+            case 2:  // BGEVENT_DOWN
+                evt.type = BgEventType::FacingDown;
+                evt.script_rom_address = event_flat;
+                evt.script_id = std::format("bg_event_{}", i);
+                break;
+                
+            case 3:  // BGEVENT_RIGHT
+                evt.type = BgEventType::FacingRight;
+                evt.script_rom_address = event_flat;
+                evt.script_id = std::format("bg_event_{}", i);
+                break;
+                
+            case 4:  // BGEVENT_LEFT
+                evt.type = BgEventType::FacingLeft;
+                evt.script_rom_address = event_flat;
+                evt.script_id = std::format("bg_event_{}", i);
+                break;
+                
+            case 5:  // BGEVENT_IFSET - conditional_event macro: dw flag, script
+            case 6:  // BGEVENT_IFNOTSET
+            {
+                evt.type = (bg_type == 5) ? BgEventType::IfSet : BgEventType::IfNotSet;
+                
+                // Read conditional_event structure: dw flag, dw script
+                if (event_flat + 4 <= rom_.size()) {
+                    auto cond_data = rom_.read_bytes(event_flat, 4);
+                    uint16_t flag = cond_data[0] | (cond_data[1] << 8);
+                    uint16_t script_ptr = cond_data[2] | (cond_data[3] << 8);
+                    
+                    evt.condition_flag = make_flag_id(flag);
+                    evt.script_rom_address = rom_.bank_to_flat(script_bank, script_ptr);
+                    evt.script_id = std::format("bg_event_{}", i);
+                }
+                break;
+            }
+                
+            case 7:  // BGEVENT_ITEM - hiddenitem macro: dwb flag, item
+            {
+                evt.type = BgEventType::HiddenItem;
+                
+                // Read hiddenitem structure: dw flag, db item (3 bytes)
+                if (event_flat + 3 <= rom_.size()) {
+                    auto item_data = rom_.read_bytes(event_flat, 3);
+                    uint16_t flag = item_data[0] | (item_data[1] << 8);
+                    uint8_t item = item_data[2];
+                    
+                    evt.condition_flag = make_flag_id(flag);
+                    evt.item_id = make_item_id(item);
+                    evt.quantity = 1;  // Hidden items are always quantity 1
+                }
+                evt.script_rom_address = 0;  // No script for hidden items
+                break;
+            }
+                
+            case 8:  // BGEVENT_COPY - unused in Crystal
+            default:
+                evt.type = BgEventType::Copy;
+                evt.script_rom_address = 0;
+                break;
         }
         
         out.push_back(evt);
@@ -676,6 +757,19 @@ bool MapExtractor::extract_objects(uint32_t ptr, uint8_t count,
         
         auto data = rom_.read_bytes(ptr, fmt.object_event_size);
         
+        // Object event format (from pokecrystal macros/scripts/maps.asm object_event):
+        // byte 0:  sprite
+        // byte 1:  y + 4
+        // byte 2:  x + 4
+        // byte 3:  movement function
+        // byte 4:  dn radius_y, radius_x (nibbles)
+        // byte 5:  hour_start
+        // byte 6:  hour_end
+        // byte 7:  dn palette, object_type (nibbles)
+        // byte 8:  sight_range
+        // bytes 9-10:  script_ptr (little-endian)
+        // bytes 11-12: event_flag (little-endian)
+        
         ObjectEvent obj;
         obj.local_id = i + 1;  // 1-indexed
         obj.sprite_id = make_sprite_id(data[0]);
@@ -686,14 +780,17 @@ bool MapExtractor::extract_objects(uint32_t ptr, uint8_t count,
         obj.movement_radius_y = (data[4] >> 4) & 0x0F;
         obj.hour_start = data[5];
         obj.hour_end = data[6];
-        obj.time_of_day = data[7];
         
-        // Object type is encoded in the low nibble of byte 7
-        // From pokecrystal constants/script_constants.asm:
-        //   OBJECTTYPE_SCRIPT   = 0  (normal script bytecode)
-        //   OBJECTTYPE_ITEMBALL = 1  (item + quantity data, not script)
-        //   OBJECTTYPE_TRAINER  = 2  (trainer data struct, not script)
+        // Byte 7: dn palette, object_type
+        // High nibble = PAL_NPC_* palette (0 = sprite default)
+        // Low nibble = OBJECTTYPE_* constant
+        obj.palette = (data[7] >> 4) & 0x0F;
         uint8_t object_type = data[7] & 0x0F;
+        
+        // Object type determines what the pointer field contains:
+        // OBJECTTYPE_SCRIPT   = 0  (normal script bytecode)
+        // OBJECTTYPE_ITEMBALL = 1  (item + quantity data, not script)
+        // OBJECTTYPE_TRAINER  = 2  (trainer data struct, not script)
         obj.is_trainer = (object_type == 2);  // OBJECTTYPE_TRAINER
         
         obj.trainer_sight_range = data[8];
@@ -919,7 +1016,7 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
         if (event_ptr < rom_.size()) {
             uint8_t coord_count = rom_.read_byte(event_ptr++);
             if (coord_count > 0 && coord_count < 100) {
-                extract_coord_events(event_ptr, coord_count, map.coord_events);
+                extract_coord_events(event_ptr, coord_count, map.coord_events, script_bank);
                 event_ptr += coord_count * fmt.coord_event_size;
             }
         }

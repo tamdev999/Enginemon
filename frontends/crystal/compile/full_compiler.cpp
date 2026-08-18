@@ -526,6 +526,7 @@ void FullGameCompiler::collect_script_addresses(
     std::cout << "  Initial roots:\n";
     std::cout << "    Object scripts:    " << s.object_roots << "\n";
     std::cout << "    BG event scripts:  " << s.bg_event_roots << "\n";
+    std::cout << "    Coord event scripts: " << s.coord_event_roots << "\n";
     std::cout << "    Scene scripts:     " << s.scene_roots << "\n";
     std::cout << "    Callback scripts:  " << s.callback_roots << "\n";
     std::cout << "  Deferred discovery:\n";

@@ -97,25 +97,27 @@ struct RuntimeCoordEvent {
 };
 
 // Background event types
+// From pokecrystal constants/script_constants.asm BGEVENT_* constants
 enum class RuntimeBgEventType : uint8_t {
-    Read = 0,           // Sign, bookshelf - any facing
-    Up = 1,             // Requires facing up
-    Down = 2,           // Requires facing down
-    Right = 3,          // Requires facing right
-    Left = 4,           // Requires facing left
-    IfSet = 5,          // Flag check
-    IfNotSet = 6,       // Inverse flag check
-    HiddenItem = 7,     // Hidden item on ground
-    Copy = 8,           // Copy tile
+    Read = 0,           // BGEVENT_READ - any facing
+    Up = 1,             // BGEVENT_UP - requires facing up
+    Down = 2,           // BGEVENT_DOWN - requires facing down
+    Right = 3,          // BGEVENT_RIGHT - requires facing right
+    Left = 4,           // BGEVENT_LEFT - requires facing left
+    IfSet = 5,          // BGEVENT_IFSET - conditional script (flag set)
+    IfNotSet = 6,       // BGEVENT_IFNOTSET - conditional script (flag not set)
+    HiddenItem = 7,     // BGEVENT_ITEM - hidden item on ground
+    Copy = 8,           // BGEVENT_COPY - copy tile (unused in Crystal)
 };
 
 // Background event (signs, hidden items, etc.)
 struct RuntimeBgEvent {
     uint8_t x, y;
     RuntimeBgEventType type;
-    std::string script_id;          // For signs/readable
+    std::string script_id;          // For signs/readable/conditional
     std::string item_id;            // For hidden items (semantic ID)
     uint8_t quantity;
+    std::string condition_flag;     // For IFSET/IFNOTSET and hidden items
 };
 
 // NPC/Object event
@@ -126,8 +128,8 @@ struct RuntimeObject {
     uint8_t movement_type;          // Movement behavior
     uint8_t movement_radius_x;
     uint8_t movement_radius_y;
-    uint8_t hour_start, hour_end;   // Active hours (0 = always)
-    uint8_t time_of_day;            // When visible (0 = always)
+    uint8_t hour_start, hour_end;   // Active hours (0 = always, or h1<h2 for range)
+    uint8_t palette;                // PAL_NPC_* palette (0 = sprite default)
     bool is_trainer;
     uint8_t trainer_sight_range;
     std::string script_id;          // Interaction script (semantic ID)

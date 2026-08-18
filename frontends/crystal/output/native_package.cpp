@@ -136,6 +136,8 @@ static void write_bg_event(std::ostream& out, const BgEvent& evt) {
     out.write(evt.script_id.data(), evt.script_id.size());
     write_le(out, static_cast<uint16_t>(evt.item_id.size()));
     out.write(evt.item_id.data(), evt.item_id.size());
+    write_le(out, static_cast<uint16_t>(evt.condition_flag.size()));
+    out.write(evt.condition_flag.data(), evt.condition_flag.size());
 }
 
 static void write_object(std::ostream& out, const ObjectEvent& obj) {
@@ -147,7 +149,7 @@ static void write_object(std::ostream& out, const ObjectEvent& obj) {
     out.put(obj.movement_radius_y);
     out.put(obj.hour_start);
     out.put(obj.hour_end);
-    out.put(obj.time_of_day);
+    out.put(obj.palette);
     out.put(obj.is_trainer ? 1 : 0);
     out.put(obj.trainer_sight_range);
     
@@ -247,6 +249,9 @@ static BgEvent read_bg_event(std::istream& in) {
     uint16_t item_len = read_le<uint16_t>(in);
     evt.item_id.resize(item_len);
     in.read(evt.item_id.data(), item_len);
+    uint16_t flag_len = read_le<uint16_t>(in);
+    evt.condition_flag.resize(flag_len);
+    in.read(evt.condition_flag.data(), flag_len);
     return evt;
 }
 
@@ -260,7 +265,7 @@ static ObjectEvent read_object(std::istream& in) {
     obj.movement_radius_y = in.get();
     obj.hour_start = in.get();
     obj.hour_end = in.get();
-    obj.time_of_day = in.get();
+    obj.palette = in.get();
     obj.is_trainer = (in.get() != 0);
     obj.trainer_sight_range = in.get();
     
@@ -1356,7 +1361,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         ro.movement_radius_y = obj.movement_radius_y;
         ro.hour_start = obj.hour_start;
         ro.hour_end = obj.hour_end;
-        ro.time_of_day = obj.time_of_day;
+        ro.palette = obj.palette;
         ro.is_trainer = obj.is_trainer;
         ro.trainer_sight_range = obj.trainer_sight_range;
         ro.script_id = std::move(obj.script_id);

@@ -179,12 +179,8 @@ static RuntimeBgEvent read_bg_event(std::istream& in) {
     
     // Read the raw type byte and convert to runtime type
     uint8_t raw_type = in.get();
-    // Map: 0=Read, 7=HiddenItem, others map as-is for now
-    switch (raw_type) {
-        case 0: evt.type = RuntimeBgEventType::Read; break;
-        case 7: evt.type = RuntimeBgEventType::HiddenItem; break;
-        default: evt.type = RuntimeBgEventType::Read; break;
-    }
+    // Direct mapping - frontend now serializes correct BGEVENT_* values
+    evt.type = static_cast<RuntimeBgEventType>(raw_type);
     
     evt.quantity = in.get();
     if (!read_length_string(in, evt.script_id)) {
@@ -192,6 +188,9 @@ static RuntimeBgEvent read_bg_event(std::istream& in) {
     }
     if (!read_length_string(in, evt.item_id)) {
         evt.item_id.clear();
+    }
+    if (!read_length_string(in, evt.condition_flag)) {
+        evt.condition_flag.clear();
     }
     return evt;
 }
@@ -206,7 +205,7 @@ static RuntimeObject read_object(std::istream& in) {
     obj.movement_radius_y = in.get();
     obj.hour_start = in.get();
     obj.hour_end = in.get();
-    obj.time_of_day = in.get();
+    obj.palette = in.get();
     obj.is_trainer = (in.get() != 0);
     obj.trainer_sight_range = in.get();
     
