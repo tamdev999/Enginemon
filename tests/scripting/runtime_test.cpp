@@ -17,6 +17,7 @@
 #include "engine/party/party.hpp"
 #include "engine/party/pokemon.hpp"
 #include "crystal/rom/loader.hpp"
+#include "crystal/rom/bank_utils.hpp"
 #include "crystal/output/native_package.hpp"
 #include "crystal/rom/profile.hpp"
 #include "crystal/rom/symbol_map.hpp"
@@ -12100,6 +12101,228 @@ TEST(coord_event_scripts_in_corpus) {
 }
 
 //=============================================================================
+// CANONICAL BANK ADDRESS HELPER TESTS — August 2026
+// Verifies crystal_flat_to_bank, crystal_bank_to_flat, crystal_local_ptr_to_flat
+// from crystal/rom/bank_utils.hpp.
+//
+// These helpers are the single source of truth for Crystal bank arithmetic.
+// Each call site that previously inlined the formula delegates to them.
+//
+// Source authority:
+//   pokecrystal scripting.asm:1389  Script_sdefer   — uses wScriptBank
+//   pokecrystal scripting.asm:1688  Script_getstring — uses wScriptBank
+//=============================================================================
+
+// Helper: crystal_flat_to_bank — bank 0 boundary
+TEST(bank_utils_flat_to_bank_zero) {
+    using namespace crystal;
+    // Bank 0 spans flat 0x0000–0x3FFF
+    ASSERT_EQ(crystal_flat_to_bank(0x0000), 0);
+    ASSERT_EQ(crystal_flat_to_bank(0x0001), 0);
+    ASSERT_EQ(crystal_flat_to_bank(0x3FFF), 0);
+    std::cout << "  [flat_to_bank: bank 0 range ✓]\n";
+}
+
+// Helper: crystal_flat_to_bank — first switchable bank
+TEST(bank_utils_flat_to_bank_one) {
+    using namespace crystal;
+    // Bank 1 spans flat 0x4000–0x7FFF
+    ASSERT_EQ(crystal_flat_to_bank(0x4000), 1);
+    ASSERT_EQ(crystal_flat_to_bank(0x4001), 1);
+    ASSERT_EQ(crystal_flat_to_bank(0x7FFF), 1);
+    std::cout << "  [flat_to_bank: bank 1 range ✓]\n";
+}
+
+// Helper: crystal_flat_to_bank — later bank (0x1A = 26, used by sdefer test)
+TEST(bank_utils_flat_to_bank_nonzero) {
+    using namespace crystal;
+    // Bank 0x1A spans flat 0x1A*0x4000 = 0x68000 to 0x6BFFF
+    ASSERT_EQ(crystal_flat_to_bank(0x68000), 0x1A);
+    ASSERT_EQ(crystal_flat_to_bank(0x68100), 0x1A);
+    ASSERT_EQ(crystal_flat_to_bank(0x6BFFF), 0x1A);
+    // Bank 0x1B starts at 0x6C000
+    ASSERT_EQ(crystal_flat_to_bank(0x6C000), 0x1B);
+    std::cout << "  [flat_to_bank: bank 0x1A/0x1B boundary ✓]\n";
+}
+
+// Helper: crystal_bank_to_flat — local ptr 0x4000 (start of banked window)
+TEST(bank_utils_bank_to_flat_ptr_at_4000) {
+    using namespace crystal;
+    // ptr = 0x4000, bank = 0x1A → flat = 0x1A * 0x4000 + 0 = 0x68000
+    ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x4000), 0x68000);
+    // ptr = 0x4000, bank = 1 → flat = 0x4000
+    ASSERT_EQ(crystal_bank_to_flat(1, 0x4000), 0x4000);
+    std::cout << "  [bank_to_flat: ptr=0x4000 ✓]\n";
+}
+
+// Helper: crystal_bank_to_flat — local ptr 0x7FFF (end of banked window)
+TEST(bank_utils_bank_to_flat_ptr_at_7fff) {
+    using namespace crystal;
+    // ptr = 0x7FFF, bank = 0x1A → flat = 0x1A*0x4000 + 0x3FFF = 0x6BFFF
+    ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x7FFF), 0x6BFFF);
+    std::cout << "  [bank_to_flat: ptr=0x7FFF ✓]\n";
+}
+
+// Helper: crystal_bank_to_flat — local ptr < 0x4000 (ROM0 region)
+TEST(bank_utils_bank_to_flat_ptr_in_rom0) {
+    using namespace crystal;
+    // ptr < 0x4000 → ROM0; bank is irrelevant, flat = ptr
+    ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x0100), 0x0100);
+    ASSERT_EQ(crystal_bank_to_flat(0x00, 0x0100), 0x0100);
+    ASSERT_EQ(crystal_bank_to_flat(0xFF, 0x3FFF), 0x3FFF);
+    std::cout << "  [bank_to_flat: ROM0 ptr → flat=ptr ✓]\n";
+}
+
+// Helper: round-trip flat→bank→flat
+TEST(bank_utils_round_trip) {
+    using namespace crystal;
+    // For a flat address in a non-zero bank, bank_to_flat(flat_to_bank(addr), local)
+    // should recover addr when local = 0x4000 + (addr & 0x3FFF)
+    uint32_t flat = 0x68500;  // Bank 0x1A, offset 0x500 within bank
+    uint8_t bank = crystal_flat_to_bank(flat);
+    // Local ptr = 0x4000 + (flat - bank*0x4000) = 0x4000 + 0x500 = 0x4500
+    uint16_t local_ptr = static_cast<uint16_t>(0x4000 + (flat - bank * 0x4000u));
+    ASSERT_EQ(crystal_bank_to_flat(bank, local_ptr), flat);
+    std::cout << "  [round-trip flat=0x68500 → bank=0x1A, ptr=0x4500 → flat=0x68500 ✓]\n";
+}
+
+// crystal_local_ptr_to_flat — sdefer nonzero-bank case
+// Proves the helper matches the expected result and asymmetry rules out raw-ptr mistake.
+// Raw ptr 0x4500 != flat 0x68500, so a raw16-as-flat bug would produce wrong result.
+TEST(bank_utils_local_ptr_to_flat_sdefer_nonzero_bank) {
+    using namespace crystal;
+    // Script at bank 0x1A (entry=0x68100), sdefer ptr=0x4500
+    // Expected flat = 0x1A*0x4000 + (0x4500 - 0x4000) = 0x68000 + 0x500 = 0x68500
+    uint32_t flat = crystal_local_ptr_to_flat(0x68100, 0x4500);
+    ASSERT_EQ(flat, 0x68500u);
+    // Prove asymmetry: raw ptr 0x4500 != flat result 0x68500
+    ASSERT_TRUE(flat != 0x4500);
+    std::cout << "  [local_ptr_to_flat sdefer: 0x4500 @ entry 0x68100 → 0x68500 ✓]\n";
+}
+
+// crystal_local_ptr_to_flat — getstring nonzero-bank case
+// getstring carries the same bank semantics as sdefer: uses wScriptBank.
+// Use a different bank (0x06) and ptr to prove this is independent.
+TEST(bank_utils_local_ptr_to_flat_getstring_nonzero_bank) {
+    using namespace crystal;
+    // Script at bank 0x06 (entry=0x18080), getstring ptr=0x5100
+    // flat = 0x06*0x4000 + (0x5100 - 0x4000) = 0x18000 + 0x1100 = 0x19100
+    uint32_t flat = crystal_local_ptr_to_flat(0x18080, 0x5100);
+    ASSERT_EQ(flat, 0x19100u);
+    // Prove asymmetry: raw ptr 0x5100 != flat result 0x19100
+    ASSERT_TRUE(flat != 0x5100);
+    std::cout << "  [local_ptr_to_flat getstring: 0x5100 @ entry 0x18080 → 0x19100 ✓]\n";
+}
+
+// sdefer lowering now uses crystal_local_ptr_to_flat — prove via canonical helper
+// This regression test replaces the older semantic_fix_sdefer_bank_resolution test's
+// implicit formula with an explicit canonical helper comparison.
+TEST(bank_utils_sdefer_lowering_matches_canonical_helper) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Script at bank 0x1A, sdefer ptr=0x4500
+    CrystalCommand cmd;
+    Cmd_Sdefer sd;
+    sd.pointer = 0x4500;
+    cmd.data = sd;
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x8D, 0x00, 0x45};
+
+    CrystalScriptIR ir;
+    ir.name = "test_sdefer_canonical";
+    ir.entry_address = 0x68100;
+    ir.rom_start = 0;
+    ir.rom_end = 3;
+    ir.commands.push_back(cmd);
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_sdefer_canonical";
+    cfg.entry_address = 0x68100;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 3;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* sdef_op = std::get_if<Sem_Sdefer>(&inst.op);
+    ASSERT_TRUE(sdef_op != nullptr);
+
+    // Canonical helper produces the expected flat address
+    uint32_t expected_flat = crystal_local_ptr_to_flat(0x68100, 0x4500);
+    ASSERT_EQ(expected_flat, 0x68500u);
+
+    // Lowering result must use exactly that address in the script_id
+    std::ostringstream ss;
+    ss << "deferred_" << std::hex << expected_flat;
+    ASSERT_STR_EQ(sdef_op->target_script_id, ss.str());
+
+    std::cout << "  [sdefer lowering == canonical helper result 0x68500 ✓]\n";
+}
+
+// getstring lowering now uses crystal_local_ptr_to_flat — prove via canonical helper
+TEST(bank_utils_getstring_lowering_matches_canonical_helper) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Script at bank 0x06 (entry=0x18080), getstring ptr=0x5100
+    CrystalCommand cmd;
+    Cmd_Getstring gs;
+    gs.text_pointer = 0x5100;
+    gs.strbuf = 0;
+    cmd.data = gs;
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = {0x45, 0, 0x00, 0x51};
+
+    CrystalScriptIR ir;
+    ir.name = "test_getstring_canonical";
+    ir.entry_address = 0x18080;
+    ir.rom_start = 0;
+    ir.rom_end = 4;
+    ir.commands.push_back(cmd);
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_getstring_canonical";
+    cfg.entry_address = 0x18080;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = 4;
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
+    ASSERT_TRUE(pta != nullptr);
+
+    // Canonical helper produces the expected flat address
+    uint32_t expected_flat = crystal_local_ptr_to_flat(0x18080, 0x5100);
+    ASSERT_EQ(expected_flat, 0x19100u);
+
+    // Lowering result must store that flat address in text_pointer
+    ASSERT_EQ(pta->text_pointer, expected_flat);
+
+    // Prove asymmetry: raw ptr 0x5100 would be wrong
+    ASSERT_TRUE(pta->text_pointer != 0x5100);
+
+    std::cout << "  [getstring lowering == canonical helper result 0x19100 ✓]\n";
+}
+
+//=============================================================================
 // SEMANTIC CORRECTNESS FIX TESTS - August 2026
 // Verifies fixes for confirmed active vanilla semantic corruption:
 //   - Finding 3: String formatting operands preserved
@@ -13007,6 +13230,19 @@ int main(int argc, char* argv[]) {
     RUN_TEST(sprite_id_mapping_authoritative);
     RUN_TEST(directional_ledge_semantic_preservation);
     
+    // Canonical bank address helper tests (August 2026)
+    RUN_TEST(bank_utils_flat_to_bank_zero);
+    RUN_TEST(bank_utils_flat_to_bank_one);
+    RUN_TEST(bank_utils_flat_to_bank_nonzero);
+    RUN_TEST(bank_utils_bank_to_flat_ptr_at_4000);
+    RUN_TEST(bank_utils_bank_to_flat_ptr_at_7fff);
+    RUN_TEST(bank_utils_bank_to_flat_ptr_in_rom0);
+    RUN_TEST(bank_utils_round_trip);
+    RUN_TEST(bank_utils_local_ptr_to_flat_sdefer_nonzero_bank);
+    RUN_TEST(bank_utils_local_ptr_to_flat_getstring_nonzero_bank);
+    RUN_TEST(bank_utils_sdefer_lowering_matches_canonical_helper);
+    RUN_TEST(bank_utils_getstring_lowering_matches_canonical_helper);
+
     // Semantic correctness fix tests (August 2026)
     RUN_TEST(semantic_fix_gettrainername_preserves_both_operands);
     RUN_TEST(semantic_fix_getstring_preserves_text_pointer);

@@ -26,22 +26,17 @@ uint32_t CorpusDiscoveryStats::total_unique_bodies() const {
 
 std::set<uint32_t> extract_sdefer_targets(
     const CrystalScriptIR& ir,
-    uint8_t script_bank) {
+    uint8_t script_bank,
+    const RomData& rom) {
     
     std::set<uint32_t> targets;
     
     for (const auto& cmd : ir.commands) {
         if (const auto* sdef = std::get_if<Cmd_Sdefer>(&cmd.data)) {
-            // sdefer pointer is bank-relative, resolve to flat address
-            // Formula: flat = bank * 0x4000 + (ptr - 0x4000) for ptr >= 0x4000
-            uint32_t flat_addr;
-            if (sdef->pointer >= 0x4000) {
-                flat_addr = static_cast<uint32_t>(script_bank) * 0x4000 + 
-                           (sdef->pointer - 0x4000);
-            } else {
-                flat_addr = sdef->pointer;  // Bank 0 pointer (rare)
-            }
-            targets.insert(flat_addr);
+            // sdefer pointer is bank-relative; resolve to flat via canonical helper.
+            // Source-proven: Script_sdefer (pokecrystal scripting.asm:1389) uses
+            // wScriptBank (the calling script's bank) as the target bank.
+            targets.insert(rom.bank_to_flat(script_bank, sdef->pointer));
         }
     }
     
@@ -338,8 +333,8 @@ CorpusDiscoveryResult discover_corpus(
             try {
                 CrystalScriptIR ir = decoder.decode_script(addr);
                 
-                // Extract sdefer targets
-                auto targets = extract_sdefer_targets(ir, script_bank);
+                // Extract sdefer targets via canonical bank helper
+                auto targets = extract_sdefer_targets(ir, script_bank, rom);
                 
                 for (uint32_t target : targets) {
                     ++result.stats.deferred_targets_encountered;

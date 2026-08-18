@@ -173,9 +173,11 @@ CorpusDiscoveryResult collect_initial_roots(
     const StdScriptsTable& std_scripts);
 
 // Helper: Extract sdefer targets from a decoded script IR
-// Returns set of flat ROM addresses (resolved from bank-relative pointers)
+// Returns set of flat ROM addresses resolved via rom.bank_to_flat(script_bank, ptr).
+// Uses RomData for canonical bank arithmetic — no inline formula at call site.
 std::set<uint32_t> extract_sdefer_targets(
     const CrystalScriptIR& ir,
-    uint8_t script_bank);
+    uint8_t script_bank,
+    const RomData& rom);
 
 } // namespace crystal

@@ -5,6 +5,7 @@
 #include "crystal/script/decoder.hpp"  // For text decoding
 #include "crystal/script/pokemail_registry.hpp"
 #include "crystal/script/text_registry.hpp"
+#include "crystal/rom/bank_utils.hpp"
 #include <sstream>
 #include <iomanip>
 #include <optional>
@@ -436,22 +437,12 @@ RuleResult rule_sdefer(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         
-        // Compute script bank from entry address
-        // Bank = entry_address / 0x4000
-        uint8_t script_bank = 0;
-        if (ctx.source_ir && ctx.source_ir->entry_address != 0) {
-            script_bank = static_cast<uint8_t>(ctx.source_ir->entry_address / 0x4000);
-        }
-        
-        // Resolve sdefer pointer to flat address (same formula as corpus_discovery.cpp)
-        // INVARIANT: discovery target == semantic target
-        uint32_t flat_addr;
-        if (sdef->pointer >= 0x4000) {
-            flat_addr = static_cast<uint32_t>(script_bank) * 0x4000 + 
-                       (sdef->pointer - 0x4000);
-        } else {
-            flat_addr = sdef->pointer;  // Bank 0 pointer (rare)
-        }
+        // Resolve sdefer pointer to flat address using the calling script's bank.
+        // Source-proven: Script_sdefer (pokecrystal scripting.asm:1389) reads
+        // wScriptBank (the currently executing script's bank) as the target bank.
+        // INVARIANT: discovery target == semantic target == canonical helper result.
+        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
+        uint32_t flat_addr = crystal_local_ptr_to_flat(entry, sdef->pointer);
         
         enginemon::Sem_Sdefer op;
         // Generate script_id based on RESOLVED flat address
@@ -3044,20 +3035,11 @@ RuleResult rule_string_format(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         
-        // Resolve the text pointer to flat address using script bank
-        // The pointer is local to the script's bank
-        uint8_t script_bank = 0;
-        if (ctx.source_ir && ctx.source_ir->entry_address != 0) {
-            script_bank = static_cast<uint8_t>(ctx.source_ir->entry_address / 0x4000);
-        }
-        
-        uint32_t flat_addr = 0;
-        if (p->text_pointer >= 0x4000) {
-            flat_addr = static_cast<uint32_t>(script_bank) * 0x4000 + 
-                       (p->text_pointer - 0x4000);
-        } else {
-            flat_addr = p->text_pointer;  // Bank 0 pointer
-        }
+        // Resolve the text pointer to flat address using the calling script's bank.
+        // Source-proven: Script_getstring (pokecrystal scripting.asm:1688) reads
+        // wScriptBank (the currently executing script's bank) for the far call.
+        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
+        const uint32_t flat_addr = crystal_local_ptr_to_flat(entry, p->text_pointer);
         
         // Extract text content through registry if available
         std::string resolved_text;
