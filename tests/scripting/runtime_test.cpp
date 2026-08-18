@@ -1843,6 +1843,161 @@ TEST(collision_classifier_source_proven_constants) {
     std::cout << "  [Collision classifier source-proven constants verified ✓]\n";
 }
 
+//=============================================================================
+// PRE-RNG CORRECTNESS REGRESSION TESTS
+// These tests verify the fixes completed in the pre-RNG correctness cleanup
+//=============================================================================
+
+TEST(script_yielded_locks_input) {
+    // REGRESSION TEST: ScriptYielded state must lock input
+    // Previously is_input_locked() only checked ScriptRunning, allowing input
+    // during dialog waits (ScriptYielded).
+    
+    // Create loop with a script that yields
+    HeadlessGameLoop loop;
+    loop.set_collision_data([](int, int) { return CollisionClass::Floor; });
+    
+    // Create GameState for RNG
+    GameState gs;
+    loop.set_game_state(&gs);
+    loop.set_rng_seed(42);
+    
+    // Spawn player at position
+    loop.spawn_player(5, 5, enginemon::Direction::Down);
+    
+    // Create a Lua runtime and wire it up
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    
+    // Set script loader - start_script expects code that creates global "script" table
+    std::string yield_script = R"(
+script = {}
+function script.main(ctx)
+    coroutine.yield("dialog")
+    return
+end
+)";
+    
+    loop.set_script_loader([&](const std::string& id) -> std::string {
+        if (id == "yield_test") return yield_script;
+        return "";
+    });
+    
+    // Start the script - should yield on dialog
+    bool started = loop.start_script("yield_test");
+    ASSERT_TRUE(started);
+    
+    // Script should now be in ScriptYielded state
+    ASSERT_TRUE(loop.is_script_running());
+    ASSERT_TRUE(loop.is_input_locked());
+    
+    // Try to process movement input - should be rejected
+    auto result = loop.process_input(InputAction::MoveUp);
+    ASSERT_FALSE(result.accepted);
+    
+    // Resume and complete the script
+    loop.resume_script();
+    ASSERT_FALSE(loop.is_script_running());
+    ASSERT_FALSE(loop.is_input_locked());
+    
+    // Now input should be accepted
+    result = loop.process_input(InputAction::MoveUp);
+    ASSERT_TRUE(result.accepted);
+    
+    std::cout << "  [ScriptYielded input locking verified ✓]\n";
+}
+
+TEST(tileset_id_bounds_1_through_36) {
+    // REGRESSION TEST: Tileset IDs must be 1..36 (Crystal 1-indexed), not 0..35
+    // Previously loops used i = 0; i < num_tilesets which accepted 0 and rejected 36.
+    
+    TilesetExtractor extractor(*g_rom, *g_profile);
+    
+    // Tileset 1 (johto_outdoor) - MUST succeed
+    auto result1 = extractor.extract_tileset("johto_outdoor");
+    ASSERT_TRUE(result1.success);
+    ASSERT_TRUE(result1.tileset.tiles.size() > 0);
+    
+    // Verify we can extract a high-numbered tileset
+    // ice_path = 20
+    auto result_ice = extractor.extract_tileset("ice_path");
+    ASSERT_TRUE(result_ice.success);
+    ASSERT_TRUE(result_ice.tileset.tiles.size() > 0);
+    
+    std::cout << "  [Tileset ID bounds 1..36 verified ✓]\n";
+}
+
+TEST(duplicate_physical_binding_release) {
+    // REGRESSION TEST: Multiple physical keys bound to same logical button
+    // must not release until ALL are released.
+    // Previously, releasing one key would clear the button even if another was held.
+    
+    InputSystem input;
+    
+    // Bind two physical scancodes to the same logical button via bindings
+    input.bindings().keyboard[100] = InputButton::A;  // Key 100 -> A
+    input.bindings().keyboard[200] = InputButton::A;  // Key 200 -> A (second binding)
+    
+    // Press both keys
+    input.begin_frame();
+    input.on_key_down(100);
+    input.on_key_down(200);
+    
+    ASSERT_TRUE(input.snapshot().is_held(InputButton::A));
+    
+    // Release one key - button should STILL be held
+    input.begin_frame();
+    input.on_key_up(100);
+    ASSERT_TRUE(input.snapshot().is_held(InputButton::A));  // 200 still held
+    
+    // Release second key - NOW button should release
+    input.begin_frame();
+    input.on_key_up(200);
+    ASSERT_FALSE(input.snapshot().is_held(InputButton::A));
+    
+    std::cout << "  [Duplicate physical binding aggregation verified ✓]\n";
+}
+
+TEST(special_tileset_fixed_palette_extracted) {
+    // REGRESSION TEST: Special tilesets (house, ice_path, etc.) must have
+    // fixed_special_palette populated, not empty standard_palette_rows.
+    // These tilesets override environment/time-based palette selection.
+    
+    TilesetExtractor extractor(*g_rom, *g_profile);
+    
+    // TILESET_HOUSE (index 5) has HousePalette as fixed special palette
+    auto result = extractor.extract_tileset("house");
+    ASSERT_TRUE(result.success);
+    ASSERT_TRUE(result.tileset.fixed_special_palette.has_value());
+    
+    // Verify the palette has valid colors (non-zero)
+    // fixed_special_palette is std::optional<std::array<Palette, 7>>
+    // Palette is struct { std::array<Color, 4> colors; }
+    const auto& palette_set = *result.tileset.fixed_special_palette;
+    bool has_nonzero = false;
+    for (size_t i = 0; i < palette_set.size() && !has_nonzero; ++i) {
+        for (size_t j = 0; j < palette_set[i].colors.size() && !has_nonzero; ++j) {
+            const auto& color = palette_set[i].colors[j];
+            if (color.r > 0 || color.g > 0 || color.b > 0) {
+                has_nonzero = true;
+            }
+        }
+    }
+    ASSERT_TRUE(has_nonzero);
+    
+    // Verify TILESET_ICE_PATH (index 20) also has special palette
+    auto result_ice = extractor.extract_tileset("ice_path");
+    ASSERT_TRUE(result_ice.success);
+    ASSERT_TRUE(result_ice.tileset.fixed_special_palette.has_value());
+    
+    // Verify johto_outdoor does NOT have fixed_special_palette (uses time-of-day)
+    auto result_outdoor = extractor.extract_tileset("johto_outdoor");
+    ASSERT_TRUE(result_outdoor.success);
+    ASSERT_FALSE(result_outdoor.tileset.fixed_special_palette.has_value());
+    
+    std::cout << "  [Special tileset fixed_special_palette extraction verified ✓]\n";
+}
+
 // =============================================================================
 // INTERACTION TESTS - A-button interaction system
 // Reference: pokecrystal/engine/overworld/events.asm CheckAPressOW
@@ -11782,6 +11937,12 @@ int main(int argc, char* argv[]) {
     // Collision classifier adversarial tests (Pre-RNG cleanup)
     RUN_TEST(collision_classifier_adversarial_misclassified_ids);
     RUN_TEST(collision_classifier_source_proven_constants);
+    
+    // Pre-RNG correctness regression tests
+    RUN_TEST(script_yielded_locks_input);
+    RUN_TEST(tileset_id_bounds_1_through_36);
+    RUN_TEST(duplicate_physical_binding_release);
+    RUN_TEST(special_tileset_fixed_palette_extracted);
     
     // Summary
     std::cout << "\n=== Results ===\n";

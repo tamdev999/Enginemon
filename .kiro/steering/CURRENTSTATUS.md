@@ -73,7 +73,7 @@ Two new collision classifier tests:
 
 ### Test Results
 
-- **Runtime Tests**: 284/284 pass (282 + 2 new collision classifier tests)
+- **Runtime Tests**: 290/290 pass (284 original + 2 collision classifier + 4 regression tests)
 - **Golden Tests**: 56/56 pass
 - **Legality Gate Tests**: 14/14 pass
 - **Corpus Test**: PASS (decoder/CFG integrity)
@@ -1549,7 +1549,7 @@ Completed font extraction from ROM bytes (not PNG files).
 
 ## Test Results (All Pass)
 
-- **Runtime Tests**: 284/284 pass
+- **Runtime Tests**: 290/290 pass
 - **Golden Tests**: 56/56 pass
 - **Legality Gate Tests**: 14/14 pass
 - **Corpus Test**: PASS (decoder/CFG integrity)
