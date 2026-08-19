@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <optional>
 #include <unordered_map>
 
@@ -214,11 +215,19 @@ public:
         uint32_t bounds_check_failures = 0;
     };
     const Stats& stats() const { return stats_; }
+    
+    // Test-only: make extract_map(group, index) return failure for this pair.
+    // Used to prove discovery/compilation fails closed when a reachable map
+    // cannot be extracted.  Harmless no-op in production (never called).
+    void for_test_fail_extraction(uint8_t group, uint8_t index) {
+        test_fail_pairs_.emplace((static_cast<uint16_t>(group) << 8) | index);
+    }
 
 private:
     const RomData& rom_;
     const ExtractionProfile& profile_;
     mutable Stats stats_;
+    mutable std::unordered_set<uint16_t> test_fail_pairs_;  // test seam only
     
     // Bounds-checked ROM access
     bool read_map_header(uint32_t addr, std::vector<uint8_t>& out) const;

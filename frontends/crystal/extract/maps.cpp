@@ -866,6 +866,14 @@ bool MapExtractor::extract_connections(uint32_t map_attr_addr, uint8_t conn_byte
 MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) const {
     MapExtractionResult result;
     
+    // Test seam: injected failure for adversarial tests
+    uint16_t key = (static_cast<uint16_t>(group) << 8) | index;
+    if (test_fail_pairs_.count(key)) {
+        result.error = std::format("injected extraction failure for map ({},{})", group, index);
+        stats_.maps_failed++;
+        return result;
+    }
+    
     // First read the MapGroup entry to get secondary metadata
     MapGroupEntry map_entry;
     if (!read_map_group_entry(group, index, map_entry)) {

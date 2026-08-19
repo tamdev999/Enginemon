@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <format>
+#include <stdexcept>
 #include <queue>
 #include <set>
 
@@ -303,20 +304,33 @@ bool FullGameCompiler::compile(const std::filesystem::path& output_path,
 //=============================================================================
 
 bool FullGameCompiler::discover_content() {
-    discover_all_maps();
+    try {
+        discover_all_maps();
+    } catch (const std::runtime_error& e) {
+        std::cerr << "FATAL: Map discovery failed: " << e.what() << "\n";
+        return false;
+    }
     discover_tilesets();
     discover_sprites();
     return true;
 }
 
 void FullGameCompiler::discover_all_maps() {
-    // Use the shared production discovery implementation
+    // Use the shared production discovery implementation.
+    // discover_reachable_maps() throws std::runtime_error if a reachable map
+    // cannot be extracted — propagate that as a hard discovery failure.
     auto discovered_refs = discover_reachable_maps(rom_, profile_, *map_extractor_);
     
-    // Convert MapIdRef results to DiscoveredMap entries
+    // Convert MapIdRef results to DiscoveredMap entries.
+    // Every ref returned was successfully extracted inside discover_reachable_maps();
+    // a second extraction failure here is a hard error (e.g., ROM corruption between calls).
     for (const auto& ref : discovered_refs) {
         auto result = map_extractor_->extract_map(ref.group, ref.map);
-        if (!result.success) continue;
+        if (!result.success) {
+            throw std::runtime_error(
+                std::format("discover_all_maps: re-extraction of reachable map ({},{}) failed: {}",
+                            ref.group, ref.map, result.error));
+        }
         
         const auto& map = result.map;
         if (map.map_id.empty()) continue;
@@ -339,15 +353,22 @@ void FullGameCompiler::discover_all_maps() {
 }
 
 void FullGameCompiler::discover_tilesets() {
-    // Discover tilesets referenced by maps
-    // Each map references a tileset via tileset_id
+    // Discover tilesets referenced by maps.
+    // Each map in content_.maps already passed extraction in discover_all_maps();
+    // a failure here is a structural regression and must be a hard error.
     
     std::unordered_set<std::string> seen;
     
     // First pass: collect unique tilesets from all maps
     for (const auto& dm : content_.maps) {
         auto result = map_extractor_->extract_map(dm.group, dm.index);
-        if (result.success && !result.map.tileset_id.empty()) {
+        if (!result.success) {
+            throw std::runtime_error(
+                std::format("discover_tilesets: re-extraction of known map '{}' ({},{}) failed: {}",
+                            dm.map_id, dm.group, dm.index,
+                            result.error.empty() ? "(no detail)" : result.error));
+        }
+        if (!result.map.tileset_id.empty()) {
             if (!seen.contains(result.map.tileset_id)) {
                 seen.insert(result.map.tileset_id);
                 
@@ -371,25 +392,30 @@ void FullGameCompiler::discover_sprites() {
     content_.sprite_index["chris"] = content_.sprites.size();
     content_.sprites.push_back(player);
     
-    // Discover NPC sprites from all map objects
+    // Discover NPC sprites from all map objects.
+    // Maps in content_.maps already passed extraction — failure is structural.
     std::unordered_set<std::string> seen;
     seen.insert("chris");
     
     for (const auto& dm : content_.maps) {
         auto result = map_extractor_->extract_map(dm.group, dm.index);
-        if (result.success) {
-            for (const auto& obj : result.map.objects) {
-                if (!obj.sprite_id.empty() && !seen.contains(obj.sprite_id)) {
-                    seen.insert(obj.sprite_id);
-                    
-                    DiscoveredSprite ds;
-                    ds.sprite_id = obj.sprite_id;
-                    ds.sprite_index = 0;
-                    ds.is_player = false;
-                    
-                    content_.sprite_index[ds.sprite_id] = content_.sprites.size();
-                    content_.sprites.push_back(ds);
-                }
+        if (!result.success) {
+            throw std::runtime_error(
+                std::format("discover_sprites: re-extraction of known map '{}' ({},{}) failed: {}",
+                            dm.map_id, dm.group, dm.index,
+                            result.error.empty() ? "(no detail)" : result.error));
+        }
+        for (const auto& obj : result.map.objects) {
+            if (!obj.sprite_id.empty() && !seen.contains(obj.sprite_id)) {
+                seen.insert(obj.sprite_id);
+                
+                DiscoveredSprite ds;
+                ds.sprite_id = obj.sprite_id;
+                ds.sprite_index = 0;
+                ds.is_player = false;
+                
+                content_.sprite_index[ds.sprite_id] = content_.sprites.size();
+                content_.sprites.push_back(ds);
             }
         }
     }
@@ -966,6 +992,9 @@ bool FullGameCompiler::link_scripts(const std::map<uint32_t, enginemon::MapId>& 
 //=============================================================================
 
 AssetResult<ExtractedTileset> FullGameCompiler::get_tileset(const std::string& tileset_id) {
+    if (test_tileset_override_) {
+        return test_tileset_override_(tileset_id);
+    }
     std::string key = make_cache_key("tileset", tileset_id);
     
     return asset_cache_->get_or_compute<ExtractedTileset>(key, [this, &tileset_id]() {
@@ -981,6 +1010,9 @@ AssetResult<ExtractedTileset> FullGameCompiler::get_tileset(const std::string& t
 }
 
 AssetResult<RuntimeSprite> FullGameCompiler::get_sprite(const std::string& sprite_id) {
+    if (test_sprite_override_) {
+        return test_sprite_override_(sprite_id);
+    }
     std::string key = make_cache_key("sprite", sprite_id);
     
     return asset_cache_->get_or_compute<RuntimeSprite>(key, [this, &sprite_id]() {
@@ -1010,6 +1042,9 @@ AssetResult<RuntimeSprite> FullGameCompiler::get_sprite(const std::string& sprit
 }
 
 AssetResult<FontAtlas> FullGameCompiler::get_font() {
+    if (test_font_override_) {
+        return test_font_override_();
+    }
     std::string key = make_cache_key("font", "crystal_main");
     
     return asset_cache_->get_or_compute<FontAtlas>(key, [this]() {
@@ -1025,6 +1060,9 @@ AssetResult<FontAtlas> FullGameCompiler::get_font() {
 }
 
 AssetResult<SpriteObjPalettes> FullGameCompiler::get_obj_palettes() {
+    if (test_palettes_override_) {
+        return test_palettes_override_();
+    }
     std::string key = make_cache_key("obj_palettes", "default");
     
     return asset_cache_->get_or_compute<SpriteObjPalettes>(key, [this]() {
@@ -1059,31 +1097,48 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
     // Add tilesets through cache
     for (const auto& dt : content_.tilesets) {
         auto tileset_result = get_tileset(dt.tileset_id);
-        if (is_success(tileset_result)) {
-            const auto& tileset = get_asset(tileset_result);
-            writer.add_tileset(tileset, TimeOfDay::Day);
+        if (!is_success(tileset_result)) {
+            const auto& err = std::get<AssetError>(tileset_result);
+            std::cerr << "FATAL: Required tileset '" << dt.tileset_id
+                      << "' extraction failed: " << err.message << "\n";
+            return false;
         }
+        writer.add_tileset(get_asset(tileset_result), TimeOfDay::Day);
+        emitted_tileset_ids_.insert(dt.tileset_id);
     }
     
     // Add sprites through cache
     for (const auto& ds : content_.sprites) {
         auto sprite_result = get_sprite(ds.sprite_id);
-        if (is_success(sprite_result)) {
-            writer.add_sprite(get_asset(sprite_result));
+        if (!is_success(sprite_result)) {
+            const auto& err = std::get<AssetError>(sprite_result);
+            std::cerr << "FATAL: Required sprite '" << ds.sprite_id
+                      << "' extraction failed: " << err.message << "\n";
+            return false;
         }
+        writer.add_sprite(get_asset(sprite_result));
+        emitted_sprite_ids_.insert(ds.sprite_id);
     }
     
     // Add OBJ palettes
     auto palettes_result = get_obj_palettes();
-    if (is_success(palettes_result)) {
-        writer.add_obj_palettes(get_asset(palettes_result));
+    if (!is_success(palettes_result)) {
+        const auto& err = std::get<AssetError>(palettes_result);
+        std::cerr << "FATAL: Required OBJ palettes extraction failed: " << err.message << "\n";
+        return false;
     }
+    writer.add_obj_palettes(get_asset(palettes_result));
+    emitted_obj_palettes_ = true;
     
     // Add font
     auto font_result = get_font();
-    if (is_success(font_result)) {
-        writer.add_font_atlas(get_asset(font_result));
+    if (!is_success(font_result)) {
+        const auto& err = std::get<AssetError>(font_result);
+        std::cerr << "FATAL: Required font extraction failed: " << err.message << "\n";
+        return false;
     }
+    writer.add_font_atlas(get_asset(font_result));
+    emitted_font_ = true;
     
     return true;
 }
@@ -1092,27 +1147,68 @@ CompilerValidationResult FullGameCompiler::validate_references() {
     CompilerValidationResult result;
     result.success = true;
     
-    // Build lookup sets
+    // Build lookup sets from the EMITTED resource inventories (populated in
+    // link_results()), not the discovery-intent sets.  A discovered asset whose
+    // extraction failed will be absent from the emitted sets and correctly
+    // flagged here rather than silently passing validation.
     std::unordered_set<std::string> map_ids;
-    std::unordered_set<std::string> sprite_ids;
-    std::unordered_set<std::string> tileset_ids;
     
     for (const auto& mr : linker_input_.maps) {
         map_ids.insert(mr.map_id);
     }
     
-    // NOTE: Script validation is now done through the SemanticLinker in Phase 2.
-    // The linked_corpus_ contains all script validation results.
+    // NOTE: Script validation is done through the SemanticLinker in Phase 2.
+    // NOTE: emitted_sprite_ids_ and emitted_tileset_ids_ are populated by
+    //       link_results() from successfully emitted assets only.
     
-    for (const auto& ds : content_.sprites) {
-        sprite_ids.insert(ds.sprite_id);
-    }
-    
+    // Package completeness invariant: every discovered resource must have been
+    // emitted.  Discrepancies here indicate an extraction failure that was not
+    // caught by link_results() — that should be impossible after the fix above,
+    // but we check explicitly for defence in depth.
     for (const auto& dt : content_.tilesets) {
-        tileset_ids.insert(dt.tileset_id);
+        if (!emitted_tileset_ids_.contains(dt.tileset_id)) {
+            result.errors.push_back({
+                CompilerValidationError::Type::MissingTileset,
+                "(completeness)",
+                dt.tileset_id,
+                std::format("Discovered tileset '{}' was not emitted into package",
+                            dt.tileset_id)
+            });
+            result.success = false;
+        }
+    }
+    for (const auto& ds : content_.sprites) {
+        if (!emitted_sprite_ids_.contains(ds.sprite_id)) {
+            result.errors.push_back({
+                CompilerValidationError::Type::MissingSprite,
+                "(completeness)",
+                ds.sprite_id,
+                std::format("Discovered sprite '{}' was not emitted into package",
+                            ds.sprite_id)
+            });
+            result.success = false;
+        }
+    }
+    if (!emitted_obj_palettes_) {
+        result.errors.push_back({
+            CompilerValidationError::Type::Other,
+            "(completeness)",
+            "obj_palettes",
+            "OBJ palettes were not emitted into package"
+        });
+        result.success = false;
+    }
+    if (!emitted_font_) {
+        result.errors.push_back({
+            CompilerValidationError::Type::MissingFont,
+            "(completeness)",
+            "font",
+            "Font was not emitted into package"
+        });
+        result.success = false;
     }
     
-    // Validate each map's references
+    // Cross-reference checks against emitted inventories
     for (const auto& mr : linker_input_.maps) {
         const auto& map = mr.map;
         
@@ -1146,22 +1242,27 @@ CompilerValidationResult FullGameCompiler::validate_references() {
             }
         }
         
-        // Validate object sprites
+        // Validate object sprites against EMITTED inventory (hard error, not warning)
         for (const auto& obj : map.objects) {
-            if (!obj.sprite_id.empty() && !sprite_ids.contains(obj.sprite_id)) {
-                result.warnings.push_back(
-                    std::format("Object in {} references missing sprite: {}",
-                               map.map_id, obj.sprite_id));
+            if (!obj.sprite_id.empty() && !emitted_sprite_ids_.contains(obj.sprite_id)) {
+                result.errors.push_back({
+                    CompilerValidationError::Type::MissingSprite,
+                    map.map_id,
+                    obj.sprite_id,
+                    std::format("Object in {} references sprite '{}' not in emitted package",
+                               map.map_id, obj.sprite_id)
+                });
+                result.success = false;
             }
         }
         
-        // Validate tileset
-        if (!map.tileset_id.empty() && !tileset_ids.contains(map.tileset_id)) {
+        // Validate tileset against EMITTED inventory
+        if (!map.tileset_id.empty() && !emitted_tileset_ids_.contains(map.tileset_id)) {
             result.errors.push_back({
                 CompilerValidationError::Type::MissingTileset,
                 map.map_id,
                 map.tileset_id,
-                std::format("Map {} references missing tileset: {}",
+                std::format("Map {} references tileset '{}' not in emitted package",
                            map.map_id, map.tileset_id)
             });
             result.success = false;
@@ -1313,24 +1414,33 @@ std::vector<MapIdRef> discover_reachable_maps(
     // Track processed script addresses to avoid reprocessing
     std::set<uint32_t> processed_scripts;
     
-    // Helper to extract map references from a semantic script IR
+    // Helper to extract map references from a semantic script IR.
+    //
+    // FAILURE POLICY:
+    //   - Decode failure (std::runtime_error from TypedScriptDecoder):
+    //     Re-throw.  A script address that cannot be decoded at all indicates
+    //     a structural ROM issue — maps only reachable via that script would
+    //     silently vanish from the graph.
+    //   - CFG / lowering failure:
+    //     Swallow.  The decode succeeded (the ROM bytes are valid), so any map
+    //     ref encoded in direct warp/connection bytes is already in the graph.
+    //     The script may legitimately fail to lower at compile time; that does
+    //     not mean the ROM is unreadable.
     auto extract_script_map_refs = [&](uint32_t script_addr) {
         if (processed_scripts.contains(script_addr)) return;
         processed_scripts.insert(script_addr);
         
+        // Stage 1: Decode — structural failure propagates.
+        CrystalScriptIR ir = decoder.decode_script(script_addr);
+        if (ir.commands.empty()) return;
+        
+        // Stage 2+: CFG and lowering — failures are non-fatal for discovery.
         try {
-            // Stage 1: Decode
-            CrystalScriptIR ir = decoder.decode_script(script_addr);
-            if (ir.commands.empty()) return;
-            
-            // Stage 2: CFG
             CrystalCFG cfg = cfg_builder.build(ir);
             if (!cfg.validation.valid) return;
             
-            // Stage 4: Lower to semantic IR
             enginemon::LoweringResult lowering = legalizer.lower(ir, cfg);
             
-            // Scan semantic IR for map references (Sem_Warp, Sem_WarpFacing, etc.)
             for (const auto& block : lowering.ir.blocks) {
                 for (const auto& inst : block.instructions) {
                     std::visit([&](const auto& sem_op) {
@@ -1356,7 +1466,7 @@ std::vector<MapIdRef> discover_reachable_maps(
                 }
             }
         } catch (...) {
-            // Ignore script processing failures during discovery
+            // CFG/lowering failure: acceptable, direct warp/connection bytes already handled.
         }
     };
     
@@ -1370,9 +1480,17 @@ std::vector<MapIdRef> discover_reachable_maps(
         MapIdRef ref = frontier.front();
         frontier.pop();
         
-        // Extract and validate map
+        // Extract and validate map.
+        // A reachable map that cannot be extracted is a hard discovery failure:
+        // its warps, connections, and scripts cannot be scanned, so descendants
+        // of this node would silently disappear from the reachable graph.
         auto map_result = extractor.extract_map(ref.group, ref.map);
-        if (!map_result.success) continue;
+        if (!map_result.success) {
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: extraction of reachable map ({},{}) failed: {}",
+                            ref.group, ref.map,
+                            map_result.error.empty() ? "(no detail)" : map_result.error));
+        }
         
         const auto& map = map_result.map;
         

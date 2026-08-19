@@ -306,6 +306,39 @@ if (Test-Path $linkerExe) {
 }
 
 # =============================================================================
+# Suite 7: Compiler Integrity Tests (fail-open adversarial)
+# Finding 1: asset extraction fail-closed
+# Finding 2: map discovery fail-closed
+# =============================================================================
+Write-TestHeader "Compiler Integrity Tests"
+
+$integrityExe = "$testReleaseDir\compiler_integrity_test.exe"
+if (Test-Path $integrityExe) {
+    $output = & $integrityExe $RomPath 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            $_
+        }
+    }
+    $exitCode = $LASTEXITCODE
+
+    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
+    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
+
+    if ($passedMatch -and $failedMatch) {
+        $passCount = $passedMatch.Matches[0].Groups[1].Value
+        $failCount = $failedMatch.Matches[0].Groups[1].Value
+        Write-TestResult "compiler_integrity_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
+    } else {
+        Write-TestResult "compiler_integrity_test" ($exitCode -eq 0) "Exit code: $exitCode"
+    }
+} else {
+    Write-TestResult "compiler_integrity_test" $false "Executable not found"
+}
+
+# =============================================================================
 # Summary
 # =============================================================================
 Write-Host "`n" -NoNewline

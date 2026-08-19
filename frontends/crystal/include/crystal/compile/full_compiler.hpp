@@ -112,7 +112,28 @@ namespace crystal {
 //        Finding 3: decode_movement_data no longer silently truncates; throws on missing terminator
 //        Finding 4: writecmdqueue resolves bank-local pointer to flat ROM address (no raw bank leak)
 //        Finding 5: pokepic operand 0 → Sem_Pokepic{ScriptVar} (was SpeciesId{0} sentinel — wrong)
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.7.0";
+// 2.8.0: Pre-Oracle semantic cleanup:
+//        checksave, startbattle, checkpoke, givepoke, giveegg, CheckPokerus now
+//        invalidate block-local wScriptVar context (all source-proven writers)
+//        pocketisfull now emits Sem_PocketFullNotify (text display) instead of absorbing
+//        legality gate rejects Sem_ShowText/Sem_ShowTextAndEnd/Sem_FacePlayerAndShowText with empty sequence
+//        Sem_CheckWarp/Sem_CheckSave IR contracts corrected (CheckWarp does NOT write wScriptVar)
+//        Sem_PrepareTextArg: account=2/account=3 magic sentinels replaced with typed NumberSource enum
+// 2.9.0: Compiler failure-policy hardening — fail-closed gates for asset extraction
+//        and reachable-map discovery:
+//        Finding 1: link_results() now returns false (FATAL) on any tileset/sprite/
+//          font/OBJ-palette extraction failure; previously silently skipped the asset.
+//          validate_references() checks emitted-resource inventories (not discovery sets);
+//          sprite missing from emitted package is now a hard error, not a warning.
+//          Package completeness invariant: discovered == emitted for every asset class.
+//        Finding 2: discover_reachable_maps() BFS now throws std::runtime_error when a
+//          reachable map fails extraction; previously continued the BFS and silently
+//          dropped the failing map, producing an incomplete (potentially unsafe) graph.
+//          Script-assisted discovery: decode failures propagate (structural), CFG/lowering
+//          failures remain suppressed (non-structural).
+//          discover_all_maps/discover_tilesets/discover_sprites: re-extraction failures
+//          also throw.  discover_content() catches and returns false with FATAL message.
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.9.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================
@@ -342,6 +363,63 @@ private:
     // Collected script IRs for linking
     std::vector<enginemon::SemanticScriptIR> map_root_irs_;
     std::vector<enginemon::SemanticScriptIR> std_script_irs_;
+    
+    // Emitted-resource inventories — populated in link_results() from
+    // successfully emitted assets.  validate_references() checks these, not
+    // the discovery-intent sets, so a discovery hit whose extraction failed
+    // cannot pass reference validation.
+    std::unordered_set<std::string> emitted_tileset_ids_;
+    std::unordered_set<std::string> emitted_sprite_ids_;
+    bool emitted_obj_palettes_ = false;
+    bool emitted_font_ = false;
+    
+    //=========================================================================
+    // TEST SEAMS
+    // Null in production; set via for_test_* methods to inject extraction
+    // failures in adversarial tests.  std::function<> checked before real
+    // extractor — zero overhead when null.
+    //=========================================================================
+    std::function<enginemon::build::AssetResult<ExtractedTileset>(const std::string&)> test_tileset_override_;
+    std::function<enginemon::build::AssetResult<RuntimeSprite>(const std::string&)>    test_sprite_override_;
+    std::function<enginemon::build::AssetResult<FontAtlas>()>                           test_font_override_;
+    std::function<enginemon::build::AssetResult<SpriteObjPalettes>()>                  test_palettes_override_;
+    
+public:
+    // Test-only injection methods — call before compile()
+    void for_test_fail_tileset(const std::string& tileset_id) {
+        test_tileset_override_ = [tileset_id](const std::string& id) ->
+            enginemon::build::AssetResult<ExtractedTileset> {
+            if (id == tileset_id)
+                return enginemon::build::AssetError{"injected tileset failure", id};
+            return enginemon::build::AssetError{"no real extractor in test override", id};
+        };
+    }
+    void for_test_fail_sprite(const std::string& sprite_id) {
+        test_sprite_override_ = [sprite_id](const std::string& id) ->
+            enginemon::build::AssetResult<RuntimeSprite> {
+            if (id == sprite_id)
+                return enginemon::build::AssetError{"injected sprite failure", id};
+            return enginemon::build::AssetError{"no real extractor in test override", id};
+        };
+    }
+    void for_test_fail_font() {
+        test_font_override_ = []() -> enginemon::build::AssetResult<FontAtlas> {
+            return enginemon::build::AssetError{"injected font failure", "font"};
+        };
+    }
+    void for_test_fail_palettes() {
+        test_palettes_override_ = []() -> enginemon::build::AssetResult<SpriteObjPalettes> {
+            return enginemon::build::AssetError{"injected OBJ palette failure", "obj_palettes"};
+        };
+    }
+    // Causes extract_map() to return failure for this semantic map ID during
+    // the full compile() pipeline — used to test discovery fail-closed behaviour.
+    // Takes (group, index) since semantic IDs aren't resolved until extraction.
+    void for_test_fail_map(uint8_t group, uint8_t index) {
+        map_extractor_->for_test_fail_extraction(group, index);
+    }
+    
+private:
     
     enginemon::build::BuildStats stats_;
     CompilerValidationResult validation_;

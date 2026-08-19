@@ -20,6 +20,7 @@ if(ENGINEMON_ENABLE_ENGINE)
         enginemon_crystal
         enginemon_engine
     )
+    target_include_directories(runtime_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     if(MSVC)
         target_compile_options(runtime_test PRIVATE /bigobj)
     endif()
@@ -59,6 +60,10 @@ target_link_libraries(legality_gate_test PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+target_include_directories(legality_gate_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+if(MSVC)
+    target_compile_options(legality_gate_test PRIVATE /bigobj)
+endif()
 
 # Structural compatibility check (field-move actor lifetime analysis)
 add_executable(structural_check
@@ -68,6 +73,9 @@ target_link_libraries(structural_check PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+if(MSVC)
+    target_compile_options(structural_check PRIVATE /bigobj)
+endif()
 
 # Stage 6: Semantic Linker test (corpus-wide typed-reference validation)
 add_executable(linker_test
@@ -77,6 +85,9 @@ target_link_libraries(linker_test PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+if(MSVC)
+    target_compile_options(linker_test PRIVATE /bigobj)
+endif()
 
 # Stage 6: Linker diagnostic (deep failure investigation)
 add_executable(linker_diagnostic
@@ -86,6 +97,18 @@ target_link_libraries(linker_diagnostic PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+
+# Compiler integrity tests (fail-open adversarial tests for asset and map discovery)
+add_executable(compiler_integrity_test
+    crystal/compiler_integrity_test.cpp
+)
+target_link_libraries(compiler_integrity_test PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+if(MSVC)
+    target_compile_options(compiler_integrity_test PRIVATE /bigobj)
+endif()
 
 # TODO: Enable these when GTest is available and dependencies are built
 if(FALSE)
