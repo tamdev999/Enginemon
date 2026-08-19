@@ -491,6 +491,51 @@ std::vector<LegalityDiagnostic> LegalityGate::check_stage5_ir(const LegalityInpu
                     }
                 }
                 
+                // =================================================================
+                // Empty text sequence check
+                // =================================================================
+                // Sem_ShowText, Sem_ShowTextAndEnd, and Sem_FacePlayerAndShowText
+                // must NEVER have an empty sequence in a legal script.
+                //
+                // An empty sequence means the text pointer could not be resolved
+                // (null TextRegistry, TEXT_NONE from extract(), or extraction failure).
+                // This is explicit failure — a script that shows invisible text is NOT
+                // a valid script. The lowering rules pass a potentially empty sequence
+                // through; this gate is the hard rejection point.
+                //
+                // "Lowering returning success after substituting defaults/empty values"
+                // is a gate violation. Empty sequences must be caught here.
+                if constexpr (std::is_same_v<T, enginemon::Sem_ShowText>) {
+                    if (op.sequence.empty()) {
+                        auto d = make_diagnostic(
+                            LegalityFailureKind::InvalidSemanticReference,
+                            script_id, "Stage5",
+                            "Sem_ShowText{empty sequence}",
+                            "ShowText has empty text sequence — TextRegistry missing or extraction failed");
+                        diagnostics.push_back(std::move(d));
+                    }
+                }
+                if constexpr (std::is_same_v<T, enginemon::Sem_ShowTextAndEnd>) {
+                    if (op.sequence.empty()) {
+                        auto d = make_diagnostic(
+                            LegalityFailureKind::InvalidSemanticReference,
+                            script_id, "Stage5",
+                            "Sem_ShowTextAndEnd{empty sequence}",
+                            "ShowTextAndEnd has empty text sequence — TextRegistry missing or extraction failed");
+                        diagnostics.push_back(std::move(d));
+                    }
+                }
+                if constexpr (std::is_same_v<T, enginemon::Sem_FacePlayerAndShowText>) {
+                    if (op.sequence.empty()) {
+                        auto d = make_diagnostic(
+                            LegalityFailureKind::InvalidSemanticReference,
+                            script_id, "Stage5",
+                            "Sem_FacePlayerAndShowText{empty sequence}",
+                            "FacePlayerAndShowText has empty text sequence — TextRegistry missing or extraction failed");
+                        diagnostics.push_back(std::move(d));
+                    }
+                }
+                
                 // NOTE: We don't have raw Crystal concepts to check for since
                 // Sem_Unlowered is no longer in the SemanticOp variant.
                 // The only way raw Crystal concepts could leak is if a lowering

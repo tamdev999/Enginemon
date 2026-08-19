@@ -14,11 +14,13 @@
 #include "crystal/rom/profile.hpp"
 #include "crystal/rom/symbol_map.hpp"
 #include "crystal/script/typed_decoder.hpp"
+#include "crystal/script/decoder.hpp"
 #include "crystal/script/crystal_command.hpp"
 #include "crystal/script/crystal_cfg.hpp"
 #include "crystal/script/native_registry.hpp"
 #include "crystal/script/semantic_legalizer.hpp"
 #include "crystal/script/legality_gate.hpp"
+#include "crystal/script/text_registry.hpp"
 #include "crystal/extract/map_extractor.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
@@ -863,6 +865,15 @@ int main(int argc, char* argv[]) {
     legalizer.set_native_registry(&native_registry);
     legalizer.set_ram_registry(&ram_registry);
     legalizer.set_num_pokemon(profile->counts.num_pokemon);
+
+    // Build TextRegistry from ROM using ScriptDecoder as the text extractor
+    // Required so legalizer can resolve text pointers to non-empty sequences;
+    // without this, every Sem_ShowText produces an empty sequence and fails Stage 5.
+    ScriptDecoder text_script_decoder(*rom, symbols);
+    TextRegistry text_registry([&text_script_decoder](uint32_t addr) {
+        return text_script_decoder.decode_text_sequence(addr);
+    });
+    legalizer.set_text_registry(&text_registry);
     
     enginemon::Stage4CorpusStats stage4_stats;
     

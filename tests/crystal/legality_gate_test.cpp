@@ -8,12 +8,14 @@
 // with the large variant types in the full headers.
 
 #include "crystal/script/legality_gate.hpp"
+#include "legality_test_helpers.hpp"
 #include <iostream>
 #include <iomanip>
 #include <cassert>
 
 using namespace crystal;
 using namespace enginemon;
+using namespace legality_test_helpers;
 
 // Test counter
 int tests_run = 0;
@@ -29,87 +31,6 @@ int tests_passed = 0;
         std::cout << "FAIL\n"; \
     } \
 } while(0)
-
-// =============================================================================
-// HELPER FUNCTIONS
-// =============================================================================
-
-// Create a minimal valid CrystalScriptIR for testing
-CrystalScriptIR make_minimal_ir(uint32_t address = 0x1000) {
-    CrystalScriptIR ir;
-    
-    // Add a simple "end" command
-    CrystalCommand cmd;
-    cmd.data = Cmd_End{};
-    cmd.span.rom_address = address;
-    cmd.span.raw_bytes = {0x91};  // end opcode
-    cmd.status = DecodeStatus::Success;
-    ir.commands.push_back(cmd);
-    
-    return ir;
-}
-
-// Create a minimal valid CrystalCFG
-CrystalCFG make_minimal_cfg(const CrystalScriptIR& ir) {
-    CrystalCFG cfg;
-    cfg.entry_address = ir.commands.empty() ? 0 : ir.commands[0].span.rom_address;
-    cfg.script_name = "test_script";
-    cfg.source_ir = &ir;
-    
-    // Create one block with the commands
-    BasicBlock block;
-    block.id = 0;
-    block.start_address = cfg.entry_address;
-    block.end_address = cfg.entry_address + 1;
-    block.command_start = 0;
-    block.command_count = ir.commands.size();
-    block.is_entry = true;
-    block.is_reachable = true;
-    block.exit.kind = ExitKind::Terminal;
-    
-    cfg.blocks.push_back(block);
-    cfg.address_to_block[cfg.entry_address] = 0;
-    
-    // Populate command boundaries
-    for (const auto& cmd : ir.commands) {
-        cfg.command_boundaries.insert(cmd.span.rom_address);
-    }
-    
-    // Validation stats
-    cfg.validation.valid = true;
-    cfg.validation.commands_covered = ir.commands.size();
-    cfg.validation.commands_total = ir.commands.size();
-    cfg.validation.terminal_exits = 1;
-    
-    return cfg;
-}
-
-// Create a minimal valid LoweringResult
-LoweringResult make_minimal_lowering(const CrystalScriptIR& ir, const CrystalCFG& cfg) {
-    LoweringResult result;
-    result.ir.script_id = cfg.script_name;
-    result.ir.script_name = cfg.script_name;
-    result.ir.source_rom_address = cfg.entry_address;
-    result.success = true;
-    result.commands_consumed = ir.commands.size();
-    result.commands_lowered = ir.commands.size();
-    result.commands_unlowered = 0;
-    result.commands_absorbed = 0;
-    
-    // Create a semantic block with Sem_End
-    SemanticBasicBlock sem_block;
-    sem_block.id = 0;
-    sem_block.label = "block_0";
-    sem_block.is_entry = true;
-    
-    SemanticInstruction inst;
-    inst.op = Sem_End{};
-    sem_block.instructions.push_back(inst);
-    
-    result.ir.blocks.push_back(sem_block);
-    
-    return result;
-}
 
 // =============================================================================
 // NEGATIVE TEST 1: Unknown Opcode (Stage 1)

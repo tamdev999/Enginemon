@@ -31,6 +31,8 @@
 #include "crystal/script/semantic_legalizer.hpp"
 #include "crystal/script/crystal_command.hpp"
 #include "crystal/script/text_registry.hpp"
+#include "crystal/script/legality_gate.hpp"
+#include "crystal/legality_test_helpers.hpp"
 #include "crystal/world/collision_classifier.hpp"
 #include "crystal/extract/sprite_ids.hpp"
 #include "engine/core/registry.hpp"
@@ -12481,10 +12483,10 @@ TEST(semantic_fix_getmoney_preserves_account) {
     ASSERT_TRUE(pta != nullptr);
     
     // CRITICAL: account must be preserved (1 = Mom's money)
-    ASSERT_EQ(pta->account, 1);
+    ASSERT_EQ(pta->account, enginemon::MoneyAccount::Mom);
     ASSERT_EQ(pta->buffer_slot, 3);
     
-    std::cout << "  [getmoney preserves account=" << (int)pta->account << " ✓]\n";
+    std::cout << "  [getmoney preserves account=" << (int)static_cast<uint8_t>(pta->account) << " ✓]\n";
 }
 
 // Finding 7: encountermusic produces Sem_PlayEncounterMusic, NOT Sem_PlayMapMusic
@@ -14462,6 +14464,459 @@ TEST(fidelity11_invalid_domain_gates_linker) {
 // END 11-FINDING TESTS
 //=============================================================================
 
+// =============================================================================
+// BATCH 10: PRE-ORACLE SEMANTIC CLEANUP TESTS — August 2026
+// Verifies all 6 fixes from the pre-Oracle audit:
+//   Fix 1: checksave, startbattle, checkpoke, givepoke, giveegg, CheckPokerus → invalidate ctx
+//   Fix 2: pocketisfull → Sem_PocketFullNotify (not absorbed)
+//   Fix 3: Sem_ShowText empty sequence fails legality gate
+//   Fix 4: Sem_CheckWarp preserves block_ctx (does not write wScriptVar)
+//   Fix 5: getcoins/getnum use typed NumberSource (no magic sentinel)
+//   Fix 6: getmoney uses typed MoneyAccount
+// =============================================================================
+
+// Helper: build a three-command block IR for context-invalidation tests
+static std::pair<crystal::CrystalScriptIR, crystal::CrystalCFG>
+make_three_cmd_ir(crystal::CrystalCommandData d1, crystal::CrystalCommandData d2,
+                  crystal::CrystalCommandData d3, uint32_t entry_address,
+                  const std::string& name) {
+    using namespace crystal;
+    CrystalScriptIR ir;
+    ir.name = name;
+    ir.entry_address = entry_address;
+    CrystalCommand c1; c1.data = std::move(d1);
+    CrystalCommand c2; c2.data = std::move(d2);
+    CrystalCommand c3; c3.data = std::move(d3);
+    ir.commands = {c1, c2, c3};
+    CrystalCFG cfg;
+    cfg.script_name = name;
+    cfg.entry_address = entry_address;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 10;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    return {ir, cfg};
+}
+
+// Fix 1a: checksave writes wScriptVar → setval(4) → checksave → MapRadio MUST fall back to Sem_Special
+TEST(batch10_checksave_invalidates_context) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    auto [ir, cfg] = make_three_cmd_ir(
+        Cmd_Setval{4},
+        Cmd_Checksave{},
+        Cmd_Special{40},  // MapRadio, consumes setval context
+        0x10000, "test_checksave_inval");
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    // After checksave invalidates context, MapRadio falls to Sem_Special (no known producer)
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() >= 3);
+    auto* special = std::get_if<Sem_Special>(&insts[2].op);
+    ASSERT_TRUE(special != nullptr);  // NOT Sem_PlayRadio — context was invalidated by checksave
+
+    std::cout << "  [checksave invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+}
+
+// Fix 1b: startbattle writes wScriptVar → context invalidated
+TEST(batch10_startbattle_invalidates_context) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    auto [ir, cfg] = make_three_cmd_ir(
+        Cmd_Setval{3},
+        Cmd_Startbattle{},
+        Cmd_Special{40},  // MapRadio
+        0x10000, "test_startbattle_inval");
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() >= 3);
+    // startbattle invalidates → MapRadio sees no context → Sem_Special
+    auto* special = std::get_if<Sem_Special>(&insts[2].op);
+    ASSERT_TRUE(special != nullptr);
+
+    std::cout << "  [startbattle invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+}
+
+// Fix 1c: checkpoke writes wScriptVar → context invalidated
+TEST(batch10_checkpoke_invalidates_context) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Checkpoke cp; cp.pokemon = 25;  // Pikachu
+    auto [ir, cfg] = make_three_cmd_ir(
+        Cmd_Setval{2},
+        cp,
+        Cmd_Special{40},  // MapRadio
+        0x10000, "test_checkpoke_inval");
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() >= 3);
+    // checkpoke invalidates → Sem_Special
+    auto* special = std::get_if<Sem_Special>(&insts[2].op);
+    ASSERT_TRUE(special != nullptr);
+
+    std::cout << "  [checkpoke invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+}
+
+// Fix 1d: givepoke writes wScriptVar → context invalidated
+TEST(batch10_givepoke_invalidates_context) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Givepoke gp; gp.pokemon = 1; gp.level = 5; gp.item = 0; gp.has_extra_data = false;
+    auto [ir, cfg] = make_three_cmd_ir(
+        Cmd_Setval{2},
+        gp,
+        Cmd_Special{40},  // MapRadio
+        0x10000, "test_givepoke_inval");
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() >= 3);
+    auto* special = std::get_if<Sem_Special>(&insts[2].op);
+    ASSERT_TRUE(special != nullptr);
+
+    std::cout << "  [givepoke invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+}
+
+// Fix 1e: giveegg writes wScriptVar → context invalidated
+TEST(batch10_giveegg_invalidates_context) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Giveegg ge; ge.pokemon = 1; ge.level = 5;
+    auto [ir, cfg] = make_three_cmd_ir(
+        Cmd_Setval{2},
+        ge,
+        Cmd_Special{40},  // MapRadio
+        0x10000, "test_giveegg_inval");
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() >= 3);
+    auto* special = std::get_if<Sem_Special>(&insts[2].op);
+    ASSERT_TRUE(special != nullptr);
+
+    std::cout << "  [giveegg invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+}
+
+// Fix 1f: CheckPokerus (Special 78) writes wScriptVar → context invalidated
+TEST(batch10_check_pokerus_invalidates_context) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // setval(3) → Special{78=CheckPokerus} → Special{40=MapRadio}
+    // If CheckPokerus invalidates properly, MapRadio sees no producer → Sem_Special
+    CrystalScriptIR ir;
+    ir.name = "test_pokerus_inval";
+    ir.entry_address = 0x10000;
+    CrystalCommand c1; c1.data = Cmd_Setval{3};        c1.span.raw_bytes = {0x15, 3};
+    CrystalCommand c2; c2.data = Cmd_Special{78};      c2.span.raw_bytes = {0x0F, 78, 0};
+    CrystalCommand c3; c3.data = Cmd_Special{40};      c3.span.raw_bytes = {0x0F, 40, 0};
+    ir.commands = {c1, c2, c3};
+    CrystalCFG cfg;
+    cfg.script_name = "test_pokerus_inval";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 8;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() >= 3);
+    // CheckPokerus invalidates context → MapRadio sees no producer → Sem_Special
+    auto* pokerus = std::get_if<Sem_CheckPartyPokerus>(&insts[1].op);
+    ASSERT_TRUE(pokerus != nullptr);  // CheckPokerus correctly lowered
+    auto* special = std::get_if<Sem_Special>(&insts[2].op);
+    ASSERT_TRUE(special != nullptr);  // MapRadio falls back due to invalidation
+
+    std::cout << "  [CheckPokerus invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+}
+
+// Fix 1g (verification): Sem_CheckWarp does NOT invalidate context — setval preserved
+TEST(batch10_checkwarp_preserves_context) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // setval(4) → Cmd_Warpcheck → Special{40=MapRadio}
+    // Warpcheck does NOT write wScriptVar → context must survive to MapRadio
+    CrystalScriptIR ir;
+    ir.name = "test_checkwarp_preserves";
+    ir.entry_address = 0x10000;
+    CrystalCommand c1; c1.data = Cmd_Setval{4};        c1.span.raw_bytes = {0x15, 4};
+    CrystalCommand c2; c2.data = Cmd_Warpcheck{};      c2.span.raw_bytes = {0x8E};
+    CrystalCommand c3; c3.data = Cmd_Special{40};      c3.span.raw_bytes = {0x0F, 40, 0};
+    ir.commands = {c1, c2, c3};
+    CrystalCFG cfg;
+    cfg.script_name = "test_checkwarp_preserves";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 6;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() >= 3);
+    // Warpcheck does NOT invalidate → MapRadio sees channel=4 → Sem_PlayRadio{4}
+    auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
+    ASSERT_TRUE(radio != nullptr);  // Context preserved: channel from setval(4)
+    ASSERT_EQ(radio->channel, 4);
+
+    std::cout << "  [Sem_CheckWarp preserves block_ctx: channel=4 propagated ✓]\n";
+}
+
+// Fix 2: pocketisfull produces Sem_PocketFullNotify (not absorbed, not wScriptVar-writing)
+TEST(batch10_pocketisfull_emits_notify_not_absorbed) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    auto [ir, cfg] = make_single_cmd_ir(
+        Cmd_Pocketisfull{},
+        0x10000, "test_pocketisfull",
+        {0x46});
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    // Must emit exactly 1 Sem_PocketFullNotify — NOT absorbed (0 instructions)
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_EQ(insts.size(), (size_t)1);
+    auto* notify = std::get_if<Sem_PocketFullNotify>(&insts[0].op);
+    ASSERT_TRUE(notify != nullptr);
+
+    // Commands absorbed must be 0 (it's not absorbed)
+    ASSERT_EQ(result.commands_absorbed, (size_t)0);
+
+    std::cout << "  [pocketisfull → Sem_PocketFullNotify (not absorbed, 1 instruction) ✓]\n";
+}
+
+// Fix 2 (cont): pocketisfull does NOT write wScriptVar — context preserved
+TEST(batch10_pocketisfull_does_not_invalidate_context) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // setval(5) → pocketisfull → Special{40=MapRadio}
+    // pocketisfull does NOT write wScriptVar → MapRadio gets channel=5
+    auto [ir, cfg] = make_three_cmd_ir(
+        Cmd_Setval{5},
+        Cmd_Pocketisfull{},
+        Cmd_Special{40},  // MapRadio
+        0x10000, "test_pocketisfull_ctx");
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() >= 3);
+    // Context survived → MapRadio produces Sem_PlayRadio{5}
+    auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
+    ASSERT_TRUE(radio != nullptr);
+    ASSERT_EQ(radio->channel, 5);
+
+    std::cout << "  [pocketisfull does NOT invalidate block_ctx: channel=5 preserved ✓]\n";
+}
+
+// Fix 3: Sem_ShowText with empty sequence must fail legality gate
+TEST(batch10_show_text_empty_sequence_fails_legality) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace legality_test_helpers;
+
+    auto ir       = make_minimal_ir(0x1000);
+    auto cfg      = make_minimal_cfg(ir, "test_empty_text");
+    auto lowering = make_minimal_lowering(ir, cfg);
+
+    // Replace the default Sem_End block with a Sem_ShowText{empty}
+    SemanticBasicBlock sblock;
+    sblock.id = 0; sblock.label = "block_0"; sblock.is_entry = true;
+    SemanticInstruction inst;
+    Sem_ShowText op;
+    ASSERT_TRUE(op.sequence.empty());  // empty by default
+    inst.op = std::move(op);
+    sblock.instructions.push_back(std::move(inst));
+    lowering.ir.blocks = {std::move(sblock)};
+
+    auto input = make_minimal_input(ir, cfg, lowering);
+    LegalityGate gate;
+    auto result = gate.validate(input);
+
+    // MUST be illegal — empty text sequence is Stage 5 violation
+    ASSERT_FALSE(result.is_legal);
+    // Confirm the first diagnostic is Stage5, not a spurious earlier failure
+    if (result.illegal && !result.illegal->diagnostics.empty()) {
+        ASSERT_TRUE(result.illegal->diagnostics[0].failing_stage == std::string("Stage5"));
+    }
+
+    std::cout << "  [Sem_ShowText{empty} rejected by legality gate ✓]\n";
+}
+
+// Fix 3 (cont): Sem_ShowText with non-empty sequence passes
+TEST(batch10_show_text_nonempty_sequence_passes_legality) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace legality_test_helpers;
+
+    auto ir       = make_minimal_ir(0x1000);
+    auto cfg      = make_minimal_cfg(ir, "test_nonempty_text");
+    auto lowering = make_minimal_lowering(ir, cfg);
+
+    // Replace the default Sem_End block with a Sem_ShowText{non-empty}
+    SemanticBasicBlock sblock;
+    sblock.id = 0; sblock.label = "block_0"; sblock.is_entry = true;
+    SemanticInstruction inst;
+    Sem_ShowText op;
+    op.sequence.elements.push_back(SemanticTextElement::make_text("Hello!"));
+    ASSERT_FALSE(op.sequence.empty());
+    inst.op = std::move(op);
+    sblock.instructions.push_back(std::move(inst));
+    lowering.ir.blocks = {std::move(sblock)};
+
+    auto input = make_minimal_input(ir, cfg, lowering);
+    LegalityGate gate;
+    auto result = gate.validate(input);
+
+    ASSERT_TRUE(result.is_legal);
+    std::cout << "  [Sem_ShowText{non-empty} passes legality gate ✓]\n";
+}
+
+// Fix 5a: getcoins uses NumberSource::Coins (not magic sentinel 2 in account field)
+TEST(batch10_getcoins_uses_coins_source) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Getcoins gc; gc.strbuf = 2;
+    auto [ir, cfg] = make_single_cmd_ir(gc, 0x10000, "test_getcoins", {0x3E, 2});
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_EQ(insts.size(), (size_t)1);
+    auto* pta = std::get_if<Sem_PrepareTextArg>(&insts[0].op);
+    ASSERT_TRUE(pta != nullptr);
+
+    // CRITICAL: number_source must be Coins, NOT a magic sentinel in account
+    ASSERT_EQ(pta->number_source, NumberSource::Coins);
+    ASSERT_EQ(pta->arg_type, TextArgType::Number);
+    ASSERT_EQ(pta->buffer_slot, 2);
+    // account field is irrelevant/default when source is Coins
+
+    std::cout << "  [getcoins → NumberSource::Coins (no magic sentinel) ✓]\n";
+}
+
+// Fix 5b: getnum uses NumberSource::ScriptVar (not magic sentinel 3 in account field)
+TEST(batch10_getnum_uses_scriptvar_source) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Getnum gn; gn.strbuf = 1;
+    auto [ir, cfg] = make_single_cmd_ir(gn, 0x10000, "test_getnum", {0x3F, 1});
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_EQ(insts.size(), (size_t)1);
+    auto* pta = std::get_if<Sem_PrepareTextArg>(&insts[0].op);
+    ASSERT_TRUE(pta != nullptr);
+
+    // CRITICAL: number_source must be ScriptVar, NOT a magic sentinel
+    ASSERT_EQ(pta->number_source, NumberSource::ScriptVar);
+    ASSERT_EQ(pta->arg_type, TextArgType::Number);
+    ASSERT_EQ(pta->buffer_slot, 1);
+
+    std::cout << "  [getnum → NumberSource::ScriptVar (no magic sentinel) ✓]\n";
+}
+
+// Fix 6: getmoney uses typed MoneyAccount (Player vs Mom — distinct and in-domain)
+TEST(batch10_getmoney_uses_typed_money_account) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Player account (0)
+    Cmd_Getmoney gm_player; gm_player.account = 0; gm_player.strbuf = 0;
+    auto [ir_p, cfg_p] = make_single_cmd_ir(gm_player, 0x10000, "gm_player", {0x3D, 0, 0});
+    SemanticLegalizer leg_p;
+    auto result_p = leg_p.lower(ir_p, cfg_p);
+    ASSERT_TRUE(result_p.success);
+    auto* pta_p = std::get_if<Sem_PrepareTextArg>(&result_p.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(pta_p != nullptr);
+    ASSERT_EQ(pta_p->number_source, NumberSource::Money);
+    ASSERT_EQ(pta_p->account, MoneyAccount::Player);
+
+    // Mom account (1)
+    Cmd_Getmoney gm_mom; gm_mom.account = 1; gm_mom.strbuf = 0;
+    auto [ir_m, cfg_m] = make_single_cmd_ir(gm_mom, 0x10000, "gm_mom", {0x3D, 1, 0});
+    SemanticLegalizer leg_m;
+    auto result_m = leg_m.lower(ir_m, cfg_m);
+    ASSERT_TRUE(result_m.success);
+    auto* pta_m = std::get_if<Sem_PrepareTextArg>(&result_m.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(pta_m != nullptr);
+    ASSERT_EQ(pta_m->number_source, NumberSource::Money);
+    ASSERT_EQ(pta_m->account, MoneyAccount::Mom);
+
+    // Verified distinction
+    ASSERT_TRUE(pta_p->account != pta_m->account);
+
+    std::cout << "  [getmoney: Player vs Mom → distinct typed MoneyAccount (no magic int) ✓]\n";
+}
+
+// Fix 5/6 (cross-check): Coins and ScriptVar sources must NOT overlap with Money
+TEST(batch10_number_sources_are_distinct) {
+    using namespace enginemon;
+
+    // Prove the three sources are distinct enum values
+    ASSERT_TRUE(NumberSource::Money != NumberSource::Coins);
+    ASSERT_TRUE(NumberSource::Money != NumberSource::ScriptVar);
+    ASSERT_TRUE(NumberSource::Coins != NumberSource::ScriptVar);
+
+    // Prove account field is only meaningful for Money
+    Sem_PrepareTextArg money_arg = Sem_PrepareTextArg::money(1, 0);
+    Sem_PrepareTextArg coins_arg = Sem_PrepareTextArg::coins(0);
+    Sem_PrepareTextArg num_arg   = Sem_PrepareTextArg::number_from_var(0);
+
+    ASSERT_EQ(money_arg.number_source, NumberSource::Money);
+    ASSERT_EQ(coins_arg.number_source, NumberSource::Coins);
+    ASSERT_EQ(num_arg.number_source,   NumberSource::ScriptVar);
+
+    std::cout << "  [NumberSource enum: Money/Coins/ScriptVar are distinct and typed ✓]\n";
+}
+
 //=============================================================================
 // MAIN
 //=============================================================================
@@ -14976,6 +15431,23 @@ int main(int argc, char* argv[]) {
     RUN_TEST(fidelity11_getname_type5_partyot);
     RUN_TEST(fidelity11_getname_type7_trainer);
     RUN_TEST(fidelity11_invalid_domain_gates_linker);
+
+    // Pre-Oracle semantic cleanup tests (August 2026 — 6 Fixes)
+    RUN_TEST(batch10_checksave_invalidates_context);
+    RUN_TEST(batch10_startbattle_invalidates_context);
+    RUN_TEST(batch10_checkpoke_invalidates_context);
+    RUN_TEST(batch10_givepoke_invalidates_context);
+    RUN_TEST(batch10_giveegg_invalidates_context);
+    RUN_TEST(batch10_check_pokerus_invalidates_context);
+    RUN_TEST(batch10_checkwarp_preserves_context);
+    RUN_TEST(batch10_pocketisfull_emits_notify_not_absorbed);
+    RUN_TEST(batch10_pocketisfull_does_not_invalidate_context);
+    RUN_TEST(batch10_show_text_empty_sequence_fails_legality);
+    RUN_TEST(batch10_show_text_nonempty_sequence_passes_legality);
+    RUN_TEST(batch10_getcoins_uses_coins_source);
+    RUN_TEST(batch10_getnum_uses_scriptvar_source);
+    RUN_TEST(batch10_getmoney_uses_typed_money_account);
+    RUN_TEST(batch10_number_sources_are_distinct);
 
     // Summary
     std::cout << "\n=== Results ===\n";

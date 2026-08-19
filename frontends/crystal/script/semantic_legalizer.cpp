@@ -1319,6 +1319,9 @@ RuleResult rule_give_pokemon(LoweringContext& ctx) {
         }
         
         r.instructions.push_back(make_inst(std::move(op)));
+        // givepoke writes wScriptVar (result of GivePoke — trainer byte value)
+        // Source: Script_givepoke (scripting.asm): farcall GivePoke; ld a, b; ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1337,6 +1340,9 @@ RuleResult rule_give_egg(LoweringContext& ctx) {
         op.species = enginemon::SpeciesId{p->pokemon};
         op.level = p->level;
         r.instructions.push_back(make_inst(std::move(op)));
+        // giveegg writes wScriptVar (0=no room in party, 2=egg given)
+        // Source: Script_giveegg (scripting.asm): xor a; ld [wScriptVar], a; ...; ld a, 2; ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1353,6 +1359,9 @@ RuleResult rule_check_pokemon(LoweringContext& ctx) {
         enginemon::Sem_CheckPokemon op;
         op.species = enginemon::SpeciesId{p->pokemon};
         r.instructions.push_back(make_inst(std::move(op)));
+        // checkpoke writes wScriptVar (TRUE=species in party, FALSE=not found)
+        // Source: Script_checkpoke (scripting.asm): xor a; ld [wScriptVar], a; ...; ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1801,6 +1810,9 @@ RuleResult rule_start_battle(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_StartBattle{}));
+        // startbattle writes wScriptVar (battle result: wBattleResult & ~BATTLERESULT_BITMASK)
+        // Source: Script_startbattle (scripting.asm): ld a, [wBattleResult]; ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -2401,6 +2413,8 @@ RuleResult rule_special(LoweringContext& ctx) {
                 // Sets wScriptVar: 1=has active infection, 0=no active infection
                 // See Sem_CheckPartyPokerus documentation in semantic_ir.hpp
                 r.instructions.push_back(make_inst(enginemon::Sem_CheckPartyPokerus{}));
+                // checkpokerus writes wScriptVar — invalidate block-local context
+                ctx.block_ctx.invalidate();
                 return r;
             }
             
@@ -2930,6 +2944,9 @@ RuleResult rule_checksave(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_CheckSave{}));
+        // checksave writes wScriptVar (save status result)
+        // Source: Script_checksave (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -3359,29 +3376,31 @@ RuleResult rule_item_notify(LoweringContext& ctx) {
         return r;
     }
     
-    // pocketisfull checks if a pocket (items, balls, TMs, key items) is full
-    // This is typically part of a giveitem flow where the script checks before giving.
+    // pocketisfull - display pocket-is-full notification text
+    // Source: pokecrystal/engine/overworld/scripting.asm Script_pocketisfull (opcode 0x46):
+    //   call GetPocketName    ; get pocket name from current item context
+    //   call CurItemName      ; get current item name
+    //   call MapTextbox       ; DISPLAYS "The BAG pocket is full." notification
+    //   ret
     //
-    // Pattern: giveitem → pocketisfull → iffalse/iftrue (check result)
-    // The result IS independently observable (wScriptVar), so we CANNOT absorb it.
-    // 
-    // Proof: pokecrystal Script_pocketisfull → CheckItemPocket → sets wScriptVar to TRUE/FALSE
-    //        This result is used by subsequent conditionals, NOT consumed by another op.
+    // Source-proven: Script_pocketisfull does NOT write wScriptVar.
+    // There is NO "ld [wScriptVar], a" in the implementation.
+    // Block-local context is PRESERVED across this operation.
     //
-    // Fix: Emit as a check operation that sets wScriptVar based on pocket capacity.
-    // For now, absorbed with explicit acknowledgment this is a gap.
-    // When inventory system is implemented, this should emit Sem_CheckPocketFull.
+    // This is a user-visible text display, NOT an inventory capacity check.
+    // The script uses it to notify the player that a pocket is full, then
+    // continues without a conditional branch on a wScriptVar result.
+    //
+    // Vanilla pattern: appears after giveitem/verbosegiveitem in full-pocket paths.
+    // The preceding giveitem/verbosegiveitem already writes wScriptVar with the
+    // give result (FALSE=bag full), so pocketisfull is purely a presentation follow-up.
     if (std::holds_alternative<Cmd_Pocketisfull>(cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
-        r.absorbed_opcodes.push_back(cmd->opcode());
-        // KNOWN GAP: pocketisfull result is independently observable via wScriptVar.
-        // This absorption is semantically lossy - the conditional branch outcome
-        // may differ if the pocket is actually full vs our "always has space" assumption.
-        // 
-        // Occurrences in corpus: Need to verify actual count and usage patterns.
-        // When inventory capacity tracking is implemented, emit proper semantic op.
+        // Emit as Sem_PocketFullNotify — a distinct, user-visible presentation operation.
+        // Block-local context NOT invalidated (confirmed: no wScriptVar write in source).
+        r.instructions.push_back(make_inst(enginemon::Sem_PocketFullNotify{}));
         return r;
     }
     return {};

@@ -610,9 +610,30 @@ enum class NameSourceType : uint8_t {
 };
 
 // Money account types for getmoney
+// Source-proven from pokecrystal/engine/overworld/scripting.asm Script_getmoney:
+//   operand 0 = player's money (wMoney)
+//   operand 1 = mom's savings (wMomsMoney)
+// ONLY valid values are Player and Mom.
 enum class MoneyAccount : uint8_t {
     Player = 0,       // wMoney - player's money
     Mom = 1,          // wMomsMoney - mom's savings
+};
+
+// =============================================================================
+// NumberSource - typed source for numeric text arguments (getcoins, getnum)
+// =============================================================================
+// getcoins has no account operand — always player's coin balance.
+// getnum has no operand — always reads current wScriptVar value.
+// These are distinct from getmoney which has an explicit MoneyAccount operand.
+//
+// Using magic sentinel values (account = 2 for coins, account = 3 for wScriptVar)
+// inside the MoneyAccount field is an architectural violation — those values are
+// outside MoneyAccount's valid domain. This enum encodes the distinction explicitly.
+// =============================================================================
+enum class NumberSource : uint8_t {
+    Money,       // getmoney: explicit MoneyAccount operand (Player or Mom)
+    Coins,       // getcoins: always player's coin balance (no account operand)
+    ScriptVar,   // getnum: reads current wScriptVar (no source operand)
 };
 
 struct Sem_PrepareTextArg {
@@ -623,7 +644,8 @@ struct Sem_PrepareTextArg {
     uint16_t id = 0;            // ItemId, SpeciesId, LandmarkId, etc.
     uint16_t id2 = 0;           // Secondary ID (trainer_id for trainer_name)
     uint8_t trainer_group = 0;  // Trainer group for trainer_name/trainer_class_name
-    uint8_t account = 0;        // Money account (0=player, 1=mom)
+    MoneyAccount account = MoneyAccount::Player;  // Money account: valid ONLY when number_source == Money
+    NumberSource number_source = NumberSource::Money;  // How numeric value is obtained
     uint32_t text_pointer = 0;  // ROM pointer for getstring (source provenance)
     std::string str_value;      // Resolved string content (for getstring)
     NameSourceType name_type = NameSourceType::Pokemon;  // For getname
@@ -658,28 +680,36 @@ struct Sem_PrepareTextArg {
     }
     
     // getmoney: account specifies which money pool (player vs mom)
-    static Sem_PrepareTextArg money(uint8_t account, uint8_t slot) {
+    // Source: Script_getmoney operand 0=player, 1=mom (MoneyAccount enum only)
+    static Sem_PrepareTextArg money(uint8_t account_byte, uint8_t slot) {
         Sem_PrepareTextArg p; 
-        p.arg_type = TextArgType::Number; 
-        p.account = account;
+        p.arg_type = TextArgType::Number;
+        p.number_source = NumberSource::Money;
+        p.account = (account_byte == 0) ? MoneyAccount::Player : MoneyAccount::Mom;
         p.buffer_slot = slot; 
         return p;
     }
     
     // getcoins: always player's coins, no account operand
+    // Source: Script_getcoins reads strbuf only — no money account, no wScriptVar read
+    // DISTINCT from getmoney (different source) and getnum (different value)
     static Sem_PrepareTextArg coins(uint8_t slot) {
         Sem_PrepareTextArg p; 
         p.arg_type = TextArgType::Number;
-        p.account = 2;  // Magic value indicating coins (not money)
+        p.number_source = NumberSource::Coins;
+        // account field is irrelevant for Coins source — leave at default
         p.buffer_slot = slot; 
         return p;
     }
     
     // getnum: reads wScriptVar (no source operand, always current script result)
+    // Source: Script_getnum reads strbuf only, formats the value in wScriptVar
+    // DISTINCT from getmoney and getcoins — reads script state, not game inventory
     static Sem_PrepareTextArg number_from_var(uint8_t slot) {
         Sem_PrepareTextArg p; 
         p.arg_type = TextArgType::Number;
-        p.account = 3;  // Magic value indicating wScriptVar
+        p.number_source = NumberSource::ScriptVar;
+        // account field is irrelevant for ScriptVar source — leave at default
         p.buffer_slot = slot; 
         return p;
     }
@@ -738,16 +768,17 @@ struct Sem_PrepareTextArg {
     }
     
     // DEPRECATED: Old factories that lose operands - DO NOT USE
-    // Keeping for temporary backward compatibility, will remove
-    static Sem_PrepareTextArg number(VarId var, uint8_t slot) {
-        // WARNING: This loses source identity
+    // Kept for temporary backward compatibility only — remove once all callers updated
+    static Sem_PrepareTextArg number(VarId /*var*/, uint8_t slot) {
+        // WARNING: This loses source identity — use money(), coins(), or number_from_var()
         Sem_PrepareTextArg p; 
-        p.arg_type = TextArgType::Number; 
+        p.arg_type = TextArgType::Number;
+        p.number_source = NumberSource::ScriptVar;  // safest fallback
         p.buffer_slot = slot; 
         return p;
     }
     static Sem_PrepareTextArg string(const std::string& s, uint8_t slot) {
-        // WARNING: This loses source pointer
+        // WARNING: This loses source pointer — use string_from_pointer() instead
         Sem_PrepareTextArg p; 
         p.arg_type = TextArgType::String; 
         p.str_value = s; 
@@ -1512,8 +1543,65 @@ struct Sem_Trade { uint8_t trade_id; };
 struct Sem_FruitTree { uint8_t tree_id; };
 struct Sem_HallOfFame {};
 struct Sem_Credits {};
-struct Sem_CheckSave {};   // Sets result
-struct Sem_CheckWarp {};   // Sets result based on warp validity (used after Battle Tower)
+// =============================================================================
+// Sem_CheckSave - Check save file status
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm Script_checksave:
+//   farcall CheckSave
+//   ld a, c            ; CheckSave result returned in C register
+//   ld [wScriptVar], a ; WRITES wScriptVar with result
+//   ret
+//
+// Semantic contract:
+//   Check save file validity/existence and write result to wScriptVar.
+//   Runtime MUST invalidate block-local ScriptVar context after this.
+//   Result values are game-defined (e.g. 0=no save, 1=valid save).
+//
+// What is NOT encoded: Crystal opcode 0xA9, CheckSave routine address, C register
+// =============================================================================
+struct Sem_CheckSave {};   // Checks save file status. WRITES wScriptVar with result.
+
+// =============================================================================
+// Sem_CheckWarp - Validate warp and conditionally enable events
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm Script_warpcheck:
+//   call WarpCheck
+//   ret nc               ; returns immediately if carry clear (warp valid)
+//   farcall EnableEvents ; carry set = invalid warp: re-enable events
+//   ret
+//
+// Semantic contract:
+//   Check warp validity. If invalid, enable events as a recovery action.
+//   DOES NOT write wScriptVar. No script result is produced.
+//   Block-local ScriptVar context is PRESERVED across this operation.
+//
+// What is NOT encoded: Crystal opcode 0x8E, WarpCheck routine address, carry flag
+// =============================================================================
+struct Sem_CheckWarp {};   // Validates warp; enables events on failure. Does NOT write wScriptVar.
+
+// =============================================================================
+// Sem_PocketFullNotify - Display pocket-is-full notification text
+// =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm Script_pocketisfull:
+//   call GetPocketName   ; get pocket name from current item context
+//   call CurItemName     ; get current item name
+//   ld hl, PocketIsFullText
+//   call MapTextbox      ; DISPLAYS "The BAG pocket is full." text
+//   ret
+//
+// Semantic contract:
+//   Display pocket-full notification text using the current item and pocket context.
+//   DOES NOT write wScriptVar (confirmed from source — no ld [wScriptVar] instruction).
+//   Block-local ScriptVar context is PRESERVED across this operation.
+//   This is NOT an inventory capacity check — it is purely a user-visible text display.
+//
+// Crystal opcode: 0x46 (pocketisfull)
+// Vanilla usage: Appears after giveitem/verbosegiveitem in bag-full paths.
+//
+// What is NOT encoded: Crystal opcode 0x46, PocketIsFullText ROM address,
+//   GetPocketName / CurItemName / MapTextbox routine addresses
+// =============================================================================
+struct Sem_PocketFullNotify {}; // Displays pocket-full message. Does NOT write wScriptVar.
 
 // =============================================================================
 // Sem_SetPlayerPalette - Set player sprite OBJ palette selector
@@ -1671,7 +1759,7 @@ using SemanticOp = std::variant<
     // Misc
     Sem_WildOn, Sem_WildOff, Sem_Special, Sem_Pokepic, Sem_ClosePokepic,
     Sem_Pokemart, Sem_Elevator, Sem_Trade, Sem_FruitTree,
-    Sem_HallOfFame, Sem_Credits, Sem_CheckSave, Sem_CheckWarp,
+    Sem_HallOfFame, Sem_Credits, Sem_CheckSave, Sem_CheckWarp, Sem_PocketFullNotify,
     Sem_SetPlayerPalette,
     
     // Standard scripts
