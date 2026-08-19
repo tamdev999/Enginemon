@@ -13,6 +13,8 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <format>
+#include <stdexcept>
 #include <numeric>
 #include <array>
 #include <iostream>
@@ -86,6 +88,21 @@ static void write_counted_array(std::ostream& out, const std::vector<T>& arr,
     }
 }
 
+// Write a length-prefixed string as uint16_t length + raw bytes.
+// The serialized length field is uint16_t (max 65535).  Any semantic ID
+// or resource name that exceeds this is a compiler bug — fail hard rather
+// than silently truncating the serialized bytes.
+static void write_length_string(std::ostream& out, const std::string& s) {
+    if (s.size() > 0xFFFF) {
+        throw std::runtime_error(
+            std::format("write_length_string: string length {} exceeds uint16_t max (65535). "
+                        "String begins: '{}'",
+                        s.size(), s.substr(0, 40)));
+    }
+    write_le(out, static_cast<uint16_t>(s.size()));
+    out.write(s.data(), static_cast<std::streamsize>(s.size()));
+}
+
 // Read value as little-endian
 template<typename T>
 static T read_le(std::istream& in) {
@@ -116,16 +133,14 @@ static void write_warp(std::ostream& out, const WarpPoint& warp) {
     out.put(warp.x);
     out.put(warp.y);
     out.put(warp.target_warp_index);
-    write_le(out, static_cast<uint16_t>(warp.target_map_id.size()));
-    out.write(warp.target_map_id.data(), warp.target_map_id.size());
+    write_length_string(out, warp.target_map_id);
 }
 
 static void write_coord_event(std::ostream& out, const CoordEvent& evt) {
     out.put(evt.x);
     out.put(evt.y);
     write_le(out, evt.scene_id);
-    write_le(out, static_cast<uint16_t>(evt.script_id.size()));
-    out.write(evt.script_id.data(), evt.script_id.size());
+    write_length_string(out, evt.script_id);
 }
 
 static void write_bg_event(std::ostream& out, const BgEvent& evt) {
@@ -133,12 +148,9 @@ static void write_bg_event(std::ostream& out, const BgEvent& evt) {
     out.put(evt.y);
     out.put(static_cast<uint8_t>(evt.type));
     out.put(evt.quantity);
-    write_le(out, static_cast<uint16_t>(evt.script_id.size()));
-    out.write(evt.script_id.data(), evt.script_id.size());
-    write_le(out, static_cast<uint16_t>(evt.item_id.size()));
-    out.write(evt.item_id.data(), evt.item_id.size());
-    write_le(out, static_cast<uint16_t>(evt.condition_flag.size()));
-    out.write(evt.condition_flag.data(), evt.condition_flag.size());
+    write_length_string(out, evt.script_id);
+    write_length_string(out, evt.item_id);
+    write_length_string(out, evt.condition_flag);
 }
 
 static void write_object(std::ostream& out, const ObjectEvent& obj) {
@@ -154,20 +166,16 @@ static void write_object(std::ostream& out, const ObjectEvent& obj) {
     out.put(obj.is_trainer ? 1 : 0);
     out.put(obj.trainer_sight_range);
     
-    write_le(out, static_cast<uint16_t>(obj.sprite_id.size()));
-    out.write(obj.sprite_id.data(), obj.sprite_id.size());
-    write_le(out, static_cast<uint16_t>(obj.script_id.size()));
-    out.write(obj.script_id.data(), obj.script_id.size());
-    write_le(out, static_cast<uint16_t>(obj.visibility_flag.size()));
-    out.write(obj.visibility_flag.data(), obj.visibility_flag.size());
+    write_length_string(out, obj.sprite_id);
+    write_length_string(out, obj.script_id);
+    write_length_string(out, obj.visibility_flag);
 }
 
 static void write_connection(std::ostream& out, const MapConnection& conn) {
     out.put(static_cast<uint8_t>(conn.direction));
     write_le(out, conn.strip_offset);
     out.put(conn.strip_length);
-    write_le(out, static_cast<uint16_t>(conn.target_map_id.size()));
-    out.write(conn.target_map_id.data(), conn.target_map_id.size());
+    write_length_string(out, conn.target_map_id);
 }
 
 static std::vector<uint8_t> serialize_map(const ExtractedMap& map) {
@@ -843,6 +851,11 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
     
     // Validate magic
     if (reader->header_.magic != PackageHeader::MAGIC) {
+        return nullptr;
+    }
+    
+    // Validate format version — do not decode under wrong-schema assumptions.
+    if (reader->header_.version != PackageHeader::VERSION) {
         return nullptr;
     }
     

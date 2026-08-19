@@ -68,7 +68,16 @@ CorpusDiscoveryResult collect_initial_roots(
     // Collect from all discovered maps
     for (const auto& ref : discovered_maps) {
         auto map_result = extractor.extract_map(ref.group, ref.map);
-        if (!map_result.success) continue;
+        if (!map_result.success) {
+            // Every map returned by discover_reachable_maps() was already
+            // successfully extracted inside the BFS.  A second failure here
+            // is a structural regression — silently skipping would omit all
+            // scripts for this map from the corpus.
+            throw std::runtime_error(
+                std::format("collect_initial_roots: re-extraction of known reachable map ({},{}) "
+                            "failed: {}", ref.group, ref.map,
+                            map_result.error.empty() ? "(no detail)" : map_result.error));
+        }
         
         enginemon::MapId map_id = (static_cast<uint16_t>(ref.group) << 8) | ref.map;
         

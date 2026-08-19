@@ -9,6 +9,7 @@
 #include <sstream>
 #include <cstring>
 #include <array>
+#include <iostream>
 
 namespace enginemon {
 
@@ -352,6 +353,16 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
     
     // Validate magic
     if (reader->header_.magic != PackageHeader::MAGIC) {
+        return nullptr;
+    }
+    
+    // Validate format version before interpreting any version-dependent payloads.
+    // An older or newer version must fail explicitly rather than silently
+    // decoding fields under wrong-schema assumptions.
+    if (reader->header_.version != PackageHeader::VERSION) {
+        std::cerr << "PackageReader: incompatible format version "
+                  << reader->header_.version
+                  << " (expected " << PackageHeader::VERSION << ")\n";
         return nullptr;
     }
     

@@ -335,14 +335,23 @@ void FullGameCompiler::discover_all_maps() {
         const auto& map = result.map;
         if (map.map_id.empty()) continue;
         
-        if (!content_.map_index.contains(map.map_id)) {
-            DiscoveredMap dm;
-            dm.map_id = map.map_id;
-            dm.group = ref.group;
-            dm.index = ref.map;
-            content_.map_index[dm.map_id] = content_.maps.size();
-            content_.maps.push_back(dm);
+        if (content_.map_index.contains(map.map_id)) {
+            // Two distinct (group,index) pairs resolved to the same semantic MapId.
+            // This is an identity collision — silently dropping the second entry
+            // would omit a real map from the compiled package.
+            const auto& first_dm = content_.maps[content_.map_index.at(map.map_id)];
+            throw std::runtime_error(
+                std::format("discover_all_maps: MapId identity collision — '{}' produced by "
+                            "({},{}) and ({},{}).  Both map entries must produce distinct IDs.",
+                            map.map_id, first_dm.group, first_dm.index, ref.group, ref.map));
         }
+        
+        DiscoveredMap dm;
+        dm.map_id = map.map_id;
+        dm.group = ref.group;
+        dm.index = ref.map;
+        content_.map_index[dm.map_id] = content_.maps.size();
+        content_.maps.push_back(dm);
     }
     
     // Debug: Print discovered maps
@@ -1494,9 +1503,18 @@ std::vector<MapIdRef> discover_reachable_maps(
         
         const auto& map = map_result.map;
         
-        if (map.width == 0 || map.height == 0 || 
+        // A reachable map with degenerate dimensions is structurally wrong —
+        // extract_map() already validates dimensions and returns failure for
+        // 0×0 or >100 maps, so reaching here means the extractor validated
+        // them and the BFS accepted them.  If we somehow have invalid dimensions
+        // at this point it is a structural inconsistency; record it and throw
+        // rather than silently dropping the map (and its reachable neighbors).
+        if (map.width == 0 || map.height == 0 ||
             map.width > 100 || map.height > 100) {
-            continue;
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: reachable map ({},{}) has invalid "
+                            "dimensions {}x{} — extraction inconsistency",
+                            ref.group, ref.map, map.width, map.height));
         }
         
         // Record discovered map
@@ -1506,22 +1524,36 @@ std::vector<MapIdRef> discover_reachable_maps(
         // COLLECT MAP REFERENCES FROM RAW EVENT DATA
         //=====================================================================
         
-        // Get map header to find events pointer
+        // Get map header to find events pointer.
+        // Bounds failures here mean the ROM data is structurally inconsistent
+        // for a map we already successfully extracted — that is a hard error.
         uint32_t group_ptr_addr = o.map_group_pointers + ((ref.group - 1) * 2);
-        if (group_ptr_addr + 2 > rom.size()) continue;
+        if (group_ptr_addr + 2 > rom.size()) {
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: map ({},{}) group pointer address "
+                            "0x{:x} out of ROM bounds", ref.group, ref.map, group_ptr_addr));
+        }
         
         uint16_t group_addr = rom.read_word(group_ptr_addr);
         uint32_t group_flat = rom.bank_to_flat(o.map_groups_bank, group_addr);
         uint32_t map_entry_addr = group_flat + ((ref.map - 1) * 9);
         
-        if (map_entry_addr + 9 > rom.size()) continue;
+        if (map_entry_addr + 9 > rom.size()) {
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: map ({},{}) map-entry address "
+                            "0x{:x} out of ROM bounds", ref.group, ref.map, map_entry_addr));
+        }
         
         auto entry = rom.read_bytes(map_entry_addr, 9);
         uint8_t attr_bank = entry[0];
         uint16_t attr_ptr = entry[3] | (entry[4] << 8);
         uint32_t header_addr = rom.bank_to_flat(attr_bank, attr_ptr);
         
-        if (header_addr + fmt.header_size > rom.size()) continue;
+        if (header_addr + fmt.header_size > rom.size()) {
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: map ({},{}) header address "
+                            "0x{:x} out of ROM bounds", ref.group, ref.map, header_addr));
+        }
         
         auto header = rom.read_bytes(header_addr, fmt.header_size);
         uint8_t conn_byte = header[fmt.connections_offset];
@@ -1551,17 +1583,30 @@ std::vector<MapIdRef> discover_reachable_maps(
         uint16_t events_addr = header[fmt.events_ptr_offset] | (header[fmt.events_ptr_offset + 1] << 8);
         uint32_t events_flat = rom.bank_to_flat(script_bank, events_addr);
         
-        if (events_flat + 2 > rom.size()) continue;
+        if (events_flat + 2 > rom.size()) {
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: map ({},{}) events address "
+                            "0x{:x} out of ROM bounds", ref.group, ref.map, events_flat));
+        }
         
         // Parse events: 2 filler bytes, warp_count, warps...
         uint32_t ptr = events_flat;
         ptr += 2;  // Skip 2 filler bytes
         
-        if (ptr + 1 > rom.size()) continue;
+        if (ptr + 1 > rom.size()) {
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: map ({},{}) events header truncated "
+                            "at 0x{:x}", ref.group, ref.map, ptr));
+        }
         uint8_t warp_count = rom.read_byte(ptr++);
         
-        // Sanity check warp count
-        if (warp_count > 50) continue;  // Too many warps = likely garbage
+        // Sanity check warp count — Crystal has at most a handful of warps per map;
+        // more than 50 indicates structural corruption rather than a legitimate map.
+        if (warp_count > 50) {
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: map ({},{}) has implausible warp count {} "
+                            "— likely ROM structure corruption", ref.group, ref.map, warp_count));
+        }
         
         // Read warps
         for (uint8_t i = 0; i < warp_count; ++i) {

@@ -133,7 +133,21 @@ namespace crystal {
 //          failures remain suppressed (non-structural).
 //          discover_all_maps/discover_tilesets/discover_sprites: re-extraction failures
 //          also throw.  discover_content() catches and returns false with FATAL message.
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.9.0";
+// 2.10.0: Pre-Oracle pipeline integrity hardening:
+//        Finding 1 (corpus shrink): corpus_test now gates on CORPUS_EXPECTED_UNIQUE_BODIES=1788
+//          using authoritative discover_corpus() independently of test's own discovery path.
+//          collect_initial_roots() silent-continue on map extraction failure → throw.
+//        Finding 2 (map identity): discover_all_maps() silent duplicate-MapId drop → throw
+//          with identity-collision diagnostic.
+//        Finding 3 (package version): both PackageReaders now explicitly validate
+//          header_.version before decoding; previously only MAGIC was checked.
+//        Finding 4 (serialization narrowing): write_length_string() helper enforces
+//          size ≤ 0xFFFF before every string-length write; was silent uint16_t truncation.
+//        Finding 5 (traversal silent exits): discover_reachable_maps() BFS — all
+//          ROM-bounds continues after result.push_back() converted to throws; width/height
+//          degenerate-dimension continue converted to throw; warp_count>50 continue
+//          converted to throw; events_flat and ptr bounds continues converted to throws.
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.10.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================

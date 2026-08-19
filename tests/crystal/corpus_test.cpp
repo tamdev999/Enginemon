@@ -22,6 +22,8 @@
 #include "crystal/script/legality_gate.hpp"
 #include "crystal/script/text_registry.hpp"
 #include "crystal/extract/map_extractor.hpp"
+#include "crystal/compile/corpus_discovery.hpp"   // authoritative discover_corpus()
+#include "crystal/compile/full_compiler.hpp"       // for StdScriptsTable
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
 #include <iomanip>
@@ -43,11 +45,11 @@ struct CorpusStats {
     std::set<uint8_t> unique_opcodes;
 };
 
-struct MapIdRef {
+struct CorpusTestMapRef {
     uint8_t group;
     uint8_t map;
     
-    bool operator<(const MapIdRef& other) const {
+    bool operator<(const CorpusTestMapRef& other) const {
         if (group != other.group) return group < other.group;
         return map < other.map;
     }
@@ -55,15 +57,15 @@ struct MapIdRef {
 
 // Fixed-point map discovery - mirrors FullGameCompiler::discover_all_maps()
 // Seeds from known entry points, follows warps/connections until closure
-std::vector<MapIdRef> discover_reachable_maps(const RomData& rom, const ExtractionProfile& profile, 
+std::vector<CorpusTestMapRef> corpus_test_discover_maps(const RomData& rom, const ExtractionProfile& profile, 
                                                MapExtractor& extractor) {
-    std::set<MapIdRef> visited;
-    std::queue<MapIdRef> frontier;
-    std::vector<MapIdRef> result;
+    std::set<CorpusTestMapRef> visited;
+    std::queue<CorpusTestMapRef> frontier;
+    std::vector<CorpusTestMapRef> result;
     
     auto enqueue = [&](uint8_t group, uint8_t map) {
         if (group == 0 || map == 0) return;
-        MapIdRef ref{group, map};
+        CorpusTestMapRef ref{group, map};
         if (!visited.contains(ref)) {
             visited.insert(ref);
             frontier.push(ref);
@@ -92,7 +94,7 @@ std::vector<MapIdRef> discover_reachable_maps(const RomData& rom, const Extracti
     const auto& fmt = profile.format.map;
     
     while (!frontier.empty()) {
-        MapIdRef ref = frontier.front();
+        CorpusTestMapRef ref = frontier.front();
         frontier.pop();
         
         auto map_result = extractor.extract_map(ref.group, ref.map);
@@ -301,11 +303,62 @@ int main(int argc, char* argv[]) {
     
     std::cout << "\n=== Corpus Validation Test ===\n\n";
 
+    // ==========================================================================
+    // CORPUS CARDINALITY GATE (independent of this test's own discovery path)
+    //
+    // The authoritative script count is 1788 — established by discover_corpus(),
+    // which uses fixed-point deferred-sdefer discovery and includes all root
+    // categories: object, BG, coord, scene, callback, deferred, StdScript.
+    //
+    // This constant is intentionally authored here by a human reading the
+    // production discovery output — it is NOT derived from this test's own
+    // discovery path.  If the discovered count diverges from this value the
+    // test FAILS, even if every discovered script individually passes.
+    //
+    // To legitimately update this baseline: provide source-backed evidence
+    // (new map, new sdefer chain, ROM hack with different script count) and
+    // update the constant explicitly with a comment explaining why.
+    // ==========================================================================
+    constexpr size_t CORPUS_EXPECTED_UNIQUE_BODIES = 1788;
+
+    {
+        // Build authoritative corpus count using the same discover_corpus() path
+        // the production compiler uses.  This is independent of the per-stage
+        // discovery below, which only collects object+BG event addresses.
+        crystal::StdScriptsTable std_scripts_for_count;
+        std_scripts_for_count.load(*rom, profile->offsets.std_scripts,
+                                   profile->offsets.std_scripts_count);
+
+        crystal::MapExtractor extractor_for_count(*rom, *profile);
+        crystal::TypedScriptDecoder decoder_for_count(*rom, symbols);
+
+        auto authoritative_corpus = crystal::discover_corpus(*rom, *profile, extractor_for_count,
+                                                              decoder_for_count, std_scripts_for_count);
+
+        size_t actual_bodies = authoritative_corpus.stats.total_unique_bodies();
+        std::cout << "=== Corpus Cardinality Gate ===\n";
+        std::cout << "  Expected unique bodies: " << CORPUS_EXPECTED_UNIQUE_BODIES << "\n";
+        std::cout << "  Discovered unique bodies: " << actual_bodies << "\n";
+        std::cout << "    Map roots: " << authoritative_corpus.stats.total_map_roots() << "\n";
+        std::cout << "    StdScript roots: " << authoritative_corpus.stats.std_script_roots << "\n";
+
+        if (actual_bodies != CORPUS_EXPECTED_UNIQUE_BODIES) {
+            std::cerr << "\nFATAL: Corpus cardinality mismatch.\n";
+            std::cerr << "  Expected: " << CORPUS_EXPECTED_UNIQUE_BODIES << "\n";
+            std::cerr << "  Got:      " << actual_bodies << "\n";
+            std::cerr << "  A regression has silently shrunk (or grown) the reachable corpus.\n";
+            std::cerr << "  To update the baseline, provide source-backed evidence and update\n";
+            std::cerr << "  CORPUS_EXPECTED_UNIQUE_BODIES in corpus_test.cpp explicitly.\n";
+            return 1;
+        }
+        std::cout << "  PASS: corpus cardinality = " << actual_bodies << " (matches baseline)\n\n";
+    }
+
     // Use fixed-point discovery (same as FullGameCompiler)
     MapExtractor extractor(*rom, *profile);
     
     std::cout << "Discovering reachable maps (fixed-point)...\n";
-    auto discovered_maps = discover_reachable_maps(*rom, *profile, extractor);
+    auto discovered_maps = corpus_test_discover_maps(*rom, *profile, extractor);
     std::cout << "  Discovered " << discovered_maps.size() << " reachable maps\n\n";
 
     // Collect script addresses from discovered maps only
