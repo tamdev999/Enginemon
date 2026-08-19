@@ -12802,6 +12802,911 @@ TEST(semantic_fix_text_identity_distinguishes_ram_addresses) {
     std::cout << "  [TextDefinition: RAM(0xD47D) vs RAM(0xD47E) → distinct ✓]\n";
 }
 
+// =============================================================================
+// SHARED TEST HELPER — build a minimal single-command IR for lowering tests
+// Defined here so it's available to all test blocks that follow.
+// =============================================================================
+static std::pair<crystal::CrystalScriptIR, crystal::CrystalCFG>
+make_single_cmd_ir(crystal::CrystalCommandData data, uint32_t entry_address,
+                   const std::string& name, std::vector<uint8_t> raw_bytes) {
+    using namespace crystal;
+    CrystalCommand cmd;
+    cmd.data = std::move(data);
+    cmd.span.rom_address = 0;
+    cmd.span.raw_bytes = raw_bytes;
+    CrystalScriptIR ir;
+    ir.name = name;
+    ir.entry_address = entry_address;
+    ir.rom_start = 0;
+    ir.rom_end = (uint32_t)raw_bytes.size();
+    ir.commands.push_back(cmd);
+    CrystalCFG cfg;
+    cfg.script_name = name;
+    cfg.entry_address = entry_address;
+    BasicBlock block;
+    block.id = 0;
+    block.start_address = 0;
+    block.end_address = (uint32_t)raw_bytes.size();
+    block.command_start = 0;
+    block.command_count = 1;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+    return {ir, cfg};
+}
+
+//=============================================================================
+// SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS — August 2026
+// Verifies all 5 findings from the hostile audit:
+//   Finding 1: wScriptVar block_ctx invalidation
+//   Finding 2: cry 0 dynamic species
+//   Finding 3: movement completeness
+//   Finding 4: writecmdqueue bank resolution
+//   Finding 5: pokepic 0 dynamic species
+//=============================================================================
+
+// Finding 1: setval 5 → yesorno → MapRadio must NOT fold channel=5
+// yesorno writes wScriptVar, so block_ctx must be invalidated before MapRadio
+TEST(stale_script_var_yesorno_invalidates_before_map_radio) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Build: setval(5), yesorno, special(MapRadio)
+    CrystalScriptIR ir;
+    ir.name = "test_yesorno_invalidate";
+    ir.entry_address = 0x10000;
+
+    CrystalCommand c1; c1.data = Cmd_Setval{5};   c1.span.raw_bytes = {0x15, 5};
+    CrystalCommand c2; c2.data = Cmd_Yesorno{};   c2.span.raw_bytes = {0x4E};
+    CrystalCommand c3; c3.data = Cmd_Special{40}; c3.span.raw_bytes = {0x0F, 40, 0};  // MapRadio=40
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_yesorno_invalidate";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 6;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    // Should produce: Sem_SetVar{5}, Sem_YesNo{}, Sem_Special{40} (NOT Sem_PlayRadio{5})
+    // MapRadio requires a known producer — after yesorno invalidates, it falls to Sem_Special
+    const auto& insts = result.ir.blocks[0].instructions;
+    ASSERT_TRUE(insts.size() == 3);
+
+    // Third instruction must be Sem_Special (MapRadio fallback), NOT Sem_PlayRadio
+    auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
+    ASSERT_TRUE(radio == nullptr);  // Must NOT be PlayRadio — context was invalidated
+    auto* sp = std::get_if<Sem_Special>(&insts[2].op);
+    ASSERT_TRUE(sp != nullptr);
+
+    std::cout << "  [setval(5)->yesorno->MapRadio: NOT channel 5 (invalidated) ✓]\n";
+}
+
+// Finding 1: setval 5 → non-writer → MapRadio SHOULD fold channel=5 (legitimate propagation)
+TEST(script_var_propagates_across_non_writer) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Build: setval(3), faceplayer (no wScriptVar write), special(MapRadio=40)
+    CrystalScriptIR ir;
+    ir.name = "test_propagate";
+    ir.entry_address = 0x10000;
+
+    CrystalCommand c1; c1.data = Cmd_Setval{3};     c1.span.raw_bytes = {0x15, 3};
+    CrystalCommand c2; c2.data = Cmd_Faceplayer{};  c2.span.raw_bytes = {0x6B};
+    CrystalCommand c3; c3.data = Cmd_Special{40};   c3.span.raw_bytes = {0x0F, 40, 0};
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_propagate";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 5;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    // Should produce: Sem_SetVar{3}, Sem_FacePlayer{}, Sem_PlayRadio{3}
+    ASSERT_TRUE(insts.size() >= 3);
+
+    // Third instruction should be Sem_PlayRadio{3} — context still valid
+    auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
+    ASSERT_TRUE(radio != nullptr);
+    ASSERT_EQ(radio->channel, 3);
+
+    std::cout << "  [setval(3)->faceplayer->MapRadio: channel=3 (propagated) ✓]\n";
+}
+
+// Finding 1: giveitem writes wScriptVar → invalidates context
+TEST(stale_script_var_giveitem_invalidates) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    CrystalScriptIR ir;
+    ir.name = "test_giveitem_inval";
+    ir.entry_address = 0x10000;
+
+    CrystalCommand c1; c1.data = Cmd_Setval{2};          c1.span.raw_bytes = {0x15, 2};
+    Cmd_Giveitem gi; gi.item = 5; gi.quantity = 1;
+    CrystalCommand c2; c2.data = gi;                      c2.span.raw_bytes = {0x1F, 5, 1};
+    CrystalCommand c3; c3.data = Cmd_Special{40};         c3.span.raw_bytes = {0x0F, 40, 0};
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_giveitem_inval";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 6;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& insts = result.ir.blocks[0].instructions;
+    // MapRadio must NOT get channel=2 — giveitem invalidated block_ctx
+    bool found_radio = false;
+    for (const auto& i : insts) {
+        if (auto* r = std::get_if<Sem_PlayRadio>(&i.op)) {
+            found_radio = true;
+        }
+    }
+    ASSERT_FALSE(found_radio);  // No PlayRadio: context was invalidated by giveitem
+
+    std::cout << "  [setval(2)->giveitem->MapRadio: not folded (invalidated by giveitem) ✓]\n";
+}
+
+// Finding 2: cry literal species
+TEST(cry_literal_species) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Cry cry; cry.cry_id = 25;  // Pikachu — low byte nonzero = literal
+    auto [ir, cfg] = make_single_cmd_ir(cry, 0x10000, "test_cry_lit", {0x84, 25, 0});
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    auto* op = std::get_if<Sem_PlayCry>(&result.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(op != nullptr);
+    ASSERT_TRUE(op->source.is_literal());
+    ASSERT_EQ(op->source.species, SpeciesId{25});
+    ASSERT_EQ(op->variant, CryVariant::Normal);
+
+    std::cout << "  [cry(25): Literal(25) ✓]\n";
+}
+
+// Finding 2: cry 0 = dynamic species from wScriptVar (NOT Literal(0))
+TEST(cry_zero_dynamic_species) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Cry cry; cry.cry_id = 0;  // 0 = dynamic — must NOT be Literal(0)
+    auto [ir, cfg] = make_single_cmd_ir(cry, 0x10000, "test_cry_dyn", {0x84, 0, 0});
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    auto* op = std::get_if<Sem_PlayCry>(&result.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(op != nullptr);
+
+    // CRITICAL: must be ScriptVar, NOT Literal(0)
+    ASSERT_TRUE(op->source.is_script_var());
+    ASSERT_FALSE(op->source.is_literal());
+
+    std::cout << "  [cry(0): ScriptVar (not Literal(0)) ✓]\n";
+}
+
+// Finding 2: cry{ScriptVar} != cry{Literal(25)}
+TEST(cry_script_var_distinct_from_literal) {
+    using namespace crystal;
+    using namespace enginemon;
+    Sem_PlayCry literal_cry;
+    literal_cry.source = SpeciesSource::literal(SpeciesId{25});
+    literal_cry.variant = CryVariant::Normal;
+
+    Sem_PlayCry dynamic_cry;
+    dynamic_cry.source = SpeciesSource::from_script_var();
+    dynamic_cry.variant = CryVariant::Normal;
+
+    ASSERT_FALSE(literal_cry.source == dynamic_cry.source);
+    std::cout << "  [Cry{Literal(25)} != Cry{ScriptVar} ✓]\n";
+}
+
+// Finding 5: pokepic literal species
+TEST(pokepic_literal_species) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Pokepic pp; pp.pokemon = 25;
+    auto [ir, cfg] = make_single_cmd_ir(pp, 0x10000, "test_pp_lit", {0x56, 25});
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    auto* op = std::get_if<Sem_Pokepic>(&result.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(op != nullptr);
+    ASSERT_TRUE(op->source.is_literal());
+    ASSERT_EQ(op->source.species, SpeciesId{25});
+
+    std::cout << "  [pokepic(25): Literal(25) ✓]\n";
+}
+
+// Finding 5: pokepic 0 = dynamic species (NOT Literal(0))
+TEST(pokepic_zero_dynamic_species) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Pokepic pp; pp.pokemon = 0;
+    auto [ir, cfg] = make_single_cmd_ir(pp, 0x10000, "test_pp_dyn", {0x56, 0});
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    auto* op = std::get_if<Sem_Pokepic>(&result.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(op != nullptr);
+
+    // CRITICAL: must be ScriptVar, NOT Literal(0)
+    ASSERT_TRUE(op->source.is_script_var());
+    ASSERT_FALSE(op->source.is_literal());
+
+    std::cout << "  [pokepic(0): ScriptVar (not Literal(0)) ✓]\n";
+}
+
+// Findings 2+5: cry and pokepic share the same SpeciesSource model
+TEST(cry_and_pokepic_same_source_semantics) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Both cry(0) and pokepic(0) should produce ScriptVar source
+    Cmd_Cry cry; cry.cry_id = 0;
+    auto [ir_c, cfg_c] = make_single_cmd_ir(cry, 0x10000, "cry0", {0x84, 0, 0});
+    SemanticLegalizer leg_c;
+    auto r_c = leg_c.lower(ir_c, cfg_c);
+    ASSERT_TRUE(r_c.success);
+    auto* cry_op = std::get_if<Sem_PlayCry>(&r_c.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(cry_op && cry_op->source.is_script_var());
+
+    Cmd_Pokepic pp; pp.pokemon = 0;
+    auto [ir_p, cfg_p] = make_single_cmd_ir(pp, 0x10000, "pp0", {0x56, 0});
+    SemanticLegalizer leg_p;
+    auto r_p = leg_p.lower(ir_p, cfg_p);
+    ASSERT_TRUE(r_p.success);
+    auto* pp_op = std::get_if<Sem_Pokepic>(&r_p.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(pp_op && pp_op->source.is_script_var());
+
+    std::cout << "  [cry(0) and pokepic(0) both produce ScriptVar source ✓]\n";
+}
+
+// Finding 4: writecmdqueue resolves bank-local pointer to flat address
+// Asymmetric: same raw $5000 in two different banks → different flat addresses
+TEST(writecmdqueue_same_ptr_different_banks_distinct) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Script at bank 0x0A (entry 0x28000): writecmdqueue ptr=0x5000
+    // Expected flat = 0x0A*0x4000 + (0x5000-0x4000) = 0x28000 + 0x1000 = 0x29000
+    Cmd_Writecmdqueue wcq1; wcq1.queue_pointer = 0x5000;
+    auto [ir1, cfg1] = make_single_cmd_ir(wcq1, 0x28100, "wq1", {0x7D, 0x00, 0x50});
+
+    SemanticLegalizer leg1;
+    auto r1 = leg1.lower(ir1, cfg1);
+    ASSERT_TRUE(r1.success);
+    auto* op1 = std::get_if<Sem_WriteCmdQueue>(&r1.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(op1 != nullptr);
+    ASSERT_EQ(op1->queue_flat_address, 0x29000u);
+
+    // Script at bank 0x0C (entry 0x30000): writecmdqueue ptr=0x5000
+    // Expected flat = 0x0C*0x4000 + (0x5000-0x4000) = 0x30000 + 0x1000 = 0x31000
+    Cmd_Writecmdqueue wcq2; wcq2.queue_pointer = 0x5000;
+    auto [ir2, cfg2] = make_single_cmd_ir(wcq2, 0x30100, "wq2", {0x7D, 0x00, 0x50});
+
+    SemanticLegalizer leg2;
+    auto r2 = leg2.lower(ir2, cfg2);
+    ASSERT_TRUE(r2.success);
+    auto* op2 = std::get_if<Sem_WriteCmdQueue>(&r2.ir.blocks[0].instructions[0].op);
+    ASSERT_TRUE(op2 != nullptr);
+    ASSERT_EQ(op2->queue_flat_address, 0x31000u);
+
+    // Different banks, same raw pointer → different flat addresses (no collision)
+    ASSERT_TRUE(op1->queue_flat_address != op2->queue_flat_address);
+
+    std::cout << "  [writecmdqueue: bank 0x0A,ptr=0x5000→0x29000 | bank 0x0C→0x31000 ✓]\n";
+}
+
+// Finding 3: valid movement terminates correctly
+TEST(movement_valid_terminates_correctly) {
+    // Valid 4-step-left sequence + step_end: {0x0E, 0x0E, 0x0E, 0x0E, 0x47}
+    // parse_movement_commands succeeds for well-formed data
+    using namespace crystal;
+
+    std::vector<uint8_t> raw = {0x0E, 0x0E, 0x0E, 0x0E, 0x47};  // 4×step-left + step_end
+    // parse_movement_commands is testable without ROM
+    SymbolMap symbols;
+    ScriptDecoder decoder(*g_rom, symbols);
+    auto cmds = decoder.parse_movement_commands(raw);
+    ASSERT_EQ(cmds.size(), 5);
+    ASSERT_EQ(static_cast<int>(cmds.back().type), static_cast<int>(MovementType::StepEnd));
+
+    std::cout << "  [valid movement: 4 steps + step_end = 5 commands ✓]\n";
+}
+
+// Finding 3: movement with invalid opcode → throws (hard failure, not silent truncation)
+TEST(movement_no_terminator_throws) {
+    using namespace crystal;
+
+    // Sequence with invalid opcode 0xFF (>= 0x5A is invalid per decode spec)
+    std::vector<uint8_t> raw_bad = {0x0E, 0xFF};
+    SymbolMap symbols;
+    ScriptDecoder decoder(*g_rom, symbols);
+    bool threw = false;
+    try {
+        auto cmds = decoder.parse_movement_commands(raw_bad);
+        (void)cmds;
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+
+    std::cout << "  [invalid movement opcode 0xFF: throws (not silent) ✓]\n";
+}
+
+//=============================================================================
+// END SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS
+//=============================================================================
+
+//=============================================================================
+// SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS — August 2026
+// Verifies all 5 confirmed script state bugs are fixed, plus adjacent fixes.
+//=============================================================================
+
+// Finding 1: setval followed by yesorno must not use stale setval fact
+// setval 5 → yesorno → MapRadio must NOT produce Sem_PlayRadio{5}
+TEST(script_state_setval_yesorno_invalidates_context) {
+    using namespace crystal;
+    using namespace enginemon;
+    // Build: setval 5, yesorno, special MapRadio(40)
+    CrystalScriptIR ir;
+    ir.name = "test_invalidation";
+    ir.entry_address = 0x10000;
+    ir.rom_start = 0;
+    ir.rom_end = 6;
+
+    Cmd_Setval sv; sv.value = 5;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 5};
+
+    CrystalCommand c2; c2.data = Cmd_Yesorno{}; c2.span.raw_bytes = {0x4E};
+
+    Cmd_Special sp; sp.special_id = 40;  // MapRadio — reads wScriptVar
+    CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
+
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_invalidation";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 6;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    // After yesorno, MapRadio must NOT be lowered with channel 5 (stale from setval)
+    // MapRadio with no known context falls through to generic Sem_Special
+    bool found_radio_with_5 = false;
+    bool found_sem_special = false;
+    for (const auto& block : result.ir.blocks) {
+        for (const auto& inst : block.instructions) {
+            if (auto* radio = std::get_if<Sem_PlayRadio>(&inst.op)) {
+                if (radio->channel == 5) found_radio_with_5 = true;
+            }
+            if (std::get_if<Sem_Special>(&inst.op)) found_sem_special = true;
+        }
+    }
+    ASSERT_FALSE(found_radio_with_5);
+    // Without a valid known context, MapRadio falls back to Sem_Special
+    ASSERT_TRUE(found_sem_special);
+
+    std::cout << "  [setval 5 → yesorno invalidates → MapRadio falls to Sem_Special ✓]\n";
+}
+
+// Finding 1: setval followed by a non-wScriptVar-writing command preserves the fact
+TEST(script_state_setval_preserved_across_noop_command) {
+    using namespace crystal;
+    using namespace enginemon;
+    // Build: setval 3, faceplayer (doesn't touch wScriptVar), special MapRadio(40)
+    CrystalScriptIR ir;
+    ir.name = "test_preserved";
+    ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 5;
+
+    Cmd_Setval sv; sv.value = 3;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 3};
+
+    CrystalCommand c2; c2.data = Cmd_Faceplayer{}; c2.span.raw_bytes = {0x6B};
+
+    Cmd_Special sp; sp.special_id = 40;  // MapRadio — channel 3 should be used
+    CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
+
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_preserved";
+    cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 5;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block);
+    cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    LoweringResult result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    bool found_radio_3 = false;
+    for (const auto& block : result.ir.blocks) {
+        for (const auto& inst : block.instructions) {
+            if (auto* radio = std::get_if<Sem_PlayRadio>(&inst.op)) {
+                if (radio->channel == 3) found_radio_3 = true;
+            }
+        }
+    }
+    ASSERT_TRUE(found_radio_3);
+    std::cout << "  [setval 3 → faceplayer (noop) → MapRadio{3} preserved ✓]\n";
+}
+
+// Finding 2: cry 0 → ScriptVar (NOT literal SpeciesId{0})
+TEST(script_state_cry_zero_is_script_var_not_literal) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Cry cry; cry.cry_id = 0;
+    CrystalCommand cmd; cmd.data = cry; cmd.span.raw_bytes = {0x84, 0, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_cry0"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 3;
+    ir.commands = {cmd};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_cry0"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 3;
+    block.command_start = 0; block.command_count = 1;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* cry_op = std::get_if<Sem_PlayCry>(&inst.op);
+    ASSERT_TRUE(cry_op != nullptr);
+    ASSERT_TRUE(cry_op->source.is_script_var());
+    ASSERT_FALSE(cry_op->source.is_literal());
+
+    std::cout << "  [cry 0 → Sem_PlayCry{ScriptVar} (not literal SpeciesId{0}) ✓]\n";
+}
+
+// Finding 2: cry nonzero → literal species
+TEST(script_state_cry_nonzero_is_literal) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Cry cry; cry.cry_id = 25;
+    CrystalCommand cmd; cmd.data = cry; cmd.span.raw_bytes = {0x84, 25, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_cry25"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 3;
+    ir.commands = {cmd};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_cry25"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 3;
+    block.command_start = 0; block.command_count = 1;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* cry_op = std::get_if<Sem_PlayCry>(&inst.op);
+    ASSERT_TRUE(cry_op != nullptr);
+    ASSERT_TRUE(cry_op->source.is_literal());
+    ASSERT_EQ(cry_op->source.species, SpeciesId{25});
+
+    std::cout << "  [cry 25 → Sem_PlayCry{Literal(25)} ✓]\n";
+}
+
+// Finding 5: pokepic 0 → ScriptVar
+TEST(script_state_pokepic_zero_is_script_var_not_literal) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Pokepic pp; pp.pokemon = 0;
+    CrystalCommand cmd; cmd.data = pp; cmd.span.raw_bytes = {0x56, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_pp0"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 2;
+    ir.commands = {cmd};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_pp0"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 2;
+    block.command_start = 0; block.command_count = 1;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* pp_op = std::get_if<Sem_Pokepic>(&inst.op);
+    ASSERT_TRUE(pp_op != nullptr);
+    ASSERT_TRUE(pp_op->source.is_script_var());
+    ASSERT_FALSE(pp_op->source.is_literal());
+
+    std::cout << "  [pokepic 0 → Sem_Pokepic{ScriptVar} (not literal SpeciesId{0}) ✓]\n";
+}
+
+// Finding 5: pokepic nonzero → literal
+TEST(script_state_pokepic_nonzero_is_literal) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    Cmd_Pokepic pp; pp.pokemon = 149;
+    CrystalCommand cmd; cmd.data = pp; cmd.span.raw_bytes = {0x56, 149};
+
+    CrystalScriptIR ir;
+    ir.name = "test_pp149"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 2;
+    ir.commands = {cmd};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_pp149"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 2;
+    block.command_start = 0; block.command_count = 1;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    const auto& inst = result.ir.blocks[0].instructions[0];
+    auto* pp_op = std::get_if<Sem_Pokepic>(&inst.op);
+    ASSERT_TRUE(pp_op != nullptr);
+    ASSERT_TRUE(pp_op->source.is_literal());
+    ASSERT_EQ(pp_op->source.species, SpeciesId{149});
+
+    std::cout << "  [pokepic 149 → Sem_Pokepic{Literal(149)} ✓]\n";
+}
+
+// Findings 2 & 5: cry and pokepic share identical SpeciesSource semantics
+TEST(script_state_cry_and_pokepic_same_source_semantics) {
+    using namespace enginemon;
+    // Both ScriptVar sources are equal
+    SpeciesSource a = SpeciesSource::from_script_var();
+    SpeciesSource b = SpeciesSource::from_script_var();
+    ASSERT_TRUE(a == b);
+    ASSERT_TRUE(a.is_script_var());
+
+    // Literal 25 and Literal 25 are equal
+    SpeciesSource c = SpeciesSource::literal(SpeciesId{25});
+    SpeciesSource d = SpeciesSource::literal(SpeciesId{25});
+    ASSERT_TRUE(c == d);
+
+    // Literal 25 != Literal 26
+    SpeciesSource e = SpeciesSource::literal(SpeciesId{26});
+    ASSERT_TRUE(!(c == e));
+
+    // ScriptVar != Literal(0) — the key invariant
+    SpeciesSource sv = SpeciesSource::from_script_var();
+    SpeciesSource lit0 = SpeciesSource::literal(SpeciesId{0});
+    ASSERT_TRUE(!(sv == lit0));
+
+    std::cout << "  [SpeciesSource: ScriptVar != Literal(0), identical literals match ✓]\n";
+}
+
+// Adjacent fix: verbosegiveitemvar invalidates wScriptVar context
+TEST(script_state_verbosegiveitemvar_invalidates) {
+    using namespace crystal;
+    using namespace enginemon;
+    // setval 3, verbosegiveitemvar item=5 var=1, special MapRadio(40)
+    // After verbosegiveitemvar, block_ctx must be invalidated
+    Cmd_Setval sv; sv.value = 3;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 3};
+
+    Cmd_Verbosegiveitemvar vgiv; vgiv.item = 5; vgiv.var = 1;
+    CrystalCommand c2; c2.data = vgiv; c2.span.raw_bytes = {0x9F, 5, 1};
+
+    Cmd_Special sp; sp.special_id = 40;  // MapRadio
+    CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_vgiv_inv"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 7;
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_vgiv_inv"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 7;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    bool found_radio_3 = false;
+    bool found_sem_special = false;
+    for (const auto& b : result.ir.blocks) {
+        for (const auto& inst : b.instructions) {
+            if (auto* r = std::get_if<Sem_PlayRadio>(&inst.op)) {
+                if (r->channel == 3) found_radio_3 = true;
+            }
+            if (std::get_if<Sem_Special>(&inst.op)) found_sem_special = true;
+        }
+    }
+    // verbosegiveitemvar should have invalidated — MapRadio must NOT get channel 3
+    ASSERT_FALSE(found_radio_3);
+    ASSERT_TRUE(found_sem_special);
+    std::cout << "  [verbosegiveitemvar invalidates: MapRadio falls to Sem_Special ✓]\n";
+}
+
+// Adjacent fix: checkcellnum invalidates
+TEST(script_state_checkcellnum_invalidates) {
+    using namespace crystal;
+    using namespace enginemon;
+    // setval 2, checkcellnum(7), special MapRadio(40) — must not get channel 2
+    Cmd_Setval sv; sv.value = 2;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 2};
+
+    Cmd_Checkcellnum cc; cc.person = 7;
+    CrystalCommand c2; c2.data = cc; c2.span.raw_bytes = {0x2A, 7};
+
+    Cmd_Special sp; sp.special_id = 40;
+    CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_cc_inv"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 6;
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_cc_inv"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 6;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    bool found_radio_2 = false;
+    for (const auto& b : result.ir.blocks)
+        for (const auto& inst : b.instructions)
+            if (auto* r = std::get_if<Sem_PlayRadio>(&inst.op))
+                if (r->channel == 2) found_radio_2 = true;
+
+    ASSERT_FALSE(found_radio_2);
+    std::cout << "  [checkcellnum invalidates wScriptVar context ✓]\n";
+}
+
+// Adjacent fix: delcmdqueue invalidates
+TEST(script_state_delcmdqueue_invalidates) {
+    using namespace crystal;
+    using namespace enginemon;
+    Cmd_Setval sv; sv.value = 1;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 1};
+
+    Cmd_Delcmdqueue dq; dq.byte = 3;
+    CrystalCommand c2; c2.data = dq; c2.span.raw_bytes = {0x7E, 3};
+
+    Cmd_Special sp; sp.special_id = 40;
+    CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_dq_inv"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 5;
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_dq_inv"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 5;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    bool found_radio_1 = false;
+    for (const auto& b : result.ir.blocks)
+        for (const auto& inst : b.instructions)
+            if (auto* r = std::get_if<Sem_PlayRadio>(&inst.op))
+                if (r->channel == 1) found_radio_1 = true;
+
+    ASSERT_FALSE(found_radio_1);
+    std::cout << "  [delcmdqueue invalidates wScriptVar context ✓]\n";
+}
+
+// Adjacent fix: checkphonecall invalidates
+TEST(script_state_checkphonecall_invalidates) {
+    using namespace crystal;
+    using namespace enginemon;
+    Cmd_Setval sv; sv.value = 4;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 4};
+
+    CrystalCommand c2; c2.data = Cmd_Checkphonecall{}; c2.span.raw_bytes = {0x9D};
+
+    Cmd_Special sp; sp.special_id = 40;
+    CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_cpc_inv"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 5;
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_cpc_inv"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 5;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    bool found_radio_4 = false;
+    for (const auto& b : result.ir.blocks)
+        for (const auto& inst : b.instructions)
+            if (auto* r = std::get_if<Sem_PlayRadio>(&inst.op))
+                if (r->channel == 4) found_radio_4 = true;
+
+    ASSERT_FALSE(found_radio_4);
+    std::cout << "  [checkphonecall invalidates wScriptVar context ✓]\n";
+}
+
+// Adjacent fix: checktime invalidates
+TEST(script_state_checktime_invalidates) {
+    using namespace crystal;
+    using namespace enginemon;
+    Cmd_Setval sv; sv.value = 6;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 6};
+
+    Cmd_Checktime ct; ct.time = 0x07;  // MORN|DAY|NITE
+    CrystalCommand c2; c2.data = ct; c2.span.raw_bytes = {0x2B, 0x07};
+
+    Cmd_Special sp; sp.special_id = 40;
+    CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_ct_inv"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 6;
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_ct_inv"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 6;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    bool found_radio_6 = false;
+    for (const auto& b : result.ir.blocks)
+        for (const auto& inst : b.instructions)
+            if (auto* r = std::get_if<Sem_PlayRadio>(&inst.op))
+                if (r->channel == 6) found_radio_6 = true;
+
+    ASSERT_FALSE(found_radio_6);
+    std::cout << "  [checktime invalidates wScriptVar context ✓]\n";
+}
+
+// Adjacent fix: checkver establishes context = 1 (GS_VERSION)
+TEST(script_state_checkver_establishes_context) {
+    using namespace crystal;
+    using namespace enginemon;
+    // checkver always sets wScriptVar = 1. After it, a setval-0 → checkver → MapRadio
+    // should use channel 1 (from checkver), not channel 0 (from setval).
+    // Actually: checkver replaces the context. Let's verify:
+    //   setval 0, checkver, MapRadio — MapRadio should NOT get channel 0
+    // (checkver sets it to 1, then MapRadio gets channel 1, but 1 is valid for radio)
+    // So just verify checkver establishes known_script_var = 1.
+    Cmd_Setval sv; sv.value = 0;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 0};
+
+    CrystalCommand c2; c2.data = Cmd_Checkver{}; c2.span.raw_bytes = {0x18};
+
+    Cmd_Special sp; sp.special_id = 40;  // MapRadio
+    CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
+
+    CrystalScriptIR ir;
+    ir.name = "test_cv_ctx"; ir.entry_address = 0x10000;
+    ir.rom_start = 0; ir.rom_end = 5;
+    ir.commands = {c1, c2, c3};
+
+    CrystalCFG cfg;
+    cfg.script_name = "test_cv_ctx"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 5;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(result.success);
+
+    // checkver sets wScriptVar = 1, so MapRadio should use channel 1 (valid, 0-8)
+    bool found_radio_0 = false;
+    bool found_radio_1 = false;
+    for (const auto& b : result.ir.blocks) {
+        for (const auto& inst : b.instructions) {
+            if (auto* r = std::get_if<Sem_PlayRadio>(&inst.op)) {
+                if (r->channel == 0) found_radio_0 = true;
+                if (r->channel == 1) found_radio_1 = true;
+            }
+        }
+    }
+    // setval 0 was overwritten by checkver(1), so channel 0 is stale
+    ASSERT_FALSE(found_radio_0);
+    // checkver set context to 1
+    ASSERT_TRUE(found_radio_1);
+    std::cout << "  [checkver establishes context=1: MapRadio{1} ✓]\n";
+}
+
+//=============================================================================
+// END SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS
+//=============================================================================
+
 //=============================================================================
 // CRYSTAL TEXT FRONTEND FIDELITY TESTS — August 2026
 // Verifies all 4 confirmed text bugs are fixed:
@@ -13108,37 +14013,12 @@ TEST(textraw_empty_raw_handled) {
 // Uses asymmetric values so a lossy rule cannot accidentally pass.
 //=============================================================================
 
-// Helper: build a minimal single-command CrystalScriptIR + CrystalCFG for one command
-static std::pair<crystal::CrystalScriptIR, crystal::CrystalCFG>
-make_single_cmd_ir(crystal::CrystalCommandData data, uint32_t entry_address,
-                   const std::string& name, std::vector<uint8_t> raw_bytes) {
-    using namespace crystal;
-    CrystalCommand cmd;
-    cmd.data = std::move(data);
-    cmd.span.rom_address = 0;
-    cmd.span.raw_bytes = raw_bytes;
-
-    CrystalScriptIR ir;
-    ir.name = name;
-    ir.entry_address = entry_address;
-    ir.rom_start = 0;
-    ir.rom_end = (uint32_t)raw_bytes.size();
-    ir.commands.push_back(cmd);
-
-    CrystalCFG cfg;
-    cfg.script_name = name;
-    cfg.entry_address = entry_address;
-    BasicBlock block;
-    block.id = 0;
-    block.start_address = 0;
-    block.end_address = (uint32_t)raw_bytes.size();
-    block.command_start = 0;
-    block.command_count = 1;
-    cfg.blocks.push_back(block);
-    cfg.source_ir = &ir;
-
-    return {ir, cfg};
-}
+// =============================================================================
+// 11-FINDING SEMANTIC FIDELITY PASS TESTS — August 2026
+// Adversarial tests proving each finding is fixed.
+// Uses asymmetric values so a lossy rule cannot accidentally pass.
+// Note: make_single_cmd_ir helper is defined earlier in this file.
+//=============================================================================
 
 // Finding 1: writetext with two different pointers → distinct non-empty sequences
 TEST(fidelity11_writetext_distinct_pointers_distinct_sequences) {
@@ -14010,6 +14890,35 @@ int main(int argc, char* argv[]) {
     RUN_TEST(sprite_id_mapping_authoritative);
     RUN_TEST(directional_ledge_semantic_preservation);
     
+    // Script state and dynamic resource semantics tests (August 2026 — Findings 1-5)
+    RUN_TEST(stale_script_var_yesorno_invalidates_before_map_radio);
+    RUN_TEST(script_var_propagates_across_non_writer);
+    RUN_TEST(stale_script_var_giveitem_invalidates);
+    RUN_TEST(cry_literal_species);
+    RUN_TEST(cry_zero_dynamic_species);
+    RUN_TEST(cry_script_var_distinct_from_literal);
+    RUN_TEST(pokepic_literal_species);
+    RUN_TEST(pokepic_zero_dynamic_species);
+    RUN_TEST(cry_and_pokepic_same_source_semantics);
+    RUN_TEST(writecmdqueue_same_ptr_different_banks_distinct);
+    RUN_TEST(movement_valid_terminates_correctly);
+    RUN_TEST(movement_no_terminator_throws);
+
+    // Script state and dynamic resource semantics tests (August 2026 — 5 Findings)
+    RUN_TEST(script_state_setval_yesorno_invalidates_context);
+    RUN_TEST(script_state_setval_preserved_across_noop_command);
+    RUN_TEST(script_state_cry_zero_is_script_var_not_literal);
+    RUN_TEST(script_state_cry_nonzero_is_literal);
+    RUN_TEST(script_state_pokepic_zero_is_script_var_not_literal);
+    RUN_TEST(script_state_pokepic_nonzero_is_literal);
+    RUN_TEST(script_state_cry_and_pokepic_same_source_semantics);
+    RUN_TEST(script_state_verbosegiveitemvar_invalidates);
+    RUN_TEST(script_state_checkcellnum_invalidates);
+    RUN_TEST(script_state_delcmdqueue_invalidates);
+    RUN_TEST(script_state_checkphonecall_invalidates);
+    RUN_TEST(script_state_checktime_invalidates);
+    RUN_TEST(script_state_checkver_establishes_context);
+
     // Crystal text frontend fidelity tests (August 2026 — Findings 1-4)
     RUN_TEST(text_literal_tx_opcode_overlap_0x14);
     RUN_TEST(text_literal_at_returns_to_outer_stream);

@@ -679,9 +679,17 @@ void SemanticLinker::extract_and_validate_from_op(
         } else if constexpr (std::is_same_v<T, Sem_CheckPokemon>) {
             add_ref(ReferenceType::Species, sem_op.species, "CheckPokemon");
         } else if constexpr (std::is_same_v<T, Sem_PlayCry>) {
-            add_ref(ReferenceType::Species, sem_op.species, "PlayCry");
+            // Only emit a species reference for literal species; ScriptVar source has no static ID
+            if (sem_op.source.is_literal()) {
+                add_ref(ReferenceType::Species, sem_op.source.species, "PlayCry");
+            }
+            // ScriptVar: species unknown at compile time — no reference to validate
         } else if constexpr (std::is_same_v<T, Sem_Pokepic>) {
-            add_ref(ReferenceType::Species, sem_op.species, "Pokepic");
+            // Only emit a species reference for literal species; ScriptVar source has no static ID
+            if (sem_op.source.is_literal()) {
+                add_ref(ReferenceType::Species, sem_op.source.species, "Pokepic");
+            }
+            // ScriptVar: species unknown at compile time — no reference to validate
         }
         
         // === Item References ===

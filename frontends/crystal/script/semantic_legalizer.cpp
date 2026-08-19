@@ -1103,6 +1103,9 @@ RuleResult rule_yes_no(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_YesNo{}));
+        // yesorno writes wScriptVar (TRUE=yes, FALSE=no) — invalidate compile-time fact
+        // Source: Script_yesorno (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1122,6 +1125,9 @@ RuleResult rule_give_item(LoweringContext& ctx) {
         op.item = enginemon::ItemId{p->item};
         op.quantity = p->quantity;
         r.instructions.push_back(make_inst(std::move(op)));
+        // giveitem writes wScriptVar (TRUE=given, FALSE=bag full)
+        // Source: Script_giveitem (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1139,6 +1145,9 @@ RuleResult rule_take_item(LoweringContext& ctx) {
         op.item = enginemon::ItemId{p->item};
         op.quantity = p->quantity;
         r.instructions.push_back(make_inst(std::move(op)));
+        // takeitem writes wScriptVar (TRUE=taken, FALSE=not found)
+        // Source: Script_takeitem (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1156,6 +1165,9 @@ RuleResult rule_check_item(LoweringContext& ctx) {
         enginemon::Sem_CheckItem op;
         op.item = enginemon::ItemId{p->item};
         r.instructions.push_back(make_inst(std::move(op)));
+        // checkitem writes wScriptVar (TRUE=has item, FALSE=doesn't)
+        // Source: Script_checkitem (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1173,6 +1185,9 @@ RuleResult rule_verbose_give_item(LoweringContext& ctx) {
         op.item = enginemon::ItemId{p->item};
         op.quantity = p->quantity;
         r.instructions.push_back(make_inst(std::move(op)));
+        // verbosegiveitem writes wScriptVar (TRUE=given, FALSE=bag full)
+        // Source: chains to GiveItemScript which calls ReceiveItem and writes result
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1678,12 +1693,18 @@ RuleResult rule_map_ops(LoweringContext& ctx) {
     // writecmdqueue (0x7D): Register map command queue for puzzle behavior
     // Reference: pokecrystal/engine/overworld/cmd_queue.asm
     // Used by ice sliding puzzles, boulder puzzles (stonetable)
+    // Source: Script_writecmdqueue reads 2-byte local ptr + wScriptBank, calls WriteCmdQueue
+    // The pointer is bank-local to the calling script's bank.
+    // Must resolve to flat ROM address using canonical bank helper — no raw pointer in semantic IR.
     if (auto* p = std::get_if<Cmd_Writecmdqueue>(&cmd->data)) {
         RuleResult r;
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_WriteCmdQueue op;
-        op.queue_pointer = p->queue_pointer;
+        // Resolve bank-local queue pointer to flat ROM address
+        // Source: Script_writecmdqueue uses wScriptBank (= calling script's bank)
+        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
+        op.queue_flat_address = crystal_local_ptr_to_flat(entry, p->queue_pointer);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -1695,6 +1716,9 @@ RuleResult rule_map_ops(LoweringContext& ctx) {
         enginemon::Sem_DeleteCmdQueue op;
         op.queue_type = p->byte;
         r.instructions.push_back(make_inst(std::move(op)));
+        // delcmdqueue writes wScriptVar (TRUE=deleted, FALSE=not found)
+        // Source: Script_delcmdqueue (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -1920,7 +1944,20 @@ RuleResult rule_play_cry(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_PlayCry op;
-        op.species = enginemon::SpeciesId{static_cast<uint8_t>(p->cry_id & 0xFF)};
+        op.variant = enginemon::CryVariant::Normal;
+        
+        // Source-proven: Script_cry (scripting.asm ~line 784):
+        //   and a; jr nz, .ok; ld a, [wScriptVar]   ← low byte == 0 → dynamic species
+        // The cry opcode has a dw (16-bit) cry_id. Only the low byte is tested.
+        uint8_t cry_low = static_cast<uint8_t>(p->cry_id & 0xFF);
+        if (cry_low == 0) {
+            // Dynamic: species read from wScriptVar at runtime
+            op.source = enginemon::SpeciesSource::from_script_var();
+        } else {
+            // Literal species ID from operand
+            op.source = enginemon::SpeciesSource::literal(enginemon::SpeciesId{cry_low});
+        }
+        // cry does NOT write wScriptVar — block_ctx preserved
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -2019,6 +2056,9 @@ RuleResult rule_check_time(LoweringContext& ctx) {
         enginemon::Sem_CheckTime op;
         op.time_flags = p->time;
         r.instructions.push_back(make_inst(std::move(op)));
+        // checktime writes wScriptVar (TRUE=time matches flags, FALSE=doesn't)
+        // Source: Script_checktime (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -2038,6 +2078,9 @@ RuleResult rule_phone_ops(LoweringContext& ctx) {
         enginemon::Sem_AddPhoneNumber op;
         op.person = p->person;
         r.instructions.push_back(make_inst(std::move(op)));
+        // addcellnum writes wScriptVar (TRUE=added, FALSE=full)
+        // Source: Script_addcellnum (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     if (auto* p = std::get_if<Cmd_Delcellnum>(&cmd->data)) {
@@ -2047,6 +2090,9 @@ RuleResult rule_phone_ops(LoweringContext& ctx) {
         enginemon::Sem_DeletePhoneNumber op;
         op.person = p->person;
         r.instructions.push_back(make_inst(std::move(op)));
+        // delcellnum writes wScriptVar (TRUE=deleted, FALSE=not found)
+        // Source: Script_delcellnum (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     if (auto* p = std::get_if<Cmd_Checkcellnum>(&cmd->data)) {
@@ -2056,6 +2102,9 @@ RuleResult rule_phone_ops(LoweringContext& ctx) {
         enginemon::Sem_CheckPhoneNumber op;
         op.person = p->person;
         r.instructions.push_back(make_inst(std::move(op)));
+        // checkcellnum writes wScriptVar (TRUE=registered, FALSE=not registered)
+        // Source: Script_checkcellnum (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -2074,6 +2123,9 @@ RuleResult rule_check_phone_call(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_CheckPhoneCall{}));
+        // checkphonecall writes wScriptVar (TRUE=pending call, FALSE=no pending call)
+        // Source: Script_checkphonecall (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -2353,78 +2405,26 @@ RuleResult rule_special(LoweringContext& ctx) {
             }
             
             case SPECIAL_GAMEBOY_CHECK: {
-                // GameboyCheck - frontend-absorbed at compile time
-                // Source: pokecrystal/engine/events/specials.asm GameboyCheck
-                // Call site: GoldenrodDeptStore5F.asm Carrie NPC (ONLY call in corpus)
-                // Comment: "This is a dummy check from Gold/Silver"
-                //
-                // ABSORPTION PROOF:
-                // Crystal is a CGB-only game. The GameboyCheck Special returns
-                // GBCHECK_CGB (2) on all real Crystal hardware. The subsequent
-                // ifnotequal GBCHECK_CGB branch is never taken on original hardware.
-                //
-                // The non-CGB branch shows "Mystery Gift requires Game Boy Color"
-                // which is dead code - Crystal physically cannot run on non-CGB.
-                //
-                // SEMANTIC LOWERING:
-                // Set wScriptVar to GBCHECK_CGB (2) directly. No hardware query
-                // survives into native runtime. The subsequent conditional branch
-                // will evaluate correctly based on this constant result.
-                //
-                // This is structurally equivalent to constant folding:
-                //   source: special GameboyCheck → ifnotequal GBCHECK_CGB, .dead
-                //   native: setval GBCHECK_CGB → ifnotequal GBCHECK_CGB, .dead
-                // The branch condition is preserved; only the hardware query is eliminated.
+                // GameboyCheck — always returns GBCHECK_CGB (2) on Crystal hardware
+                // See full documentation above.
                 enginemon::Sem_SetVar op;
                 op.var = enginemon::VarId{0};  // wScriptVar
                 op.source = enginemon::VarValueSource::literal(GBCHECK_CGB);
                 r.instructions.push_back(make_inst(std::move(op)));
+                // This emits Sem_SetVar — update block_ctx to reflect the known value
+                ctx.block_ctx.on_setval(GBCHECK_CGB);
                 return r;
             }
             
             case SPECIAL_CHECK_MOBILE_ADAPTER_STATUS: {
-                // CheckMobileAdapterStatusSpecial - frontend-absorbed at compile time
-                // Source: pokecrystal/mobile/mobile_41.asm CheckMobileAdapterStatusSpecial
-                //
-                // SOURCE IMPLEMENTATION:
-                //   CheckMobileAdapterStatusSpecial: ; unused
-                //       ; this routine calls CheckMobileAdapterStatus
-                //       ; in the Japanese version
-                //       xor a                   ; A = 0
-                //       ld [wScriptVar], a      ; wScriptVar = 0
-                //       ret
-                //
-                // ABSORPTION PROOF:
-                // International Crystal stubbed the Mobile Adapter check. The Japanese
-                // version actually queried Mobile Adapter hardware status. Since the
-                // Mobile Adapter was never released outside Japan, the stub returns
-                // FALSE (0) unconditionally.
-                //
-                // All 7 corpus call sites consume the result via iffalse/iftrue:
-                //   - CeruleanPokecenter1F: iftrue .mobile (NOT taken)
-                //   - EcruteakPokecenter1F: iftrue .mobile (NOT taken)
-                //   - FastShipCabins_SW_SSW_NW: iftrue .mobile (NOT taken)
-                //   - Pokecenter2F (Trade): iffalse .NoMobile (TAKEN)
-                //   - Pokecenter2F (Battle): iffalse .NoMobile (TAKEN)
-                //   - Route40: iftrue .mobile (NOT taken)
-                //   - SaffronPokecenter1F: iftrue .mobile (NOT taken)
-                //
-                // SEMANTIC LOWERING:
-                // Set wScriptVar to 0 directly. No hardware query survives into
-                // native runtime. The subsequent conditional branch will evaluate
-                // correctly based on this constant result.
-                //
-                // This is structurally equivalent to constant folding:
-                //   source: special CheckMobileAdapterStatusSpecial → iffalse/iftrue
-                //   native: setval 0 → iffalse/iftrue
-                // The branch condition is preserved; only the stubbed query is eliminated.
-                //
-                // NOTE: This is NOT a zero-instruction absorption. The result (0) must
-                // be explicitly written because subsequent conditionals depend on it.
+                // CheckMobileAdapterStatusSpecial — always returns 0 in international Crystal
+                // See full documentation above.
                 enginemon::Sem_SetVar op;
                 op.var = enginemon::VarId{0};  // wScriptVar
-                op.source = enginemon::VarValueSource::literal(0);  // FALSE / Mobile not present
+                op.source = enginemon::VarValueSource::literal(0);
                 r.instructions.push_back(make_inst(std::move(op)));
+                // This emits Sem_SetVar with value 0 — update block_ctx
+                ctx.block_ctx.on_setval(0);
                 return r;
             }
             
@@ -2727,7 +2727,7 @@ RuleResult rule_special(LoweringContext& ctx) {
                 }
                 
                 enginemon::Sem_PlayCry op;
-                op.species = enginemon::SpeciesId{species};
+                op.source = enginemon::SpeciesSource::literal(enginemon::SpeciesId{species});
                 op.variant = enginemon::CryVariant::Slow;
                 r.instructions.push_back(make_inst(std::move(op)));
                 // Context preserved - PlaySlowCry does NOT write wScriptVar
@@ -2795,10 +2795,13 @@ RuleResult rule_special(LoweringContext& ctx) {
         }
         
         // Fallback: emit generic Sem_Special for unhandled specials
+        // Unhandled specials may write wScriptVar — invalidate compile-time fact
+        // to prevent stale constant propagation into subsequent context-dependent ops.
         enginemon::Sem_Special op;
         op.special_id = p->special_id;
         op.name = "special_" + std::to_string(p->special_id);
         r.instructions.push_back(make_inst(std::move(op)));
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -2813,7 +2816,15 @@ RuleResult rule_pokepic(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_Pokepic op;
-        op.species = enginemon::SpeciesId{p->pokemon};
+        
+        // Source-proven: Script_pokepic (scripting.asm ~line 411):
+        //   and a; jr nz, .ok; ld a, [wScriptVar]   ← operand == 0 → dynamic species
+        if (p->pokemon == 0) {
+            op.source = enginemon::SpeciesSource::from_script_var();
+        } else {
+            op.source = enginemon::SpeciesSource::literal(enginemon::SpeciesId{p->pokemon});
+        }
+        // pokepic does NOT write wScriptVar — block_ctx preserved
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }
@@ -3107,6 +3118,9 @@ RuleResult rule_menu_ops(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_VerticalMenu{}));
+        // verticalmenu writes wScriptVar (wMenuCursorY result)
+        // Source: Script_verticalmenu (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     
@@ -3119,6 +3133,9 @@ RuleResult rule_menu_ops(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         r.instructions.push_back(make_inst(enginemon::Sem_2DMenu{}));
+        // _2dmenu writes wScriptVar (wMenuCursorPosition result)
+        // Source: Script__2dmenu (scripting.asm): ld [wScriptVar], a
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -3458,6 +3475,12 @@ RuleResult rule_verbose_give_item_var(LoweringContext& ctx) {
         // GetVarAction(var_index) → wram pointer → quantity read at runtime
         op.quantity_var = p->var;
         r.instructions.push_back(make_inst(std::move(op)));
+        // verbosegiveitemvar writes wScriptVar (TRUE=given, FALSE=bag full)
+        // Source: Script_verbosegiveitemvar (scripting.asm): ld [wScriptVar], a
+        // Same result contract as verbosegiveitem — must invalidate block_ctx.
+        // Note: the item operand may also read wScriptVar (ITEM_FROM_MEM=0 case),
+        // but that is a read before the write, so the write still invalidates.
+        ctx.block_ctx.invalidate();
         return r;
     }
     return {};
@@ -3609,6 +3632,9 @@ RuleResult rule_check_version(LoweringContext& ctx) {
         op.var = enginemon::VarId{0};  // wScriptVar
         op.source = enginemon::VarValueSource::literal(1);  // GS_VERSION = 1 for Crystal
         r.instructions.push_back(make_inst(std::move(op)));
+        // checkver writes wScriptVar = 1 (GS_VERSION for Crystal) — update block_ctx
+        // Source: Script_checkver (scripting.asm): ld [wScriptVar], a (always 1)
+        ctx.block_ctx.on_setval(1);
         return r;
     }
     return {};

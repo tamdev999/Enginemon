@@ -1026,11 +1026,72 @@ struct Sem_ChangeBlock { uint8_t x; uint8_t y; uint8_t block; };
 // Used by puzzle maps (ice sliding, boulder puzzles) to register per-tick behavior handlers.
 // The command queue pointer references a table of queue entries in the map's script bank.
 // Runtime interprets this as a behavior registration, not raw pointer execution.
+//
+// IMPORTANT: Crystal's writecmdqueue (0x7D) reads a 16-bit bank-local pointer from the
+// script byte stream and resolves it using wScriptBank. The EMON package must store the
+// canonical flat ROM address, not the bank-relative 16-bit pointer.
+// Source: scripting.asm Script_writecmdqueue:
+//   call GetScriptByte (lo), call GetScriptByte (hi) → de = bank-local ptr
+//   ld a, [wScriptBank] → b = bank
+//   farcall WriteCmdQueue
+// Both fields (bank + local ptr) are required to identify the resource.
+// No raw Crystal bank or pointer survives into the semantic IR.
 struct Sem_WriteCmdQueue {
-    uint16_t queue_pointer;  // Pointer to command queue table (map-local)
+    uint32_t queue_flat_address;  // Flat ROM address of command queue table (compiler-resolved)
+                                   // Was: raw bank-local uint16 pointer (wrong — violated frontend boundary)
 };
 struct Sem_DeleteCmdQueue {
     uint8_t queue_type;      // Queue type to remove (e.g., CMDQUEUE_STONETABLE)
+};
+
+// =============================================================================
+// SpeciesSource - typed species origin for dynamic vs literal species operands
+// =============================================================================
+// Crystal commands cry and pokepic share identical sentinel semantics:
+//   operand == 0 → species comes from wScriptVar at runtime (dynamic)
+//   operand != 0 → literal species ID
+//
+// Source-proven from pokecrystal/engine/overworld/scripting.asm:
+//   Script_cry     (line ~784): and a; jr nz, .ok; ld a, [wScriptVar]
+//   Script_pokepic (line ~411): and a; jr nz, .ok; ld a, [wScriptVar]
+//
+// SpeciesSource preserves this distinction. Using SpeciesId{0} as a sentinel
+// is NOT acceptable — it destroys the Literal/Dynamic distinction and is a
+// valid species slot (SPECIES_NONE in Crystal == sentinel, not a real Pokémon).
+//
+// Linker behavior:
+//   Literal  → validate SpeciesId against profile domain
+//   ScriptVar → no SpeciesId reference emitted (no fake SpeciesId{0})
+// =============================================================================
+enum class SpeciesSourceKind : uint8_t {
+    Literal,    // Species ID is a compile-time literal from the source operand
+    ScriptVar,  // Species ID is read from wScriptVar at runtime (operand was 0)
+};
+
+struct SpeciesSource {
+    SpeciesSourceKind kind = SpeciesSourceKind::Literal;
+    SpeciesId species = SpeciesId{0};  // Valid only when kind == Literal
+
+    static SpeciesSource literal(SpeciesId s) {
+        SpeciesSource src;
+        src.kind = SpeciesSourceKind::Literal;
+        src.species = s;
+        return src;
+    }
+
+    static SpeciesSource from_script_var() {
+        SpeciesSource src;
+        src.kind = SpeciesSourceKind::ScriptVar;
+        src.species = SpeciesId{0};  // Unused
+        return src;
+    }
+
+    bool is_literal()    const { return kind == SpeciesSourceKind::Literal;    }
+    bool is_script_var() const { return kind == SpeciesSourceKind::ScriptVar;  }
+
+    bool operator==(const SpeciesSource& o) const {
+        return kind == o.kind && (kind == SpeciesSourceKind::ScriptVar || species == o.species);
+    }
 };
 
 // --- Battle ---
@@ -1128,14 +1189,18 @@ struct Sem_PlaySound { SfxId sound; };
 // =============================================================================
 // Sem_PlayCry - Play Pokemon cry sound
 // =============================================================================
+// Source-proven from pokecrystal/engine/overworld/scripting.asm Script_cry:
+//   The cry operand (dw cry_id) low byte:
+//     0   → species read from wScriptVar at runtime (ScriptVar source)
+//     !=0 → literal species ID
+//
+// SpeciesSource preserves this distinction.
 // Normal cry: Standard pitch and duration
 // Slow cry: Lower pitch, longer duration (used for dramatic moments)
 //
 // Source references:
-//   - Normal: cry opcode (0x98) or Special PlayCry
-//   - Slow: Special 95 (PlaySlowCry)
-//
-// Both variants consume species from context (setval preceding the operation).
+//   - Normal: cry opcode (0x84)
+//   - Slow: Special 95 (PlaySlowCry) - also consumes species from wScriptVar
 // =============================================================================
 enum class CryVariant : uint8_t {
     Normal,  // Standard cry playback
@@ -1143,10 +1208,10 @@ enum class CryVariant : uint8_t {
 };
 
 struct Sem_PlayCry {
-    SpeciesId species;
+    SpeciesSource source;       // Literal species ID or ScriptVar (dynamic)
     CryVariant variant = CryVariant::Normal;
 };
-struct Sem_PlaySlowCry { SpeciesId species; };  // Slowed-down cry (lower pitch, longer duration)
+struct Sem_PlaySlowCry { SpeciesSource source; };  // Slowed-down cry — same SpeciesSource semantics
 struct Sem_WaitSound {};
 struct Sem_FadeOutMusic { MusicId music; uint8_t fade_time; };
 struct Sem_FadeToSilence {};  // Fade current music to silence with fixed timing
@@ -1436,7 +1501,10 @@ struct Sem_RebuildSprites {};
 struct Sem_WildOn {};
 struct Sem_WildOff {};
 struct Sem_Special { uint16_t special_id; std::string name; };
-struct Sem_Pokepic { SpeciesId species; };
+// Sem_Pokepic: display a Pokémon picture
+// Source-proven: Script_pokepic (scripting.asm): operand==0 → species from wScriptVar
+// Uses SpeciesSource — same convention as Sem_PlayCry
+struct Sem_Pokepic { SpeciesSource source; };
 struct Sem_ClosePokepic {};
 struct Sem_Pokemart { uint8_t dialog_id; uint16_t mart_id; };
 struct Sem_Elevator { ElevatorId elevator_id; };  // Semantic ID, NOT ROM pointer

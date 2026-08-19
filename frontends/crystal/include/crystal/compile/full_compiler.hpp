@@ -104,7 +104,15 @@ namespace crystal {
 //        Finding 2: TX_BOX param1=height/param2=width corrected (was transposed)
 //        Finding 3: TX_FAR identity includes bank (param2, was using wrong field param1=0)
 //        Finding 4: TextRaw identity uses hex byte content (not just length)
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.6.0";
+// 2.7.0: Script state and dynamic resource semantics fixes:
+//        Finding 1: wScriptVar block_ctx invalidated by yesorno, giveitem, takeitem, checkitem,
+//                   verbosegiveitem, verticalmenu, _2dmenu, special-fallback; GAMEBOY_CHECK and
+//                   CHECK_MOBILE now call on_setval to keep fact in sync with emitted Sem_SetVar
+//        Finding 2: cry opcode 0 → Sem_PlayCry{ScriptVar} (was SpeciesId{0} sentinel — wrong)
+//        Finding 3: decode_movement_data no longer silently truncates; throws on missing terminator
+//        Finding 4: writecmdqueue resolves bank-local pointer to flat ROM address (no raw bank leak)
+//        Finding 5: pokepic operand 0 → Sem_Pokepic{ScriptVar} (was SpeciesId{0} sentinel — wrong)
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.7.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================
