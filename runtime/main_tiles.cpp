@@ -1293,7 +1293,9 @@ int main(int argc, char* argv[]) {
                     }
                     // Check for connection crossing (at map edge facing outward)
                     else if (world_manager.is_at_connection_edge(px, py, pfacing)) {
-                        auto result = world_manager.resolve_connection(px, py, pfacing);
+                        // F4: prepare_connection resolves + loads destination map (fallible).
+                        // Does NOT write state.player. commit_connection writes state after staging.
+                        auto result = world_manager.prepare_connection(px, py, pfacing);
                         
                         if (result.success) {
                             // F4: commit_connection runs only after transition staging succeeds.

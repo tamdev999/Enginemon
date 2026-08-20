@@ -162,25 +162,51 @@ WarpResult WorldManager::execute_warp(const RuntimeWarp& warp, GameState& state)
 }
 
 WarpResult WorldManager::prepare_warp(const RuntimeWarp& warp, GameState& state) {
-    // F4: Resolve destination without committing to it.
-    // Writes warp_memory from current (source) position — must happen BEFORE destination
-    // is committed so LAST_MAP/LAST_WARP record the correct source.
-    // Does NOT load the new map.  Does NOT overwrite state.player with destination.
+    // F4 corrected: Preparation must not mutate authoritative persistent state.
+    //
+    // 1. resolve_warp() — pure computation, no side effects
+    // 2. load_map() — the only fallible operation; done here during PREPARATION
+    //    so commit becomes non-failing state application
+    // 3. Stage warp_memory values in the result struct — applied during commit_warp()
+    //
+    // On any failure: state.warp_memory, state.player, WorldManager.current_map_ all unchanged.
     WarpResult result = resolve_warp(warp, state);
     if (!result.success) return result;
     
+    // Stage warp_memory from current source position (must record before destination commit)
     if (result.is_outdoor_to_indoor && current_map_.has_value()) {
-        remember_outdoor(current_map_id_, state.player.x, state.player.y, state);
+        result.has_pending_outdoor = true;
+        result.pending_outdoor_map_id = current_map_id_;
+        result.pending_outdoor_x = state.player.x;
+        result.pending_outdoor_y = state.player.y;
     }
-    remember_backup_warp(current_map_id_, state.player.x, state.player.y, state);
+    result.pending_backup_map_id = current_map_id_;
+    result.pending_backup_x = state.player.x;
+    result.pending_backup_y = state.player.y;
     
-    return result;  // success=true; no map loaded; state.player unchanged
+    // Perform the fallible map load HERE in preparation.
+    // If this fails, no persistent state has been touched.
+    if (!load_map(result.target_map_id)) {
+        result.success = false;
+        result.error = "Failed to load destination map: " + result.target_map_id;
+        return result;
+    }
+    
+    return result;  // success=true; state.warp_memory unchanged; state.player unchanged
 }
 
 void WorldManager::commit_warp(const WarpResult& result, GameState& state) {
-    // F4: Called only after transition_to_map preparation succeeds.
-    // Loads new map into WorldManager + updates state.player to destination.
-    load_map(result.target_map_id);
+    // F4: Non-failing state application — all fallible work done in prepare_warp().
+    // Apply staged warp_memory, then update state.player to destination.
+    // No load_map() call here — the map was already loaded in prepare_warp().
+    if (result.has_pending_outdoor) {
+        state.warp_memory.map_id = result.pending_outdoor_map_id;
+        state.warp_memory.x = result.pending_outdoor_x;
+        state.warp_memory.y = result.pending_outdoor_y;
+    }
+    state.warp_memory.backup_map_id = result.pending_backup_map_id;
+    state.warp_memory.backup_x = result.pending_backup_x;
+    state.warp_memory.backup_y = result.pending_backup_y;
     state.player.current_map_id = result.target_map_id;
     state.player.x = result.target_x;
     state.player.y = result.target_y;
@@ -414,13 +440,31 @@ ConnectionResult WorldManager::execute_connection(
 }
 
 void WorldManager::commit_connection(const ConnectionResult& result, GameState& state) {
-    // F4: Called only after transition_to_map preparation succeeds.
-    // Loads new map into WorldManager + updates state.player to destination.
-    load_map(result.target_map_id);
+    // F4: Non-failing state application.
+    // load_map() was called during prepare_connection() before staging.
     state.player.current_map_id = result.target_map_id;
     state.player.x = result.target_x;
     state.player.y = result.target_y;
     state.player.facing = result.target_facing;
+}
+
+ConnectionResult WorldManager::prepare_connection(
+    int32_t player_x, int32_t player_y,
+    Direction facing
+) {
+    // F4: Resolve connection + load destination map (the only fallible step).
+    // Does NOT write state.player.
+    // On failure: WorldManager.current_map_ is unchanged (load_map is all-or-nothing).
+    ConnectionResult result = resolve_connection(player_x, player_y, facing);
+    if (!result.success) return result;
+    
+    if (!load_map(result.target_map_id)) {
+        result.success = false;
+        result.error = "Failed to load destination map: " + result.target_map_id;
+        return result;
+    }
+    
+    return result;  // success=true; state.player unchanged
 }
 
 //=============================================================================

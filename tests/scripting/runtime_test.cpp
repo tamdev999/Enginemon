@@ -6003,11 +6003,13 @@ TEST(f3_no_second_player_authority) {
 }
 
 // =============================================================================
-// F4 adversarial: prepare_warp does not mutate game_state.player before commit
+// F4 adversarial: prepare_warp does not mutate game_state.player or warp_memory;
+// commit_warp applies staged values only after preparation succeeds.
 // =============================================================================
 TEST(f4_prepare_warp_does_not_mutate_player) {
     // Prove: WorldManager::prepare_warp does NOT overwrite game_state.player.x/y
-    // with destination coordinates.  Only commit_warp does.
+    // with destination coordinates, and does NOT write warp_memory.
+    // Only commit_warp applies both.
     using namespace enginemon;
 
     GameState gs;
@@ -6015,10 +6017,16 @@ TEST(f4_prepare_warp_does_not_mutate_player) {
     gs.player.y = 6;
     gs.player.facing = enginemon::Direction::Down;
     gs.player.current_map_id = "source_map";
+    // Set a known warp_memory state so we can verify it's untouched after prepare
+    gs.warp_memory.map_id = "previous_outdoor";
+    gs.warp_memory.x = 99;
+    gs.warp_memory.y = 99;
+    gs.warp_memory.backup_map_id = "old_backup";
+    gs.warp_memory.backup_x = 77;
+    gs.warp_memory.backup_y = 77;
 
     WorldManager wm;
 
-    // Source map: has one warp at (4,7) targeting "dest_map" warp index 1
     RuntimeMap src;
     src.map_id = "source_map";
     src.width = 5; src.height = 10;
@@ -6030,7 +6038,6 @@ TEST(f4_prepare_warp_does_not_mutate_player) {
     warp_out.target_warp_index = 1;
     src.warps.push_back(warp_out);
 
-    // Destination map: has one warp
     RuntimeMap dst;
     dst.map_id = "dest_map";
     dst.width = 5; dst.height = 5;
@@ -6041,7 +6048,6 @@ TEST(f4_prepare_warp_does_not_mutate_player) {
     warp_in.target_warp_index = 1;
     dst.warps.push_back(warp_in);
 
-    bool src_loaded = false;
     wm.set_map_loader([&](const std::string& id) -> std::optional<RuntimeMap> {
         if (id == "source_map") return src;
         if (id == "dest_map") return dst;
@@ -6049,22 +6055,97 @@ TEST(f4_prepare_warp_does_not_mutate_player) {
     });
     wm.load_map("source_map");
 
-    // prepare_warp — must NOT touch game_state.player.x/y with destination
+    // prepare_warp: resolve + load destination map + stage warp_memory values
     auto result = wm.prepare_warp(warp_out, gs);
     ASSERT_TRUE(result.success);
 
-    // ORACLE: game_state.player still at SOURCE position (4,6) after prepare
-    ASSERT_EQ(gs.player.x, 4);   // NOT result.target_x
-    ASSERT_EQ(gs.player.y, 6);   // NOT result.target_y
-    ASSERT_STR_EQ(gs.player.current_map_id, "source_map");  // NOT "dest_map"
+    // ORACLE: game_state.player still at SOURCE position after prepare
+    ASSERT_EQ(gs.player.x, 4);
+    ASSERT_EQ(gs.player.y, 6);
+    ASSERT_STR_EQ(gs.player.current_map_id, "source_map");
 
-    // commit_warp now updates game_state.player to destination
+    // ORACLE: warp_memory NOT written during prepare — still holds old values
+    ASSERT_STR_EQ(gs.warp_memory.map_id, "previous_outdoor");
+    ASSERT_EQ(gs.warp_memory.x, 99);
+    ASSERT_STR_EQ(gs.warp_memory.backup_map_id, "old_backup");
+    ASSERT_EQ(gs.warp_memory.backup_x, 77);
+
+    // commit_warp: apply staged values to game_state
     wm.commit_warp(result, gs);
     ASSERT_EQ(gs.player.x, result.target_x);
     ASSERT_EQ(gs.player.y, result.target_y);
     ASSERT_STR_EQ(gs.player.current_map_id, "dest_map");
+    // warp_memory.backup now holds the pre-commit source position (4,6)
+    ASSERT_STR_EQ(gs.warp_memory.backup_map_id, "source_map");
+    ASSERT_EQ(gs.warp_memory.backup_x, 4);
+    ASSERT_EQ(gs.warp_memory.backup_y, 6);
 
-    std::cout << "  [F4: prepare_warp preserves source GameState; commit_warp applies dest ✓]\n";
+    std::cout << "  [F4: prepare_warp preserves player+warp_memory; commit_warp applies staged values ✓]\n";
+}
+
+// =============================================================================
+// F4 injected-failure: failed prepare_warp leaves ALL authoritative state unchanged
+// Injection point: destination map does not exist (map-load failure in prepare)
+// After failure, verify: warp_memory, WorldManager current_map, GameState.player
+//   are ALL unchanged and the old world is coherent.
+// =============================================================================
+TEST(f4_failed_prepare_warp_leaves_everything_unchanged) {
+    using namespace enginemon;
+
+    GameState gs;
+    gs.player.x = 3;
+    gs.player.y = 5;
+    gs.player.facing = enginemon::Direction::Right;
+    gs.player.current_map_id = "old_map";
+    gs.warp_memory.map_id = "last_outdoor";
+    gs.warp_memory.x = 11;
+    gs.warp_memory.y = 22;
+    gs.warp_memory.backup_map_id = "backup_map";
+    gs.warp_memory.backup_x = 33;
+    gs.warp_memory.backup_y = 44;
+
+    WorldManager wm;
+
+    RuntimeMap old;
+    old.map_id = "old_map";
+    old.width = 5; old.height = 5;
+    old.blocks.assign(25, 0);
+    RuntimeWarp warp_out;
+    warp_out.x = 3; warp_out.y = 6;
+    warp_out.target_map_id = "missing_dest";  // Destination does NOT exist
+    warp_out.target_warp_index = 1;
+    old.warps.push_back(warp_out);
+
+    // map loader: "old_map" exists, "missing_dest" does NOT
+    wm.set_map_loader([&](const std::string& id) -> std::optional<RuntimeMap> {
+        if (id == "old_map") return old;
+        return std::nullopt;  // missing_dest not found → load_map fails
+    });
+    wm.load_map("old_map");
+    std::string old_wm_map_id = wm.current_map_id();  // "old_map"
+
+    // Inject failure: prepare_warp will fail at load_map("missing_dest")
+    auto result = wm.prepare_warp(warp_out, gs);
+    ASSERT_FALSE(result.success);
+
+    // ORACLE — warp_memory unchanged
+    ASSERT_STR_EQ(gs.warp_memory.map_id,        "last_outdoor");
+    ASSERT_EQ(gs.warp_memory.x,                  11);
+    ASSERT_EQ(gs.warp_memory.y,                  22);
+    ASSERT_STR_EQ(gs.warp_memory.backup_map_id,  "backup_map");
+    ASSERT_EQ(gs.warp_memory.backup_x,            33);
+    ASSERT_EQ(gs.warp_memory.backup_y,            44);
+
+    // ORACLE — WorldManager current map unchanged
+    ASSERT_STR_EQ(wm.current_map_id(), old_wm_map_id);
+
+    // ORACLE — GameState.player unchanged
+    ASSERT_EQ(gs.player.x, 3);
+    ASSERT_EQ(gs.player.y, 5);
+    ASSERT_EQ(gs.player.facing, enginemon::Direction::Right);
+    ASSERT_STR_EQ(gs.player.current_map_id, "old_map");
+
+    std::cout << "  [F4 injected failure: failed prepare_warp leaves warp_memory/WorldManager/GameState.player all unchanged ✓]\n";
 }
 
 // =============================================================================
@@ -15895,6 +15976,7 @@ int main(int argc, char* argv[]) {
     // F3/F4 adversarial (from new pass)
     RUN_TEST(f3_no_second_player_authority);
     RUN_TEST(f4_prepare_warp_does_not_mutate_player);
+    RUN_TEST(f4_failed_prepare_warp_leaves_everything_unchanged);
 
     // F5: Save v2 NPC section mandatory
     RUN_TEST(f5_save_v2_npc_section_mandatory_truncations);

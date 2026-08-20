@@ -37,6 +37,16 @@ struct WarpResult {
     
     bool is_indoor_to_outdoor = false;  // For LAST_MAP tracking
     bool is_outdoor_to_indoor = false;
+
+    // Pending warp-memory values: computed during prepare_warp(), applied during commit_warp().
+    // Staging these avoids writing authoritative persistent state before preparation succeeds.
+    bool has_pending_outdoor = false;       // Should remember_outdoor be applied on commit?
+    std::string pending_outdoor_map_id;
+    int32_t pending_outdoor_x = 0;
+    int32_t pending_outdoor_y = 0;
+    std::string pending_backup_map_id;
+    int32_t pending_backup_x = 0;
+    int32_t pending_backup_y = 0;
 };
 
 //=============================================================================
@@ -134,8 +144,15 @@ public:
         GameState& state
     );
     
-    // Commit connection: load new map + write state.player to destination.
-    // Call only after transition preparation succeeds.
+    // Prepare connection: resolve landing + load destination map (fallible).
+    // Does NOT write state.player. Call before transition_to_map staging.
+    ConnectionResult prepare_connection(
+        int32_t player_x, int32_t player_y,
+        Direction facing
+    );
+    
+    // Commit connection: write state.player to destination (non-failing).
+    // Call only after transition preparation and prepare_connection succeed.
     void commit_connection(const ConnectionResult& result, GameState& state);
     
     //=========================================================================
