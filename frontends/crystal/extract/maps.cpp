@@ -970,11 +970,25 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
         // Skip filler
         uint32_t event_ptr = events_flat + 2;
         
-        // Read warp count and extract warps
+        // Read warp count and extract warps.
+        // A declared non-zero count that cannot be fully read is a hard error —
+        // a partial warp table misaligns every subsequent event category.
         if (event_ptr < rom_.size()) {
             uint8_t warp_count = rom_.read_byte(event_ptr++);
-            if (warp_count > 0 && warp_count < 100) {
-                extract_warps(event_ptr, warp_count, map.warps);
+            if (warp_count >= 100) {
+                result.error = std::format("extract_map ({},{}): implausible warp count {}",
+                                           group, index, warp_count);
+                stats_.maps_failed++;
+                return result;
+            }
+            if (warp_count > 0) {
+                if (!extract_warps(event_ptr, warp_count, map.warps)) {
+                    result.error = std::format("extract_map ({},{}): warp extraction failed "
+                                               "(truncated ROM at declared count {})",
+                                               group, index, warp_count);
+                    stats_.maps_failed++;
+                    return result;
+                }
                 event_ptr += warp_count * fmt.warp_size;
             }
         }
@@ -982,8 +996,20 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
         // Read coord event count and extract
         if (event_ptr < rom_.size()) {
             uint8_t coord_count = rom_.read_byte(event_ptr++);
-            if (coord_count > 0 && coord_count < 100) {
-                extract_coord_events(event_ptr, coord_count, map.coord_events, script_bank);
+            if (coord_count >= 100) {
+                result.error = std::format("extract_map ({},{}): implausible coord event count {}",
+                                           group, index, coord_count);
+                stats_.maps_failed++;
+                return result;
+            }
+            if (coord_count > 0) {
+                if (!extract_coord_events(event_ptr, coord_count, map.coord_events, script_bank)) {
+                    result.error = std::format("extract_map ({},{}): coord event extraction failed "
+                                               "(truncated ROM at declared count {})",
+                                               group, index, coord_count);
+                    stats_.maps_failed++;
+                    return result;
+                }
                 event_ptr += coord_count * fmt.coord_event_size;
             }
         }
@@ -991,8 +1017,20 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
         // Read bg event count and extract
         if (event_ptr < rom_.size()) {
             uint8_t bg_count = rom_.read_byte(event_ptr++);
-            if (bg_count > 0 && bg_count < 100) {
-                extract_bg_events(event_ptr, bg_count, map.bg_events, script_bank);
+            if (bg_count >= 100) {
+                result.error = std::format("extract_map ({},{}): implausible bg event count {}",
+                                           group, index, bg_count);
+                stats_.maps_failed++;
+                return result;
+            }
+            if (bg_count > 0) {
+                if (!extract_bg_events(event_ptr, bg_count, map.bg_events, script_bank)) {
+                    result.error = std::format("extract_map ({},{}): bg event extraction failed "
+                                               "(truncated ROM at declared count {})",
+                                               group, index, bg_count);
+                    stats_.maps_failed++;
+                    return result;
+                }
                 event_ptr += bg_count * fmt.bg_event_size;
             }
         }
@@ -1000,8 +1038,20 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
         // Read object event count and extract
         if (event_ptr < rom_.size()) {
             uint8_t obj_count = rom_.read_byte(event_ptr++);
-            if (obj_count > 0 && obj_count < 100) {
-                extract_objects(event_ptr, obj_count, map.objects, script_bank, group, index);
+            if (obj_count >= 100) {
+                result.error = std::format("extract_map ({},{}): implausible object count {}",
+                                           group, index, obj_count);
+                stats_.maps_failed++;
+                return result;
+            }
+            if (obj_count > 0) {
+                if (!extract_objects(event_ptr, obj_count, map.objects, script_bank, group, index)) {
+                    result.error = std::format("extract_map ({},{}): object extraction failed "
+                                               "(truncated ROM at declared count {})",
+                                               group, index, obj_count);
+                    stats_.maps_failed++;
+                    return result;
+                }
             }
         }
     }
@@ -1009,7 +1059,13 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
     // Extract connections if any
     if (conn_byte != 0) {
         // Connections follow immediately after the header in attributes.asm
-        extract_connections(header_addr, conn_byte, map.connections);
+        if (!extract_connections(header_addr, conn_byte, map.connections)) {
+            result.error = std::format("extract_map ({},{}): connection extraction failed "
+                                       "(truncated ROM, conn_byte=0x{:02x})",
+                                       group, index, conn_byte);
+            stats_.maps_failed++;
+            return result;
+        }
     }
     
 #ifndef NDEBUG

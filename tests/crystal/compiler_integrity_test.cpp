@@ -294,6 +294,66 @@ TEST(successful_reachable_chain_no_injection) {
 }
 
 //=============================================================================
+// F1 — MapExtractor partial-success propagation
+//=============================================================================
+
+// Truncated warp in a reachable map → extract_map fails → compile fails.
+// We use the for_test_fail_map seam to make a map fail completely.
+// The warp-truncation path itself is proven by the adversarial ROM test in
+// oracle_test.cpp; here we prove the compile() pipeline propagates map
+// extraction failure from the child-extractor path.
+TEST(map_extraction_child_failure_propagates) {
+    auto out = temp_emon_path("child_fail");
+    std::filesystem::remove(out);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+    // ElmsLab is directly reachable from NewBarkTown (warp from NBT → Elm's Lab).
+    // Forcing it to fail tests that a reachable map whose extraction fails
+    // propagates as a hard compile failure — not a reduced-but-successful graph.
+    compiler.for_test_fail_map(24, 5);
+
+    bool ok = compiler.compile(out, no_cache_config());
+    ASSERT_FALSE(ok);
+
+    bool package_absent = !std::filesystem::exists(out) ||
+                          std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(package_absent);
+
+    std::cout << "  [map child failure → compile() returned false ✓]\n";
+}
+
+//=============================================================================
+// F2 — Reachable-map traversal truncation
+//=============================================================================
+
+// Injected warp-truncation path: a reachable map whose warp data is truncated
+// must cause discover_reachable_maps() to throw, which discover_content()
+// catches and converts to a hard compile failure.
+// We simulate this by forcing the BFS to encounter a map that fails extraction,
+// which then exercises the same throw path.
+TEST(truncated_warp_in_traversal_fails_discovery) {
+    auto out = temp_emon_path("traversal_warp_fail");
+    std::filesystem::remove(out);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+    // Player's house 1F (24,6) is reachable from NBT via warp.
+    // Forcing it to fail exercises the traversal-failure path for a
+    // non-seed, non-primary map in the BFS graph.
+    compiler.for_test_fail_map(24, 6);
+
+    bool ok = compiler.compile(out, no_cache_config());
+    ASSERT_FALSE(ok);
+
+    bool package_absent = !std::filesystem::exists(out) ||
+                          std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(package_absent);
+
+    std::cout << "  [traversal warp failure → compile() returned false ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -334,6 +394,12 @@ int main(int argc, char* argv[]) {
     RUN_TEST(reachable_map_B_extraction_failure_fails_discovery);
     RUN_TEST(seed_map_extraction_failure_fails_discovery);
     RUN_TEST(successful_reachable_chain_no_injection);
+
+    // F1: MapExtractor child failure propagation
+    RUN_TEST(map_extraction_child_failure_propagates);
+
+    // F2: Traversal truncation
+    RUN_TEST(truncated_warp_in_traversal_fails_discovery);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";

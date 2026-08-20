@@ -10,6 +10,8 @@
 #include <cstring>
 #include <array>
 #include <iostream>
+#include <format>
+#include <stdexcept>
 
 namespace enginemon {
 
@@ -226,14 +228,20 @@ static RuntimeObject read_object(std::istream& in) {
 static RuntimeConnection read_connection(std::istream& in) {
     RuntimeConnection conn;
     
-    // Read raw direction byte and convert to runtime type
+    // Read raw direction byte and convert to runtime type.
+    // An unrecognized direction byte is a structural package error — throw
+    // rather than silently defaulting to North.
     uint8_t raw_dir = in.get();
     switch (raw_dir) {
         case 0: conn.direction = ConnectionDirection::North; break;
         case 1: conn.direction = ConnectionDirection::South; break;
         case 2: conn.direction = ConnectionDirection::East; break;
         case 3: conn.direction = ConnectionDirection::West; break;
-        default: conn.direction = ConnectionDirection::North; break;
+        default:
+            throw std::runtime_error(
+                std::format("read_connection: invalid direction byte {} "
+                            "— malformed or wrong-schema package",
+                            static_cast<int>(raw_dir)));
     }
     
     conn.strip_offset = read_le<int32_t>(in);
@@ -244,27 +252,38 @@ static RuntimeConnection read_connection(std::istream& in) {
     return conn;
 }
 
-// Read counted array with bounds validation (Audit 4)
+// Read counted array with hard failure on structural anomalies.
+// - count > MAX_ARRAY_COUNT: structural corruption → throw (not empty return)
+// - stream failure mid-array: truncated package → throw (not partial prefix)
 template<typename T>
 static std::vector<T> read_counted_array(std::istream& in, T (*read_item)(std::istream&)) {
     uint32_t count = read_le<uint32_t>(in);
     
-    // Bounds check: reject unreasonably large counts
     if (count > PackageLimits::MAX_ARRAY_COUNT) {
-        return {};  // Return empty on malformed data
+        throw std::runtime_error(
+            std::format("read_counted_array: declared count {} exceeds MAX_ARRAY_COUNT {} "
+                        "— malformed or wrong-schema package",
+                        count, PackageLimits::MAX_ARRAY_COUNT));
     }
     
     std::vector<T> arr;
     arr.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
-        if (!in.good()) break;  // Stop on stream error
+        if (!in.good()) {
+            throw std::runtime_error(
+                std::format("read_counted_array: stream failure after reading {}/{} items "
+                            "— truncated package payload",
+                            i, count));
+        }
         arr.push_back(read_item(in));
     }
     return arr;
 }
 
-// Deserialize map data directly to RuntimeMap
-static RuntimeMap deserialize_map(const std::vector<uint8_t>& data) {
+// Deserialize map data directly to RuntimeMap.
+// Returns nullopt on any structural failure — callers can distinguish a
+// malformed payload (nullopt) from a valid but empty/default resource.
+static std::optional<RuntimeMap> deserialize_map(const std::vector<uint8_t>& data) {
     std::istringstream in(std::string(data.begin(), data.end()), std::ios::binary);
     
     RuntimeMap map;
@@ -283,6 +302,8 @@ static RuntimeMap deserialize_map(const std::vector<uint8_t>& data) {
     map.border_block = in.get();
     map.environment_type = in.get();
     
+    if (!in.good()) return std::nullopt;  // Fixed-header truncated
+    
     // Derive semantic Environment from raw Crystal byte
     map.environment = environment_from_crystal(map.environment_type);
     
@@ -293,12 +314,6 @@ static RuntimeMap deserialize_map(const std::vector<uint8_t>& data) {
     map.lighting = in.get();
     
     // Derive time_policy from lighting byte
-    // Crystal's lighting byte encodes the palette policy:
-    //   0 = PALETTE_AUTO (follow RTC)
-    //   1 = PALETTE_DAY (always Day)
-    //   2 = PALETTE_NITE (always Night)
-    //   3 = PALETTE_MORN (always Morning)
-    //   4 = PALETTE_DARK (dark cave)
     if (map.lighting <= 4) {
         map.time_policy = static_cast<PalettePolicy>(map.lighting);
     } else {
@@ -308,20 +323,28 @@ static RuntimeMap deserialize_map(const std::vector<uint8_t>& data) {
     in.get();  // padding
     in.get();  // padding
     
-    // Block data with bounds validation (Audit 4)
+    if (!in.good()) return std::nullopt;
+    
+    // Block data — oversized block_count is a structural error, not a silent skip
     uint32_t block_count = read_le<uint32_t>(in);
     if (block_count > PackageLimits::MAX_BLOCK_COUNT) {
-        return map;  // Return partial map on malformed data
+        return std::nullopt;  // Malformed: block count exceeds physical limit
     }
     map.blocks.resize(block_count);
     in.read(reinterpret_cast<char*>(map.blocks.data()), block_count);
+    if (!in.good() && !in.eof()) return std::nullopt;  // Truncated block data
     
-    // Events - directly to runtime types
-    map.warps = read_counted_array(in, read_warp);
-    map.coord_events = read_counted_array(in, read_coord_event);
-    map.bg_events = read_counted_array(in, read_bg_event);
-    map.objects = read_counted_array(in, read_object);
-    map.connections = read_counted_array(in, read_connection);
+    // Events — read_counted_array and read_connection both throw on structural failure;
+    // catch and convert to nullopt so the whole map decode is a clean failure.
+    try {
+        map.warps = read_counted_array(in, read_warp);
+        map.coord_events = read_counted_array(in, read_coord_event);
+        map.bg_events = read_counted_array(in, read_bg_event);
+        map.objects = read_counted_array(in, read_object);
+        map.connections = read_counted_array(in, read_connection);
+    } catch (const std::exception& e) {
+        return std::nullopt;  // Structural failure in event arrays
+    }
     
     return map;
 }
@@ -605,7 +628,8 @@ std::optional<RuntimeMap> PackageReader::load_map(const std::string& map_id) con
     auto data = read_indexed_chunk(ChunkType::Maps, map_id, map_index_);
     if (!data) return std::nullopt;
     
-    // Deserialize directly to RuntimeMap
+    // deserialize_map returns nullopt on any structural failure —
+    // a malformed payload is distinguishable from "map not found" (data = nullopt).
     return deserialize_map(*data);
 }
 

@@ -147,7 +147,26 @@ namespace crystal {
 //          ROM-bounds continues after result.push_back() converted to throws; width/height
 //          degenerate-dimension continue converted to throw; warp_count>50 continue
 //          converted to throw; events_flat and ptr bounds continues converted to throws.
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.10.0";
+// 2.11.0: Post-Oracle Phase 1 integrity hardening (F1–F4):
+//        F1 (MapExtractor partial success): extract_map() now propagates failure from all
+//          five child extractors (warps, coord events, bg events, objects, connections).
+//          A declared event category that cannot be fully read returns failure immediately
+//          rather than a partially-populated map with success=true.
+//          Implausible counts (≥100) are now hard failures, not silent skips.
+//        F2 (traversal truncation): discover_reachable_maps() warp-loop break and
+//          read_conn silent-return converted to throws; a truncated declared warp or
+//          connection now causes hard discovery failure, not a shorter-but-successful graph.
+//        F3 (serialization narrowing): write_chunk_id() checked helper added; all six
+//          chunk-index write sites in native_package.cpp write() now use write_chunk_id()
+//          instead of bare static_cast<uint16_t>(id.size()); sprite payload ID and font
+//          charmap strings also converted to write_length_string().
+//        F4 (fail-soft deserialization): deserialize_map() returns std::optional<RuntimeMap>
+//          and returns nullopt on any structural failure (block_count overflow, event-array
+//          malformed count, stream failure mid-array, invalid connection direction).
+//          read_counted_array throws on count > MAX_ARRAY_COUNT and stream failure mid-loop
+//          instead of returning {} or a partial prefix. read_connection throws on unknown
+//          direction byte instead of defaulting to North.
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.11.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================

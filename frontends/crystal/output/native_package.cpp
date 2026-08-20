@@ -103,6 +103,20 @@ static void write_length_string(std::ostream& out, const std::string& s) {
     out.write(s.data(), static_cast<std::streamsize>(s.size()));
 }
 
+// Write a chunk index key (string ID) with a checked uint16_t length prefix.
+// Used in every chunk index entry:  uint16_t id_len, id bytes, uint32_t data_size.
+// Same overflow contract as write_length_string — throws on ID > 65535 bytes.
+static void write_chunk_id(std::ostream& out, const std::string& id) {
+    if (id.size() > 0xFFFF) {
+        throw std::runtime_error(
+            std::format("write_chunk_id: resource ID length {} exceeds uint16_t max (65535). "
+                        "ID begins: '{}'",
+                        id.size(), id.substr(0, 40)));
+    }
+    write_le(out, static_cast<uint16_t>(id.size()));
+    out.write(id.data(), static_cast<std::streamsize>(id.size()));
+}
+
 // Read value as little-endian
 template<typename T>
 static T read_le(std::istream& in) {
@@ -550,10 +564,8 @@ void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
         //   utf8_len: u16, utf8_char: bytes
         write_le(out, entry.glyph_index);
         out.put(entry.is_control ? 1 : 0);
-        write_le(out, static_cast<uint16_t>(entry.control_name.size()));
-        out.write(entry.control_name.data(), entry.control_name.size());
-        write_le(out, static_cast<uint16_t>(entry.utf8_char.size()));
-        out.write(entry.utf8_char.data(), entry.utf8_char.size());
+        write_length_string(out, entry.control_name);
+        write_length_string(out, entry.utf8_char);
     }
     
     // Special glyph indices
@@ -579,8 +591,7 @@ void PackageWriter::add_sprite(const RuntimeSprite& sprite) {
     std::ostringstream out(std::ios::binary);
     
     // Header: sprite_id, type, palette
-    write_le(out, static_cast<uint16_t>(sprite.sprite_id.size()));
-    out.write(sprite.sprite_id.data(), sprite.sprite_id.size());
+    write_length_string(out, sprite.sprite_id);
     out.put(static_cast<uint8_t>(sprite.type));
     out.put(static_cast<uint8_t>(sprite.default_palette));
     
@@ -639,8 +650,7 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         
         // Write map index (id -> offset within chunk)
         for (const auto& [id, data] : map_data_) {
-            write_le(chunk, static_cast<uint16_t>(id.size()));
-            chunk.write(id.data(), id.size());
+            write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
         }
         
@@ -666,8 +676,7 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         
         std::ostringstream chunk(std::ios::binary);
         for (const auto& [id, data] : collision_data_) {
-            write_le(chunk, static_cast<uint16_t>(id.size()));
-            chunk.write(id.data(), id.size());
+            write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
             chunk.write(reinterpret_cast<const char*>(data.data()), data.size());
         }
@@ -691,8 +700,7 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         
         // Write index (id -> size)
         for (const auto& [id, data] : tileset_data_) {
-            write_le(chunk, static_cast<uint16_t>(id.size()));
-            chunk.write(id.data(), id.size());
+            write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
         }
         
@@ -720,8 +728,7 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         
         // Write index (id -> size)
         for (const auto& [id, data] : font_data_) {
-            write_le(chunk, static_cast<uint16_t>(id.size()));
-            chunk.write(id.data(), id.size());
+            write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
         }
         
@@ -749,8 +756,7 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         
         // Write index (script_id -> lua_code_size)
         for (const auto& [id, lua_code] : script_data_) {
-            write_le(chunk, static_cast<uint16_t>(id.size()));
-            chunk.write(id.data(), id.size());
+            write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(lua_code.size()));
         }
         
@@ -778,8 +784,7 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         
         // Write index (sprite_id -> data_size)
         for (const auto& [id, data] : sprite_data_) {
-            write_le(chunk, static_cast<uint16_t>(id.size()));
-            chunk.write(id.data(), id.size());
+            write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
         }
         

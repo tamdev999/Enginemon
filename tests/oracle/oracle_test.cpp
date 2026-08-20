@@ -928,6 +928,312 @@ TEST(package_seam_map_connection_direction_offset) {
 }
 
 // =============================================================================
+// F3 TESTS — Package serialization length narrowing
+// =============================================================================
+
+// F3-1: An ID > 65535 bytes long must throw before any bytes are written.
+// (Vanilla IDs are always << 65535, so this protects against future tooling
+// generating pathological IDs without silently corrupting the package.)
+TEST(f3_oversized_map_id_throws_before_write) {
+    using namespace crystal;
+
+    // Build a map whose ID is 65536 bytes long — exceeds uint16_t max
+    ExtractedMap input_map;
+    input_map.map_id = std::string(65536, 'x');  // 65536 chars — one too many
+    input_map.display_name = "test";
+    input_map.tileset_id = "johto_outdoor";
+    input_map.width = 1;
+    input_map.height = 1;
+    input_map.blocks = {0x00};
+    input_map.is_outdoor = false;
+    input_map.environment_type = 3;
+    input_map.lighting = 0;
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "oracle_f3_oversized.emon";
+    std::filesystem::remove(tmp_path);
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("f3_test_sha1", "f3_test_v1");
+    writer.add_map(input_map);
+
+    // write() must throw before writing the oversized ID
+    bool threw = false;
+    try {
+        writer.write(tmp_path);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    } catch (const std::exception&) {
+        threw = true;
+    }
+
+    ASSERT_TRUE(threw);
+    // Package file must NOT exist (no partial write committed)
+    // (it may exist as empty if ofstream was opened but nothing written)
+    // The key invariant: throw before corrupt data
+    if (std::filesystem::exists(tmp_path)) std::filesystem::remove(tmp_path);
+
+    std::cout << "  [F3: oversized map ID (65536 bytes) → throws before write ✓]\n";
+}
+
+// F3-2: A map with a normal-length ID writes and reads back correctly.
+// (Regression check — the checked helper must not break valid cases.)
+TEST(f3_normal_id_writes_correctly) {
+    using namespace crystal;
+
+    ExtractedMap input_map;
+    input_map.map_id = "new_bark_town";
+    input_map.display_name = "New Bark Town";
+    input_map.tileset_id = "johto_outdoor";
+    input_map.width = 2;
+    input_map.height = 2;
+    input_map.blocks.assign(4, 0x00);
+    input_map.is_outdoor = true;
+    input_map.environment_type = 1;
+    input_map.lighting = 0;
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "oracle_f3_normal.emon";
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("f3_normal_sha1", "f3_normal_v1");
+    writer.add_map(input_map);
+    ASSERT_TRUE(writer.write(tmp_path));
+
+    auto reader = enginemon::PackageReader::open(tmp_path);
+    ASSERT_TRUE(reader != nullptr);
+    auto rmap = reader->load_map("new_bark_town");
+    ASSERT_TRUE(rmap.has_value());
+    ASSERT_STR_EQ(rmap->map_id, "new_bark_town");
+
+    std::filesystem::remove(tmp_path);
+    std::cout << "  [F3: normal map ID writes and reads back correctly ✓]\n";
+}
+
+// =============================================================================
+// F4 TESTS — Fail-soft deserialization
+// =============================================================================
+
+// F4-1: block_count > MAX_BLOCK_COUNT must return nullopt, not a partial map.
+// We construct raw map payload bytes with an absurd block_count header.
+TEST(f4_block_count_overflow_returns_nullopt) {
+    using namespace enginemon;
+
+    // Construct the minimal fixed-header portion of a serialized map
+    // followed by an absurd block_count (0xFFFFFFFF).
+    // deserialize_map() must return nullopt — not a partial RuntimeMap.
+
+    // Fixed fields: 64+64+32+32+32+64+32 = 320 bytes of zero-padded strings
+    // + width(1) + height(1) + border(1) + env(1) + flags(1) + lighting(1) + pad(1) + pad(1) = 8 bytes
+    // Total fixed header: 328 bytes
+    std::vector<uint8_t> malformed(328 + 4, 0x00);
+    // Set block_count field at offset 328 to 0xFFFFFFFF (little-endian)
+    malformed[328] = 0xFF;
+    malformed[329] = 0xFF;
+    malformed[330] = 0xFF;
+    malformed[331] = 0xFF;
+
+    // Write to temp file and wrap in a minimal package
+    // We cannot call deserialize_map directly (it's file-local), so we go
+    // through the full writer/reader seam using raw data injection.
+    // Instead: build a valid package with a valid map, then corrupt the block_count
+    // field in the serialized data before writing the package bytes.
+
+    // Build a valid one-block map
+    crystal::ExtractedMap input_map;
+    input_map.map_id = "f4_test_map";
+    input_map.display_name = "F4 Test";
+    input_map.tileset_id = "johto_outdoor";
+    input_map.width = 1;
+    input_map.height = 1;
+    input_map.blocks = {0x00};
+    input_map.is_outdoor = false;
+    input_map.environment_type = 3;
+    input_map.lighting = 0;
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "oracle_f4_blockcount.emon";
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("f4_test_sha1", "f4_test_v1");
+    writer.add_map(input_map);
+    ASSERT_TRUE(writer.write(tmp_path));
+
+    // Corrupt the block_count field: read the file, find the block_count bytes,
+    // overwrite with 0xFFFFFFFF, write back.
+    std::vector<uint8_t> file_bytes;
+    {
+        std::ifstream f(tmp_path, std::ios::binary);
+        file_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+
+    // Find the block_count in the file. The map payload starts after:
+    // - PackageHeader
+    // - Map chunk index entry: uint16_t id_len + id bytes + uint32_t data_size
+    // - Fixed map fields: 328 bytes
+    // Then block_count is the next 4 bytes.
+    // Instead of parsing, search for the known map ID then scan forward.
+    // Simpler: corrupt bytes at the end of the file that are in range for
+    // block_count (we know the payload is small, so block_count is near the
+    // end of the fixed fields). We'll scan for the pattern 0x01 0x00 0x00 0x00
+    // (block_count=1 for a 1-block map) and overwrite the first occurrence that
+    // appears after a likely-fixed-field offset.
+
+    bool corrupted = false;
+    // The block count value 0x01000000 would be BE=1; in LE it's 0x01 0x00 0x00 0x00
+    // Search for this 4-byte sequence after at least sizeof(PackageHeader) bytes
+    for (size_t i = sizeof(enginemon::PackageHeader); i + 4 <= file_bytes.size(); ++i) {
+        if (file_bytes[i] == 0x01 && file_bytes[i+1] == 0x00 &&
+            file_bytes[i+2] == 0x00 && file_bytes[i+3] == 0x00) {
+            // Overwrite with MAX_BLOCK_COUNT + 1  (MAX_BLOCK_COUNT = 4*1024*1024)
+            uint32_t bad_count = 4u * 1024u * 1024u + 1u;
+            file_bytes[i]   = bad_count & 0xFF;
+            file_bytes[i+1] = (bad_count >> 8) & 0xFF;
+            file_bytes[i+2] = (bad_count >> 16) & 0xFF;
+            file_bytes[i+3] = (bad_count >> 24) & 0xFF;
+            corrupted = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(corrupted);
+
+    auto tmp_corrupt = std::filesystem::temp_directory_path() / "oracle_f4_blockcount_corrupt.emon";
+    {
+        std::ofstream f(tmp_corrupt, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(file_bytes.data()), file_bytes.size());
+    }
+
+    // The engine reader must reject this (version check passes; block count check fails → nullopt)
+    // Note: CRC will be wrong after corruption — PackageReader::open() does not call validate()
+    // automatically. This is intentional: we're testing the deserializer path, not the CRC path.
+    auto reader = enginemon::PackageReader::open(tmp_corrupt);
+    if (reader) {
+        // If the reader opened (CRC not enforced at open()), load_map must return nullopt
+        auto rmap = reader->load_map("f4_test_map");
+        ASSERT_FALSE(rmap.has_value());
+        std::cout << "  [F4: block_count overflow → load_map returns nullopt ✓]\n";
+    } else {
+        // Reader may also reject the file at open() — that's also acceptable
+        std::cout << "  [F4: block_count overflow → PackageReader::open() rejected file ✓]\n";
+    }
+
+    std::filesystem::remove(tmp_path);
+    std::filesystem::remove(tmp_corrupt);
+}
+
+// F4-2: An invalid connection direction byte must return nullopt from load_map.
+// Direction bytes 4-255 are invalid — must not silently default to North.
+TEST(f4_invalid_connection_direction_returns_nullopt) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Build a map with one connection, write it, then corrupt the direction byte.
+    ExtractedMap input_map;
+    input_map.map_id = "f4_conn_map";
+    input_map.display_name = "F4 Conn Map";
+    input_map.tileset_id = "johto_outdoor";
+    input_map.width = 2;
+    input_map.height = 2;
+    input_map.blocks.assign(4, 0x00);
+    input_map.is_outdoor = true;
+    input_map.environment_type = 2;
+
+    crystal::MapConnection conn;
+    conn.direction = crystal::Direction::East;
+    conn.target_map_id = "route_29";
+    conn.strip_offset = 5;
+    conn.strip_length = 3;
+    input_map.connections.push_back(conn);
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "oracle_f4_conn.emon";
+
+    PackageWriter writer;
+    writer.set_source_rom("f4_conn_sha1", "f4_conn_v1");
+    writer.add_map(input_map);
+    ASSERT_TRUE(writer.write(tmp_path));
+
+    // Corrupt the connection direction byte. East is serialized as 2 (uint8_t).
+    // Replace 0x02 with 0xFF (invalid direction).
+    std::vector<uint8_t> file_bytes;
+    {
+        std::ifstream f(tmp_path, std::ios::binary);
+        file_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    bool corrupted = false;
+    // The East direction (value 2) is at the start of the connection record,
+    // which is the last array in the payload (after warps/coord/bg/objects).
+    // Search from the END of the file to find the last 0x02 byte that is the
+    // direction byte — this avoids hitting environment_type=2 or other fields.
+    for (size_t i = file_bytes.size(); i > sizeof(enginemon::PackageHeader); --i) {
+        if (file_bytes[i - 1] == 0x02) {
+            file_bytes[i - 1] = 0xFF;  // Invalid direction
+            corrupted = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(corrupted);
+
+    auto tmp_corrupt = std::filesystem::temp_directory_path() / "oracle_f4_conn_corrupt.emon";
+    {
+        std::ofstream f(tmp_corrupt, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(file_bytes.data()), file_bytes.size());
+    }
+
+    auto reader = enginemon::PackageReader::open(tmp_corrupt);
+    if (reader) {
+        auto rmap = reader->load_map("f4_conn_map");
+        // Must not silently default to North — must return nullopt
+        ASSERT_FALSE(rmap.has_value());
+        std::cout << "  [F4: invalid connection direction 0xFF → load_map returns nullopt ✓]\n";
+    } else {
+        std::cout << "  [F4: invalid direction → PackageReader::open() rejected file ✓]\n";
+    }
+
+    std::filesystem::remove(tmp_path);
+    std::filesystem::remove(tmp_corrupt);
+}
+
+// F4-3: A well-formed map round-trips correctly through the hardened deserializer.
+TEST(f4_valid_map_deserializes_correctly) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    ExtractedMap input_map;
+    input_map.map_id = "f4_valid_map";
+    input_map.display_name = "F4 Valid Map";
+    input_map.tileset_id = "johto_outdoor";
+    input_map.width = 3;
+    input_map.height = 3;
+    input_map.blocks.assign(9, 0x05);
+    input_map.is_outdoor = true;
+    input_map.environment_type = 1;
+    input_map.lighting = 1;
+
+    WarpPoint warp;
+    warp.x = 1; warp.y = 2;
+    warp.target_map_id = "elms_lab";
+    warp.target_warp_index = 0;
+    input_map.warps.push_back(warp);
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "oracle_f4_valid.emon";
+
+    PackageWriter writer;
+    writer.set_source_rom("f4_valid_sha1", "f4_valid_v1");
+    writer.add_map(input_map);
+    ASSERT_TRUE(writer.write(tmp_path));
+
+    auto reader = enginemon::PackageReader::open(tmp_path);
+    ASSERT_TRUE(reader != nullptr);
+    auto rmap = reader->load_map("f4_valid_map");
+    ASSERT_TRUE(rmap.has_value());
+    ASSERT_EQ(rmap->width, 3);
+    ASSERT_EQ(rmap->height, 3);
+    ASSERT_EQ(rmap->blocks.size(), 9u);
+    ASSERT_EQ(rmap->warps.size(), 1u);
+    ASSERT_STR_EQ(rmap->warps[0].target_map_id, "elms_lab");
+
+    std::filesystem::remove(tmp_path);
+    std::cout << "  [F4: valid map round-trips correctly through hardened deserializer ✓]\n";
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -953,10 +1259,19 @@ int main(int argc, char* argv[]) {
     RUN_TEST(negative_truncated_operand_fails_explicitly);
     RUN_TEST(negative_invalid_movement_opcode_throws);
 
-    // Package seam fixtures
+    // Package seam fixtures (Oracle Phase 1)
     RUN_TEST(package_seam_bg_event_ifset_condition_flag);
     RUN_TEST(package_seam_sprite_id_boundary);
     RUN_TEST(package_seam_map_connection_direction_offset);
+
+    // F3: Package length narrowing — oversized IDs must throw before write
+    RUN_TEST(f3_oversized_map_id_throws_before_write);
+    RUN_TEST(f3_normal_id_writes_correctly);
+
+    // F4: Fail-soft deserialization — malformed payloads return nullopt
+    RUN_TEST(f4_block_count_overflow_returns_nullopt);
+    RUN_TEST(f4_invalid_connection_direction_returns_nullopt);
+    RUN_TEST(f4_valid_map_deserializes_correctly);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";

@@ -1563,7 +1563,12 @@ std::vector<MapIdRef> discover_reachable_maps(
         uint32_t conn_ptr = header_addr + fmt.header_size;
         
         auto read_conn = [&]() {
-            if (conn_ptr + fmt.connection_size > rom.size()) return;
+            if (conn_ptr + fmt.connection_size > rom.size()) {
+                throw std::runtime_error(
+                    std::format("discover_reachable_maps: map ({},{}) connection data "
+                                "at 0x{:x} truncated (declared in conn_byte=0x{:02x})",
+                                ref.group, ref.map, conn_ptr, conn_byte));
+            }
             auto data = rom.read_bytes(conn_ptr, fmt.connection_size);
             uint8_t tgt_group = data[0];
             uint8_t tgt_map = data[1];
@@ -1610,7 +1615,12 @@ std::vector<MapIdRef> discover_reachable_maps(
         
         // Read warps
         for (uint8_t i = 0; i < warp_count; ++i) {
-            if (ptr + fmt.warp_size > rom.size()) break;
+            if (ptr + fmt.warp_size > rom.size()) {
+                throw std::runtime_error(
+                    std::format("discover_reachable_maps: map ({},{}) warp {} of {} truncated "
+                                "at ROM address 0x{:x}",
+                                ref.group, ref.map, i + 1, warp_count, ptr));
+            }
             auto warp = rom.read_bytes(ptr, fmt.warp_size);
             // Warp: y, x, warp_index, target_group, target_map
             uint8_t tgt_group = warp[3];
