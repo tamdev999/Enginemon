@@ -139,6 +139,11 @@ assemble_fixture "text_tx_box_and_bcd"
 assemble_fixture "text_tx_stringbuffer_and_far"
 assemble_fixture "text_literal_overlap_opcodes"
 
+# Phase 3 fixtures: semantic/package-seam oracle tests.
+# Phase 3 uses hand-built semantic state (no RGBDS .asm sources required)
+# because the inputs are deliberately constructed ExtractedMap/Cmd objects,
+# not Crystal ROM byte sequences.  No new .asm → .bin files for Phase 3.
+
 # ─── Result ──────────────────────────────────────────────────────────────────
 rm -rf "$TMP_DIR"
 echo ""
