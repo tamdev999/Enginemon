@@ -323,6 +323,33 @@ TEST(map_extraction_child_failure_propagates) {
     std::cout << "  [map child failure → compile() returned false ✓]\n";
 }
 
+// F1 second child: a map with BG events failing extraction → compile fails.
+//
+// Route 29 (24,3) has BG events (signs/readables) and is reachable from
+// NewBarkTown via connection.  Forcing it to fail exercises the same
+// extract_map() failure-propagation path that the F1 fix protects for the
+// bg_event child extractor.  The invariant: a map that entered the reachable
+// set and has BG events cannot produce success if extraction fails.
+TEST(map_extraction_bg_event_child_failure_propagates) {
+    auto out = temp_emon_path("bg_child_fail");
+    std::filesystem::remove(out);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+    // Route 29 is group=24, index=3.  It has BG events (sign near New Bark
+    // Town entrance) and is reachable via the Route 29 connection from NBT.
+    compiler.for_test_fail_map(24, 3);
+
+    bool ok = compiler.compile(out, no_cache_config());
+    ASSERT_FALSE(ok);
+
+    bool package_absent = !std::filesystem::exists(out) ||
+                          std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(package_absent);
+
+    std::cout << "  [BG-event-bearing map (24,3) failure → compile() returned false ✓]\n";
+}
+
 //=============================================================================
 // F2 — Reachable-map traversal truncation
 //=============================================================================
@@ -351,6 +378,36 @@ TEST(truncated_warp_in_traversal_fails_discovery) {
     ASSERT_TRUE(package_absent);
 
     std::cout << "  [traversal warp failure → compile() returned false ✓]\n";
+}
+
+// F2 connection: a map with declared connections failing in the BFS must not
+// produce a smaller-but-successful reachable graph.
+//
+// Cherrygrove City (26,3) has East and West connections to Route 30 (26,1) and
+// Route 31 (26,2).  Forcing Cherrygrove to fail inside the BFS exercises the
+// connection-traversal failure path: the read_conn lambda would normally enqueue
+// those targets, but the map's extraction failure now throws before reaching
+// connection-byte reading — proving the invariant that a connection-bearing map
+// that fails cannot silently reduce the graph.
+TEST(truncated_connection_in_traversal_fails_discovery) {
+    auto out = temp_emon_path("traversal_conn_fail");
+    std::filesystem::remove(out);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+    // Cherrygrove City is group=26, index=3.  It has connections East (→ Route 30)
+    // and West (→ Route 31).  Its failure must not allow a partial graph where
+    // Route 30 or Route 31 are silently absent.
+    compiler.for_test_fail_map(26, 3);
+
+    bool ok = compiler.compile(out, no_cache_config());
+    ASSERT_FALSE(ok);
+
+    bool package_absent = !std::filesystem::exists(out) ||
+                          std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(package_absent);
+
+    std::cout << "  [connection-bearing map (26,3) failure → compile() returned false ✓]\n";
 }
 
 //=============================================================================
@@ -397,9 +454,11 @@ int main(int argc, char* argv[]) {
 
     // F1: MapExtractor child failure propagation
     RUN_TEST(map_extraction_child_failure_propagates);
+    RUN_TEST(map_extraction_bg_event_child_failure_propagates);
 
     // F2: Traversal truncation
     RUN_TEST(truncated_warp_in_traversal_fails_discovery);
+    RUN_TEST(truncated_connection_in_traversal_fails_discovery);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";
