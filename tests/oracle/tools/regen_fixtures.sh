@@ -127,6 +127,18 @@ assemble_fixture "sdefer_bank_resolution"
 # Phase 1.5 connection fixture
 assemble_fixture "connection_offset_direction"
 
+# ─── Phase 2 fixtures ────────────────────────────────────────────────────────
+assemble_fixture "event_zero_and_one_byte_ops"
+assemble_fixture "event_word_operand_ops"
+assemble_fixture "event_multi_byte_ops"
+assemble_fixture "event_pointer_and_branch_ops"
+assemble_fixture "movement_directional_family"
+assemble_fixture "movement_parameterized_family"
+assemble_fixture "movement_non_directional_misc"
+assemble_fixture "text_tx_box_and_bcd"
+assemble_fixture "text_tx_stringbuffer_and_far"
+assemble_fixture "text_literal_overlap_opcodes"
+
 # ─── Result ──────────────────────────────────────────────────────────────────
 rm -rf "$TMP_DIR"
 echo ""
