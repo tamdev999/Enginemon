@@ -21,7 +21,7 @@ static T read_le(const uint8_t*& ptr) {
     return value;
 }
 
-RuntimeTileset RuntimeTileset::from_package_data(
+std::optional<RuntimeTileset> RuntimeTileset::from_package_data(
     const std::string& tileset_id,
     const std::vector<uint8_t>& data
 ) {
@@ -30,7 +30,7 @@ RuntimeTileset RuntimeTileset::from_package_data(
     
     if (data.size() < 8) {
         std::cerr << "[TILESET] " << tileset_id << ": data too small (" << data.size() << " bytes)\n";
-        return tileset;
+        return std::nullopt;
     }
     
     const uint8_t* ptr = data.data();
@@ -44,7 +44,7 @@ RuntimeTileset RuntimeTileset::from_package_data(
     for (uint32_t i = 0; i < tile_count; ++i) {
         if (ptr + 64 > end) {
             std::cerr << "[TILESET] " << tileset_id << ": truncated at tile " << i << "\n";
-            return tileset;
+            return std::nullopt;
         }
         std::memcpy(tileset.tiles[i].indices.data(), ptr, 64);
         ptr += 64;
@@ -53,7 +53,7 @@ RuntimeTileset RuntimeTileset::from_package_data(
     // Read block count
     if (ptr + 4 > end) {
         std::cerr << "[TILESET] " << tileset_id << ": truncated at block count\n";
-        return tileset;
+        return std::nullopt;
     }
     uint32_t block_count = read_le<uint32_t>(ptr);
     
@@ -62,7 +62,7 @@ RuntimeTileset RuntimeTileset::from_package_data(
     for (uint32_t i = 0; i < block_count; ++i) {
         if (ptr + 32 > end) {
             std::cerr << "[TILESET] " << tileset_id << ": truncated at block " << i << "\n";
-            return tileset;
+            return std::nullopt;
         }
         for (int t = 0; t < 16; ++t) {
             tileset.blocks[i].tile_ids[t] = read_le<uint16_t>(ptr);
@@ -72,14 +72,14 @@ RuntimeTileset RuntimeTileset::from_package_data(
     // Read collision count
     if (ptr + 4 > end) {
         std::cerr << "[TILESET] " << tileset_id << ": truncated at collision count\n";
-        return tileset;
+        return std::nullopt;
     }
     uint32_t coll_count = read_le<uint32_t>(ptr);
     
     // Read collision data (semantic CollisionClass values, 1 byte each)
     if (ptr + coll_count > end) {
         std::cerr << "[TILESET] " << tileset_id << ": truncated at collision data\n";
-        return tileset;
+        return std::nullopt;
     }
     tileset.collision.resize(coll_count);
     for (uint32_t i = 0; i < coll_count; ++i) {
@@ -89,13 +89,13 @@ RuntimeTileset RuntimeTileset::from_package_data(
     // Read palette map
     if (ptr + 4 > end) {
         std::cerr << "[TILESET] " << tileset_id << ": truncated at palette map count\n";
-        return tileset;
+        return std::nullopt;
     }
     uint32_t palmap_count = read_le<uint32_t>(ptr);
     
     if (ptr + palmap_count > end) {
         std::cerr << "[TILESET] " << tileset_id << ": truncated at palette map data\n";
-        return tileset;
+        return std::nullopt;
     }
     tileset.palette_map.resize(palmap_count);
     std::memcpy(tileset.palette_map.data(), ptr, palmap_count);
@@ -118,14 +118,14 @@ RuntimeTileset RuntimeTileset::from_package_data(
     for (int row = 0; row < 5; ++row) {
         if (!read_palette_set(tileset.standard_palette_rows[row])) {
             std::cerr << "[TILESET] " << tileset_id << ": truncated at palette row " << row << "\n";
-            return tileset;
+            return std::nullopt;
         }
     }
     
     // Read fixed special palette (if present)
     if (ptr + 1 > end) {
         std::cerr << "[TILESET] " << tileset_id << ": truncated at has_fixed flag\n";
-        return tileset;
+        return std::nullopt;
     }
     uint8_t has_fixed = *ptr++;
     
@@ -133,7 +133,7 @@ RuntimeTileset RuntimeTileset::from_package_data(
         RuntimePaletteSet special_set;
         if (!read_palette_set(special_set)) {
             std::cerr << "[TILESET] " << tileset_id << ": truncated at special palette\n";
-            return tileset;
+            return std::nullopt;
         }
         tileset.fixed_special_palette = special_set;
     }

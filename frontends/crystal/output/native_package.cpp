@@ -380,6 +380,16 @@ PackageWriter::PackageWriter() {
 }
 
 void PackageWriter::add_map(const ExtractedMap& map) {
+    // Reject duplicate map IDs — inconsistent first-wins/last-wins reader behaviour
+    // makes duplicates structurally invalid rather than merely undesirable.
+    for (const auto& [existing_id, _] : map_data_) {
+        if (existing_id == map.map_id) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_map: duplicate map ID '{}' — "
+                            "each resource ID must be unique within its namespace",
+                            map.map_id));
+        }
+    }
     auto data = serialize_map(map);
     
     // Store serialized data with map_id as key
@@ -407,6 +417,13 @@ void PackageWriter::add_map(const ExtractedMap& map) {
 }
 
 void PackageWriter::add_tileset_atlas(const TilesetAtlas& atlas) {
+    for (const auto& [existing_id, _] : tileset_data_) {
+        if (existing_id == atlas.tileset_id) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_tileset_atlas: duplicate tileset ID '{}'",
+                            atlas.tileset_id));
+        }
+    }
     std::ostringstream out(std::ios::binary);
     
     // Header
@@ -441,6 +458,13 @@ void PackageWriter::add_tileset_atlas(const TilesetAtlas& atlas) {
 }
 
 void PackageWriter::add_tileset(const ExtractedTileset& tileset, TimeOfDay tod) {
+    for (const auto& [existing_id, _] : tileset_data_) {
+        if (existing_id == tileset.tileset_id) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_tileset: duplicate tileset ID '{}'",
+                            tileset.tileset_id));
+        }
+    }
     // Serialize native indexed tiles + palette data
     // Format:
     //   tile_count (u32)
@@ -529,10 +553,24 @@ void PackageWriter::add_tileset(const ExtractedTileset& tileset, TimeOfDay tod) 
 
 void PackageWriter::add_collision(const std::string& tileset_id, 
                                    const std::vector<uint8_t>& collision) {
+    for (const auto& [existing_id, _] : collision_data_) {
+        if (existing_id == tileset_id) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_collision: duplicate collision ID '{}'",
+                            tileset_id));
+        }
+    }
     collision_data_.push_back({tileset_id, collision});
 }
 
 void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
+    for (const auto& [existing_id, _] : font_data_) {
+        if (existing_id == atlas.font_id) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_font_atlas: duplicate font ID '{}'",
+                            atlas.font_id));
+        }
+    }
     std::ostringstream out(std::ios::binary);
     
     // Header: dimensions
@@ -583,11 +621,25 @@ void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
 }
 
 void PackageWriter::add_script(const std::string& script_id, const std::string& lua_code) {
+    for (const auto& [existing_id, _] : script_data_) {
+        if (existing_id == script_id) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_script: duplicate script ID '{}'",
+                            script_id));
+        }
+    }
     script_data_.push_back({script_id, lua_code});
     stats_.scripts_written++;
 }
 
 void PackageWriter::add_sprite(const RuntimeSprite& sprite) {
+    for (const auto& [existing_id, _] : sprite_data_) {
+        if (existing_id == sprite.sprite_id) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_sprite: duplicate sprite ID '{}'",
+                            sprite.sprite_id));
+        }
+    }
     std::ostringstream out(std::ios::binary);
     
     // Header: sprite_id, type, palette

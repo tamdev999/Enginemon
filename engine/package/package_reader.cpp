@@ -495,6 +495,12 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
             // Don't need to validate data_size fits here since we're just reading index
             // The actual data read will validate against remaining chunk size
             
+            // Reject duplicate IDs: a duplicate in the index means the writer
+            // emitted an invalid package.  Reject rather than silently accepting
+            // last-wins (which would desync the index from the sequential data scan).
+            if (target_index->contains(id)) {
+                return nullptr;  // Duplicate ID in chunk index — malformed package
+            }
             (*target_index)[id] = j;
             (void)data_size;
         }
@@ -654,25 +660,33 @@ std::optional<RuntimeSprite> PackageReader::load_sprite(const std::string& sprit
     auto data = read_indexed_chunk(ChunkType::Sprites, sprite_id, sprite_index_);
     if (!data) return std::nullopt;
     
-    // Deserialize sprite
+    // Deserialize sprite with stream-health checks at each structural read.
+    // Returns nullopt on any truncation rather than a partially-built sprite.
     std::istringstream in(std::string(data->begin(), data->end()), std::ios::binary);
     
     RuntimeSprite sprite;
     
-    // Read sprite_id
+    // Read sprite_id (length-prefixed)
     uint16_t id_len = read_le<uint16_t>(in);
+    if (!in.good()) return std::nullopt;
     sprite.sprite_id.resize(id_len);
     in.read(sprite.sprite_id.data(), id_len);
+    if (!in.good() && !in.eof()) return std::nullopt;
     
     // Read type and palette
-    sprite.type = static_cast<SpriteType>(in.get());
-    sprite.default_palette = static_cast<SpritePalette>(in.get());
+    int type_byte = in.get();
+    int palette_byte = in.get();
+    if (!in.good() && !in.eof()) return std::nullopt;
+    sprite.type = static_cast<SpriteType>(type_byte);
+    sprite.default_palette = static_cast<SpritePalette>(palette_byte);
     
     // Read frames
     uint32_t frame_count = read_le<uint32_t>(in);
+    if (!in.good()) return std::nullopt;
     sprite.frames.resize(frame_count);
     for (uint32_t i = 0; i < frame_count; ++i) {
         in.read(reinterpret_cast<char*>(sprite.frames[i].pixels.data()), 256);
+        if (!in.good() && !in.eof()) return std::nullopt;
     }
     
     return sprite;

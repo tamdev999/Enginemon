@@ -123,9 +123,11 @@ struct RuntimeTileset {
     // If present, this overrides environment/time-based palette selection
     std::optional<RuntimePaletteSet> fixed_special_palette;
     
-    // Parse from package data
-    static RuntimeTileset from_package_data(const std::string& tileset_id,
-                                             const std::vector<uint8_t>& data);
+    // Parse from package data.
+    // Returns nullopt on any structural failure (truncated, malformed counts, etc.).
+    // A partial RuntimeTileset is never returned as success.
+    static std::optional<RuntimeTileset> from_package_data(const std::string& tileset_id,
+                                                             const std::vector<uint8_t>& data);
     
     // Helpers
     size_t tile_count() const { return tiles.size(); }

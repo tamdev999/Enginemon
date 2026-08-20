@@ -223,9 +223,15 @@ static bool load_world_state(
             return false;
         }
         
-        // Parse tileset data into RuntimeTileset (native 8×8 tiles + blocks)
-        auto tileset = RuntimeTileset::from_package_data(tileset_id, *tileset_data);
-        pkg_ctx.tileset_cache[tileset_id] = std::move(tileset);
+        // Parse tileset data into RuntimeTileset (native 8×8 tiles + blocks).
+        // from_package_data() returns nullopt on any structural failure —
+        // a partial tileset must not be cached or accepted as a valid world state.
+        auto tileset_opt = RuntimeTileset::from_package_data(tileset_id, *tileset_data);
+        if (!tileset_opt) {
+            error = "Failed to parse tileset from package data: " + tileset_id;
+            return false;
+        }
+        pkg_ctx.tileset_cache[tileset_id] = std::move(*tileset_opt);
     }
     
     state.tileset = pkg_ctx.tileset_cache[tileset_id];

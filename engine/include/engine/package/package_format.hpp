@@ -17,8 +17,10 @@
 // - Audio data (converted from GB format)
 // - Script bytecode (compiled Lua)
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 
 namespace enginemon {
 
@@ -45,6 +47,58 @@ struct PackageHeader {
     // Checksums for integrity
     uint32_t data_crc32;
 };
+
+// =============================================================================
+// WIRE-LAYOUT STATIC GUARANTEES
+//
+// PackageHeader is serialized as a raw struct (reinterpret_cast<char*>).
+// These assertions pin the exact byte layout assumed by the writer and reader.
+//
+// If any assertion fires, the struct layout has changed (padding, field order,
+// or compiler alignment rules differ from what was intended) and BOTH the
+// writer and reader need updating.  Do not delete or relax these asserts —
+// they exist precisely to catch accidental ABI changes.
+//
+// Expected layout on all current supported targets (Windows x64, MSVC/Clang):
+//   offset  0 : magic          (uint32,  4 bytes)
+//   offset  4 : version        (uint32,  4 bytes)
+//   offset  8 : flags          (uint32,  4 bytes)
+//   offset 12 : source_sha1[41](char[41],41 bytes)
+//   offset 53 : source_version (char[32],32 bytes) — char[] has alignment 1, no padding
+//   offset 85 : [3 bytes implicit padding to align toc_offset to 4]
+//   offset 88 : toc_offset     (uint32,  4 bytes)
+//   offset 92 : toc_size       (uint32,  4 bytes)
+//   offset 96 : data_crc32     (uint32,  4 bytes)
+//   total     : 100 bytes (multiple of 4 — no trailing padding needed)
+//
+// Endianness: the header is written/read as native bytes on the host.
+// The current supported platforms are all little-endian x86-64.
+// A future cross-platform port must replace the raw struct read/write with
+// field-by-field little-endian serialization.
+// =============================================================================
+
+static_assert(std::is_standard_layout_v<PackageHeader>,
+    "PackageHeader must be standard-layout for raw struct serialization");
+static_assert(std::is_trivially_copyable_v<PackageHeader>,
+    "PackageHeader must be trivially copyable for raw struct serialization");
+static_assert(sizeof(PackageHeader) == 100,
+    "PackageHeader wire size changed — update reader/writer or bump EMON_FORMAT_VERSION");
+static_assert(offsetof(PackageHeader, magic)          ==  0,
+    "PackageHeader::magic offset changed");
+static_assert(offsetof(PackageHeader, version)        ==  4,
+    "PackageHeader::version offset changed");
+static_assert(offsetof(PackageHeader, flags)          ==  8,
+    "PackageHeader::flags offset changed");
+static_assert(offsetof(PackageHeader, source_sha1)    == 12,
+    "PackageHeader::source_sha1 offset changed");
+static_assert(offsetof(PackageHeader, source_version) == 53,
+    "PackageHeader::source_version offset changed");
+static_assert(offsetof(PackageHeader, toc_offset)     == 88,
+    "PackageHeader::toc_offset offset changed — implicit padding changed?");
+static_assert(offsetof(PackageHeader, toc_size)       == 92,
+    "PackageHeader::toc_size offset changed");
+static_assert(offsetof(PackageHeader, data_crc32)     == 96,
+    "PackageHeader::data_crc32 offset changed");
 
 //=============================================================================
 // TABLE OF CONTENTS
