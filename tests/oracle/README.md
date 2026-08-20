@@ -19,15 +19,16 @@ and snapshotting the result.
 ## Provenance
 
 ```
-pokecrystal reference: https://github.com/pret/pokecrystal  (commit: local reference)
-RGBDS version: 0.7.0 (pinned — see regen_fixtures.sh)
-Fixture bytes: hand-authored from Crystal macro/opcode documentation
-               Derivation notes are in each fixture .asm file.
+pokecrystal reference: https://github.com/pret/pokecrystal
+  commit: 8e8f7e200 (HEAD at time of Phase 1.5 — see git log in references/pokecrystal)
+RGBDS version: 1.0.3 (pinned — see regen_fixtures.sh)
+Fixture bytes: assembled by RGBDS 1.0.3 from hand-authored .asm sources
+               All 8 Phase 1+1.5 fixtures verified byte-identical to RGBDS 1.0.3 output.
 ```
 
 The `.bin` files in `fixtures/` are checked in and are the normal CI inputs.
 The `.asm` files are the authoritative source for what the bytes mean.
-Running `regen_fixtures.sh` should reproduce byte-identical `.bin` files.
+Running `regen_fixtures.sh` reproduces byte-identical `.bin` files.
 
 ---
 
@@ -46,6 +47,7 @@ Each `.asm` + `.bin` pair exercises one historically-fragile axis.
 | `movement_step_dig` | step_dig parameter byte | step_dig (0x4F) consumes a length parameter byte that must be preserved, not treated as next command |
 | `movement_skyfall_top` | skyfall_top terminal | skyfall_top (0x59) is a terminal — previously silently degraded to StepEnd or caused decoder overrun |
 | `sdefer_bank_resolution` | sdefer bank-relative pointer → flat | sdefer resolved pointer using wrong bank, or used raw 16-bit as flat address |
+| `connection_offset_direction` | Connection direction-dependent offset byte | MapExtractor selected wrong offset byte for connection direction: N/S must use data[9] (X), E/W must use data[8] (Y) |
 
 ### Package seam fixtures (`package_seam/`)
 
@@ -71,13 +73,20 @@ Hand-crafted invalid byte sequences — NOT RGBDS output.
 ## How to regenerate fixtures
 
 ```bash
-# From the Enginemon workspace root:
+# From the Enginemon workspace root (verify mode — default):
 ./tests/oracle/tools/regen_fixtures.sh
+
+# To update checked-in .bin files after intentionally changing a .asm:
+./tests/oracle/tools/regen_fixtures.sh --update
 ```
 
-Requires RGBDS 0.7.0 installed and on PATH.
-The script assembles each `.asm` into a `.bin` and diffs against checked-in.
-A diff means either the fixture changed (intentional) or RGBDS version drifted.
+Requires RGBDS 1.0.3 on PATH (or set `RGBASM=/path/to/rgbasm`).
+The script assembles each `.asm` into a flat binary and compares against checked-in.
+In **verify mode** (default): exits nonzero on any mismatch — never updates files.
+In **update mode**: overwrites `.bin` files — only use when a fixture change is intentional.
+
+A mismatch means either the `.asm` fixture changed, the checked-in `.bin` is wrong,
+or the RGBDS version has drifted. Investigate before updating.
 
 ---
 
