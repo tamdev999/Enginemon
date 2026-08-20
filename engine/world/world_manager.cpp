@@ -161,6 +161,32 @@ WarpResult WorldManager::execute_warp(const RuntimeWarp& warp, GameState& state)
     return result;
 }
 
+WarpResult WorldManager::prepare_warp(const RuntimeWarp& warp, GameState& state) {
+    // F4: Resolve destination without committing to it.
+    // Writes warp_memory from current (source) position — must happen BEFORE destination
+    // is committed so LAST_MAP/LAST_WARP record the correct source.
+    // Does NOT load the new map.  Does NOT overwrite state.player with destination.
+    WarpResult result = resolve_warp(warp, state);
+    if (!result.success) return result;
+    
+    if (result.is_outdoor_to_indoor && current_map_.has_value()) {
+        remember_outdoor(current_map_id_, state.player.x, state.player.y, state);
+    }
+    remember_backup_warp(current_map_id_, state.player.x, state.player.y, state);
+    
+    return result;  // success=true; no map loaded; state.player unchanged
+}
+
+void WorldManager::commit_warp(const WarpResult& result, GameState& state) {
+    // F4: Called only after transition_to_map preparation succeeds.
+    // Loads new map into WorldManager + updates state.player to destination.
+    load_map(result.target_map_id);
+    state.player.current_map_id = result.target_map_id;
+    state.player.x = result.target_x;
+    state.player.y = result.target_y;
+    // facing is set by spawn_player() in the transition_to_map commit block
+}
+
 WarpResult WorldManager::execute_warp_at(int32_t x, int32_t y, GameState& state) {
     const RuntimeWarp* warp = get_warp_at(x, y);
     if (!warp) {
@@ -385,6 +411,16 @@ ConnectionResult WorldManager::execute_connection(
     state.player.facing = result.target_facing;
     
     return result;
+}
+
+void WorldManager::commit_connection(const ConnectionResult& result, GameState& state) {
+    // F4: Called only after transition_to_map preparation succeeds.
+    // Loads new map into WorldManager + updates state.player to destination.
+    load_map(result.target_map_id);
+    state.player.current_map_id = result.target_map_id;
+    state.player.x = result.target_x;
+    state.player.y = result.target_y;
+    state.player.facing = result.target_facing;
 }
 
 //=============================================================================

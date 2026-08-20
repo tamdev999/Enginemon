@@ -646,17 +646,11 @@ int main(int argc, char* argv[]) {
     // Bind canonical GameState BEFORE any RNG operation.
     // set_rng_seed() and next_random() require game_state_ to be non-null.
     game_loop.set_game_state(&game_state);
-    
-    // F3: Keep GameState::player authoritative.
-    // game_loop.player_ is the live simulation state.
-    // game_state.player is the save/warp-source authority.
-    // Sync on every step completion so execute_warp/execute_connection always
-    // reads the latest confirmed position, not the startup coords.
-    game_loop.set_movement_callback([&game_state, &game_loop](int32_t x, int32_t y, Direction facing) {
-        game_state.player.x = x;
-        game_state.player.y = y;
-        game_state.player.facing = facing;
-    });
+    // F3: Direct ownership — game_state.player is the single authoritative
+    // mutable player position/facing.  HeadlessGameLoop writes game_state_->player
+    // directly at every spawn_player, handle_movement (facing), and
+    // complete_player_movement (confirmed position) call.
+    // The movement callback copy is no longer needed.
     
     // Set RNG seed for deterministic NPC movement (hash map_id string for seed)
     uint32_t map_seed = 0;
@@ -1091,7 +1085,11 @@ int main(int argc, char* argv[]) {
                         if (facing_edge) {
                             // Take the warp
                             transition_ctx.is_warp_arrival = true;
-                            auto warp_result = world_manager.execute_warp(*warp_at_pos, game_state);
+                            // F4: prepare_warp resolves destination + writes warp_memory
+                            // from current source position, WITHOUT loading new map or
+                            // overwriting game_state.player.  commit_warp runs only after
+                            // transition_to_map preparation (GPU staging) succeeds.
+                            auto warp_result = world_manager.prepare_warp(*warp_at_pos, game_state);
                             if (warp_result.success) {
                                 std::string trans_error;
                                 if (!transition_to_map(
@@ -1104,6 +1102,9 @@ int main(int argc, char* argv[]) {
                                     trans_error
                                 )) {
                                     std::cerr << "Collision-warp transition failed: " << trans_error << "\n";
+                                } else {
+                                    // Staging succeeded — commit WorldManager map + game_state.player
+                                    world_manager.commit_warp(warp_result, game_state);
                                 }
                             }
                         }
@@ -1267,9 +1268,10 @@ int main(int argc, char* argv[]) {
                     }
                     
                     if (warp_to_take) {
-                        // Execute the warp through WorldManager
+                        // F4: prepare_warp resolves + writes warp_memory from source.
+                        // commit_warp runs only after staging succeeds.
                         transition_ctx.is_warp_arrival = true;
-                        auto result = world_manager.execute_warp(*warp_to_take, game_state);
+                        auto result = world_manager.prepare_warp(*warp_to_take, game_state);
                         
                         if (result.success) {
                             // Transition renderer and game state to new map
@@ -1284,6 +1286,8 @@ int main(int argc, char* argv[]) {
                                 trans_error
                             )) {
                                 std::cerr << "Warp transition failed: " << trans_error << "\n";
+                            } else {
+                                world_manager.commit_warp(result, game_state);
                             }
                         }
                     }
@@ -1292,14 +1296,12 @@ int main(int argc, char* argv[]) {
                         auto result = world_manager.resolve_connection(px, py, pfacing);
                         
                         if (result.success) {
-                            // Execute the connection through WorldManager
-                            auto exec_result = world_manager.execute_connection(px, py, pfacing, game_state);
+                            // F4: commit_connection runs only after transition staging succeeds.
+                            // CONNECTION: Do NOT set warpEntryCell
+                            // Reference: Gen2Recomped crossConnection never sets warpEntryCell
+                            transition_ctx.is_warp_arrival = false;
+                            std::string trans_error;
                             
-                            if (exec_result.success) {
-                                // CONNECTION: Do NOT set warpEntryCell
-                                // Reference: Gen2Recomped crossConnection never sets warpEntryCell
-                                transition_ctx.is_warp_arrival = false;
-                                
                                 //=============================================================
                                 // Gen2Recomped crossConnection seam step (lines ~1740-1760):
                                 //   1. setMap(destMap, landing.x, landing.y, facing)
@@ -1323,38 +1325,39 @@ int main(int argc, char* argv[]) {
                                 //=============================================================
                                 
                                 // Transition to new map, placing player at SEAM position
-                                std::string trans_error;
                                 if (!transition_to_map(
-                                    exec_result.target_map_id,
-                                    exec_result.seam_x,   // Seam position (one cell before landing)
-                                    exec_result.seam_y,
-                                    exec_result.target_facing,
+                                    result.target_map_id,
+                                    result.seam_x,   // Seam position (one cell before landing)
+                                    result.seam_y,
+                                    result.target_facing,
                                     world_state,
                                     transition_ctx,
                                     trans_error
                                 )) {
                                     std::cerr << "Connection transition failed: " << trans_error << "\n";
                                 } else {
+                                    // Staging succeeded — commit WorldManager + game_state
+                                    world_manager.commit_connection(result, game_state);
+                                    
                                     // Start seam step movement through AUTHORITATIVE path
                                     // Reference: Gen2Recomped crossConnection lines 1751-1756
                                     // This enqueues in movement_manager and sets state_=Moving
                                     game_loop.start_player_movement_to(
-                                        exec_result.target_x,  // Landing
-                                        exec_result.target_y,
-                                        exec_result.target_facing
+                                        result.target_x,  // Landing
+                                        result.target_y,
+                                        result.target_facing
                                     );
                                     
                                     // Set up presentation state to match game_loop state
                                     // Presentation derives from the authoritative movement
-                                    player_start_x = exec_result.seam_x * 16.0f;
-                                    player_start_y = exec_result.seam_y * 16.0f;
-                                    player_target_x = exec_result.target_x * 16.0f;
-                                    player_target_y = exec_result.target_y * 16.0f;
+                                    player_start_x = result.seam_x * 16.0f;
+                                    player_start_y = result.seam_y * 16.0f;
+                                    player_target_x = result.target_x * 16.0f;
+                                    player_target_y = result.target_y * 16.0f;
                                     player_moving = true;
                                     step_frame = 0;
                                     anim_clock = 0;  // Fresh walk-cycle so seam step shows leg frames
                                 }
-                            }
                         }
                     }
                 } // end if (!is_scripted_movement)

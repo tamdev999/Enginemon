@@ -53,6 +53,16 @@ void HeadlessGameLoop::spawn_player(int32_t x, int32_t y, Direction facing) {
     player_.target_y = y;
     player_.frames_remaining = 0;
     state_ = LoopState::Idle;
+    
+    // F3: Keep GameState::player in sync as the authoritative persistent state.
+    // player_ is the transient simulation scratchpad (is_moving/target/frames).
+    // game_state_->player.x/y/facing are the canonical position — written here
+    // so save, warp-memory, and connection paths always read current values.
+    if (game_state_) {
+        game_state_->player.x = x;
+        game_state_->player.y = y;
+        game_state_->player.facing = facing;
+    }
 }
 
 void HeadlessGameLoop::add_npc(const NpcState& npc) {
@@ -110,6 +120,9 @@ InputResult HeadlessGameLoop::handle_movement(Direction dir) {
     // Always update facing (even if blocked)
     // Reference: Gen2Recomped player:tryMove always sets facing
     player_.facing = dir;
+    if (game_state_) {
+        game_state_->player.facing = dir;
+    }
     
     // Check collision
     CollisionResult collision = check_player_collision(dir);
@@ -339,6 +352,15 @@ void HeadlessGameLoop::complete_player_movement() {
     player_.y = player_.target_y;
     player_.is_moving = false;
     player_.frames_remaining = 0;
+    
+    // F3: Commit confirmed position to canonical GameState immediately.
+    // This is the definitive step-completion write — any prior read from
+    // game_state_->player.x/y will now reflect the latest confirmed cell.
+    if (game_state_) {
+        game_state_->player.x = player_.x;
+        game_state_->player.y = player_.y;
+        // facing was already synced in handle_movement/start_player_movement_to
+    }
     
     // Return to idle if no script running
     if (state_ == LoopState::Moving) {

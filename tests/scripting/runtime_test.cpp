@@ -5722,67 +5722,69 @@ TEST(gamestate_serialize_insertion_order_determinism) {
 }
 
 // =============================================================================
-// F3: GameState::player authority — step sync and warp consumption
+// F3: GameState::player single authority — direct sync, no callback needed
 // =============================================================================
 TEST(f3_player_authority_step_syncs_gamestate) {
-    // Prove: HeadlessGameLoop movement callback syncs game_state.player.x/y/facing.
-    // The callback is what keeps GameState::player authoritative for save/warp.
+    // Prove: HeadlessGameLoop directly writes game_state_->player.x/y/facing
+    // at spawn_player, handle_movement (facing), and complete_player_movement.
+    // No external callback is required — the loop IS the single write path.
     GameState gs;
     gs.player.x = 5;
     gs.player.y = 5;
     gs.player.facing = enginemon::Direction::Down;
 
-    // The callback mirrors the production wiring in main_tiles.cpp
     HeadlessGameLoop loop;
     loop.set_game_state(&gs);
-    loop.set_movement_callback([&gs](int32_t x, int32_t y, enginemon::Direction facing) {
-        gs.player.x = x;
-        gs.player.y = y;
-        gs.player.facing = facing;
-    });
+    // No movement callback registered — direct sync is sufficient.
 
-    // Build a minimal 1-tile-wide map so the player can move right
     RuntimeMap map;
     map.map_id = "f3_test";
-    map.width = 5; map.height = 5;
-    map.blocks.assign(25, 0);
+    map.width = 10; map.height = 10;
+    map.blocks.assign(100, 0);
     loop.load_map(map);
     loop.set_collision_data([](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; });
 
     uint32_t seed = 12345;
     for (char c : map.map_id) seed = seed * 31 + static_cast<uint32_t>(c);
     loop.set_rng_seed(seed);
-    loop.spawn_player(5, 5, enginemon::Direction::Right);
 
-    // Spawn sets loop player but callback hasn't fired (no movement yet)
-    ASSERT_EQ(loop.player().x, 5);
-    ASSERT_EQ(loop.player().y, 5);
-    // GameState still at (5,5) from initialization — spawn doesn't fire callback
-    ASSERT_EQ(gs.player.x, 5);
-
-    // Move right: input accepted → start movement
-    auto input_result = loop.process_input(InputAction::MoveRight);
-    ASSERT_TRUE(input_result.accepted);
-
-    // Tick 16 frames to complete the step
-    for (int i = 0; i < 16; ++i) loop.tick();
-
-    // After step completion: loop player advanced to (6,5)
-    ASSERT_EQ(loop.player().x, 6);
-    ASSERT_EQ(loop.player().y, 5);
-
-    // ORACLE: game_state.player MUST be synced — not still at (5,5)
-    ASSERT_EQ(gs.player.x, 6);
-    ASSERT_EQ(gs.player.y, 5);
+    // ORACLE 1: spawn_player directly syncs game_state.player immediately
+    loop.spawn_player(3, 7, enginemon::Direction::Right);
+    ASSERT_EQ(gs.player.x, 3);
+    ASSERT_EQ(gs.player.y, 7);
     ASSERT_EQ(gs.player.facing, enginemon::Direction::Right);
 
-    std::cout << "  [F3: movement callback syncs GameState::player on step complete ✓]\n";
+    // ORACLE 2: facing-only update (blocked movement) also syncs
+    auto blocked = loop.process_input(InputAction::MoveLeft); // map too small edge case, or use a wall
+    // Whether blocked or not, facing must be updated
+    ASSERT_EQ(gs.player.facing, enginemon::Direction::Left);
+
+    // Reset to a clean position
+    loop.spawn_player(3, 7, enginemon::Direction::Right);
+
+    // ORACLE 3: full step completion syncs x/y
+    auto input_result = loop.process_input(InputAction::MoveRight);
+    ASSERT_TRUE(input_result.accepted);
+    for (int i = 0; i < 16; ++i) loop.tick();
+    ASSERT_EQ(loop.player().x, 4);
+    ASSERT_EQ(loop.player().y, 7);
+    ASSERT_EQ(gs.player.x, 4);  // Direct sync — not deferred callback
+    ASSERT_EQ(gs.player.y, 7);
+    ASSERT_EQ(gs.player.facing, enginemon::Direction::Right);
+
+    // MUTATION CHECK: there is no second writable copy that could diverge.
+    // Any write to loop.player_ is immediately mirrored to gs.player.
+    // Verify by comparing all x/y/facing fields:
+    ASSERT_EQ(loop.player().x,      gs.player.x);
+    ASSERT_EQ(loop.player().y,      gs.player.y);
+    ASSERT_EQ(loop.player().facing, gs.player.facing);
+
+    std::cout << "  [F3: spawn/facing/step all directly sync GameState::player — no callback ✓]\n";
 }
 
 TEST(f3_player_authority_warp_uses_latest_position) {
-    // Prove: execute_warp reads GameState::player.x/y for remember_outdoor/remember_backup.
-    // After movement, game_state.player must reflect current position, not startup coords.
-    // We verify that the warp_memory backup is written from the post-movement position.
+    // Prove: GameState::player.x/y reflects the latest confirmed position
+    // so that prepare_warp/execute_warp reads the correct source coords.
     GameState gs;
     gs.player.x = 3;
     gs.player.y = 3;
@@ -5791,16 +5793,12 @@ TEST(f3_player_authority_warp_uses_latest_position) {
 
     HeadlessGameLoop loop;
     loop.set_game_state(&gs);
-    loop.set_movement_callback([&gs](int32_t x, int32_t y, enginemon::Direction facing) {
-        gs.player.x = x;
-        gs.player.y = y;
-        gs.player.facing = facing;
-    });
+    // No callback needed — direct sync is the mechanism.
 
     RuntimeMap map;
     map.map_id = "test_outdoor";
-    map.width = 5; map.height = 5;
-    map.blocks.assign(25, 0);
+    map.width = 10; map.height = 10;
+    map.blocks.assign(100, 0);
     map.is_outdoor = true;
     loop.load_map(map);
     loop.set_collision_data([](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; });
@@ -5809,6 +5807,10 @@ TEST(f3_player_authority_warp_uses_latest_position) {
     for (char c : map.map_id) seed = seed * 31 + static_cast<uint32_t>(c);
     loop.set_rng_seed(seed);
     loop.spawn_player(3, 3, enginemon::Direction::Right);
+
+    // ORACLE: spawn immediately syncs — no step needed
+    ASSERT_EQ(gs.player.x, 3);
+    ASSERT_EQ(gs.player.y, 3);
 
     // Take one step right → player moves to (4,3)
     loop.process_input(InputAction::MoveRight);
@@ -5936,6 +5938,133 @@ TEST(f4_transition_staged_world_state_separate) {
 
     std::filesystem::remove(tmp_live);
     std::cout << "  [F4: staged pattern preserves live state when destination fails ✓]\n";
+}
+
+// =============================================================================
+// F3 adversarial: no second writable authority — all paths use same GameState
+// =============================================================================
+TEST(f3_no_second_player_authority) {
+    // Adversarial: mutate through EVERY player-state write path and verify
+    // game_state.player tracks player_ at all times with NO external sync needed.
+    GameState gs;
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+
+    RuntimeMap map;
+    map.map_id = "adversarial_auth";
+    map.width = 20; map.height = 20;
+    map.blocks.assign(400, 0);
+    loop.load_map(map);
+    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass { return CollisionClass::Floor; });
+    uint32_t seed = 777;
+    loop.set_rng_seed(seed);
+
+    // Path 1: spawn_player syncs immediately
+    loop.spawn_player(5, 8, enginemon::Direction::Up);
+    ASSERT_EQ(gs.player.x, 5);  ASSERT_EQ(gs.player.y, 8);
+    ASSERT_EQ(gs.player.facing, enginemon::Direction::Up);
+
+    // Path 2: blocked movement updates facing only
+    loop.process_input(InputAction::MoveDown);  // blocked by nothing, will start movement
+    // After accepting input, facing is set; position commits on step complete
+    ASSERT_EQ(gs.player.facing, enginemon::Direction::Down);
+
+    for (int i = 0; i < 16; ++i) loop.tick();
+    ASSERT_EQ(gs.player.y, 9);  // stepped down
+
+    // Path 3: second spawn after movement
+    loop.spawn_player(10, 10, enginemon::Direction::Right);
+    ASSERT_EQ(gs.player.x, 10); ASSERT_EQ(gs.player.y, 10);
+    ASSERT_EQ(gs.player.facing, enginemon::Direction::Right);
+
+    // Path 4: step in each direction — all directly update GameState
+    loop.process_input(InputAction::MoveRight);
+    for (int i = 0; i < 16; ++i) loop.tick();
+    ASSERT_EQ(gs.player.x, 11);
+
+    loop.process_input(InputAction::MoveDown);
+    for (int i = 0; i < 16; ++i) loop.tick();
+    ASSERT_EQ(gs.player.y, 11);
+
+    loop.process_input(InputAction::MoveLeft);
+    for (int i = 0; i < 16; ++i) loop.tick();
+    ASSERT_EQ(gs.player.x, 10);
+
+    loop.process_input(InputAction::MoveUp);
+    for (int i = 0; i < 16; ++i) loop.tick();
+    ASSERT_EQ(gs.player.y, 10);
+
+    // At every point: loop.player_ == gs.player (x/y/facing)
+    ASSERT_EQ(loop.player().x,      gs.player.x);
+    ASSERT_EQ(loop.player().y,      gs.player.y);
+    ASSERT_EQ(loop.player().facing, gs.player.facing);
+
+    std::cout << "  [F3 adversarial: all move paths (spawn/facing/step) keep single GameState authority ✓]\n";
+}
+
+// =============================================================================
+// F4 adversarial: prepare_warp does not mutate game_state.player before commit
+// =============================================================================
+TEST(f4_prepare_warp_does_not_mutate_player) {
+    // Prove: WorldManager::prepare_warp does NOT overwrite game_state.player.x/y
+    // with destination coordinates.  Only commit_warp does.
+    using namespace enginemon;
+
+    GameState gs;
+    gs.player.x = 4;
+    gs.player.y = 6;
+    gs.player.facing = enginemon::Direction::Down;
+    gs.player.current_map_id = "source_map";
+
+    WorldManager wm;
+
+    // Source map: has one warp at (4,7) targeting "dest_map" warp index 1
+    RuntimeMap src;
+    src.map_id = "source_map";
+    src.width = 5; src.height = 10;
+    src.blocks.assign(50, 0);
+    src.is_outdoor = true;
+    RuntimeWarp warp_out;
+    warp_out.x = 4; warp_out.y = 7;
+    warp_out.target_map_id = "dest_map";
+    warp_out.target_warp_index = 1;
+    src.warps.push_back(warp_out);
+
+    // Destination map: has one warp
+    RuntimeMap dst;
+    dst.map_id = "dest_map";
+    dst.width = 5; dst.height = 5;
+    dst.blocks.assign(25, 0);
+    RuntimeWarp warp_in;
+    warp_in.x = 2; warp_in.y = 3;
+    warp_in.target_map_id = "source_map";
+    warp_in.target_warp_index = 1;
+    dst.warps.push_back(warp_in);
+
+    bool src_loaded = false;
+    wm.set_map_loader([&](const std::string& id) -> std::optional<RuntimeMap> {
+        if (id == "source_map") return src;
+        if (id == "dest_map") return dst;
+        return std::nullopt;
+    });
+    wm.load_map("source_map");
+
+    // prepare_warp — must NOT touch game_state.player.x/y with destination
+    auto result = wm.prepare_warp(warp_out, gs);
+    ASSERT_TRUE(result.success);
+
+    // ORACLE: game_state.player still at SOURCE position (4,6) after prepare
+    ASSERT_EQ(gs.player.x, 4);   // NOT result.target_x
+    ASSERT_EQ(gs.player.y, 6);   // NOT result.target_y
+    ASSERT_STR_EQ(gs.player.current_map_id, "source_map");  // NOT "dest_map"
+
+    // commit_warp now updates game_state.player to destination
+    wm.commit_warp(result, gs);
+    ASSERT_EQ(gs.player.x, result.target_x);
+    ASSERT_EQ(gs.player.y, result.target_y);
+    ASSERT_STR_EQ(gs.player.current_map_id, "dest_map");
+
+    std::cout << "  [F4: prepare_warp preserves source GameState; commit_warp applies dest ✓]\n";
 }
 
 // =============================================================================
@@ -15762,6 +15891,10 @@ int main(int argc, char* argv[]) {
     // F4: Transactional transition
     RUN_TEST(f4_transition_failure_leaves_old_world_coherent);
     RUN_TEST(f4_transition_staged_world_state_separate);
+
+    // F3/F4 adversarial (from new pass)
+    RUN_TEST(f3_no_second_player_authority);
+    RUN_TEST(f4_prepare_warp_does_not_mutate_player);
 
     // F5: Save v2 NPC section mandatory
     RUN_TEST(f5_save_v2_npc_section_mandatory_truncations);

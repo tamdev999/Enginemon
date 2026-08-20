@@ -93,7 +93,17 @@ public:
     // Returns destination info without actually transitioning
     WarpResult resolve_warp(const RuntimeWarp& warp, const GameState& state) const;
     
-    // Execute warp transition (loads new map)
+    // Prepare warp: resolve destination + write warp_memory from current position.
+    // Does NOT load the new map, does NOT update state.player to destination.
+    // Safe to call before staging — only touches warp_memory (wBackupWarp/LAST_MAP).
+    WarpResult prepare_warp(const RuntimeWarp& warp, GameState& state);
+    
+    // Commit warp: load the new map + write state.player to destination.
+    // Call only after transition preparation (GPU/tileset staging) succeeds.
+    void commit_warp(const WarpResult& result, GameState& state);
+    
+    // Execute warp transition (loads new map) — resolve + prepare + commit atomically
+    // Legacy: use only when prepare/commit split is not needed.
     WarpResult execute_warp(const RuntimeWarp& warp, GameState& state);
     
     // Execute warp by position (convenience)
@@ -123,6 +133,10 @@ public:
         Direction facing,
         GameState& state
     );
+    
+    // Commit connection: load new map + write state.player to destination.
+    // Call only after transition preparation succeeds.
+    void commit_connection(const ConnectionResult& result, GameState& state);
     
     //=========================================================================
     // WARP MEMORY
