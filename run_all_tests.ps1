@@ -339,6 +339,39 @@ if (Test-Path $integrityExe) {
 }
 
 # =============================================================================
+# Suite 8: Crystal Frontend Oracle (Phase 1)
+# Independent source-fidelity tests — expected values from pokecrystal semantics,
+# never from Enginemon encoder/decoder output.
+# =============================================================================
+Write-TestHeader "Crystal Frontend Oracle (Phase 1)"
+
+$oracleExe = "$testReleaseDir\oracle_test.exe"
+if (Test-Path $oracleExe) {
+    $output = & $oracleExe $RomPath 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            $_
+        }
+    }
+    $exitCode = $LASTEXITCODE
+
+    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
+    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
+
+    if ($passedMatch -and $failedMatch) {
+        $passCount = $passedMatch.Matches[0].Groups[1].Value
+        $failCount = $failedMatch.Matches[0].Groups[1].Value
+        Write-TestResult "oracle_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
+    } else {
+        Write-TestResult "oracle_test" ($exitCode -eq 0) "Exit code: $exitCode"
+    }
+} else {
+    Write-TestResult "oracle_test" $false "Executable not found"
+}
+
+# =============================================================================
 # Summary
 # =============================================================================
 Write-Host "`n" -NoNewline

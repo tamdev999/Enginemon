@@ -110,6 +110,20 @@ if(MSVC)
     target_compile_options(compiler_integrity_test PRIVATE /bigobj)
 endif()
 
+# Crystal Frontend Oracle — Phase 1
+# Independent source-fidelity tests using RGBDS-derived (or hand-authored) binary fixtures.
+# Expected values come from pokecrystal semantics, NOT from Enginemon encoder output.
+add_executable(oracle_test
+    oracle/oracle_test.cpp
+)
+target_link_libraries(oracle_test PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+if(MSVC)
+    target_compile_options(oracle_test PRIVATE /bigobj)
+endif()
+
 # TODO: Enable these when GTest is available and dependencies are built
 if(FALSE)
 
