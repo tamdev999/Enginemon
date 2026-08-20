@@ -11,6 +11,7 @@
 #include "render/vulkan_bootstrap.hpp"
 #include "engine/scripting/api_bindings.hpp"
 #include <cstring>
+#include <stdexcept>
 #include <iostream>
 #include <algorithm>
 #include <fstream>
@@ -61,33 +62,93 @@ static std::string extract_utf8_char(const char*& p, const char* end) {
 NativeTextSequence NativeTextSequence::from_runtime(const RuntimeTextSequence& seq) {
     NativeTextSequence result;
     for (const auto& elem : seq.elements) {
-        NativeTextElement native;
         switch (elem.op) {
+            // --- Presentation control ops: map to NativeTextElement control codes ---
             case RuntimeTextOp::Text:
+            {
+                NativeTextElement native;
                 native.control = TextControl::None;
                 native.text = elem.text;
+                result.elements.push_back(native);
                 break;
+            }
             case RuntimeTextOp::Line:
-                native.control = TextControl::Line;
+                result.elements.push_back(NativeTextElement::make_line());
                 break;
             case RuntimeTextOp::Next:
+            {
+                NativeTextElement native;
                 native.control = TextControl::Next;
+                result.elements.push_back(native);
                 break;
+            }
             case RuntimeTextOp::Para:
-                native.control = TextControl::Para;
+                result.elements.push_back(NativeTextElement::make_para());
                 break;
             case RuntimeTextOp::Cont:
             case RuntimeTextOp::Scroll:
-                native.control = TextControl::Cont;
+                result.elements.push_back(NativeTextElement::make_cont());
                 break;
             case RuntimeTextOp::Done:
-                native.control = TextControl::Done;
+                result.elements.push_back(NativeTextElement::make_done());
                 break;
             case RuntimeTextOp::Prompt:
-                native.control = TextControl::Prompt;
+                result.elements.push_back(NativeTextElement::make_prompt());
+                break;
+
+            // --- Deferred dynamic ops: preserve typed payload; renderer defers substitution ---
+            case RuntimeTextOp::Ram:
+                result.elements.push_back(NativeTextElement::make_deferred("ram", elem.addr));
+                break;
+            case RuntimeTextOp::Bcd:
+                result.elements.push_back(NativeTextElement::make_deferred("bcd", elem.addr, elem.param));
+                break;
+            case RuntimeTextOp::Decimal:
+                result.elements.push_back(NativeTextElement::make_deferred("decimal", elem.addr, elem.param));
+                break;
+            case RuntimeTextOp::Buffer:
+                result.elements.push_back(NativeTextElement::make_deferred("buffer", 0, elem.param));
+                break;
+            case RuntimeTextOp::Far:
+                result.elements.push_back(NativeTextElement::make_deferred("far", elem.addr, elem.param, elem.param2));
+                break;
+            case RuntimeTextOp::Move:
+                result.elements.push_back(NativeTextElement::make_deferred("move", elem.addr));
+                break;
+            case RuntimeTextOp::Box:
+                result.elements.push_back(NativeTextElement::make_deferred("box", elem.addr, elem.param, elem.param2));
+                break;
+            case RuntimeTextOp::Day:
+                result.elements.push_back(NativeTextElement::make_deferred("day"));
+                break;
+            case RuntimeTextOp::Low:
+                result.elements.push_back(NativeTextElement::make_deferred("low"));
+                break;
+            case RuntimeTextOp::WaitButton:
+                result.elements.push_back(NativeTextElement::make_deferred("waitbutton"));
+                break;
+            case RuntimeTextOp::TxScroll:
+                result.elements.push_back(NativeTextElement::make_deferred("txscroll"));
+                break;
+            case RuntimeTextOp::Sound:
+                result.elements.push_back(NativeTextElement::make_deferred("sound", 0, elem.param));
+                break;
+            case RuntimeTextOp::Raw:
+                result.elements.push_back(NativeTextElement::make_deferred("raw"));
+                break;
+            case RuntimeTextOp::Asm:
+                result.elements.push_back(NativeTextElement::make_deferred("asm"));
+                break;
+
+            // --- Explicitly unimplemented: fail at capability boundary ---
+            case RuntimeTextOp::Unsupported:
+                // Unsupported op must never silently become blank text.
+                // Throw to make the capability gap visible immediately.
+                throw std::runtime_error(
+                    "NativeTextSequence::from_runtime: unsupported text op \"" +
+                    elem.op_name + "\" — not implemented at native boundary");
                 break;
         }
-        result.elements.push_back(native);
     }
     return result;
 }

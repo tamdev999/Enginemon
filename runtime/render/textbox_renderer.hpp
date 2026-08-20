@@ -52,7 +52,11 @@ enum class TextControl : uint8_t {
     Cont = 4,      // Wait, scroll, continue
     Done = 5,      // End text processing
     Prompt = 6,    // Show cursor, wait, end
-    Terminator = 7 // End of string
+    Terminator = 7, // End of string
+    // Deferred dynamic ops: op is known but not yet rendered as visible text.
+    // The renderer should pass these through without treating them as display-control.
+    // The op_name field identifies the specific dynamic operation.
+    DeferredDynamic = 8,
 };
 
 // Runtime font atlas
@@ -134,6 +138,11 @@ struct TextboxRendererConfig {
 struct NativeTextElement {
     TextControl control = TextControl::None;  // None = text run
     std::string text;  // UTF-8 text (only for control == None)
+    // For DeferredDynamic: op_name identifies the dynamic op; addr/param carry operands
+    std::string op_name;
+    uint32_t addr = 0;
+    uint8_t param = 0;
+    uint8_t param2 = 0;
     
     bool is_text() const { return control == TextControl::None && !text.empty(); }
     bool is_control() const { return control != TextControl::None; }
@@ -146,6 +155,15 @@ struct NativeTextElement {
     static NativeTextElement make_cont() { return {TextControl::Cont, ""}; }
     static NativeTextElement make_done() { return {TextControl::Done, ""}; }
     static NativeTextElement make_prompt() { return {TextControl::Prompt, ""}; }
+    static NativeTextElement make_deferred(const std::string& name, uint32_t a = 0, uint8_t p = 0, uint8_t p2 = 0) {
+        NativeTextElement e;
+        e.control = TextControl::DeferredDynamic;
+        e.op_name = name;
+        e.addr = a;
+        e.param = p;
+        e.param2 = p2;
+        return e;
+    }
 };
 
 // Complete native text sequence

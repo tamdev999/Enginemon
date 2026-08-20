@@ -324,6 +324,10 @@ bool TileRenderer::create_pipeline(VulkanBootstrap& vk) {
 }
 
 bool TileRenderer::set_tileset(VulkanBootstrap& vk, const RuntimeTileset& tileset, PaletteRow active_row) {
+    // F4-renderer: Stage new texture locally.
+    // Do NOT touch tile_texture_ until the new texture is fully ready.
+    // If creation fails, tile_texture_ (and the live renderer) remain valid.
+    
     // Resolve the palette set to use:
     // - If tileset has fixed_special_palette, use it
     // - Otherwise, use standard_palette_rows[active_row]
@@ -335,55 +339,65 @@ bool TileRenderer::set_tileset(VulkanBootstrap& vk, const RuntimeTileset& tilese
     }
     
     // Generate tile atlas with pre-resolved colors using the selected palette set
-    // This bakes palette resolution into RGBA (temporary approach until we have
-    // per-instance palette_id working in the shader)
     TileAtlas atlas = TileAtlas::from_tileset_with_palette(tileset, *palette_set);
     
     if (atlas.pixels.empty()) {
         std::cerr << "[TILE RENDERER] Failed to generate tile atlas\n";
-        return false;
+        return false;  // tile_texture_ unchanged
     }
     
-    // Upload texture
-    if (!tile_texture_.create(vk, atlas.width, atlas.height, atlas.pixels.data())) {
+    // Create new texture into a local VulkanTexture — NOT into tile_texture_ yet.
+    // If this fails the existing tile_texture_ is still intact.
+    VulkanTexture new_texture;
+    if (!new_texture.create(vk, atlas.width, atlas.height, atlas.pixels.data())) {
         std::cerr << "[TILE RENDERER] Failed to create tile texture\n";
-        return false;
+        return false;  // tile_texture_ unchanged
     }
     
-    // Store tile UVs, block definitions, and palette map
-    tile_uvs_ = atlas.tile_uvs;
-    blocks_ = tileset.blocks;
-    palette_map_ = tileset.palette_map;
+    // Update cached data BEFORE committing the texture
+    std::vector<TileUV>     new_tile_uvs  = atlas.tile_uvs;
+    std::vector<RuntimeBlock> new_blocks  = tileset.blocks;
+    std::vector<uint8_t>    new_pal_map   = tileset.palette_map;
     
     // Reset descriptor pool before allocating new set
     vkResetDescriptorPool(device_, descriptor_pool_, 0);
     
-    // Allocate descriptor set
+    // Allocate descriptor set using the new texture's view
     VkDescriptorSetAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     alloc_info.descriptorPool = descriptor_pool_;
     alloc_info.descriptorSetCount = 1;
     alloc_info.pSetLayouts = &descriptor_layout_;
     
-    if (vkAllocateDescriptorSets(device_, &alloc_info, &descriptor_set_) != VK_SUCCESS) {
+    VkDescriptorSet new_descriptor_set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(device_, &alloc_info, &new_descriptor_set) != VK_SUCCESS) {
+        // new_texture destroyed by its destructor — tile_texture_ unchanged
         return false;
     }
     
-    // Update descriptor
+    // Update descriptor with new texture's image info
     VkDescriptorImageInfo image_info{};
-    image_info.sampler = tile_texture_.sampler();
-    image_info.imageView = tile_texture_.view();
+    image_info.sampler = new_texture.sampler();
+    image_info.imageView = new_texture.view();
     image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = descriptor_set_;
+    write.dstSet = new_descriptor_set;
     write.dstBinding = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.descriptorCount = 1;
     write.pImageInfo = &image_info;
     
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+    
+    // ALL preparation succeeded — commit: swap new texture into live state.
+    // The old tile_texture_ is destroyed by VulkanTexture's move assignment.
+    tile_texture_ = std::move(new_texture);
+    tile_uvs_     = std::move(new_tile_uvs);
+    blocks_       = std::move(new_blocks);
+    palette_map_  = std::move(new_pal_map);
+    descriptor_set_ = new_descriptor_set;
     
     return true;
 }
@@ -523,10 +537,37 @@ bool TileRenderer::build_map(VulkanBootstrap& vk, const RuntimeMap& map, const R
 bool TileRenderer::create_buffers(VulkanBootstrap& vk,
                                    const std::vector<TileVertex>& vertices,
                                    const std::vector<uint32_t>& indices) {
-    destroy_buffers();
+    // F4-renderer: Create new buffers into LOCALS.
+    // Do NOT call destroy_buffers() first — that would kill the live geometry.
+    // Only replace the live buffers after all allocations succeed.
     
     VkDeviceSize vertex_size = vertices.size() * sizeof(TileVertex);
     VkDeviceSize index_size = indices.size() * sizeof(uint32_t);
+    
+    VkBuffer new_vertex_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory new_vertex_memory = VK_NULL_HANDLE;
+    VkBuffer new_index_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory new_index_memory = VK_NULL_HANDLE;
+    
+    // Helper: clean up new locals on failure
+    auto cleanup_new = [&]() {
+        if (new_vertex_buffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, new_vertex_buffer, nullptr);
+            new_vertex_buffer = VK_NULL_HANDLE;
+        }
+        if (new_vertex_memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, new_vertex_memory, nullptr);
+            new_vertex_memory = VK_NULL_HANDLE;
+        }
+        if (new_index_buffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, new_index_buffer, nullptr);
+            new_index_buffer = VK_NULL_HANDLE;
+        }
+        if (new_index_memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, new_index_memory, nullptr);
+            new_index_memory = VK_NULL_HANDLE;
+        }
+    };
     
     // Create vertex buffer
     VkBufferCreateInfo buffer_info{};
@@ -535,12 +576,12 @@ bool TileRenderer::create_buffers(VulkanBootstrap& vk,
     buffer_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     
-    if (vkCreateBuffer(device_, &buffer_info, nullptr, &vertex_buffer_) != VK_SUCCESS) {
-        return false;
+    if (vkCreateBuffer(device_, &buffer_info, nullptr, &new_vertex_buffer) != VK_SUCCESS) {
+        cleanup_new(); return false;  // live buffers untouched
     }
     
     VkMemoryRequirements mem_reqs;
-    vkGetBufferMemoryRequirements(device_, vertex_buffer_, &mem_reqs);
+    vkGetBufferMemoryRequirements(device_, new_vertex_buffer, &mem_reqs);
     
     VkMemoryAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -549,42 +590,47 @@ bool TileRenderer::create_buffers(VulkanBootstrap& vk,
         vk.physical_device(), mem_reqs.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     
-    if (vkAllocateMemory(device_, &alloc_info, nullptr, &vertex_memory_) != VK_SUCCESS) {
-        return false;
+    if (vkAllocateMemory(device_, &alloc_info, nullptr, &new_vertex_memory) != VK_SUCCESS) {
+        cleanup_new(); return false;
     }
     
-    vkBindBufferMemory(device_, vertex_buffer_, vertex_memory_, 0);
+    vkBindBufferMemory(device_, new_vertex_buffer, new_vertex_memory, 0);
     
-    // Copy vertex data
     void* data;
-    vkMapMemory(device_, vertex_memory_, 0, vertex_size, 0, &data);
+    vkMapMemory(device_, new_vertex_memory, 0, vertex_size, 0, &data);
     std::memcpy(data, vertices.data(), vertex_size);
-    vkUnmapMemory(device_, vertex_memory_);
+    vkUnmapMemory(device_, new_vertex_memory);
     
     // Create index buffer
     buffer_info.size = index_size;
     buffer_info.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     
-    if (vkCreateBuffer(device_, &buffer_info, nullptr, &index_buffer_) != VK_SUCCESS) {
-        return false;
+    if (vkCreateBuffer(device_, &buffer_info, nullptr, &new_index_buffer) != VK_SUCCESS) {
+        cleanup_new(); return false;
     }
     
-    vkGetBufferMemoryRequirements(device_, index_buffer_, &mem_reqs);
+    vkGetBufferMemoryRequirements(device_, new_index_buffer, &mem_reqs);
     alloc_info.allocationSize = mem_reqs.size;
     alloc_info.memoryTypeIndex = find_memory_type(
         vk.physical_device(), mem_reqs.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     
-    if (vkAllocateMemory(device_, &alloc_info, nullptr, &index_memory_) != VK_SUCCESS) {
-        return false;
+    if (vkAllocateMemory(device_, &alloc_info, nullptr, &new_index_memory) != VK_SUCCESS) {
+        cleanup_new(); return false;
     }
     
-    vkBindBufferMemory(device_, index_buffer_, index_memory_, 0);
+    vkBindBufferMemory(device_, new_index_buffer, new_index_memory, 0);
     
-    vkMapMemory(device_, index_memory_, 0, index_size, 0, &data);
+    vkMapMemory(device_, new_index_memory, 0, index_size, 0, &data);
     std::memcpy(data, indices.data(), index_size);
-    vkUnmapMemory(device_, index_memory_);
+    vkUnmapMemory(device_, new_index_memory);
     
+    // ALL allocations succeeded — destroy old buffers then commit new ones.
+    destroy_buffers();
+    vertex_buffer_ = new_vertex_buffer;
+    vertex_memory_ = new_vertex_memory;
+    index_buffer_ = new_index_buffer;
+    index_memory_ = new_index_memory;
     index_count_ = static_cast<uint32_t>(indices.size());
     return true;
 }

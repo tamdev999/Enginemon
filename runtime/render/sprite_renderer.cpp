@@ -323,47 +323,56 @@ bool SpriteRenderer::create_pipeline(VulkanBootstrap& vk) {
 }
 
 bool SpriteRenderer::set_atlas(VulkanBootstrap& vk, const RuntimeSpriteAtlas& atlas) {
-    // Upload texture
-    if (!atlas_texture_.create(vk, atlas.atlas_width, atlas.atlas_height, atlas.pixels.data())) {
-        return false;
+    // F4-renderer: Stage new texture locally.
+    // Do NOT touch atlas_texture_ until the new one is fully ready.
+    VulkanTexture new_texture;
+    if (!new_texture.create(vk, atlas.atlas_width, atlas.atlas_height, atlas.pixels.data())) {
+        return false;  // atlas_texture_ unchanged
     }
     
-    // Build UV lookup
-    sprite_uvs_.clear();
+    // Build UV lookup into a local map first
+    std::unordered_map<std::string, RuntimeSpriteAtlas::SpriteUVs> new_sprite_uvs;
     for (const auto& uvs : atlas.sprite_uvs) {
-        sprite_uvs_[uvs.sprite_id] = uvs;
+        new_sprite_uvs[uvs.sprite_id] = uvs;
     }
     
     // Reset descriptor pool before allocating new set
     // This frees any previously allocated descriptor sets
     vkResetDescriptorPool(device_, descriptor_pool_, 0);
     
-    // Allocate descriptor set
+    // Allocate descriptor set using the new texture's view
     VkDescriptorSetAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     alloc_info.descriptorPool = descriptor_pool_;
     alloc_info.descriptorSetCount = 1;
     alloc_info.pSetLayouts = &descriptor_layout_;
     
-    if (vkAllocateDescriptorSets(device_, &alloc_info, &descriptor_set_) != VK_SUCCESS) {
+    VkDescriptorSet new_descriptor_set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(device_, &alloc_info, &new_descriptor_set) != VK_SUCCESS) {
+        // new_texture destroyed by its destructor — atlas_texture_ unchanged
         return false;
     }
     
     // Update descriptor
     VkDescriptorImageInfo image_info{};
-    image_info.sampler = atlas_texture_.sampler();
-    image_info.imageView = atlas_texture_.view();
+    image_info.sampler = new_texture.sampler();
+    image_info.imageView = new_texture.view();
     image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = descriptor_set_;
+    write.dstSet = new_descriptor_set;
     write.dstBinding = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.descriptorCount = 1;
     write.pImageInfo = &image_info;
     
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+    
+    // ALL preparation succeeded — commit: swap new texture into live state.
+    atlas_texture_ = std::move(new_texture);
+    sprite_uvs_ = std::move(new_sprite_uvs);
+    descriptor_set_ = new_descriptor_set;
     
     return true;
 }
