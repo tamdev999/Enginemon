@@ -488,90 +488,37 @@ static std::string direction_to_string(Direction dir) {
 void LuaEmitter::emit_op(std::ostream& out, const Op_ApplyMovement& op) {
     emit_comment(out, "applymovement " + std::to_string(op.object_id));
     
-    // Generate semantic movement commands instead of raw bytes
-    // This keeps the Lua simple and semantic while native C++ handles timing
-    
-    // Count steps in each direction for batched movement
-    int steps_down = 0, steps_up = 0, steps_left = 0, steps_right = 0;
-    Direction last_facing = Direction::Down;
+    // Emit movement commands in exact source order.
+    //
+    // ORDERING CONTRACT: Crystal movement sequences are ordered programs, not
+    // direction bags.  RIGHT, DOWN, DOWN must execute as RIGHT then DOWN then DOWN.
+    // We emit one ctx.world:move_actor() call per step, preserving source order.
+    //
+    // Adjacent identical steps are each emitted separately so that the runtime
+    // executes them one tile at a time with correct collision/warp checks at
+    // each intermediate cell.
     
     for (const auto& cmd : op.commands) {
-        // Handle step commands - batch them
-        if (cmd.is_step()) {
-            switch (cmd.direction) {
-                case Direction::Down: steps_down++; break;
-                case Direction::Up: steps_up++; break;
-                case Direction::Left: steps_left++; break;
-                case Direction::Right: steps_right++; break;
-            }
-            last_facing = cmd.direction;
-        }
-        // Handle turn commands - emit them directly
-        else if (cmd.is_turn()) {
-            // Flush any pending steps first
-            if (steps_down > 0 || steps_up > 0 || steps_left > 0 || steps_right > 0) {
-                std::ostringstream line;
-                line << "ctx.world:move_actor(" << (int)op.object_id << ", {";
-                bool first = true;
-                if (steps_down > 0) {
-                    line << (first ? "" : ", ") << "down=" << steps_down;
-                    first = false;
-                }
-                if (steps_up > 0) {
-                    line << (first ? "" : ", ") << "up=" << steps_up;
-                    first = false;
-                }
-                if (steps_left > 0) {
-                    line << (first ? "" : ", ") << "left=" << steps_left;
-                    first = false;
-                }
-                if (steps_right > 0) {
-                    line << (first ? "" : ", ") << "right=" << steps_right;
-                    first = false;
-                }
-                line << "})";
-                emit_line(out, line.str());
-                steps_down = steps_up = steps_left = steps_right = 0;
-            }
-            // Emit turn
-            emit_line(out, "ctx.world:face_actor(" + std::to_string(op.object_id) + 
-                      ", \"" + direction_to_string(cmd.direction) + "\")");
-            last_facing = cmd.direction;
-        }
-        // Handle step_end - flush and end
-        else if (cmd.type == MovementType::StepEnd) {
+        if (cmd.type == MovementType::StepEnd) {
             break;
         }
-        // Handle special commands
+        
+        // Step commands — emit one call per step in source order
+        if (cmd.is_step()) {
+            std::string dir = direction_to_string(cmd.direction);
+            emit_line(out, "ctx.world:move_actor(" + std::to_string(op.object_id) +
+                      ", \"" + dir + "\", 1)");
+        }
+        // Turn commands — face without moving
+        else if (cmd.is_turn()) {
+            emit_line(out, "ctx.world:face_actor(" + std::to_string(op.object_id) +
+                      ", \"" + direction_to_string(cmd.direction) + "\")");
+        }
+        // Sleep/wait commands
         else if (cmd.type == MovementType::StepSleep && cmd.param > 0) {
-            // Flush pending steps
-            if (steps_down > 0 || steps_up > 0 || steps_left > 0 || steps_right > 0) {
-                std::ostringstream line;
-                line << "ctx.world:move_actor(" << (int)op.object_id << ", {";
-                bool first = true;
-                if (steps_down > 0) { line << (first ? "" : ", ") << "down=" << steps_down; first = false; }
-                if (steps_up > 0) { line << (first ? "" : ", ") << "up=" << steps_up; first = false; }
-                if (steps_left > 0) { line << (first ? "" : ", ") << "left=" << steps_left; first = false; }
-                if (steps_right > 0) { line << (first ? "" : ", ") << "right=" << steps_right; first = false; }
-                line << "})";
-                emit_line(out, line.str());
-                steps_down = steps_up = steps_left = steps_right = 0;
-            }
             emit_line(out, "ctx.util:wait_frames(" + std::to_string(cmd.param) + ")");
         }
-    }
-    
-    // Flush any remaining steps
-    if (steps_down > 0 || steps_up > 0 || steps_left > 0 || steps_right > 0) {
-        std::ostringstream line;
-        line << "ctx.world:move_actor(" << (int)op.object_id << ", {";
-        bool first = true;
-        if (steps_down > 0) { line << (first ? "" : ", ") << "down=" << steps_down; first = false; }
-        if (steps_up > 0) { line << (first ? "" : ", ") << "up=" << steps_up; first = false; }
-        if (steps_left > 0) { line << (first ? "" : ", ") << "left=" << steps_left; first = false; }
-        if (steps_right > 0) { line << (first ? "" : ", ") << "right=" << steps_right; first = false; }
-        line << "})";
-        emit_line(out, line.str());
+        // Other non-step commands (hide, remove, special animations) — skip emit for now
     }
     
     // Yield until movement completes

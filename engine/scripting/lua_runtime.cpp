@@ -854,6 +854,15 @@ std::vector<uint32_t> LuaRuntime::update(float delta_time) {
         }
     }
     
+    // F6: Deterministic simultaneous wakeup ordering.
+    // coroutines_ is an unordered_map — iteration order is hash-dependent and
+    // non-reproducible across runs/platforms.  Sort to_resume by coroutine ID
+    // (ascending) before executing any resume.  IDs are monotonically allocated
+    // (next_coroutine_id_++ in start_script()) and are never reused during a
+    // session, so ascending ID == ascending creation order.  This gives
+    // deterministic behaviour when two coroutines expire on the same tick.
+    std::sort(to_resume.begin(), to_resume.end());
+    
     for (uint32_t id : to_resume) {
         // Record the identity of this resumed coroutine
         resumed_ids_this_update_.push_back(id);

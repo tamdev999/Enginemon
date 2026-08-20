@@ -103,50 +103,57 @@ int text_sequence(lua_State* L) {
     
     RuntimeTextSequence seq;
     
-    // Iterate the sequence table (array of operation tables)
-    lua_pushnil(L);  // First key
-    while (lua_next(L, 2) != 0) {
-        // Stack: key at -2, value (operation table) at -1
-        if (lua_istable(L, -1)) {
-            // Read "op" field
-            lua_getfield(L, -1, "op");
-            const char* op_str = lua_tostring(L, -1);
-            lua_pop(L, 1);  // Pop op value
+    // F7: Ordered numeric access — do NOT use lua_next() for semantic arrays.
+    // lua_next() iteration order over an integer-keyed table is an implementation
+    // detail of Lua 5.4's array/hash split and is not guaranteed by the language spec.
+    // lua_rawlen() + lua_rawgeti(1..N) gives formally guaranteed sequential order
+    // and rejects holes/non-array structures explicitly.
+    int n = static_cast<int>(lua_rawlen(L, 2));
+    for (int i = 1; i <= n; ++i) {
+        lua_rawgeti(L, 2, i);
+        // Stack: element table at -1 (or nil/non-table for holes)
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            continue;  // skip holes (shouldn't exist in well-formed emitter output)
+        }
+        
+        // Read "op" field
+        lua_getfield(L, -1, "op");
+        const char* op_str = lua_tostring(L, -1);
+        lua_pop(L, 1);  // Pop op value
+        
+        if (op_str) {
+            std::string op(op_str);
             
-            if (op_str) {
-                std::string op(op_str);
-                
-                if (op == "text") {
-                    // Read "text" field for text operations
-                    lua_getfield(L, -1, "text");
-                    const char* text = lua_tostring(L, -1);
-                    lua_pop(L, 1);
-                    seq.elements.push_back(RuntimeTextElement::make_text(text ? text : ""));
-                }
-                else if (op == "line") {
-                    seq.elements.push_back(RuntimeTextElement::make_line());
-                }
-                else if (op == "next") {
-                    seq.elements.push_back(RuntimeTextElement::make_next());
-                }
-                else if (op == "para") {
-                    seq.elements.push_back(RuntimeTextElement::make_para());
-                }
-                else if (op == "cont") {
-                    seq.elements.push_back(RuntimeTextElement::make_cont());
-                }
-                else if (op == "scroll") {
-                    seq.elements.push_back(RuntimeTextElement::make_scroll());
-                }
-                else if (op == "done") {
-                    seq.elements.push_back(RuntimeTextElement::make_done());
-                }
-                else if (op == "prompt") {
-                    seq.elements.push_back(RuntimeTextElement::make_prompt());
-                }
+            if (op == "text") {
+                lua_getfield(L, -1, "text");
+                const char* text = lua_tostring(L, -1);
+                lua_pop(L, 1);
+                seq.elements.push_back(RuntimeTextElement::make_text(text ? text : ""));
+            }
+            else if (op == "line") {
+                seq.elements.push_back(RuntimeTextElement::make_line());
+            }
+            else if (op == "next") {
+                seq.elements.push_back(RuntimeTextElement::make_next());
+            }
+            else if (op == "para") {
+                seq.elements.push_back(RuntimeTextElement::make_para());
+            }
+            else if (op == "cont") {
+                seq.elements.push_back(RuntimeTextElement::make_cont());
+            }
+            else if (op == "scroll") {
+                seq.elements.push_back(RuntimeTextElement::make_scroll());
+            }
+            else if (op == "done") {
+                seq.elements.push_back(RuntimeTextElement::make_done());
+            }
+            else if (op == "prompt") {
+                seq.elements.push_back(RuntimeTextElement::make_prompt());
             }
         }
-        lua_pop(L, 1);  // Pop value, keep key for next iteration
+        lua_pop(L, 1);  // Pop element table
     }
     
     // Call the per-runtime callback to update the visible textbox with semantic sequence

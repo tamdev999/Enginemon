@@ -361,15 +361,20 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
         return result;
     }
     
-    // NPC states per map (only present in version 2+)
+    // NPC states per map — MANDATORY in version 2 (never optional).
+    // A v2 save that truncates before map_count is corrupted, not merely
+    // missing optional data.  Return CorruptedPayload, not Success.
     int32_t map_count = 0;
-    if (read_int32(ptr, end, map_count)) {
-        // Bounds check (Audit 4)
-        if (map_count < 0 || map_count > 10000) {
-            result.error = DeserializeError::CorruptedPayload;
-            return result;
-        }
-        for (int32_t m = 0; m < map_count; m++) {
+    if (!read_int32(ptr, end, map_count)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    // Bounds check
+    if (map_count < 0 || map_count > 10000) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    for (int32_t m = 0; m < map_count; m++) {
             std::string map_id;
             if (!read_string(ptr, end, map_id)) {
                 result.error = DeserializeError::CorruptedPayload;
@@ -446,7 +451,6 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
             
             state.npc_states[map_id] = std::move(npcs);
         }
-    }
     
     result.error = DeserializeError::Success;
     return result;

@@ -62,9 +62,16 @@ std::vector<uint32_t> MovementManager::update() {
     std::vector<uint32_t> completed_coroutines;
     std::vector<uint32_t> to_remove;
     
-    // Phase 1: Retire completed movements
-    for (auto& [actor_id, mv] : active_movements_) {
-        if (mv.completed) {
+    // Phase 1: Retire already-completed movements (from previous tick)
+    // Collect actor_ids in sorted order for deterministic callback sequence.
+    {
+        std::vector<uint32_t> phase1_actors;
+        for (auto& [actor_id, mv] : active_movements_) {
+            if (mv.completed) phase1_actors.push_back(actor_id);
+        }
+        std::sort(phase1_actors.begin(), phase1_actors.end());  // F6: deterministic order
+        for (uint32_t actor_id : phase1_actors) {
+            auto& mv = active_movements_.at(actor_id);
             completed_coroutines.push_back(mv.coroutine_id);
             pending_completions_.push_back({actor_id, mv.coroutine_id});
             to_remove.push_back(actor_id);
@@ -79,15 +86,22 @@ std::vector<uint32_t> MovementManager::update() {
     }
     to_remove.clear();
     
-    // Phase 2: Tick all active movements
-    for (auto& [actor_id, mv] : active_movements_) {
-        if (tick_movement(mv)) {
-            // Movement just completed
-            completed_coroutines.push_back(mv.coroutine_id);
-            pending_completions_.push_back({actor_id, mv.coroutine_id});
-            to_remove.push_back(actor_id);
-            if (completion_callback_) {
-                completion_callback_(actor_id, mv.coroutine_id);
+    // Phase 2: Tick all active movements.
+    // Tick in sorted actor_id order so simultaneous completions fire in a
+    // reproducible sequence regardless of unordered_map bucket layout.
+    {
+        std::vector<uint32_t> phase2_actors;
+        for (auto& [actor_id, mv] : active_movements_) phase2_actors.push_back(actor_id);
+        std::sort(phase2_actors.begin(), phase2_actors.end());  // F6: deterministic order
+        for (uint32_t actor_id : phase2_actors) {
+            auto& mv = active_movements_.at(actor_id);
+            if (tick_movement(mv)) {
+                completed_coroutines.push_back(mv.coroutine_id);
+                pending_completions_.push_back({actor_id, mv.coroutine_id});
+                to_remove.push_back(actor_id);
+                if (completion_callback_) {
+                    completion_callback_(actor_id, mv.coroutine_id);
+                }
             }
         }
     }

@@ -336,34 +336,45 @@ static bool transition_to_map(
     //=========================================================================
     vkDeviceWaitIdle(ctx.vulkan->device());
     
-    // Load new map world state (uses per-instance package context)
-    if (!load_world_state(*ctx.pkg_ctx, new_map_id, world_state, error)) {
-        return false;
+    //=========================================================================
+    // F4: STAGED PREPARATION
+    // Load all destination data into a LOCAL staging state.
+    // The live world_state is NOT touched until every fallible operation
+    // succeeds. This prevents a split old/new state on partial failure.
+    //=========================================================================
+    WorldState staged;
+    if (!load_world_state(*ctx.pkg_ctx, new_map_id, staged, error)) {
+        return false;  // world_state unchanged — old world still coherent
     }
     
     // Resolve palette row based on map environment + time policy
-    // For now, use Day as the RTC time (future: integrate with actual RTC)
     PaletteRow active_palette = TileRenderer::resolve_palette_row(
-        world_state.map.environment,
-        world_state.map.time_policy,
+        staged.map.environment,
+        staged.map.time_policy,
         PaletteRow::Day  // RTC time - hardcoded to Day for now
     );
     
-    // Update tile renderer with new tileset and map
-    if (!ctx.tile_renderer->set_tileset(*ctx.vulkan, world_state.tileset, active_palette)) {
+    // All GPU upload operations — still using staged data.
+    // On any failure: world_state is still old, gameplay state is still old.
+    if (!ctx.tile_renderer->set_tileset(*ctx.vulkan, staged.tileset, active_palette)) {
         error = "Failed to upload tileset for " + new_map_id;
         return false;
     }
-    if (!ctx.tile_renderer->build_map(*ctx.vulkan, world_state.map, world_state.tileset)) {
+    if (!ctx.tile_renderer->build_map(*ctx.vulkan, staged.map, staged.tileset)) {
         error = "Failed to build map geometry for " + new_map_id;
         return false;
     }
-    
-    // Update sprite renderer with new sprites
-    if (!ctx.sprite_renderer->set_atlas(*ctx.vulkan, world_state.sprite_atlas)) {
+    if (!ctx.sprite_renderer->set_atlas(*ctx.vulkan, staged.sprite_atlas)) {
         error = "Failed to upload sprite atlas for " + new_map_id;
         return false;
     }
+    
+    //=========================================================================
+    // ALL FALLIBLE OPERATIONS SUCCEEDED.
+    // Commit: replace live world_state and update authoritative gameplay state.
+    //=========================================================================
+    world_state = std::move(staged);
+    
     ctx.sprite_renderer->set_sprite_data(world_state.sprites);
     
     // Update game loop with new map
@@ -630,6 +641,21 @@ int main(int argc, char* argv[]) {
     game_loop.set_collision_data([&world_state](int32_t x, int32_t y) -> CollisionClass {
         return get_collision_from_blocks(world_state.map.blocks, 
             world_state.tileset.collision, world_state.map.width, x, y);
+    });
+    
+    // Bind canonical GameState BEFORE any RNG operation.
+    // set_rng_seed() and next_random() require game_state_ to be non-null.
+    game_loop.set_game_state(&game_state);
+    
+    // F3: Keep GameState::player authoritative.
+    // game_loop.player_ is the live simulation state.
+    // game_state.player is the save/warp-source authority.
+    // Sync on every step completion so execute_warp/execute_connection always
+    // reads the latest confirmed position, not the startup coords.
+    game_loop.set_movement_callback([&game_state, &game_loop](int32_t x, int32_t y, Direction facing) {
+        game_state.player.x = x;
+        game_state.player.y = y;
+        game_state.player.facing = facing;
     });
     
     // Set RNG seed for deterministic NPC movement (hash map_id string for seed)
@@ -1068,7 +1094,7 @@ int main(int argc, char* argv[]) {
                             auto warp_result = world_manager.execute_warp(*warp_at_pos, game_state);
                             if (warp_result.success) {
                                 std::string trans_error;
-                                transition_to_map(
+                                if (!transition_to_map(
                                     warp_result.target_map_id,
                                     warp_result.target_x,
                                     warp_result.target_y,
@@ -1076,7 +1102,9 @@ int main(int argc, char* argv[]) {
                                     world_state,
                                     transition_ctx,
                                     trans_error
-                                );
+                                )) {
+                                    std::cerr << "Collision-warp transition failed: " << trans_error << "\n";
+                                }
                             }
                         }
                     }
