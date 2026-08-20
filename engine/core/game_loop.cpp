@@ -716,21 +716,18 @@ void HeadlessGameLoop::restore_npc_states(const std::string& map_id) {
 // Reference: Gen2Recomped/src/world/NPC.lua
 //=============================================================================
 
-// Get next random value from the canonical gameplay RNG
-// REQUIRES game_state_ to be set - no fallback RNG
+// Get next random value — uses the MAP-LOCAL RNG for NPC movement.
+// This is separate from the canonical gameplay RNG (game_state_->rng).
+// Map-local RNG is seeded per map and does not affect save state.
 uint32_t HeadlessGameLoop::next_random() {
-    if (!game_state_) {
-        // This is a programming error - gameplay simulation requires GameState
-        throw std::runtime_error("HeadlessGameLoop::next_random() called without GameState");
-    }
-    return game_state_->rng.next();
+    return map_rng_.next();
 }
 
 void HeadlessGameLoop::set_rng_seed(uint32_t seed) {
-    if (!game_state_) {
-        throw std::runtime_error("HeadlessGameLoop::set_rng_seed() called without GameState");
-    }
-    game_state_->rng.set_seed(seed);
+    // Seeds the MAP-LOCAL RNG for NPC movement and map-scoped randomness.
+    // Does NOT touch the canonical gameplay RNG (game_state_->rng).
+    // The canonical gameplay RNG is a continuous save-persisted stream.
+    map_rng_.set_seed(seed);
 }
 
 void HeadlessGameLoop::freeze_npc(uint16_t npc_id) {

@@ -183,12 +183,18 @@ struct Op_Choice { std::vector<std::string> options; };
 struct Op_GiveItem { ItemId item; uint8_t count; };
 struct Op_TakeItem { ItemId item; uint8_t count; };
 struct Op_CheckItem { ItemId item; };
-struct Op_GiveMoney { uint32_t amount; };
-struct Op_TakeMoney { uint32_t amount; };
-struct Op_CheckMoney { uint32_t amount; };
+struct Op_GiveMoney { uint32_t amount; uint8_t account; };  // account: 0=player, 1=mom
+struct Op_TakeMoney { uint32_t amount; uint8_t account; };
+struct Op_CheckMoney { uint32_t amount; uint8_t account; };
 
 // Party/Pokemon
-struct Op_GivePokemon { SpeciesId species; uint8_t level; ItemId held_item; };
+struct Op_GivePokemon { 
+    SpeciesId species; 
+    uint8_t level; 
+    ItemId held_item;
+    std::string nickname;    // resolved from text pointer, empty if none
+    std::string ot_name;     // resolved from text pointer, empty if none
+};
 struct Op_HealParty {};
 struct Op_CheckPartyCount {};
 struct Op_CheckPartySpecies { SpeciesId species; };
@@ -203,7 +209,7 @@ struct Op_ApplyMovement {
     std::vector<MovementCommand> commands;  // Parsed semantic commands
 };
 struct Op_FacePlayer { uint8_t object_id; };
-struct Op_FaceObject { uint8_t object_id; Direction direction; };
+struct Op_FaceObject { uint8_t object_id; enginemon::Direction direction; };
 struct Op_ShowSprite { uint8_t object_id; };
 struct Op_HideSprite { uint8_t object_id; };
 struct Op_Warp { MapId map; uint8_t x; uint8_t y; };

@@ -119,10 +119,12 @@ void write_bool(std::vector<uint8_t>& out, bool val) {
     out.push_back(val ? 1 : 0);
 }
 
-// Read bool
+// Read bool — only accepts exactly 0 or 1 as valid boolean encodings
 bool read_bool(const uint8_t*& ptr, const uint8_t* end, bool& out) {
     if (ptr >= end) return false;
-    out = (*ptr++) != 0;
+    uint8_t val = *ptr++;
+    if (val > 1) return false;  // Only 0 or 1 are valid boolean encodings
+    out = (val != 0);
     return true;
 }
 
@@ -261,6 +263,11 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
         return result;
     }
     state.player.facing = static_cast<Direction>(facing);
+    // Validate Direction is within domain (0-3: Down=0, Up=1, Left=2, Right=3)
+    if (static_cast<uint8_t>(state.player.facing) > 3) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     
     uint8_t surfing = 0, on_bike = 0;
     if (!read_uint8(ptr, end, surfing)) {
@@ -416,6 +423,11 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
                     return result;
                 }
                 npc.facing = static_cast<Direction>(facing);
+                // Validate Direction is within domain (0-3)
+                if (static_cast<uint8_t>(npc.facing) > 3) {
+                    result.error = DeserializeError::CorruptedPayload;
+                    return result;
+                }
                 
                 if (!read_bool(ptr, end, npc.is_moving)) {
                     result.error = DeserializeError::CorruptedPayload;
@@ -451,6 +463,12 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
             
             state.npc_states[map_id] = std::move(npcs);
         }
+    
+    // Require exact payload consumption — no trailing bytes allowed
+    if (ptr != end) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
     
     result.error = DeserializeError::Success;
     return result;

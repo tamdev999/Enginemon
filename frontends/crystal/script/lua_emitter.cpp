@@ -348,7 +348,16 @@ void LuaEmitter::emit_op(std::ostream& out, const Op_GiveItem& op) {
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_GivePokemon& op) {
     std::ostringstream line;
-    line << "ctx.party:add_pokemon(" << op.species << ", " << (int)op.level << ")";
+    line << "ctx.party:add_pokemon({species=" << static_cast<int>(op.species)
+         << ", level=" << static_cast<int>(op.level)
+         << ", held_item=" << static_cast<int>(op.held_item);
+    if (!op.nickname.empty()) {
+        line << ", nickname=\"" << escape_string(op.nickname) << "\"";
+    }
+    if (!op.ot_name.empty()) {
+        line << ", ot_name=\"" << escape_string(op.ot_name) << "\"";
+    }
+    line << "})";
     emit_line(out, line.str());
 }
 
@@ -451,15 +460,15 @@ void LuaEmitter::emit_op(std::ostream& out, const Op_CheckItem& op) {
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_GiveMoney& op) {
-    emit_line(out, "ctx.inventory:give_money(" + std::to_string(op.amount) + ")");
+    emit_line(out, "ctx.inventory:give_money(" + std::to_string(op.amount) + ", " + std::to_string(op.account) + ")");
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_TakeMoney& op) {
-    emit_line(out, "ctx.inventory:take_money(" + std::to_string(op.amount) + ")");
+    emit_line(out, "ctx.inventory:take_money(" + std::to_string(op.amount) + ", " + std::to_string(op.account) + ")");
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_CheckMoney& op) {
-    emit_line(out, "result = ctx.inventory:has_money(" + std::to_string(op.amount) + ")");
+    emit_line(out, "result = ctx.inventory:has_money(" + std::to_string(op.amount) + ", " + std::to_string(op.account) + ")");
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_HealParty& op) {
@@ -534,7 +543,10 @@ void LuaEmitter::emit_op(std::ostream& out, const Op_FacePlayer& op) {
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_FaceObject& op) {
-    emit_line(out, "ctx.world:face_object(" + std::to_string(op.object_id) + ", \"down\")");
+    // face_actor is the single canonical world-facing API (already registered).
+    // Preserve the source direction — do NOT hardcode "down".
+    emit_line(out, "ctx.world:face_actor(" + std::to_string(op.object_id) +
+              ", \"" + direction_to_string(op.direction) + "\")");
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_ShowSprite& op) {

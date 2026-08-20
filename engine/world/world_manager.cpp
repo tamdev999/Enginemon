@@ -33,6 +33,20 @@ bool WorldManager::load_map(const std::string& map_id) {
     return true;
 }
 
+std::optional<RuntimeMap> WorldManager::acquire_map(const std::string& map_id) const {
+    if (!map_loader_) return std::nullopt;
+    return map_loader_(map_id);
+}
+
+void WorldManager::commit_map(const std::string& map_id, RuntimeMap&& map_data) {
+    std::string old_map_id = current_map_id_;
+    current_map_ = std::move(map_data);
+    current_map_id_ = map_id;
+    if (transition_cb_ && !old_map_id.empty()) {
+        transition_cb_(old_map_id, map_id);
+    }
+}
+
 //=============================================================================
 // WARPS
 //=============================================================================
@@ -162,11 +176,11 @@ WarpResult WorldManager::execute_warp(const RuntimeWarp& warp, GameState& state)
 }
 
 WarpResult WorldManager::prepare_warp(const RuntimeWarp& warp, GameState& state) {
-    // F4 corrected: Preparation must not mutate authoritative persistent state.
+    // F5 corrected: Preparation must not mutate authoritative persistent state.
     //
     // 1. resolve_warp() — pure computation, no side effects
-    // 2. load_map() — the only fallible operation; done here during PREPARATION
-    //    so commit becomes non-failing state application
+    // 2. acquire_map() — loads destination WITHOUT mutating current_map_/current_map_id_
+    //    stored in staged_map field; commit_warp() calls commit_map() to apply
     // 3. Stage warp_memory values in the result struct — applied during commit_warp()
     //
     // On any failure: state.warp_memory, state.player, WorldManager.current_map_ all unchanged.
@@ -184,21 +198,22 @@ WarpResult WorldManager::prepare_warp(const RuntimeWarp& warp, GameState& state)
     result.pending_backup_x = state.player.x;
     result.pending_backup_y = state.player.y;
     
-    // Perform the fallible map load HERE in preparation.
+    // Acquire destination map WITHOUT mutating current state.
     // If this fails, no persistent state has been touched.
-    if (!load_map(result.target_map_id)) {
+    auto acquired = acquire_map(result.target_map_id);
+    if (!acquired.has_value()) {
         result.success = false;
-        result.error = "Failed to load destination map: " + result.target_map_id;
+        result.error = "Failed to acquire destination map: " + result.target_map_id;
         return result;
     }
+    result.staged_map = std::move(acquired);
     
-    return result;  // success=true; state.warp_memory unchanged; state.player unchanged
+    return result;  // success=true; state.warp_memory unchanged; state.player unchanged; current_map_ unchanged
 }
 
 void WorldManager::commit_warp(const WarpResult& result, GameState& state) {
-    // F4: Non-failing state application — all fallible work done in prepare_warp().
-    // Apply staged warp_memory, then update state.player to destination.
-    // No load_map() call here — the map was already loaded in prepare_warp().
+    // F5: Non-failing state application — all fallible work done in prepare_warp().
+    // Apply staged warp_memory, commit staged map, then update state.player to destination.
     if (result.has_pending_outdoor) {
         state.warp_memory.map_id = result.pending_outdoor_map_id;
         state.warp_memory.x = result.pending_outdoor_x;
@@ -211,6 +226,12 @@ void WorldManager::commit_warp(const WarpResult& result, GameState& state) {
     state.player.x = result.target_x;
     state.player.y = result.target_y;
     // facing is set by spawn_player() in the transition_to_map commit block
+    
+    // Commit the staged map to WorldManager (non-failing)
+    if (result.staged_map.has_value()) {
+        RuntimeMap map_copy = *result.staged_map;
+        commit_map(result.target_map_id, std::move(map_copy));
+    }
 }
 
 WarpResult WorldManager::execute_warp_at(int32_t x, int32_t y, GameState& state) {

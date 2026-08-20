@@ -114,7 +114,8 @@ int text_sequence(lua_State* L) {
         // Stack: element table at -1 (or nil/non-table for holes)
         if (!lua_istable(L, -1)) {
             lua_pop(L, 1);
-            continue;  // skip holes (shouldn't exist in well-formed emitter output)
+            // F2: Holes are errors, not silent skips
+            return luaL_error(L, "text_sequence: hole at index %d", i);
         }
         
         // Read "op" field
@@ -151,6 +152,84 @@ int text_sequence(lua_State* L) {
             }
             else if (op == "prompt") {
                 seq.elements.push_back(RuntimeTextElement::make_prompt());
+            }
+            // F2: Handle dynamic text ops — preserve them instead of silently dropping
+            else if (op == "ram") {
+                RuntimeTextElement e;
+                e.op = RuntimeTextOp::Ram;
+                lua_getfield(L, -1, "addr");
+                e.addr = static_cast<uint32_t>(lua_tointeger(L, -1));
+                lua_pop(L, 1);
+                seq.elements.push_back(e);
+            }
+            else if (op == "bcd") {
+                RuntimeTextElement e;
+                e.op = RuntimeTextOp::Bcd;
+                lua_getfield(L, -1, "addr"); e.addr = static_cast<uint32_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                lua_getfield(L, -1, "flags"); e.param = static_cast<uint8_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                seq.elements.push_back(e);
+            }
+            else if (op == "decimal") {
+                RuntimeTextElement e;
+                e.op = RuntimeTextOp::Decimal;
+                lua_getfield(L, -1, "addr"); e.addr = static_cast<uint32_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                lua_getfield(L, -1, "param"); e.param = static_cast<uint8_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                seq.elements.push_back(e);
+            }
+            else if (op == "buffer") {
+                RuntimeTextElement e;
+                e.op = RuntimeTextOp::Buffer;
+                lua_getfield(L, -1, "id"); e.param = static_cast<uint8_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                seq.elements.push_back(e);
+            }
+            else if (op == "far") {
+                RuntimeTextElement e;
+                e.op = RuntimeTextOp::Far;
+                lua_getfield(L, -1, "addr"); e.addr = static_cast<uint32_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                lua_getfield(L, -1, "bank"); e.param = static_cast<uint8_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                seq.elements.push_back(e);
+            }
+            else if (op == "move") {
+                RuntimeTextElement e;
+                e.op = RuntimeTextOp::Move;
+                lua_getfield(L, -1, "pos"); e.addr = static_cast<uint32_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                seq.elements.push_back(e);
+            }
+            else if (op == "box") {
+                RuntimeTextElement e;
+                e.op = RuntimeTextOp::Box;
+                lua_getfield(L, -1, "addr"); e.addr = static_cast<uint32_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                lua_getfield(L, -1, "w"); e.param = static_cast<uint8_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                lua_getfield(L, -1, "h"); e.param2 = static_cast<uint8_t>(lua_tointeger(L, -1)); lua_pop(L, 1);
+                seq.elements.push_back(e);
+            }
+            else if (op == "low") {
+                RuntimeTextElement e; e.op = RuntimeTextOp::Low; seq.elements.push_back(e);
+            }
+            else if (op == "waitbutton") {
+                RuntimeTextElement e; e.op = RuntimeTextOp::WaitButton; seq.elements.push_back(e);
+            }
+            else if (op == "txscroll") {
+                RuntimeTextElement e; e.op = RuntimeTextOp::TxScroll; seq.elements.push_back(e);
+            }
+            else if (op == "pause") {
+                RuntimeTextElement e; e.op = RuntimeTextOp::Unsupported; e.op_name = "pause"; seq.elements.push_back(e);
+            }
+            else if (op == "day") {
+                RuntimeTextElement e; e.op = RuntimeTextOp::Day; seq.elements.push_back(e);
+            }
+            else if (op == "snd_item" || op == "snd_caught" || op == "snd_fanfare") {
+                RuntimeTextElement e; e.op = RuntimeTextOp::Sound; e.op_name = op; seq.elements.push_back(e);
+            }
+            else if (op == "raw") {
+                RuntimeTextElement e; e.op = RuntimeTextOp::Raw; seq.elements.push_back(e);
+            }
+            else if (op == "asm") {
+                RuntimeTextElement e; e.op = RuntimeTextOp::Asm; seq.elements.push_back(e);
+            }
+            else {
+                // Unknown op — preserve as Unsupported with op_name so presentation layer knows
+                seq.elements.push_back(RuntimeTextElement::make_unsupported(op));
             }
         }
         lua_pop(L, 1);  // Pop element table
@@ -448,11 +527,18 @@ int teleport_player(lua_State* L) {
     return 0;
 }
 
-// ctx.world:warp(map_id, warp_id) - yields during transition
+// ctx.world:warp(map_id, x, y) — scripted warp to map coordinates
+// Source: Script_warp passes (group, map, x, y) → semantic Sem_Warp{map, x, y}
+// The emitter passes map ID + tile coordinates, matching Crystal's actual warp semantics.
 int warp(lua_State* L) {
+    auto& stubs = get_stubs(L);
     int map_id = luaL_checkinteger(L, 2);
-    int warp_id = luaL_checkinteger(L, 3);
-    (void)map_id; (void)warp_id;
+    int x = luaL_checkinteger(L, 3);
+    int y = luaL_checkinteger(L, 4);
+    stubs.last_warp_map = map_id;
+    stubs.last_warp_x = x;
+    stubs.last_warp_y = y;
+    stubs.movement_calls.push_back({"warp", std::to_string(map_id) + "," + std::to_string(x) + "," + std::to_string(y)});
     return 0;
 }
 
@@ -557,11 +643,37 @@ int heal_all(lua_State* L) {
     return 0;
 }
 
-// ctx.party:add_pokemon(species_id, level) -> bool
+// ctx.party:add_pokemon(species_id, level) -> bool  (legacy)
+// ctx.party:add_pokemon({species=, level=, held_item=, nickname=, ot_name=}) -> bool (new)
 int add_pokemon(lua_State* L) {
-    int species_id = luaL_checkinteger(L, 2);
-    int level = luaL_checkinteger(L, 3);
-    (void)species_id; (void)level;
+    int species_id = 0, level = 5;
+    ItemId held_item = 0;
+    std::string nickname, ot_name;
+    
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "species");   species_id = static_cast<int>(lua_tointeger(L, -1)); lua_pop(L, 1);
+        lua_getfield(L, 2, "level");     level = static_cast<int>(lua_tointeger(L, -1)); lua_pop(L, 1);
+        lua_getfield(L, 2, "held_item"); held_item = static_cast<ItemId>(lua_tointeger(L, -1)); lua_pop(L, 1);
+        lua_getfield(L, 2, "nickname");
+        if (!lua_isnil(L, -1)) { const char* s = lua_tostring(L, -1); if (s) nickname = s; }
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "ot_name");
+        if (!lua_isnil(L, -1)) { const char* s = lua_tostring(L, -1); if (s) ot_name = s; }
+        lua_pop(L, 1);
+    } else {
+        species_id = static_cast<int>(luaL_checkinteger(L, 2));
+        level = static_cast<int>(luaL_optinteger(L, 3, 5));
+    }
+    
+    // Store results in stubs for testing
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+    stubs.last_add_pokemon_species = species_id;
+    stubs.last_add_pokemon_level = level;
+    stubs.last_add_pokemon_held_item = held_item;
+    stubs.last_add_pokemon_nickname = nickname;
+    stubs.last_add_pokemon_ot_name = ot_name;
+    
     lua_pushboolean(L, true);
     return 1;
 }
@@ -620,23 +732,34 @@ int count(lua_State* L) {
     return 1;
 }
 
-// ctx.inventory:give_money(amount)
+// ctx.inventory:give_money(amount, account?) - account: 0=player, 1=mom
 int give_money(lua_State* L) {
     int amount = luaL_checkinteger(L, 2);
-    (void)amount;
+    int account = static_cast<int>(luaL_optinteger(L, 3, 0));
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+    stubs.last_give_money_amount = amount;
+    stubs.last_give_money_account = account;
     return 0;
 }
 
-// ctx.inventory:take_money(amount) -> bool
+// ctx.inventory:take_money(amount, account?) -> bool
 int take_money(lua_State* L) {
     int amount = luaL_checkinteger(L, 2);
+    int account = static_cast<int>(luaL_optinteger(L, 3, 0));
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+    stubs.last_take_money_amount = amount;
+    stubs.last_take_money_account = account;
     lua_pushboolean(L, true);
     return 1;
 }
 
-// ctx.inventory:has_money(amount) -> bool
+// ctx.inventory:has_money(amount, account?) -> bool
 int has_money(lua_State* L) {
     int amount = luaL_checkinteger(L, 2);
+    int account = static_cast<int>(luaL_optinteger(L, 3, 0));
+    (void)amount; (void)account;
     lua_pushboolean(L, false);
     return 1;
 }
@@ -1159,14 +1282,29 @@ std::string RuntimeTextSequence::debug_string() const {
     std::string result;
     for (const auto& elem : elements) {
         switch (elem.op) {
-            case RuntimeTextOp::Text:   result += elem.text; break;
-            case RuntimeTextOp::Line:   result += "[LINE]"; break;
-            case RuntimeTextOp::Next:   result += "[NEXT]"; break;
-            case RuntimeTextOp::Para:   result += "[PARA]"; break;
-            case RuntimeTextOp::Cont:   result += "[CONT]"; break;
-            case RuntimeTextOp::Scroll: result += "[SCROLL]"; break;
-            case RuntimeTextOp::Done:   result += "[DONE]"; break;
-            case RuntimeTextOp::Prompt: result += "[PROMPT]"; break;
+            case RuntimeTextOp::Text:        result += elem.text; break;
+            case RuntimeTextOp::Line:        result += "[LINE]"; break;
+            case RuntimeTextOp::Next:        result += "[NEXT]"; break;
+            case RuntimeTextOp::Para:        result += "[PARA]"; break;
+            case RuntimeTextOp::Cont:        result += "[CONT]"; break;
+            case RuntimeTextOp::Scroll:      result += "[SCROLL]"; break;
+            case RuntimeTextOp::Done:        result += "[DONE]"; break;
+            case RuntimeTextOp::Prompt:      result += "[PROMPT]"; break;
+            case RuntimeTextOp::Ram:         result += "[RAM:" + std::to_string(elem.addr) + "]"; break;
+            case RuntimeTextOp::Bcd:         result += "[BCD:" + std::to_string(elem.addr) + "]"; break;
+            case RuntimeTextOp::Decimal:     result += "[DECIMAL:" + std::to_string(elem.addr) + "]"; break;
+            case RuntimeTextOp::Buffer:      result += "[BUFFER:" + std::to_string(elem.param) + "]"; break;
+            case RuntimeTextOp::Far:         result += "[FAR:" + std::to_string(elem.addr) + "]"; break;
+            case RuntimeTextOp::Move:        result += "[MOVE]"; break;
+            case RuntimeTextOp::Box:         result += "[BOX]"; break;
+            case RuntimeTextOp::Day:         result += "[DAY]"; break;
+            case RuntimeTextOp::Low:         result += "[LOW]"; break;
+            case RuntimeTextOp::WaitButton:  result += "[WAITBUTTON]"; break;
+            case RuntimeTextOp::TxScroll:    result += "[TXSCROLL]"; break;
+            case RuntimeTextOp::Sound:       result += "[SOUND:" + elem.op_name + "]"; break;
+            case RuntimeTextOp::Raw:         result += "[RAW]"; break;
+            case RuntimeTextOp::Asm:         result += "[ASM]"; break;
+            case RuntimeTextOp::Unsupported: result += "[?" + elem.op_name + "?]"; break;
         }
     }
     return result;

@@ -316,9 +316,17 @@ public:
     GameState* game_state() { return game_state_; }
     const GameState* game_state() const { return game_state_; }
     
-    // Set RNG seed - REQUIRES GameState to be set
-    // Throws if no GameState is available (no fallback RNG)
+    // Set RNG seed — writes the MAP-LOCAL RNG only.
+    // Does NOT touch the canonical gameplay RNG (game_state_->rng).
+    // The canonical gameplay RNG is a continuous save-persisted stream.
+    // No GameState required — map_rng_ is loop-owned.
     void set_rng_seed(uint32_t seed);
+    
+    // Get/set map-local RNG state (for save/restore of NPC movement determinism).
+    // map_rng_ is loop-local and NOT serialized in GameState.
+    // To restore deterministic NPC simulation after load, snapshot and restore this too.
+    RngState get_map_rng_state() const { return map_rng_; }
+    void set_map_rng_state(const RngState& state) { map_rng_ = state; }
     
     //=========================================================================
     // NPC STATE SNAPSHOT/RESTORE
@@ -388,6 +396,12 @@ private:
     // Used for RNG and other gameplay state
     // REQUIRED for gameplay simulation - no fallback RNG
     GameState* game_state_ = nullptr;
+    
+    // Map-local RNG for NPC movement and map-scoped randomness.
+    // This is NOT the canonical gameplay RNG (game_state_->rng).
+    // Seeded from map identity on each map load — does not affect save state.
+    // set_rng_seed() writes ONLY this member; game_state_->rng is untouched.
+    RngState map_rng_;
     
     //=========================================================================
     // INTERNAL HELPERS

@@ -118,10 +118,28 @@ struct StubServices {
     std::unique_ptr<MovementManager> movement_manager;
     bool async_movement_enabled = false;
     
+    // Warp stub state (for F4)
+    int last_warp_map = 0;
+    int last_warp_x = -1;
+    int last_warp_y = -1;
+    
     // Flag API stub state
     std::unordered_map<int, bool> flags;
     std::unordered_map<int, int> vars;
     std::vector<std::pair<std::string, int>> flag_calls;
+    
+    // Party add_pokemon stub state (for F3)
+    int last_add_pokemon_species = 0;
+    int last_add_pokemon_level = 0;
+    ItemId last_add_pokemon_held_item = 0;
+    std::string last_add_pokemon_nickname;
+    std::string last_add_pokemon_ot_name;
+    
+    // Money stub state (for F8)
+    int last_give_money_amount = 0;
+    int last_give_money_account = 0;
+    int last_take_money_amount = 0;
+    int last_take_money_account = 0;
     
     // Field API stub configuration
     StubFieldConfig field_config;
@@ -135,9 +153,21 @@ struct StubServices {
             movement_manager->cancel_all();
             movement_manager->clear_pending_completions();
         }
+        last_warp_map = 0;
+        last_warp_x = -1;
+        last_warp_y = -1;
         flags.clear();
         vars.clear();
         flag_calls.clear();
+        last_add_pokemon_species = 0;
+        last_add_pokemon_level = 0;
+        last_add_pokemon_held_item = 0;
+        last_add_pokemon_nickname.clear();
+        last_add_pokemon_ot_name.clear();
+        last_give_money_amount = 0;
+        last_give_money_account = 0;
+        last_take_money_amount = 0;
+        last_take_money_account = 0;
         field_config = StubFieldConfig{};
     }
     

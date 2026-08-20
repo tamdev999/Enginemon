@@ -182,21 +182,46 @@ enum class RuntimeTextOp : uint8_t {
     Scroll,     // Scroll without wait
     Done,       // End text processing
     Prompt,     // Show cursor, wait, end
+    Ram,        // TX_RAM: display RAM contents {addr}
+    Bcd,        // TX_BCD: display BCD number {addr, flags}
+    Decimal,    // TX_DECIMAL: display decimal {addr, param}
+    Buffer,     // TX_STRINGBUFFER: display string buffer {id}
+    Far,        // TX_FAR: far text pointer {addr, bank}
+    Move,       // TX_MOVE: move cursor {pos}
+    Box,        // TX_BOX: draw text box {addr, w, h}
+    Day,        // TX_DAY: day of week
+    Low,        // TX_LOW: move to bottom
+    WaitButton, // TX_PROMPTBUTTON in text
+    TxScroll,   // TX_SCROLL
+    Sound,      // Sound effect in text
+    Raw,        // Raw bytes
+    Asm,        // Inline ASM
+    Unsupported,// Op received but not yet implemented by runtime
 };
 
 // Single element in a runtime text sequence
 struct RuntimeTextElement {
     RuntimeTextOp op;
-    std::string text;  // Only for RuntimeTextOp::Text
+    std::string text;      // For RuntimeTextOp::Text
+    std::string op_name;   // For RuntimeTextOp::Unsupported: the original op string
+    uint32_t addr = 0;     // For Ram/Bcd/Decimal/Far/Move/Box: address/pointer
+    uint8_t param = 0;     // For Bcd: flags; Decimal: bytes|digits; Buffer: id; Box: w; Far: bank
+    uint8_t param2 = 0;    // For Box: h
     
     static RuntimeTextElement make_text(const std::string& s) { return {RuntimeTextOp::Text, s}; }
-    static RuntimeTextElement make_line() { return {RuntimeTextOp::Line, ""}; }
-    static RuntimeTextElement make_next() { return {RuntimeTextOp::Next, ""}; }
-    static RuntimeTextElement make_para() { return {RuntimeTextOp::Para, ""}; }
-    static RuntimeTextElement make_cont() { return {RuntimeTextOp::Cont, ""}; }
-    static RuntimeTextElement make_scroll() { return {RuntimeTextOp::Scroll, ""}; }
-    static RuntimeTextElement make_done() { return {RuntimeTextOp::Done, ""}; }
-    static RuntimeTextElement make_prompt() { return {RuntimeTextOp::Prompt, ""}; }
+    static RuntimeTextElement make_line() { return {RuntimeTextOp::Line}; }
+    static RuntimeTextElement make_next() { return {RuntimeTextOp::Next}; }
+    static RuntimeTextElement make_para() { return {RuntimeTextOp::Para}; }
+    static RuntimeTextElement make_cont() { return {RuntimeTextOp::Cont}; }
+    static RuntimeTextElement make_scroll() { return {RuntimeTextOp::Scroll}; }
+    static RuntimeTextElement make_done() { return {RuntimeTextOp::Done}; }
+    static RuntimeTextElement make_prompt() { return {RuntimeTextOp::Prompt}; }
+    static RuntimeTextElement make_unsupported(const std::string& name) {
+        RuntimeTextElement e;
+        e.op = RuntimeTextOp::Unsupported;
+        e.op_name = name;
+        return e;
+    }
 };
 
 // Complete runtime text sequence

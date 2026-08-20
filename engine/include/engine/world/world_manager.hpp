@@ -47,6 +47,10 @@ struct WarpResult {
     std::string pending_backup_map_id;
     int32_t pending_backup_x = 0;
     int32_t pending_backup_y = 0;
+    
+    // Staged destination map (loaded by prepare_warp via acquire_map, committed by commit_warp).
+    // If present, commit_warp calls commit_map with this data instead of calling load_map.
+    std::optional<RuntimeMap> staged_map;
 };
 
 //=============================================================================
@@ -90,6 +94,15 @@ public:
     // Get current map
     const RuntimeMap* current_map() const { return current_map_.has_value() ? &current_map_.value() : nullptr; }
     const std::string& current_map_id() const { return current_map_id_; }
+    
+    // Acquire destination map data without changing current state.
+    // Returns the loaded RuntimeMap (or nullopt if not found).
+    // Does NOT modify current_map_, current_map_id_, or fire transition_cb_.
+    std::optional<RuntimeMap> acquire_map(const std::string& map_id) const;
+    
+    // Commit a previously acquired map as the new current map.
+    // Fires transition_cb_ if registered.
+    void commit_map(const std::string& map_id, RuntimeMap&& map_data);
     
     //=========================================================================
     // WARPS
