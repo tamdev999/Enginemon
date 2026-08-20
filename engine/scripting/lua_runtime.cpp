@@ -8,6 +8,8 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>  // For std::ceil in WaitSeconds tick conversion
+#include <vector>
+#include <algorithm>
 
 namespace enginemon {
 
@@ -421,10 +423,20 @@ void LuaRuntime::load_script_file(const std::filesystem::path& path) {
 }
 
 void LuaRuntime::load_script_directory(const std::filesystem::path& dir) {
+    // Collect all .lua paths first, then sort lexicographically before executing.
+    // std::filesystem::directory_iterator order is filesystem-implementation-defined
+    // and non-reproducible across OS versions and filesystem types.
+    // Sorting by path string guarantees identical load order regardless of
+    // directory entry creation order.
+    std::vector<std::filesystem::path> paths;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (entry.path().extension() == ".lua") {
-            load_script_file(entry.path());
+            paths.push_back(entry.path());
         }
+    }
+    std::sort(paths.begin(), paths.end());
+    for (const auto& p : paths) {
+        load_script_file(p);
     }
 }
 

@@ -77,6 +77,16 @@ FullGameCompiler::~FullGameCompiler() = default;
 
 bool FullGameCompiler::compile(const std::filesystem::path& output_path,
                                 const FullCompilerConfig& config) {
+    // Single-use contract: once compile() has been called (successfully or not),
+    // the instance cannot be reused.  Accumulated build state is not reset
+    // between calls; a second call would collide on duplicate map/tileset IDs.
+    if (compile_called_) {
+        throw std::logic_error(
+            "FullGameCompiler::compile() called more than once on the same instance. "
+            "Create a new FullGameCompiler for each compilation.");
+    }
+    compile_called_ = true;
+
     std::cout << "=== Full Game Crystal Compiler ===\n";
     std::cout << "Source ROM: " << profile_.version_string << "\n";
     std::cout << "Output: " << output_path << "\n\n";

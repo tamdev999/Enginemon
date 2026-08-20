@@ -9,14 +9,19 @@ void TypeChart::set_effectiveness(TypeId attacking, TypeId defending, uint8_t mu
     if (frozen_) {
         throw RegistryError("Cannot modify frozen type chart");
     }
-    if (attacking < MAX_TYPES && defending < MAX_TYPES) {
-        chart_[attacking][defending] = multiplier;
+    if (attacking >= MAX_TYPES || defending >= MAX_TYPES) {
+        throw std::out_of_range(
+            "TypeChart::set_effectiveness: TypeId out of range (max " +
+            std::to_string(MAX_TYPES - 1) + ")");
     }
+    chart_[attacking][defending] = multiplier;
 }
 
 uint8_t TypeChart::get_effectiveness(TypeId attacking, TypeId defending) const {
     if (attacking >= MAX_TYPES || defending >= MAX_TYPES) {
-        return 10; // Normal effectiveness as fallback for out-of-range types
+        throw std::out_of_range(
+            "TypeChart::get_effectiveness: TypeId out of range (max " +
+            std::to_string(MAX_TYPES - 1) + ")");
     }
     // Return exactly what was stored - chart is pre-filled with 10 (neutral)
     // 0 means immune (explicitly set), not "unset"

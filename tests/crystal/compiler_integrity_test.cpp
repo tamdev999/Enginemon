@@ -411,6 +411,71 @@ TEST(truncated_connection_in_traversal_fails_discovery) {
 }
 
 //=============================================================================
+// FIX 5: FullGameCompiler single-use contract
+//=============================================================================
+
+// Test: successful compile → second call on same instance must throw.
+TEST(compiler_single_use_success_then_retry_throws) {
+    auto out1 = temp_emon_path("su_first");
+    auto out2 = temp_emon_path("su_retry");
+    std::filesystem::remove(out1);
+    std::filesystem::remove(out2);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+
+    // First call: expected to succeed
+    bool ok = compiler.compile(out1, no_cache_config());
+    ASSERT_TRUE(ok);
+
+    // Second call on same instance: must throw std::logic_error
+    bool threw = false;
+    try {
+        compiler.compile(out2, no_cache_config());
+    } catch (const std::logic_error&) {
+        threw = true;
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+
+    if (std::filesystem::exists(out1)) std::filesystem::remove(out1);
+    if (std::filesystem::exists(out2)) std::filesystem::remove(out2);
+
+    std::cout << "  [single-use: success → second compile() throws ✓]\n";
+}
+
+// Test: failed first compile → retry on same instance also throws.
+TEST(compiler_single_use_failed_first_retry_throws) {
+    auto out1 = temp_emon_path("su_fail1");
+    auto out2 = temp_emon_path("su_fail2");
+    std::filesystem::remove(out1);
+    std::filesystem::remove(out2);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+
+    // Inject a failure so first call returns false
+    compiler.for_test_fail_tileset("johto_outdoor");
+    bool ok = compiler.compile(out1, no_cache_config());
+    ASSERT_FALSE(ok);  // Should have failed
+
+    // Retry on the same (failed) instance must also throw
+    bool threw = false;
+    try {
+        compiler.compile(out2, no_cache_config());
+    } catch (const std::logic_error&) {
+        threw = true;
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+
+    if (std::filesystem::exists(out1)) std::filesystem::remove(out1);
+    if (std::filesystem::exists(out2)) std::filesystem::remove(out2);
+
+    std::cout << "  [single-use: failed first compile → retry also throws ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -459,6 +524,10 @@ int main(int argc, char* argv[]) {
     // F2: Traversal truncation
     RUN_TEST(truncated_warp_in_traversal_fails_discovery);
     RUN_TEST(truncated_connection_in_traversal_fails_discovery);
+
+    // Fix 5: single-use contract
+    RUN_TEST(compiler_single_use_success_then_retry_throws);
+    RUN_TEST(compiler_single_use_failed_first_retry_throws);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <bit>
 #include <format>
 #include <stdexcept>
 #include <numeric>
@@ -440,10 +441,10 @@ void PackageWriter::add_tileset_atlas(const TilesetAtlas& atlas) {
     
     // UV data
     for (const auto& uv : atlas.metatile_uvs) {
-        write_le(out, *reinterpret_cast<const uint32_t*>(&uv.u0));
-        write_le(out, *reinterpret_cast<const uint32_t*>(&uv.v0));
-        write_le(out, *reinterpret_cast<const uint32_t*>(&uv.u1));
-        write_le(out, *reinterpret_cast<const uint32_t*>(&uv.v1));
+        write_le(out, std::bit_cast<uint32_t>(uv.u0));
+        write_le(out, std::bit_cast<uint32_t>(uv.v0));
+        write_le(out, std::bit_cast<uint32_t>(uv.u1));
+        write_le(out, std::bit_cast<uint32_t>(uv.v1));
     }
     
     // Collision data
@@ -585,10 +586,10 @@ void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
     // Glyph UV count and data
     write_le(out, static_cast<uint32_t>(atlas.glyph_uvs.size()));
     for (const auto& uv : atlas.glyph_uvs) {
-        write_le(out, *reinterpret_cast<const uint32_t*>(&uv.u0));
-        write_le(out, *reinterpret_cast<const uint32_t*>(&uv.v0));
-        write_le(out, *reinterpret_cast<const uint32_t*>(&uv.u1));
-        write_le(out, *reinterpret_cast<const uint32_t*>(&uv.v1));
+        write_le(out, std::bit_cast<uint32_t>(uv.u0));
+        write_le(out, std::bit_cast<uint32_t>(uv.v0));
+        write_le(out, std::bit_cast<uint32_t>(uv.u1));
+        write_le(out, std::bit_cast<uint32_t>(uv.v1));
     }
     
     // Charmap entries (native format: UTF-8 → GlyphId)

@@ -39,6 +39,8 @@
 
 #include <iostream>
 #include <sstream>
+#include <fstream>
+#include <filesystem>
 #include <array>
 #include <map>
 #include <unordered_map>
@@ -4785,6 +4787,162 @@ TEST(typechart_explicit_values_survive_lookup) {
     ASSERT_EQ(chart.get_effectiveness(4, 4), 20);
     
     std::cout << "  [All explicit effectiveness values survive lookup unchanged]\n";
+}
+
+// =============================================================================
+// POST-ORACLE CLEANUP TESTS
+// =============================================================================
+
+// Fix 2: create_pokemon hard-fail on missing SpeciesId
+TEST(create_pokemon_missing_species_throws) {
+    // NEGATIVE TEST: SpeciesId not in registry → must throw, not return zero-stat Pokémon
+    Registries reg;  // Empty registry — no species registered
+
+    RngState rng;
+    rng.set_seed(42);
+
+    bool threw = false;
+    try {
+        // SpeciesId 99 is not in the empty registry
+        auto mon = create_pokemon(static_cast<SpeciesId>(99), 5, rng, reg);
+        (void)mon;
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+    std::cout << "  [create_pokemon: missing SpeciesId throws, not zero-stat Pokémon ✓]\n";
+}
+
+TEST(create_pokemon_registered_species_succeeds) {
+    // POSITIVE TEST: registered species → succeeds, stats > 0
+    Registries reg;
+    SpeciesData sd;
+    sd.base_stats.hp      = 45;
+    sd.base_stats.attack  = 49;
+    sd.base_stats.defense = 49;
+    sd.base_stats.speed   = 45;
+    sd.base_stats.special_attack  = 65;
+    sd.base_stats.special_defense = 65;
+    sd.name = "Bulbasaur";
+    reg.species.register_entry(static_cast<SpeciesId>(1), sd);
+
+    RngState rng;
+    rng.set_seed(42);
+    auto mon = create_pokemon(static_cast<SpeciesId>(1), 10, rng, reg);
+
+    ASSERT_EQ(mon.species, static_cast<SpeciesId>(1));
+    ASSERT_TRUE(mon.max_hp > 0);
+    ASSERT_TRUE(mon.current_hp > 0);
+    ASSERT_EQ(mon.level, 10);
+    std::cout << "  [create_pokemon: registered species produces valid Pokémon (HP=" << mon.max_hp << ") ✓]\n";
+}
+
+// Fix 3: TypeChart invalid TypeId throws
+TEST(typechart_out_of_range_get_throws) {
+    // NEGATIVE TEST: TypeId ≥ MAX_TYPES (32) must throw, not return neutral 10
+    TypeChart chart;
+    bool threw = false;
+    try {
+        (void)chart.get_effectiveness(32, 0);  // 32 == MAX_TYPES → out of range
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+
+    bool threw2 = false;
+    try {
+        (void)chart.get_effectiveness(0, 32);  // defender out of range
+    } catch (const std::out_of_range&) {
+        threw2 = true;
+    }
+    ASSERT_TRUE(threw2);
+    std::cout << "  [TypeChart: TypeId≥32 throws out_of_range ✓]\n";
+}
+
+TEST(typechart_out_of_range_set_throws) {
+    // NEGATIVE TEST: set_effectiveness with out-of-range TypeId throws
+    TypeChart chart;
+    bool threw = false;
+    try {
+        chart.set_effectiveness(32, 0, 20);  // attacker out of range
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+
+    // In-range set must still work (regression check)
+    chart.set_effectiveness(1, 2, 20);
+    ASSERT_EQ(chart.get_effectiveness(1, 2), 20);
+    std::cout << "  [TypeChart: set_effectiveness out-of-range throws; in-range still works ✓]\n";
+}
+
+TEST(typechart_max_valid_index_accepted) {
+    // BOUNDARY TEST: TypeId 31 (MAX_TYPES-1) is the last valid index
+    TypeChart chart;
+    chart.set_effectiveness(31, 31, 5);
+    ASSERT_EQ(chart.get_effectiveness(31, 31), 5);
+    std::cout << "  [TypeChart: TypeId 31 (MAX_TYPES-1) is valid boundary ✓]\n";
+}
+
+TEST(typechart_dual_type_out_of_range_throws) {
+    // NEGATIVE TEST: dual-type overload propagates the throw
+    TypeChart chart;
+    bool threw = false;
+    try {
+        (void)chart.get_effectiveness(1, 32, 0);  // def1 out of range
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+    std::cout << "  [TypeChart: dual-type with out-of-range TypeId throws ✓]\n";
+}
+
+// Fix 4: Lua load_script_directory deterministic sort
+TEST(lua_load_script_directory_deterministic_order) {
+    // DETERMINISM TEST: two scripts define the same global key with different values.
+    // Lexicographic sort → a_script.lua loads first, b_script.lua loads second → b wins.
+    // Creation order is reversed to prove sort overrides filesystem order.
+    {
+        auto tmp = std::filesystem::temp_directory_path() / "oracle_lua_order_test";
+        std::filesystem::create_directories(tmp);
+
+        // Write b_script.lua first (creation order: b before a — "wrong" filesystem order)
+        {
+            std::ofstream f(tmp / "b_script.lua");
+            f << "g_order_winner = 'b'\n";
+        }
+        // Write a_script.lua second (creation order: a after b)
+        {
+            std::ofstream f(tmp / "a_script.lua");
+            f << "g_order_winner = 'a'\n";
+        }
+
+        // load_script_directory sorts lexicographically:
+        //   a_script.lua < b_script.lua → a loads first, b loads second → b wins.
+        // Without sort: filesystem might return b first → a loads second → a would win.
+        LuaRuntime rt;
+        rt.load_script_directory(tmp);
+
+        // Verify by running a Lua snippet that asserts g_order_winner == 'b'
+        // If sort is working, b loaded last → 'b' wins.
+        // If sort is broken and creation order was used, 'a' would win and this throws.
+        bool threw = false;
+        try {
+            rt.execute_string(
+                "assert(g_order_winner == 'b', "
+                "'expected b (lexicographic last) but got: ' .. tostring(g_order_winner))",
+                "order_check");
+        } catch (const std::exception& e) {
+            threw = true;
+            std::cerr << "  [FAIL detail: " << e.what() << "]\n";
+        }
+        ASSERT_FALSE(threw);
+
+        std::filesystem::remove_all(tmp);
+    }
+    std::cout << "  [Lua load_script_directory: sorted — b_script.lua wins over creation order ✓]\n";
 }
 
 TEST(pcstorage_deposit_moves_pokemon_exactly_once) {
@@ -15078,6 +15236,16 @@ int main(int argc, char* argv[]) {
     RUN_TEST(typechart_immunity_is_zero_not_unset);
     RUN_TEST(typechart_dual_type_immunity_remains_zero);
     RUN_TEST(typechart_explicit_values_survive_lookup);
+    // Fix 2: create_pokemon hard-fail
+    RUN_TEST(create_pokemon_missing_species_throws);
+    RUN_TEST(create_pokemon_registered_species_succeeds);
+    // Fix 3: TypeChart domain enforcement
+    RUN_TEST(typechart_out_of_range_get_throws);
+    RUN_TEST(typechart_out_of_range_set_throws);
+    RUN_TEST(typechart_max_valid_index_accepted);
+    RUN_TEST(typechart_dual_type_out_of_range_throws);
+    // Fix 4: Lua load order determinism
+    RUN_TEST(lua_load_script_directory_deterministic_order);
     RUN_TEST(pcstorage_deposit_moves_pokemon_exactly_once);
     RUN_TEST(pokemon_move_slots_initialized_to_defaults);
     RUN_TEST(connection_strip_first_valid_coordinate);

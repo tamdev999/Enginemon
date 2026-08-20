@@ -404,6 +404,11 @@ private:
     std::unordered_set<std::string> emitted_sprite_ids_;
     bool emitted_obj_palettes_ = false;
     bool emitted_font_ = false;
+
+    // Single-use contract: compile() must not be called more than once on the
+    // same instance.  Accumulated build state (content_, linker_input_, etc.)
+    // is not reset between calls and would produce colliding IDs or stale data.
+    bool compile_called_ = false;
     
     //=========================================================================
     // TEST SEAMS

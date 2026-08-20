@@ -4,6 +4,7 @@
 #include "engine/party/pokemon.hpp"
 #include "engine/core/registry.hpp"
 #include "engine/core/game_state.hpp"  // For RngState
+#include <stdexcept>
 
 namespace enginemon {
 
@@ -173,14 +174,17 @@ Pokemon create_pokemon(SpeciesId species, uint8_t level, Pokemon::DVs dvs, const
     // Zero stat exp for new Pokemon
     mon.stat_exp = {0, 0, 0, 0, 0};
     
-    // Get species data for stats and moves
+    // Get species data for stats and moves — species MUST be in registry.
+    // A missing SpeciesId means the caller passed an invalid/unregistered species.
+    // Creating a zero-stat Pokémon would silently corrupt gameplay state.
     const SpeciesData* sp_data = reg.species.get(species);
-    if (sp_data) {
-        mon.recalculate_stats(*sp_data);
-        mon.current_hp = mon.max_hp;
-        
-        // TODO: Initial moves from learnset
+    if (!sp_data) {
+        throw std::invalid_argument(
+            "create_pokemon: SpeciesId " + std::to_string(static_cast<uint16_t>(species)) +
+            " is not registered — refusing to create zero-stat Pokémon");
     }
+    mon.recalculate_stats(*sp_data);
+    mon.current_hp = mon.max_hp;
     
     mon.status = Status::None;
     mon.status_data = 0;
