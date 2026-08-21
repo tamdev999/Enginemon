@@ -159,7 +159,8 @@ static RuntimeWarp read_warp(std::istream& in) {
     warp.y = in.get();
     warp.target_warp_index = in.get();
     if (!read_length_string(in, warp.target_map_id)) {
-        warp.target_map_id.clear();
+        throw std::runtime_error(
+            "read_warp: truncated target_map_id string — malformed package payload");
     }
     return warp;
 }
@@ -170,7 +171,8 @@ static RuntimeCoordEvent read_coord_event(std::istream& in) {
     evt.y = in.get();
     evt.scene_id = read_le<uint16_t>(in);
     if (!read_length_string(in, evt.script_id)) {
-        evt.script_id.clear();
+        throw std::runtime_error(
+            "read_coord_event: truncated script_id string — malformed package payload");
     }
     return evt;
 }
@@ -179,21 +181,32 @@ static RuntimeBgEvent read_bg_event(std::istream& in) {
     RuntimeBgEvent evt;
     evt.x = in.get();
     evt.y = in.get();
-    
-    // Read the raw type byte and convert to runtime type
+
+    // Read the raw type byte and validate domain before cast.
+    // RuntimeBgEventType is defined 0–8; bytes outside this range are
+    // a structural package error — throw rather than producing a garbage enum.
     uint8_t raw_type = in.get();
-    // Direct mapping - frontend now serializes correct BGEVENT_* values
+    constexpr uint8_t BGEVENT_MAX_VALID = 8;  // Copy (= RuntimeBgEventType::Copy)
+    if (raw_type > BGEVENT_MAX_VALID) {
+        throw std::runtime_error(
+            std::format("read_bg_event: invalid BgEventType byte {} (max {})"
+                        " — malformed or wrong-schema package",
+                        static_cast<int>(raw_type), static_cast<int>(BGEVENT_MAX_VALID)));
+    }
     evt.type = static_cast<RuntimeBgEventType>(raw_type);
-    
+
     evt.quantity = in.get();
     if (!read_length_string(in, evt.script_id)) {
-        evt.script_id.clear();
+        throw std::runtime_error(
+            "read_bg_event: truncated script_id string — malformed package payload");
     }
     if (!read_length_string(in, evt.item_id)) {
-        evt.item_id.clear();
+        throw std::runtime_error(
+            "read_bg_event: truncated item_id string — malformed package payload");
     }
     if (!read_length_string(in, evt.condition_flag)) {
-        evt.condition_flag.clear();
+        throw std::runtime_error(
+            "read_bg_event: truncated condition_flag string — malformed package payload");
     }
     return evt;
 }
@@ -211,17 +224,20 @@ static RuntimeObject read_object(std::istream& in) {
     obj.palette = in.get();
     obj.is_trainer = (in.get() != 0);
     obj.trainer_sight_range = in.get();
-    
+
     if (!read_length_string(in, obj.sprite_id)) {
-        obj.sprite_id.clear();
+        throw std::runtime_error(
+            "read_object: truncated sprite_id string — malformed package payload");
     }
     if (!read_length_string(in, obj.script_id)) {
-        obj.script_id.clear();
+        throw std::runtime_error(
+            "read_object: truncated script_id string — malformed package payload");
     }
     if (!read_length_string(in, obj.visibility_flag)) {
-        obj.visibility_flag.clear();
+        throw std::runtime_error(
+            "read_object: truncated visibility_flag string — malformed package payload");
     }
-    
+
     return obj;
 }
 
@@ -248,7 +264,8 @@ static RuntimeConnection read_connection(std::istream& in) {
     conn.strip_length_blocks = in.get();
     conn.coord_adjust_tiles = read_le<int32_t>(in);
     if (!read_length_string(in, conn.target_map_id)) {
-        conn.target_map_id.clear();
+        throw std::runtime_error(
+            "read_connection: truncated target_map_id string — malformed package payload");
     }
     return conn;
 }

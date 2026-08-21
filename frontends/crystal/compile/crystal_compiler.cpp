@@ -168,7 +168,7 @@ bool CrystalCompiler::compile_map(const std::string& map_id, PackageWriter& writ
             writer.add_tileset(tileset_result.tileset, TimeOfDay::Day);
             
             // Collision data is part of the tileset now
-            // (No separate add_collision needed - it's included in add_tileset)
+            // Collision data is embedded in the tileset chunk via add_tileset().
             
             compiled_tilesets_.insert(map.tileset_id);
             stats_.tilesets_compiled++;

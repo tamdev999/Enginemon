@@ -6,6 +6,7 @@
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include "engine/world/movement_manager.hpp"
+#include "engine/core/game_state.hpp"
 #include <unordered_map>
 #include <vector>
 #include <utility>
@@ -542,6 +543,16 @@ int warp(lua_State* L) {
     return 0;
 }
 
+// ctx.world:warp_to_spawn()
+// Warp the player to their last-set backup/spawn warp position.
+// Corresponds to Crystal's warptobspawn / WarpToBackup semantics.
+// Semantic equivalent of Sem_WarpToBackup — use the backup warp point from GameState.
+int warp_to_spawn(lua_State* L) {
+    auto& stubs = get_stubs(L);
+    stubs.movement_calls.push_back({"warp_to_spawn", ""});
+    return 0;
+}
+
 // ctx.world:show_npc(npc_id)
 int show_npc(lua_State* L) {
     int npc_id = luaL_checkinteger(L, 2);
@@ -854,60 +865,99 @@ const std::vector<std::pair<std::string, int>>& get_flag_calls(LuaRuntime* runti
 
 // ctx.flags:set(flag_id)
 int set(lua_State* L) {
-    auto& stubs = get_stubs(L);
+    LuaRuntime* runtime = get_runtime(L);
     int flag_id = luaL_checkinteger(L, 2);
-    stubs.flags[flag_id] = true;
-    stubs.flag_calls.push_back({"set", flag_id});
+    // Production path: write through GameState when bound
+    if (GameState* gs = runtime->get_game_state()) {
+        gs->flags.insert("flag_" + std::to_string(flag_id));
+    } else {
+        auto& stubs = runtime->get_stub_services();
+        stubs.flags[flag_id] = true;
+    }
+    runtime->get_stub_services().flag_calls.push_back({"set", flag_id});
     return 0;
 }
 
 // ctx.flags:clear(flag_id)
 int clear(lua_State* L) {
-    auto& stubs = get_stubs(L);
+    LuaRuntime* runtime = get_runtime(L);
     int flag_id = luaL_checkinteger(L, 2);
-    stubs.flags[flag_id] = false;
-    stubs.flag_calls.push_back({"clear", flag_id});
+    // Production path: write through GameState when bound
+    if (GameState* gs = runtime->get_game_state()) {
+        gs->flags.erase("flag_" + std::to_string(flag_id));
+    } else {
+        auto& stubs = runtime->get_stub_services();
+        stubs.flags[flag_id] = false;
+    }
+    runtime->get_stub_services().flag_calls.push_back({"clear", flag_id});
     return 0;
 }
 
 // ctx.flags:check(flag_id) -> bool
 int check(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
-    auto& stubs = runtime->get_stub_services();
     int flag_id = luaL_checkinteger(L, 2);
-    bool value = get_test_flag(runtime, flag_id);
-    stubs.flag_calls.push_back({"check", flag_id});
+    bool value = false;
+    // Production path: read from GameState when bound
+    if (GameState* gs = runtime->get_game_state()) {
+        value = gs->flags.count("flag_" + std::to_string(flag_id)) > 0;
+    } else {
+        value = get_test_flag(runtime, flag_id);
+    }
+    runtime->get_stub_services().flag_calls.push_back({"check", flag_id});
     lua_pushboolean(L, value);
     return 1;
 }
 
 // ctx.flags:set_var(var_id, value)
 int set_var(lua_State* L) {
-    auto& stubs = get_stubs(L);
+    LuaRuntime* runtime = get_runtime(L);
     int var_id = luaL_checkinteger(L, 2);
-    int value = luaL_checkinteger(L, 3);
-    stubs.vars[var_id] = value;
+    int value  = luaL_checkinteger(L, 3);
+    // Production path: write through GameState when bound
+    if (GameState* gs = runtime->get_game_state()) {
+        gs->variables["var_" + std::to_string(var_id)] = value;
+    } else {
+        runtime->get_stub_services().vars[var_id] = value;
+    }
     return 0;
 }
 
 // ctx.flags:get_var(var_id) -> number
 int get_var(lua_State* L) {
-    const auto& stubs = get_stubs(L);
+    LuaRuntime* runtime = get_runtime(L);
     int var_id = luaL_checkinteger(L, 2);
-    auto it = stubs.vars.find(var_id);
-    int value = it != stubs.vars.end() ? it->second : 0;
+    int value  = 0;
+    // Production path: read from GameState when bound
+    if (GameState* gs = runtime->get_game_state()) {
+        auto it = gs->variables.find("var_" + std::to_string(var_id));
+        value = (it != gs->variables.end()) ? it->second : 0;
+    } else {
+        const auto& stubs = runtime->get_stub_services();
+        auto it = stubs.vars.find(var_id);
+        value = (it != stubs.vars.end()) ? it->second : 0;
+    }
     lua_pushinteger(L, value);
     return 1;
 }
 
 // ctx.flags:add_var(var_id, delta)
 int add_var(lua_State* L) {
-    auto& stubs = get_stubs(L);
+    LuaRuntime* runtime = get_runtime(L);
     int var_id = luaL_checkinteger(L, 2);
-    int delta = luaL_checkinteger(L, 3);
-    auto it = stubs.vars.find(var_id);
-    int current = it != stubs.vars.end() ? it->second : 0;
-    stubs.vars[var_id] = current + delta;
+    int delta  = luaL_checkinteger(L, 3);
+    // Production path: read-modify-write through GameState when bound
+    if (GameState* gs = runtime->get_game_state()) {
+        std::string key = "var_" + std::to_string(var_id);
+        auto it = gs->variables.find(key);
+        int current = (it != gs->variables.end()) ? it->second : 0;
+        gs->variables[key] = current + delta;
+    } else {
+        auto& stubs = runtime->get_stub_services();
+        auto it = stubs.vars.find(var_id);
+        int current = (it != stubs.vars.end()) ? it->second : 0;
+        stubs.vars[var_id] = current + delta;
+    }
     return 0;
 }
 

@@ -146,6 +146,9 @@ void LuaRuntime::bind_world_api() {
     lua_pushcfunction(L_, world_api::warp);
     lua_setfield(L_, -2, "warp");
     
+    lua_pushcfunction(L_, world_api::warp_to_spawn);
+    lua_setfield(L_, -2, "warp_to_spawn");
+    
     lua_pushcfunction(L_, world_api::show_npc);
     lua_setfield(L_, -2, "show_npc");
     

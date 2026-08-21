@@ -21,6 +21,7 @@ namespace enginemon {
 
 // Forward declarations
 class GameContext;
+class GameState;
 class World;
 class BattleContext;
 class Party;
@@ -294,6 +295,13 @@ public:
     // Used by scripting API stub implementations for testing
     StubServices& get_stub_services() { return stub_services_; }
     const StubServices& get_stub_services() const { return stub_services_; }
+
+    // Bind a GameState to this runtime so that flag/variable API calls
+    // write through to authoritative simulation state rather than test stubs.
+    // Pass nullptr to unbind (reverts to stub-only mode for isolated tests).
+    // The caller owns GameState; LuaRuntime does NOT take ownership.
+    void set_game_state(GameState* gs) { game_state_ = gs; }
+    GameState* get_game_state() const  { return game_state_; }
     
     // Error handler
     using ErrorHandler = std::function<void(const std::string& error, const std::string& traceback)>;
@@ -315,6 +323,11 @@ private:
     // NOT global/shared state - each LuaRuntime has its own stub state
     // Used by scripting API stub implementations for testing
     StubServices stub_services_;
+
+    // Optional GameState binding for production flag/var write-through.
+    // nullptr means stub-only mode (isolated tests).
+    // Caller maintains ownership; this pointer is never deleted here.
+    GameState* game_state_ = nullptr;
     
     uint32_t next_coroutine_id_ = 1;
     std::unordered_map<uint32_t, ScriptCoroutine> coroutines_;

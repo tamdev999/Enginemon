@@ -154,7 +154,7 @@ namespace crystal {
 //          checks the result and propagates failure — partial tilesets can no longer
 //          enter the tileset cache or set state.valid = true.
 //        F2 (duplicate package IDs): PackageWriter::add_map/add_tileset/add_tileset_atlas/
-//          add_collision/add_font_atlas/add_script/add_sprite all throw on duplicate ID.
+//          add_font_atlas/add_script/add_sprite all throw on duplicate ID.
 //          PackageReader::open() rejects duplicate IDs in any chunk index (returns nullptr).
 //        F3 (cache validation): validate_cached_package() now opens the cached package
 //          via PackageReader::open() and calls validate() for per-chunk CRC check.

@@ -536,6 +536,26 @@ std::vector<LegalityDiagnostic> LegalityGate::check_stage5_ir(const LegalityInpu
                     }
                 }
                 
+                // =================================================================
+                // Sem_Special: raw Crystal Special ID — never legal in package
+                // =================================================================
+                // Sem_Special must never survive legality. It carries a raw
+                // Crystal Special table index, which is Crystal implementation
+                // identity — not a stable semantic ID.
+                //
+                // The legalizer fallback that previously emitted Sem_Special has
+                // been removed. This check is the hard backstop: if Sem_Special
+                // is manually constructed or survives any path, reject here.
+                if constexpr (std::is_same_v<T, enginemon::Sem_Special>) {
+                    auto d = make_diagnostic(
+                        LegalityFailureKind::InvalidSemanticReference,
+                        script_id, "Stage5",
+                        "Sem_Special{id=" + std::to_string(op.special_id) + "}",
+                        "Sem_Special carries raw Crystal Special ID — not a valid packageable semantic. "
+                        "Add a named lowering rule for this Special.");
+                    diagnostics.push_back(std::move(d));
+                }
+
                 // NOTE: We don't have raw Crystal concepts to check for since
                 // Sem_Unlowered is no longer in the SemanticOp variant.
                 // The only way raw Crystal concepts could leak is if a lowering

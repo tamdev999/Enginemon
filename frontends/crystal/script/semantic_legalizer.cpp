@@ -2808,15 +2808,17 @@ RuleResult rule_special(LoweringContext& ctx) {
                 break;
         }
         
-        // Fallback: emit generic Sem_Special for unhandled specials
-        // Unhandled specials may write wScriptVar — invalidate compile-time fact
-        // to prevent stale constant propagation into subsequent context-dependent ops.
-        enginemon::Sem_Special op;
-        op.special_id = p->special_id;
-        op.name = "special_" + std::to_string(p->special_id);
-        r.instructions.push_back(make_inst(std::move(op)));
-        ctx.block_ctx.invalidate();
-        return r;
+        // No lowering rule matched for this Special ID.
+        // Returning {} (unmatched) causes the outer lower() loop to emit an
+        // UnloweredDiagnostic and increment commands_unlowered, which will
+        // cause the legality gate to reject this script.
+        //
+        // Sem_Special is NOT a valid fallback: it carries raw Crystal Special
+        // table identity and must not reach the package or runtime.
+        //
+        // To add support for a new Special, add a named case above with a
+        // source-proven semantic operation, then add a corpus test.
+        return {};
     }
     return {};
 }

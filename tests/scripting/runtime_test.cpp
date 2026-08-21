@@ -5832,6 +5832,81 @@ TEST(gamestate_variables_persist) {
     std::cout << "  [Variables persisted correctly]\n";
 }
 
+// Save/load regression: Lua-set flags and vars survive serialize → deserialize
+// Verifies that ctx.flags write-through to GameState is complete end-to-end.
+TEST(lua_flags_vars_persist_through_gamestate_save_load) {
+    // Script that sets a flag, clears another, sets a var, and adds to a var.
+    // All operations go through ctx.flags → GameState (when bound).
+    const char* script = R"(
+script = (function()
+  local function main()
+    ctx.flags:set(7)
+    ctx.flags:set(42)
+    ctx.flags:clear(42)
+    ctx.flags:set_var(3, 100)
+    ctx.flags:add_var(3, 25)
+  end
+  return {main = coroutine.wrap(main)}
+end)()
+)";
+
+    LuaRuntime runtime;
+    GameState gs;
+    gs.player.current_map_id = "test";
+    runtime.set_game_state(&gs);
+    runtime.execute_string(script, "test_flag_persistence");
+    uint32_t coro = runtime.start_script("script");
+
+    // Script runs to completion synchronously (no yields)
+    auto state = runtime.get_state(coro);
+    ASSERT_TRUE(state == ScriptState::Finished || state == ScriptState::Running);
+
+    // GameState must reflect script mutations
+    ASSERT_TRUE(gs.check_flag("flag_7"));      // set(7) fired
+    ASSERT_FALSE(gs.check_flag("flag_42"));    // set(42) then clear(42) → absent
+    ASSERT_EQ(gs.get_var("var_3"), 125);       // set_var(3,100) + add_var(3,25)
+
+    // Serialize and deserialize
+    auto bytes = gs.serialize();
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+    GameState& restored = result.state;
+
+    // Flag 7 survives, flag 42 absent, var_3 = 125
+    ASSERT_TRUE(restored.check_flag("flag_7"));
+    ASSERT_FALSE(restored.check_flag("flag_42"));
+    ASSERT_EQ(restored.get_var("var_3"), 125);
+
+    std::cout << "  [Lua flags/vars → GameState → serialize → deserialize: all correct ✓]\n";
+}
+
+// Isolated test mode: no GameState bound → stubs absorb ops, GameState unaffected
+TEST(lua_flags_without_gamestate_uses_stubs_only) {
+    const char* script = R"(
+script = (function()
+  local function main()
+    ctx.flags:set(99)
+    ctx.flags:set_var(5, 777)
+  end
+  return {main = coroutine.wrap(main)}
+end)()
+)";
+
+    LuaRuntime runtime;
+    // No set_game_state call — stub-only mode
+    runtime.execute_string(script, "test_stub_isolation");
+    runtime.start_script("script");
+
+    // Stubs received the calls
+    ASSERT_TRUE(flag_api::get_test_flag(&runtime, 99));
+    auto it = runtime.get_stub_services().vars.find(5);
+    ASSERT_TRUE(it != runtime.get_stub_services().vars.end());
+    ASSERT_EQ(it->second, 777);
+
+    // No GameState was mutated (no pointer was set — nothing to check)
+    std::cout << "  [No GameState bound → stubs absorb, no side-effects ✓]\n";
+}
+
 TEST(gamestate_warp_memory_persist) {
     // Warp memory survives for LAST_MAP exits
     GameState original;
@@ -9733,23 +9808,17 @@ TEST(batch5_special_144_remains_sem_special) {
     block.command_count = 1;
     lctx.current_block = &block;
     
-    // 4. Call rule_special
+    // CRITICAL: Special 144 (CheckCaughtCelebi) is unhandled — no lowering rule.
+    // Since the Sem_Special fallback was removed, rule_special() returns {} (unmatched).
+    // The outer lower() loop will produce an UnloweredDiagnostic and the script will
+    // fail the legality gate — correct behavior.
     RuleResult result = rule_special(lctx);
-    
-    // 5. ASSERT: rule matched
-    ASSERT_TRUE(result.matched);
-    ASSERT_EQ(result.consumed, 1);
-    ASSERT_EQ(result.instructions.size(), 1);
-    
-    // 6. ASSERT: IS Sem_Special (NOT generalized/lowered)
-    const auto& op = result.instructions[0].op;
-    bool is_sem_special = std::holds_alternative<Sem_Special>(op);
-    ASSERT_TRUE(is_sem_special);
-    
-    const auto& sem_special = std::get<Sem_Special>(op);
-    ASSERT_EQ(sem_special.special_id, 144);
-    
-    std::cout << "  [Special 144 → Sem_Special (correctly NOT generalized)]\n";
+
+    // 5. ASSERT: rule did NOT match (unhandled special → unlowered path)
+    ASSERT_FALSE(result.matched);
+    ASSERT_EQ(result.instructions.size(), 0u);
+
+    std::cout << "  [Special 144 → unmatched (no Sem_Special fallback, unlowered path) ✓]\n";
 }
 
 TEST(batch5_no_sem_special_for_78_102) {
@@ -9995,26 +10064,14 @@ TEST(batch6_unhandled_special_produces_sem_special) {
     
     RuleResult result = rule_special(lctx);
     
-    // ASSERT: Rule matched and consumed
-    ASSERT_TRUE(result.matched);
-    ASSERT_EQ(result.consumed, 1);
+    // ASSERT: Rule did NOT match (unhandled specials return {} — no Sem_Special fallback)
+    // The Sem_Special fallback was removed; unhandled specials produce unlowered diagnostics
+    // via the outer lower() loop and fail the legality gate.
+    ASSERT_FALSE(result.matched);
+    ASSERT_EQ(result.instructions.size(), 0u);
     
-    // ASSERT: Produced exactly 1 instruction (NOT zero like absorption)
-    ASSERT_EQ(result.instructions.size(), 1);
-    
-    // ASSERT: That instruction IS Sem_Special (fallback path)
-    const auto& op = result.instructions[0].op;
-    bool is_sem_special = std::holds_alternative<Sem_Special>(op);
-    ASSERT_TRUE(is_sem_special);
-    
-    const auto& sem_special = std::get<Sem_Special>(op);
-    ASSERT_EQ(sem_special.special_id, 1);
-    
-    // ASSERT: No absorbed_opcodes (this was lowered, not absorbed)
-    ASSERT_EQ(result.absorbed_opcodes.size(), 0);
-    
-    std::cout << "  [Unhandled Special 1 → Sem_Special (fallback verified)]\n";
-    std::cout << "  [Distinguishes absorption from accidental dropping]\n";
+    std::cout << "  [Unhandled Special 1 → unmatched (no Sem_Special fallback, unlowered) ✓]\n";
+    std::cout << "  [Distinguishes absorption from unhandled: unhandled returns {} not Sem_Special]\n";
 }
 
 TEST(batch6_absorption_accounting_invariant) {
@@ -11301,12 +11358,14 @@ TEST(batch9_special_40_no_context_fallback) {
     
     ASSERT_FALSE(ctx.block_ctx.has_value());
     RuleResult result = rule_special(ctx);
-    
-    auto* sem_special = std::get_if<Sem_Special>(&result.instructions[0].op);
-    ASSERT_TRUE(sem_special != nullptr);
-    ASSERT_EQ(sem_special->special_id, 40);
-    
-    std::cout << "  [Special 40 no context → Sem_Special (fallback) ✓]\n";
+
+    // Without context, Special 40 cannot be lowered → returns {} (unmatched).
+    // The Sem_Special fallback is gone; context-dependent specials produce
+    // UnloweredDiagnostic via the outer lower() loop and fail legality.
+    ASSERT_FALSE(result.matched);
+    ASSERT_EQ(result.instructions.size(), 0u);
+
+    std::cout << "  [Special 40 no context → unmatched (no Sem_Special fallback) ✓]\n";
 }
 
 TEST(batch9_special_152_palette_normalization) {
@@ -11399,11 +11458,14 @@ TEST(batch9_special_152_invalid_encoding_rejected) {
         ctx.current_block = &block;
         
         RuleResult result = rule_special(ctx);
-        auto* sem_special = std::get_if<Sem_Special>(&result.instructions[0].op);
-        ASSERT_TRUE(sem_special != nullptr);
+        // Invalid encoding (bit7 clear) → no lowering rule for this encoding.
+        // Returns {} (unmatched) — Sem_Special fallback has been removed.
+        // These encodings are source-invalid (routine returns immediately).
+        ASSERT_FALSE(result.matched);
+        ASSERT_EQ(result.instructions.size(), 0u);
     }
     
-    std::cout << "  [Special 152 bit7-clear values → Sem_Special ✓]\n";
+    std::cout << "  [Special 152 bit7-clear values → unmatched (no Sem_Special fallback) ✓]\n";
 }
 
 TEST(batch9_special_152_all_source_valid_selectors_accepted) {
@@ -11519,10 +11581,11 @@ TEST(batch9_species_domain_from_profile_not_hardcoded) {
     {
         auto* ctx = make_context(252, 251);  // 252 > 251
         RuleResult result = rule_special(*ctx);
-        // Should fall through to Sem_Special since species is out of domain
-        auto* sem_special = std::get_if<Sem_Special>(&result.instructions[0].op);
-        ASSERT_TRUE(sem_special != nullptr);
-        std::cout << "  [Species 252 + num_pokemon=251 → Sem_Special (out of domain) ✓]\n";
+        // Out-of-domain species → no lowering rule matches → returns {} (unmatched).
+        // Sem_Special fallback has been removed; unlowered path used instead.
+        ASSERT_FALSE(result.matched);
+        ASSERT_EQ(result.instructions.size(), 0u);
+        std::cout << "  [Species 252 + num_pokemon=251 → unmatched (out of domain, no Sem_Special) ✓]\n";
     }
     
     // Test 3: Species 252 with extended profile (num_pokemon=256) → should SUCCEED
@@ -14087,20 +14150,22 @@ TEST(stale_script_var_yesorno_invalidates_before_map_radio) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
 
-    // Should produce: Sem_SetVar{5}, Sem_YesNo{}, Sem_Special{40} (NOT Sem_PlayRadio{5})
-    // MapRadio requires a known producer — after yesorno invalidates, it falls to Sem_Special
-    const auto& insts = result.ir.blocks[0].instructions;
-    ASSERT_TRUE(insts.size() == 3);
+    // After yesorno invalidates context, MapRadio (Special 40) has no producer.
+    // rule_special returns {} (unmatched) → outer loop records unlowered command.
+    // result.success = false (unlowered command present)
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
-    // Third instruction must be Sem_Special (MapRadio fallback), NOT Sem_PlayRadio
-    auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
-    ASSERT_TRUE(radio == nullptr);  // Must NOT be PlayRadio — context was invalidated
-    auto* sp = std::get_if<Sem_Special>(&insts[2].op);
-    ASSERT_TRUE(sp != nullptr);
+    // Also verify MapRadio was NOT folded with channel 5
+    for (const auto& block : result.ir.blocks) {
+        for (const auto& inst : block.instructions) {
+            auto* radio = std::get_if<Sem_PlayRadio>(&inst.op);
+            ASSERT_TRUE(radio == nullptr);  // Must NOT be PlayRadio — context was invalidated
+        }
+    }
 
-    std::cout << "  [setval(5)->yesorno->MapRadio: NOT channel 5 (invalidated) ✓]\n";
+    std::cout << "  [setval(5)->yesorno->MapRadio: unlowered (invalidated, no Sem_Special fallback) ✓]\n";
 }
 
 // Finding 1: setval 5 → non-writer → MapRadio SHOULD fold channel=5 (legitimate propagation)
@@ -14171,19 +14236,22 @@ TEST(stale_script_var_giveitem_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    // giveitem invalidates context → MapRadio (Special 40) has no producer → unlowered
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
-    const auto& insts = result.ir.blocks[0].instructions;
     // MapRadio must NOT get channel=2 — giveitem invalidated block_ctx
     bool found_radio = false;
-    for (const auto& i : insts) {
-        if (auto* r = std::get_if<Sem_PlayRadio>(&i.op)) {
-            found_radio = true;
+    for (const auto& b : result.ir.blocks) {
+        for (const auto& i : b.instructions) {
+            if (auto* r = std::get_if<Sem_PlayRadio>(&i.op)) {
+                found_radio = true;
+            }
         }
     }
     ASSERT_FALSE(found_radio);  // No PlayRadio: context was invalidated by giveitem
 
-    std::cout << "  [setval(2)->giveitem->MapRadio: not folded (invalidated by giveitem) ✓]\n";
+    std::cout << "  [setval(2)->giveitem->MapRadio: unlowered (invalidated by giveitem, no Sem_Special) ✓]\n";
 }
 
 // Finding 2: cry literal species
@@ -14428,23 +14496,22 @@ TEST(script_state_setval_yesorno_invalidates_context) {
 
     SemanticLegalizer legalizer;
     LoweringResult result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
 
-    // After yesorno, MapRadio must NOT be lowered with channel 5 (stale from setval)
-    // MapRadio with no known context falls through to generic Sem_Special
+    // After yesorno, MapRadio (Special 40) has no valid context → unlowered.
+    // No Sem_Special fallback — result.commands_unlowered > 0.
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
+
+    // MapRadio must NOT be lowered with channel 5 (stale from setval)
     bool found_radio_with_5 = false;
-    bool found_sem_special = false;
     for (const auto& block : result.ir.blocks) {
         for (const auto& inst : block.instructions) {
             if (auto* radio = std::get_if<Sem_PlayRadio>(&inst.op)) {
                 if (radio->channel == 5) found_radio_with_5 = true;
             }
-            if (std::get_if<Sem_Special>(&inst.op)) found_sem_special = true;
         }
     }
     ASSERT_FALSE(found_radio_with_5);
-    // Without a valid known context, MapRadio falls back to Sem_Special
-    ASSERT_TRUE(found_sem_special);
 
     std::cout << "  [setval 5 → yesorno invalidates → MapRadio falls to Sem_Special ✓]\n";
 }
@@ -14687,22 +14754,20 @@ TEST(script_state_verbosegiveitemvar_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);  // MapRadio with invalidated context → unlowered
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
     bool found_radio_3 = false;
-    bool found_sem_special = false;
     for (const auto& b : result.ir.blocks) {
         for (const auto& inst : b.instructions) {
             if (auto* r = std::get_if<Sem_PlayRadio>(&inst.op)) {
                 if (r->channel == 3) found_radio_3 = true;
             }
-            if (std::get_if<Sem_Special>(&inst.op)) found_sem_special = true;
         }
     }
     // verbosegiveitemvar should have invalidated — MapRadio must NOT get channel 3
     ASSERT_FALSE(found_radio_3);
-    ASSERT_TRUE(found_sem_special);
-    std::cout << "  [verbosegiveitemvar invalidates: MapRadio falls to Sem_Special ✓]\n";
+    std::cout << "  [verbosegiveitemvar invalidates: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
 }
 
 // Adjacent fix: checkcellnum invalidates
@@ -14734,7 +14799,8 @@ TEST(script_state_checkcellnum_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);  // MapRadio with invalidated context → unlowered
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
     bool found_radio_2 = false;
     for (const auto& b : result.ir.blocks)
@@ -14774,7 +14840,8 @@ TEST(script_state_delcmdqueue_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
     bool found_radio_1 = false;
     for (const auto& b : result.ir.blocks)
@@ -14813,7 +14880,8 @@ TEST(script_state_checkphonecall_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
     bool found_radio_4 = false;
     for (const auto& b : result.ir.blocks)
@@ -14853,7 +14921,8 @@ TEST(script_state_checktime_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
     bool found_radio_6 = false;
     for (const auto& b : result.ir.blocks)
@@ -15726,15 +15795,17 @@ TEST(batch10_checksave_invalidates_context) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);  // MapRadio with invalidated context → unlowered
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
-    // After checksave invalidates context, MapRadio falls to Sem_Special (no known producer)
-    const auto& insts = result.ir.blocks[0].instructions;
-    ASSERT_TRUE(insts.size() >= 3);
-    auto* special = std::get_if<Sem_Special>(&insts[2].op);
-    ASSERT_TRUE(special != nullptr);  // NOT Sem_PlayRadio — context was invalidated by checksave
+    // Verify MapRadio was NOT folded with the setval context
+    for (const auto& b : result.ir.blocks) {
+        for (const auto& inst : b.instructions) {
+            ASSERT_TRUE(!std::get_if<Sem_PlayRadio>(&inst.op));
+        }
+    }
 
-    std::cout << "  [checksave invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+    std::cout << "  [checksave invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
 }
 
 // Fix 1b: startbattle writes wScriptVar → context invalidated
@@ -15750,15 +15821,10 @@ TEST(batch10_startbattle_invalidates_context) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
-    const auto& insts = result.ir.blocks[0].instructions;
-    ASSERT_TRUE(insts.size() >= 3);
-    // startbattle invalidates → MapRadio sees no context → Sem_Special
-    auto* special = std::get_if<Sem_Special>(&insts[2].op);
-    ASSERT_TRUE(special != nullptr);
-
-    std::cout << "  [startbattle invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+    std::cout << "  [startbattle invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
 }
 
 // Fix 1c: checkpoke writes wScriptVar → context invalidated
@@ -15775,15 +15841,10 @@ TEST(batch10_checkpoke_invalidates_context) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
-    const auto& insts = result.ir.blocks[0].instructions;
-    ASSERT_TRUE(insts.size() >= 3);
-    // checkpoke invalidates → Sem_Special
-    auto* special = std::get_if<Sem_Special>(&insts[2].op);
-    ASSERT_TRUE(special != nullptr);
-
-    std::cout << "  [checkpoke invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+    std::cout << "  [checkpoke invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
 }
 
 // Fix 1d: givepoke writes wScriptVar → context invalidated
@@ -15800,14 +15861,10 @@ TEST(batch10_givepoke_invalidates_context) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
-    const auto& insts = result.ir.blocks[0].instructions;
-    ASSERT_TRUE(insts.size() >= 3);
-    auto* special = std::get_if<Sem_Special>(&insts[2].op);
-    ASSERT_TRUE(special != nullptr);
-
-    std::cout << "  [givepoke invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+    std::cout << "  [givepoke invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
 }
 
 // Fix 1e: giveegg writes wScriptVar → context invalidated
@@ -15824,14 +15881,10 @@ TEST(batch10_giveegg_invalidates_context) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
-    const auto& insts = result.ir.blocks[0].instructions;
-    ASSERT_TRUE(insts.size() >= 3);
-    auto* special = std::get_if<Sem_Special>(&insts[2].op);
-    ASSERT_TRUE(special != nullptr);
-
-    std::cout << "  [giveegg invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+    std::cout << "  [giveegg invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
 }
 
 // Fix 1f: CheckPokerus (Special 78) writes wScriptVar → context invalidated
@@ -15840,7 +15893,7 @@ TEST(batch10_check_pokerus_invalidates_context) {
     using namespace enginemon;
 
     // setval(3) → Special{78=CheckPokerus} → Special{40=MapRadio}
-    // If CheckPokerus invalidates properly, MapRadio sees no producer → Sem_Special
+    // If CheckPokerus invalidates properly, MapRadio sees no producer → unlowered
     CrystalScriptIR ir;
     ir.name = "test_pokerus_inval";
     ir.entry_address = 0x10000;
@@ -15859,17 +15912,20 @@ TEST(batch10_check_pokerus_invalidates_context) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_TRUE(result.success);
+    // CheckPokerus (Special 78) lowers correctly; MapRadio has invalidated context → unlowered
+    // CheckPokerus invalidates, so MapRadio (Special 40) cannot be lowered → commands_unlowered > 0
+    ASSERT_TRUE(result.commands_unlowered > 0);
 
-    const auto& insts = result.ir.blocks[0].instructions;
-    ASSERT_TRUE(insts.size() >= 3);
-    // CheckPokerus invalidates context → MapRadio sees no producer → Sem_Special
-    auto* pokerus = std::get_if<Sem_CheckPartyPokerus>(&insts[1].op);
-    ASSERT_TRUE(pokerus != nullptr);  // CheckPokerus correctly lowered
-    auto* special = std::get_if<Sem_Special>(&insts[2].op);
-    ASSERT_TRUE(special != nullptr);  // MapRadio falls back due to invalidation
+    // Verify CheckPokerus IS correctly lowered (first special)
+    bool found_pokerus = false;
+    for (const auto& b : result.ir.blocks) {
+        for (const auto& inst : b.instructions) {
+            if (std::get_if<Sem_CheckPartyPokerus>(&inst.op)) found_pokerus = true;
+        }
+    }
+    ASSERT_TRUE(found_pokerus);  // CheckPokerus correctly lowered
 
-    std::cout << "  [CheckPokerus invalidates block_ctx: MapRadio falls to Sem_Special ✓]\n";
+    std::cout << "  [CheckPokerus invalidates block_ctx: MapRadio unlowered (no Sem_Special) ✓]\n";
 }
 
 // Fix 1g (verification): Sem_CheckWarp does NOT invalidate context — setval preserved
@@ -16130,11 +16186,207 @@ TEST(batch10_number_sources_are_distinct) {
     std::cout << "  [NumberSource enum: Money/Coins/ScriptVar are distinct and typed ✓]\n";
 }
 
-//=============================================================================
-// F1-F8 PRODUCTION FIX TESTS
-//=============================================================================
+// Sem_Special adversarial gate test: manually inject Sem_Special into IR, prove rejection
+// This is the mandatory negative test required by the steering document:
+// "Every hard compiler gate must have adversarial negative tests proving it rejects
+//  known-invalid input; happy-path corpus success is not sufficient."
+TEST(sem_special_rejected_by_stage5_legality_gate) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace legality_test_helpers;
+
+    // Construct a valid IR/CFG/lowering pipeline, then manually inject Sem_Special.
+    // This simulates what would happen if Sem_Special somehow survived lowering —
+    // the Stage 5 gate must catch it regardless of how it got there.
+    auto ir       = make_minimal_ir(0x1000);
+    auto cfg      = make_minimal_cfg(ir, "test_sem_special_adversarial");
+    auto lowering = make_minimal_lowering(ir, cfg);
+
+    // Replace the default block with a block containing Sem_Special
+    SemanticBasicBlock sblock;
+    sblock.id = 0; sblock.label = "block_0"; sblock.is_entry = true;
+    SemanticInstruction inst;
+    Sem_Special op;
+    op.special_id = 42;     // Arbitrary Crystal Special table index
+    op.name = "special_42"; // Crystal-identity name
+    inst.op = std::move(op);
+    sblock.instructions.push_back(std::move(inst));
+    lowering.ir.blocks = {std::move(sblock)};
+
+    auto input = make_minimal_input(ir, cfg, lowering);
+    LegalityGate gate;
+    auto result = gate.validate(input);
+
+    // MUST be illegal — Sem_Special carries raw Crystal Special ID
+    ASSERT_FALSE(result.is_legal);
+    // Confirm it's a Stage5 failure about Sem_Special
+    ASSERT_TRUE(result.illegal.has_value());
+    ASSERT_FALSE(result.illegal->diagnostics.empty());
+    bool found_stage5 = false;
+    bool found_sem_special_msg = false;
+    for (const auto& d : result.illegal->diagnostics) {
+        if (d.failing_stage == std::string("Stage5")) {
+            found_stage5 = true;
+            if (d.reason.find("Sem_Special") != std::string::npos ||
+                d.reason.find("raw Crystal Special") != std::string::npos) {
+                found_sem_special_msg = true;
+            }
+        }
+    }
+    ASSERT_TRUE(found_stage5);
+    ASSERT_TRUE(found_sem_special_msg);
+
+    std::cout << "  [Sem_Special with id=42 rejected by Stage5 legality gate ✓]\n";
+}
+
+// Sem_Special adversarial: a clean IR with only Sem_End must PASS
+// (proves the Sem_Special check is scoped, not a blanket rejection)
+TEST(sem_special_clean_ir_still_passes_legality) {
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace legality_test_helpers;
+
+    auto ir       = make_minimal_ir(0x1000);
+    auto cfg      = make_minimal_cfg(ir, "test_sem_special_clean");
+    auto lowering = make_minimal_lowering(ir, cfg);
+    // Default lowering has Sem_End — no Sem_Special
+
+    auto input = make_minimal_input(ir, cfg, lowering);
+    LegalityGate gate;
+    auto result = gate.validate(input);
+
+    ASSERT_TRUE(result.is_legal);
+    std::cout << "  [Clean IR (Sem_End only) still passes legality ✓]\n";
+}
 
 // F1: turnobject — direction preserved end-to-end
+// =============================================================================
+// EMITTER BINDING GAP TESTS
+// Prove that the three previously-crashing emitter paths no longer crash:
+//   1. Op_JumpStd / Op_CallStd → comment (no ctx.std nil crash)
+//   2. Op_Special → comment (no ctx.special nil crash)
+//   3. Op_WarpToSpawn → ctx.world:warp_to_spawn() with real binding
+// =============================================================================
+
+TEST(emitter_jumpstd_no_crash) {
+    // Op_JumpStd previously emitted ctx.std:<name>() with no binding → nil crash.
+    // Now emits a comment. Script must execute to completion without error.
+    using namespace crystal;
+    ScriptIR script;
+    script.name = "TestJumpStd";
+    script.rom_start = 0; script.rom_end = 0;
+    Op_JumpStd op;
+    op.std_id = 5;
+    op.name = "GoToGameCorner";
+    Instruction inst; inst.op = op;
+    script.instructions.push_back(inst);
+    Instruction end_inst; end_inst.op = Op_End{};
+    script.instructions.push_back(end_inst);
+
+    LuaEmitter emitter;
+    std::string lua_code = emitter.emit(script);
+    lua_code = "script = (function()\n" + lua_code + "\nend)()";
+
+    // Must NOT contain ctx.std (would nil-crash at runtime)
+    ASSERT_TRUE(lua_code.find("ctx.std") == std::string::npos);
+    // Must contain a comment explaining why it's a no-op
+    ASSERT_STR_CONTAINS(lua_code, "jumpstd");
+
+    // Execute must not throw
+    LuaRuntime runtime;
+    runtime.execute_string(lua_code, "jumpstd_test");
+    runtime.start_script("script");
+    std::cout << "  [Op_JumpStd: no ctx.std call, no crash ✓]\n";
+}
+
+TEST(emitter_callstd_no_crash) {
+    // Op_CallStd previously emitted ctx.std:<name>() → nil crash.
+    using namespace crystal;
+    ScriptIR script;
+    script.name = "TestCallStd";
+    script.rom_start = 0; script.rom_end = 0;
+    Op_CallStd op;
+    op.std_id = 12;
+    op.name = "PokeCenterHeal";
+    Instruction inst; inst.op = op;
+    script.instructions.push_back(inst);
+    Instruction end_inst; end_inst.op = Op_End{};
+    script.instructions.push_back(end_inst);
+
+    LuaEmitter emitter;
+    std::string lua_code = emitter.emit(script);
+    lua_code = "script = (function()\n" + lua_code + "\nend)()";
+
+    ASSERT_TRUE(lua_code.find("ctx.std") == std::string::npos);
+    ASSERT_STR_CONTAINS(lua_code, "callstd");
+
+    LuaRuntime runtime;
+    runtime.execute_string(lua_code, "callstd_test");
+    runtime.start_script("script");
+    std::cout << "  [Op_CallStd: no ctx.std call, no crash ✓]\n";
+}
+
+TEST(emitter_special_no_crash) {
+    // Op_Special previously emitted ctx.special:<name>() → nil crash.
+    using namespace crystal;
+    ScriptIR script;
+    script.name = "TestSpecial";
+    script.rom_start = 0; script.rom_end = 0;
+    Op_Special op;
+    op.special_id = 7;
+    op.name = "special_7";
+    Instruction inst; inst.op = op;
+    script.instructions.push_back(inst);
+    Instruction end_inst; end_inst.op = Op_End{};
+    script.instructions.push_back(end_inst);
+
+    LuaEmitter emitter;
+    std::string lua_code = emitter.emit(script);
+    lua_code = "script = (function()\n" + lua_code + "\nend)()";
+
+    ASSERT_TRUE(lua_code.find("ctx.special") == std::string::npos);
+    ASSERT_STR_CONTAINS(lua_code, "special");
+
+    LuaRuntime runtime;
+    runtime.execute_string(lua_code, "special_test");
+    runtime.start_script("script");
+    std::cout << "  [Op_Special: no ctx.special call, no crash ✓]\n";
+}
+
+TEST(emitter_warp_to_spawn_has_binding) {
+    // Op_WarpToSpawn emits ctx.world:warp_to_spawn(). The binding must exist.
+    // Previously: binding was missing → nil crash at runtime.
+    using namespace crystal;
+    ScriptIR script;
+    script.name = "TestWarpToSpawn";
+    script.rom_start = 0; script.rom_end = 0;
+    Op_WarpToSpawn wts;
+    Instruction inst; inst.op = wts;
+    script.instructions.push_back(inst);
+    Instruction end_inst; end_inst.op = Op_End{};
+    script.instructions.push_back(end_inst);
+
+    LuaEmitter emitter;
+    std::string lua_code = emitter.emit(script);
+    lua_code = "script = (function()\n" + lua_code + "\nend)()";
+
+    ASSERT_STR_CONTAINS(lua_code, "ctx.world:warp_to_spawn()");
+
+    // Execute — must not crash
+    LuaRuntime runtime;
+    runtime.execute_string(lua_code, "warp_to_spawn_test");
+    runtime.start_script("script");
+
+    // Verify binding was called
+    const auto& calls = runtime.get_stub_services().movement_calls;
+    bool found = false;
+    for (const auto& c : calls) {
+        if (c.first == "warp_to_spawn") { found = true; break; }
+    }
+    ASSERT_TRUE(found);
+    std::cout << "  [Op_WarpToSpawn: binding exists, recorded in stubs ✓]\n";
+}
+
 TEST(f1_turnobject_direction_preserved_right) {
     using namespace crystal;
     
@@ -16747,6 +16999,8 @@ int main(int argc, char* argv[]) {
     RUN_TEST(gamestate_serialize_roundtrip);
     RUN_TEST(gamestate_flags_persist);
     RUN_TEST(gamestate_variables_persist);
+    RUN_TEST(lua_flags_vars_persist_through_gamestate_save_load);
+    RUN_TEST(lua_flags_without_gamestate_uses_stubs_only);
     RUN_TEST(gamestate_warp_memory_persist);
     RUN_TEST(gamestate_rng_persist);
     RUN_TEST(save_mutate_load_identical);
@@ -17124,8 +17378,14 @@ int main(int argc, char* argv[]) {
     RUN_TEST(batch10_getnum_uses_scriptvar_source);
     RUN_TEST(batch10_getmoney_uses_typed_money_account);
     RUN_TEST(batch10_number_sources_are_distinct);
+    RUN_TEST(sem_special_rejected_by_stage5_legality_gate);
+    RUN_TEST(sem_special_clean_ir_still_passes_legality);
 
     // F1-F8 production fix tests
+    RUN_TEST(emitter_jumpstd_no_crash);
+    RUN_TEST(emitter_callstd_no_crash);
+    RUN_TEST(emitter_special_no_crash);
+    RUN_TEST(emitter_warp_to_spawn_has_binding);
     RUN_TEST(f1_turnobject_direction_preserved_right);
     RUN_TEST(f1_turnobject_direction_preserved_up);
     RUN_TEST(f4_scripted_warp_coordinates_preserved);

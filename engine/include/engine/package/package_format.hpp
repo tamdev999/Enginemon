@@ -11,8 +11,7 @@
 // Package format:
 // - Header (version, checksums, table of contents)
 // - Map data (semantic structures, no ROM addresses)
-// - Tileset atlases (pre-rendered RGBA)
-// - Collision data
+// - Tileset atlases (pre-rendered RGBA, or native 8×8 tile+block format)
 // - Sprite atlases
 // - Audio data (converted from GB format)
 // - Script bytecode (compiled Lua)
@@ -107,7 +106,6 @@ static_assert(offsetof(PackageHeader, data_crc32)     == 96,
 enum class ChunkType : uint32_t {
     Maps = 0x4D415053,          // "MAPS"
     TilesetAtlases = 0x54494C53, // "TILS"
-    Collision = 0x434F4C4C,      // "COLL"
     Sprites = 0x53505254,        // "SPRT"
     ObjPalettes = 0x4F424A50,    // "OBJP"
     Scripts = 0x53435250,        // "SCRP"

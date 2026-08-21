@@ -67,7 +67,6 @@ struct PackageHeader {
 enum class ChunkType : uint32_t {
     Maps = 0x4D415053,          // "MAPS"
     TilesetAtlases = 0x54494C53, // "TILS"
-    Collision = 0x434F4C4C,      // "COLL"
     Sprites = 0x53505254,        // "SPRT"
     ObjPalettes = 0x4F424A50,    // "OBJP"
     Scripts = 0x53435250,        // "SCRP"
@@ -124,8 +123,6 @@ public:
     void add_map(const ExtractedMap& map);
     void add_tileset_atlas(const TilesetAtlas& atlas);  // Legacy baked 32×32 metatiles
     void add_tileset(const ExtractedTileset& tileset, TimeOfDay tod);  // Native 8×8 tiles + blocks
-    void add_collision(const std::string& tileset_id, 
-                       const std::vector<uint8_t>& collision);
     void add_font_atlas(const FontAtlas& atlas);
     
     // Add compiled scripts (ScriptId → Lua code)
@@ -161,7 +158,6 @@ private:
     std::vector<SerializedMap> maps_;
     std::vector<std::pair<std::string, std::vector<uint8_t>>> map_data_;
     std::vector<std::pair<std::string, std::vector<uint8_t>>> tileset_data_;
-    std::vector<std::pair<std::string, std::vector<uint8_t>>> collision_data_;
     std::vector<std::pair<std::string, std::vector<uint8_t>>> font_data_;
     std::vector<std::pair<std::string, std::string>> script_data_;  // ScriptId → Lua code
     std::vector<std::pair<std::string, std::vector<uint8_t>>> sprite_data_;  // sprite_id → serialized sprite

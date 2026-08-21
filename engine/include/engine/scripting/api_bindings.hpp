@@ -58,6 +58,11 @@ namespace world_api {
     // ctx.world:warp(map_id, warp_id)
     // Yields during transition
     int warp(lua_State* L);
+
+    // ctx.world:warp_to_spawn()
+    // Warp the player to their last-set backup/spawn warp position.
+    // Semantic equivalent of Sem_WarpToBackup.
+    int warp_to_spawn(lua_State* L);
     
     // NPC visibility
     // ctx.world:show_npc(npc_id)

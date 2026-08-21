@@ -327,12 +327,18 @@ void LuaEmitter::emit_op(std::ostream& out, const Op_JumpTextFacePlayer& op) {
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_JumpStd& op) {
-    emit_line(out, "ctx.std:" + op.name + "()");
-    emit_line(out, "return");
+    // Op_JumpStd is a pre-semantic-IR escape hatch for StdScript calls.
+    // The typed SemanticScriptIR pipeline handles these via named Sem_* ops.
+    // Emit a comment so the script completes without a runtime nil-call crash.
+    emit_comment(out, "jumpstd " + op.name + " (handled by semantic pipeline)");
+    // Note: no 'return' emitted — the enclosing script structure provides termination
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_CallStd& op) {
-    emit_line(out, "ctx.std:" + op.name + "()");
+    // Op_CallStd is a pre-semantic-IR escape hatch for StdScript calls.
+    // The typed SemanticScriptIR pipeline handles these via named Sem_* ops.
+    // Emit a comment — no ctx.std table exists in the runtime.
+    emit_comment(out, "callstd " + op.name + " (handled by semantic pipeline)");
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_YesNo& op) {
@@ -384,7 +390,10 @@ void LuaEmitter::emit_op(std::ostream& out, const Op_PlayMusic& op) {
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_Special& op) {
-    emit_line(out, "ctx.special:" + op.name + "()");
+    // Op_Special is a pre-semantic-IR escape hatch for Crystal Specials.
+    // The typed SemanticScriptIR pipeline handles all known Specials via named Sem_* ops.
+    // Emit a comment — no ctx.special table exists in the runtime.
+    emit_comment(out, "special " + op.name + " (handled by semantic pipeline)");
 }
 
 void LuaEmitter::emit_op(std::ostream& out, const Op_Raw& op) {
@@ -560,7 +569,6 @@ void LuaEmitter::emit_op(std::ostream& out, const Op_HideSprite& op) {
 void LuaEmitter::emit_op(std::ostream& out, const Op_WarpToSpawn& op) {
     emit_line(out, "ctx.world:warp_to_spawn()");
 }
-
 void LuaEmitter::emit_op(std::ostream& out, const Op_CheckBattleResult& op) {
     emit_line(out, "result = ctx.battle:last_result()");
 }

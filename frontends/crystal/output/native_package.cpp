@@ -554,18 +554,6 @@ void PackageWriter::add_tileset(const ExtractedTileset& tileset, TimeOfDay tod) 
               << "\n";
 }
 
-void PackageWriter::add_collision(const std::string& tileset_id, 
-                                   const std::vector<uint8_t>& collision) {
-    for (const auto& [existing_id, _] : collision_data_) {
-        if (existing_id == tileset_id) {
-            throw std::runtime_error(
-                std::format("PackageWriter::add_collision: duplicate collision ID '{}'",
-                            tileset_id));
-        }
-    }
-    collision_data_.push_back({tileset_id, collision});
-}
-
 void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
     for (const auto& [existing_id, _] : font_data_) {
         if (existing_id == atlas.font_id) {
@@ -711,28 +699,6 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         
         // Write map data
         for (const auto& [id, data] : map_data_) {
-            chunk.write(reinterpret_cast<const char*>(data.data()), data.size());
-        }
-        
-        std::string chunk_data = chunk.str();
-        entry.size = static_cast<uint32_t>(chunk_data.size());
-        entry.crc32 = calculate_crc32(chunk_data.data(), chunk_data.size());
-        
-        toc.push_back(entry);
-        all_data.insert(all_data.end(), chunk_data.begin(), chunk_data.end());
-    }
-    
-    // Collision chunk
-    if (!collision_data_.empty()) {
-        TocEntry entry;
-        entry.type = ChunkType::Collision;
-        entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
-        entry.count = static_cast<uint32_t>(collision_data_.size());
-        
-        std::ostringstream chunk(std::ios::binary);
-        for (const auto& [id, data] : collision_data_) {
-            write_chunk_id(chunk, id);
-            write_le(chunk, static_cast<uint32_t>(data.size()));
             chunk.write(reinterpret_cast<const char*>(data.data()), data.size());
         }
         

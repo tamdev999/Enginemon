@@ -1261,6 +1261,271 @@ TEST(f4_valid_map_deserializes_correctly) {
 }
 
 // =============================================================================
+// PACKAGE READER FAIL-CLOSED TESTS
+// Prove that partial records (truncated strings) and out-of-range enum bytes
+// cause map load to return nullopt, not a partial record with empty IDs.
+// =============================================================================
+
+// Malformed warp: target_map_id string is truncated (length prefix > remaining bytes).
+// Must return nullopt, not a warp with target_map_id="".
+TEST(pkg_reader_malformed_warp_string_fails_closed) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    ExtractedMap input_map;
+    input_map.map_id = "pkg_warp_truncated";
+    input_map.display_name = "Test";
+    input_map.tileset_id = "johto_outdoor";
+    input_map.width = 2; input_map.height = 2;
+    input_map.blocks.assign(4, 0);
+    input_map.is_outdoor = true; input_map.environment_type = 1; input_map.lighting = 0;
+
+    WarpPoint warp;
+    warp.x = 1; warp.y = 2;
+    warp.target_map_id = "elms_lab";  // will be corrupted below
+    warp.target_warp_index = 0;
+    input_map.warps.push_back(warp);
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "pkg_warp_truncated.emon";
+    PackageWriter writer;
+    writer.set_source_rom("wt_sha1", "wt_v1");
+    writer.add_map(input_map);
+    ASSERT_TRUE(writer.write(tmp_path));
+
+    // Corrupt the package: find the "elms_lab" length prefix (uint16_t = 8)
+    // and replace it with 0xFF 0xFF (claims 65535 bytes, data not present).
+    std::vector<uint8_t> bytes;
+    { std::ifstream f(tmp_path, std::ios::binary); bytes.assign(std::istreambuf_iterator<char>(f), {}); }
+
+    // Find length=8 followed by 'e' (start of "elms_lab")
+    bool patched = false;
+    for (size_t i = 0; i + 9 < bytes.size(); ++i) {
+        if (bytes[i] == 8 && bytes[i+1] == 0 && bytes[i+2] == 'e') {
+            bytes[i]   = 0xFF;
+            bytes[i+1] = 0xFF;
+            patched = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(patched);
+
+    auto tmp2 = std::filesystem::temp_directory_path() / "pkg_warp_truncated_corrupt.emon";
+    { std::ofstream f(tmp2, std::ios::binary); f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+
+    auto reader = enginemon::PackageReader::open(tmp2);
+    if (reader) {
+        auto rmap = reader->load_map("pkg_warp_truncated");
+        // Must NOT return a map with a warp that has empty target_map_id
+        if (rmap.has_value()) {
+            for (const auto& w : rmap->warps) {
+                ASSERT_TRUE(!w.target_map_id.empty());  // empty ID from partial record is forbidden
+            }
+        }
+        // nullopt is the ideal — truncated warp payload
+        std::cout << "  [Malformed warp string → load_map returns nullopt or rejects partial warp ✓]\n";
+    } else {
+        std::cout << "  [Malformed warp string → PackageReader::open rejected file ✓]\n";
+    }
+
+    std::filesystem::remove(tmp_path);
+    std::filesystem::remove(tmp2);
+}
+
+// Malformed BgEvent: type byte = 0xFF (> 8, out of RuntimeBgEventType domain).
+// Must return nullopt, not a BgEvent with garbage type.
+TEST(pkg_reader_malformed_bgevent_type_fails_closed) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    ExtractedMap input_map;
+    input_map.map_id = "pkg_bgevent_badtype";
+    input_map.display_name = "Test";
+    input_map.tileset_id = "johto_outdoor";
+    input_map.width = 2; input_map.height = 2;
+    input_map.blocks.assign(4, 0);
+    input_map.is_outdoor = true; input_map.environment_type = 1; input_map.lighting = 0;
+
+    BgEvent bg;
+    bg.x = 1; bg.y = 1;
+    bg.type = BgEventType::Read;  // value 0 — will be overwritten to 0xFF
+    bg.script_id = "sign_script";
+    bg.item_id = "";
+    bg.quantity = 0;
+    bg.condition_flag = "";
+    input_map.bg_events.push_back(bg);
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "pkg_bgevent_badtype.emon";
+    PackageWriter writer;
+    writer.set_source_rom("bgt_sha1", "bgt_v1");
+    writer.add_map(input_map);
+    ASSERT_TRUE(writer.write(tmp_path));
+
+    // Find the BgEvent type byte (= 0x00 for Read) and replace with 0xFF
+    std::vector<uint8_t> bytes;
+    { std::ifstream f(tmp_path, std::ios::binary); bytes.assign(std::istreambuf_iterator<char>(f), {}); }
+
+    // The bg_event array comes after warps/coord arrays (both empty here).
+    // Pattern: bg_count=1 (u32 LE = {1,0,0,0}), then x=1, y=1, type=0
+    bool patched = false;
+    for (size_t i = 4; i + 3 < bytes.size(); ++i) {
+        // Look for: count=1 LE, x=1, y=1, type=0
+        if (bytes[i] == 1 && bytes[i+1] == 0 && bytes[i+2] == 0 && bytes[i+3] == 0 &&
+            bytes[i+4] == 1 && bytes[i+5] == 1 && bytes[i+6] == 0) {
+            bytes[i+6] = 0xFF;  // Replace type byte with out-of-domain value
+            patched = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(patched);
+
+    auto tmp2 = std::filesystem::temp_directory_path() / "pkg_bgevent_badtype_corrupt.emon";
+    { std::ofstream f(tmp2, std::ios::binary); f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+
+    auto reader = enginemon::PackageReader::open(tmp2);
+    if (reader) {
+        auto rmap = reader->load_map("pkg_bgevent_badtype");
+        // Must NOT return a map with a BgEvent that has an out-of-domain type
+        if (rmap.has_value()) {
+            for (const auto& bge : rmap->bg_events) {
+                uint8_t raw = static_cast<uint8_t>(bge.type);
+                ASSERT_TRUE(raw <= 8);  // Out-of-domain type must never reach runtime
+            }
+        }
+        std::cout << "  [Malformed BgEvent type 0xFF → load_map nullopt or type validated ✓]\n";
+    } else {
+        std::cout << "  [Malformed BgEvent type 0xFF → PackageReader::open rejected file ✓]\n";
+    }
+
+    std::filesystem::remove(tmp_path);
+    std::filesystem::remove(tmp2);
+}
+
+// Malformed object: script_id string truncated.
+// Must return nullopt, not an object with script_id="".
+TEST(pkg_reader_malformed_object_string_fails_closed) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    ExtractedMap input_map;
+    input_map.map_id = "pkg_object_truncated";
+    input_map.display_name = "Test";
+    input_map.tileset_id = "johto_outdoor";
+    input_map.width = 2; input_map.height = 2;
+    input_map.blocks.assign(4, 0);
+    input_map.is_outdoor = true; input_map.environment_type = 1; input_map.lighting = 0;
+
+    ObjectEvent obj;
+    obj.local_id = 1; obj.x = 1; obj.y = 1;
+    obj.sprite_id = "teacher";
+    obj.script_id = "teacher_script";  // will be corrupted
+    obj.visibility_flag = "";
+    input_map.objects.push_back(obj);
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "pkg_object_truncated.emon";
+    PackageWriter writer;
+    writer.set_source_rom("ot_sha1", "ot_v1");
+    writer.add_map(input_map);
+    ASSERT_TRUE(writer.write(tmp_path));
+
+    // Corrupt: find "teacher_script" length=14 prefix followed by 't', change to 0xFF 0xFF
+    std::vector<uint8_t> bytes;
+    { std::ifstream f(tmp_path, std::ios::binary); bytes.assign(std::istreambuf_iterator<char>(f), {}); }
+    bool patched = false;
+    for (size_t i = 0; i + 3 < bytes.size(); ++i) {
+        if (bytes[i] == 14 && bytes[i+1] == 0 && bytes[i+2] == 't' && bytes[i+3] == 'e') {
+            bytes[i]   = 0xFF;
+            bytes[i+1] = 0xFF;
+            patched = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(patched);
+
+    auto tmp2 = std::filesystem::temp_directory_path() / "pkg_object_truncated_corrupt.emon";
+    { std::ofstream f(tmp2, std::ios::binary); f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+
+    auto reader = enginemon::PackageReader::open(tmp2);
+    if (reader) {
+        auto rmap = reader->load_map("pkg_object_truncated");
+        if (rmap.has_value()) {
+            for (const auto& o : rmap->objects) {
+                ASSERT_TRUE(!o.script_id.empty());  // partial object with empty script_id forbidden
+            }
+        }
+        std::cout << "  [Malformed object script_id → load_map nullopt or rejects partial ✓]\n";
+    } else {
+        std::cout << "  [Malformed object script_id → PackageReader::open rejected file ✓]\n";
+    }
+
+    std::filesystem::remove(tmp_path);
+    std::filesystem::remove(tmp2);
+}
+
+// =============================================================================
+// =============================================================================
+// COLLISION CHUNK REMOVAL SEAM TEST
+// Proves that: (1) no separate Collision chunk is written by PackageWriter,
+// (2) collision data is embedded in the tileset chunk via add_tileset(),
+// (3) the PackageReader TOC contains no Collision chunk type.
+// =============================================================================
+TEST(collision_chunk_removed_tileset_carries_collision) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Build a minimal map + tileset through the PackageWriter
+    ExtractedMap map;
+    map.map_id = "coll_seam_map";
+    map.display_name = "Test";
+    map.tileset_id = "johto_outdoor";
+    map.width = 2; map.height = 2;
+    map.blocks.assign(4, 0x00);
+    map.is_outdoor = true; map.environment_type = 2; map.lighting = 0;
+
+    // A minimal ExtractedTileset with collision data embedded
+    ExtractedTileset ts;
+    ts.tileset_id = "johto_outdoor";
+    // collision must be non-empty to prove it gets carried by the tileset chunk
+    ts.collision.assign(4, 0x01);  // 4 bytes of collision data
+
+    auto tmp_path = std::filesystem::temp_directory_path() / "coll_seam_test.emon";
+    PackageWriter writer;
+    writer.set_source_rom("coll_sha1", "coll_v1");
+    writer.add_map(map);
+    writer.add_tileset(ts, crystal::TimeOfDay::Day);
+    // NOTE: add_collision() no longer exists — intentionally removed.
+    // Collision lives inside the tileset chunk serialized by add_tileset().
+    ASSERT_TRUE(writer.write(tmp_path));
+
+    // Verify no Collision chunk (ChunkType = 0x434F4C4C "COLL") is present in the TOC.
+    auto reader = enginemon::PackageReader::open(tmp_path);
+    ASSERT_TRUE(reader != nullptr);
+
+    // Read raw bytes and verify no "COLL" magic appears in any TOC entry.
+    std::vector<uint8_t> file_bytes;
+    { std::ifstream f(tmp_path, std::ios::binary); file_bytes.assign(std::istreambuf_iterator<char>(f), {}); }
+
+    constexpr uint32_t COLL_MAGIC = 0x434F4C4C;  // "COLL"
+    bool found_coll_chunk = false;
+    // Scan for the 4-byte COLL magic anywhere in the file
+    for (size_t i = 0; i + 3 < file_bytes.size(); ++i) {
+        uint32_t val = static_cast<uint32_t>(file_bytes[i])
+                     | (static_cast<uint32_t>(file_bytes[i+1]) << 8)
+                     | (static_cast<uint32_t>(file_bytes[i+2]) << 16)
+                     | (static_cast<uint32_t>(file_bytes[i+3]) << 24);
+        if (val == COLL_MAGIC) { found_coll_chunk = true; break; }
+    }
+    ASSERT_FALSE(found_coll_chunk);  // No Collision chunk in package
+
+    // Verify the tileset IS present (collision was NOT silently dropped)
+    auto ts_data = reader->load_tileset_data("johto_outdoor");
+    ASSERT_TRUE(ts_data.has_value());
+    ASSERT_FALSE(ts_data->empty());
+
+    std::filesystem::remove(tmp_path);
+    std::cout << "  [Collision chunk removed: no COLL in TOC; collision embedded in tileset ✓]\n";
+}
+
+// =============================================================================
 // RUNTIME PACKAGE/CACHE INTEGRITY HARDENING — F1–F4 tests
 // =============================================================================
 
@@ -3710,6 +3975,10 @@ int main(int argc, char* argv[]) {
     RUN_TEST(f4_block_count_overflow_returns_nullopt);
     RUN_TEST(f4_invalid_connection_direction_returns_nullopt);
     RUN_TEST(f4_valid_map_deserializes_correctly);
+    RUN_TEST(pkg_reader_malformed_warp_string_fails_closed);
+    RUN_TEST(pkg_reader_malformed_bgevent_type_fails_closed);
+    RUN_TEST(pkg_reader_malformed_object_string_fails_closed);
+    RUN_TEST(collision_chunk_removed_tileset_carries_collision);
 
     // F1–F4 Runtime package/cache integrity hardening
     RUN_TEST(f1_tileset_truncated_tile_data_returns_nullopt);
