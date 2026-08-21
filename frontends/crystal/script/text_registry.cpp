@@ -40,7 +40,6 @@ enginemon::SemanticTextSequence TextDefinition::to_semantic_sequence() const {
             case TextOp::TextRam:
             case TextOp::TextBcd:
             case TextOp::TextDecimal:
-            case TextOp::TextStringBuffer:
             case TextOp::TextFar:
             case TextOp::TextBox:
             case TextOp::TextMove:
@@ -57,6 +56,17 @@ enginemon::SemanticTextSequence TextDefinition::to_semantic_sequence() const {
                 // Preserve dynamic/unknown elements as empty text placeholders
                 // so the sequence structure is not lost
                 sem.elements.push_back(enginemon::SemanticTextElement::make_text(""));
+                break;
+            case TextOp::TextStringBuffer:
+                // TX_STRINGBUFFER (0x14): elem.param1 = buffer_id (1-5 in Crystal)
+                // Maps to SemanticTextOp::Arg with 0-indexed slot (0-4).
+                // The corresponding wStringBuffer slot is populated by a preceding
+                // Sem_PrepareTextArg operation — see getmonname/getitemname/gettrainername etc.
+                // Slot 0 = wStringBuffer1, slot 1 = wStringBuffer2, ..., slot 4 = wStringBuffer5
+                {
+                    uint8_t slot = (elem.param1 > 0) ? static_cast<uint8_t>(elem.param1 - 1) : 0;
+                    sem.elements.push_back(enginemon::SemanticTextElement::make_arg(slot));
+                }
                 break;
         }
     }

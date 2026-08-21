@@ -1532,6 +1532,29 @@ struct Sem_RebuildSprites {};
 struct Sem_WildOn {};
 struct Sem_WildOff {};
 struct Sem_Special { uint16_t special_id; std::string name; };
+
+// =============================================================================
+// Sem_GameSpecificEvent — Named game behavior not universal to all frontends
+// =============================================================================
+// Used for Crystal Specials that represent legitimate game semantics but are
+// not universal engine primitives (Crystal-specific subsystems, mini-games,
+// UI events, etc.).
+//
+// This maps to the BehaviorTable dispatch model from the architecture:
+//   Crystal Special → named behavior identity → BehaviorTable → native impl
+//
+// writes_script_var: true if this behavior writes wScriptVar at runtime.
+//   When true, the block-local ScriptVar context is invalidated after this op
+//   to prevent stale constant propagation.
+//
+// Source: Crystal special_pointers.asm — each named behavior has a stable
+// Crystal identity that is preserved here as the behavior name, NOT as the
+// raw special table index.
+// =============================================================================
+struct Sem_GameSpecificEvent {
+    std::string behavior_name;    // Stable behavior name (e.g., "HealMachineAnim")
+    bool writes_script_var;       // true → invalidate block-local ScriptVar after
+};
 // Sem_Pokepic: display a Pokémon picture
 // Source-proven: Script_pokepic (scripting.asm): operand==0 → species from wScriptVar
 // Uses SpeciesSource — same convention as Sem_PlayCry
@@ -1761,6 +1784,7 @@ using SemanticOp = std::variant<
     Sem_Pokemart, Sem_Elevator, Sem_Trade, Sem_FruitTree,
     Sem_HallOfFame, Sem_Credits, Sem_CheckSave, Sem_CheckWarp, Sem_PocketFullNotify,
     Sem_SetPlayerPalette,
+    Sem_GameSpecificEvent,
     
     // Standard scripts
     Sem_CallStd, Sem_JumpStd,

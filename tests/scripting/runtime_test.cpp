@@ -9775,8 +9775,9 @@ TEST(batch5_special_102_production_lowering) {
 }
 
 TEST(batch5_special_144_remains_sem_special) {
-    // CRITICAL: Verify Special 144 (CheckCaughtCelebi) remains Sem_Special
-    // This is NOT a Pokédex check - it reads wBattleResult bit 6
+    // UPDATED: Special 144 (CheckCaughtCelebi) is now lowered to Sem_GameSpecificEvent
+    // via the game-specific behaviors table. It writes wScriptVar (writes_var=true).
+    // This is NOT a Pokédex check - it checks whether Celebi was caught.
     using namespace crystal;
     using namespace enginemon;
     using namespace lowering_rules;
@@ -9808,17 +9809,24 @@ TEST(batch5_special_144_remains_sem_special) {
     block.command_count = 1;
     lctx.current_block = &block;
     
-    // CRITICAL: Special 144 (CheckCaughtCelebi) is unhandled — no lowering rule.
-    // Since the Sem_Special fallback was removed, rule_special() returns {} (unmatched).
-    // The outer lower() loop will produce an UnloweredDiagnostic and the script will
-    // fail the legality gate — correct behavior.
+    // CRITICAL: Special 144 (CheckCaughtCelebi) is now lowered to Sem_GameSpecificEvent.
+    // Source: special_pointers.asm, CheckCaughtCelebi reads/writes wScriptVar.
+    // The Sem_GameSpecificEvent table covers this ID with writes_script_var=true.
     RuleResult result = rule_special(lctx);
 
-    // 5. ASSERT: rule did NOT match (unhandled special → unlowered path)
-    ASSERT_FALSE(result.matched);
-    ASSERT_EQ(result.instructions.size(), 0u);
+    // 5. ASSERT: rule matched and produced Sem_GameSpecificEvent
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1u);
+    ASSERT_EQ(result.instructions.size(), 1u);
+    
+    // Must be Sem_GameSpecificEvent with the source-proven behavior name
+    const auto& op = result.instructions[0].op;
+    auto* gse = std::get_if<Sem_GameSpecificEvent>(&op);
+    ASSERT_TRUE(gse != nullptr);
+    ASSERT_STR_EQ(gse->behavior_name.c_str(), "CheckCaughtCelebi");
+    ASSERT_TRUE(gse->writes_script_var);  // writes wScriptVar
 
-    std::cout << "  [Special 144 → unmatched (no Sem_Special fallback, unlowered path) ✓]\n";
+    std::cout << "  [Special 144 → Sem_GameSpecificEvent{CheckCaughtCelebi} (writes_var=true) ✓]\n";
 }
 
 TEST(batch5_no_sem_special_for_78_102) {
@@ -10064,14 +10072,20 @@ TEST(batch6_unhandled_special_produces_sem_special) {
     
     RuleResult result = rule_special(lctx);
     
-    // ASSERT: Rule did NOT match (unhandled specials return {} — no Sem_Special fallback)
-    // The Sem_Special fallback was removed; unhandled specials produce unlowered diagnostics
-    // via the outer lower() loop and fail the legality gate.
-    ASSERT_FALSE(result.matched);
-    ASSERT_EQ(result.instructions.size(), 0u);
+    // ASSERT: Special 1 (SetBitsForLinkTradeRequest) is now in the Sem_GameSpecificEvent table.
+    // It produces Sem_GameSpecificEvent with behavior_name="SetBitsForLinkTradeRequest".
+    // Previously this was "unhandled" but the Sem_GameSpecificEvent table now covers it.
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.consumed, 1u);
+    ASSERT_EQ(result.instructions.size(), 1u);
     
-    std::cout << "  [Unhandled Special 1 → unmatched (no Sem_Special fallback, unlowered) ✓]\n";
-    std::cout << "  [Distinguishes absorption from unhandled: unhandled returns {} not Sem_Special]\n";
+    const auto& op = result.instructions[0].op;
+    auto* gse = std::get_if<Sem_GameSpecificEvent>(&op);
+    ASSERT_TRUE(gse != nullptr);
+    ASSERT_STR_EQ(gse->behavior_name.c_str(), "SetBitsForLinkTradeRequest");
+    
+    std::cout << "  [Special 1 → Sem_GameSpecificEvent{SetBitsForLinkTradeRequest} (not Sem_Special) ✓]\n";
+    std::cout << "  [All non-explicit-rule specials now produce Sem_GameSpecificEvent, not unlowered]\n";
 }
 
 TEST(batch6_absorption_accounting_invariant) {
@@ -14081,6 +14095,286 @@ TEST(semantic_fix_text_identity_distinguishes_ram_addresses) {
 }
 
 // =============================================================================
+// TEXT SEMANTIC TESTS — TextStringBuffer → SemanticTextOp::Arg
+// =============================================================================
+// Verifies that TX_STRINGBUFFER (wStringBuffer1-5) correctly maps to
+// SemanticTextElement::make_arg(slot) rather than make_text("").
+// Source: Crystal TX_STRINGBUFFER (opcode 0x14); slot = buffer_id - 1
+// =============================================================================
+
+TEST(text_string_buffer_slot1_maps_to_arg_slot0) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    TextDefinition def;
+    def.source_rom_address = 0x1000;
+    // "Hi " + wStringBuffer1 (buffer_id=1) + "!"
+    def.sequence.elements.push_back(TextElement::make_text("Hi "));
+    def.sequence.elements.push_back(TextElement::make_text_string_buffer(1));  // wStringBuffer1
+    def.sequence.elements.push_back(TextElement::make_text("!"));
+    
+    auto sem = def.to_semantic_sequence();
+    
+    ASSERT_EQ(sem.elements.size(), 3u);
+    // First element: text
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Text);
+    ASSERT_STR_EQ(sem.elements[0].text.c_str(), "Hi ");
+    // Second element: Arg at slot 0 (buffer_id 1 → slot 0)
+    ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Arg);
+    ASSERT_EQ(sem.elements[1].arg_index, 0u);
+    // Third element: text
+    ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
+    ASSERT_STR_EQ(sem.elements[2].text.c_str(), "!");
+    
+    // MUTATION: must NOT be empty text placeholder
+    ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
+    
+    std::cout << "  [TX_STRINGBUFFER(1) → SemanticTextOp::Arg(slot=0) ✓]\n";
+}
+
+TEST(text_string_buffer_slot5_maps_to_arg_slot4) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    TextDefinition def;
+    def.source_rom_address = 0x2000;
+    // wStringBuffer5 (buffer_id=5) → slot 4
+    def.sequence.elements.push_back(TextElement::make_text_string_buffer(5));  // wStringBuffer5
+    
+    auto sem = def.to_semantic_sequence();
+    
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
+    ASSERT_EQ(sem.elements[0].arg_index, 4u);  // slot = 5 - 1 = 4
+    
+    std::cout << "  [TX_STRINGBUFFER(5) → SemanticTextOp::Arg(slot=4) ✓]\n";
+}
+
+TEST(text_string_buffer_invalid_id0_maps_to_arg_slot0) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    // buffer_id=0 is invalid in Crystal (1-5 are valid), but must not crash or produce empty text.
+    // Current fix: (param1 > 0) ? param1-1 : 0 → slot 0 (safe fallback, not an empty string).
+    TextDefinition def;
+    def.source_rom_address = 0x3000;
+    def.sequence.elements.push_back(TextElement::make_text_string_buffer(0));  // invalid
+    
+    auto sem = def.to_semantic_sequence();
+    
+    ASSERT_EQ(sem.elements.size(), 1u);
+    // Must NOT be empty text — must be Arg at slot 0 (safe default)
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
+    ASSERT_EQ(sem.elements[0].arg_index, 0u);
+    // Critically: NOT a silent empty string
+    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
+    
+    std::cout << "  [TX_STRINGBUFFER(0/invalid) → SemanticTextOp::Arg(slot=0) not empty-text ✓]\n";
+}
+
+TEST(text_tx_ram_does_not_silently_collapse_to_empty) {
+    using namespace crystal;
+    using namespace enginemon;
+    
+    // TX_RAM (wPlayerName etc.) cannot be typed as a string-buffer slot because
+    // the RAM address determines the runtime value. Currently falls to make_text("")
+    // per the default case — which is a known semantic loss documented in text_registry.cpp.
+    // This test DOCUMENTS the current behavior rather than asserting it's ideal:
+    // TX_RAM produces make_text("") (empty string placeholder) — the information is
+    // preserved structurally but the value is empty at semantic level.
+    //
+    // This test ensures the STRUCTURE is present (element count correct) even if
+    // the value is empty, so the text sequence is not incorrectly considered empty.
+    TextDefinition def;
+    def.source_rom_address = 0x4000;
+    def.sequence.elements.push_back(TextElement::make_text("Player: "));
+    def.sequence.elements.push_back(TextElement::make_text_ram(0xD47D));  // wPlayerName
+    def.sequence.elements.push_back(TextElement::make_text("'s Pokémon"));
+    
+    auto sem = def.to_semantic_sequence();
+    
+    // STRUCTURAL: sequence must have 3 elements (not empty = not zero elements)
+    ASSERT_EQ(sem.elements.size(), 3u);
+    ASSERT_FALSE(sem.empty());
+    // The RAM element currently becomes empty-string Text (documented loss)
+    ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Text);
+    // But it must at least be present in the sequence structure
+    
+    std::cout << "  [TX_RAM present in sequence (3 elements, not empty): documented ✓]\n";
+}
+
+// =============================================================================
+// Sem_GameSpecificEvent ADVERSARIAL TESTS
+// =============================================================================
+
+TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
+    // Verify that a Special with writes_script_var=true (e.g., BugContestJudging=20)
+    // correctly invalidates block-local ScriptVar context, preventing stale values
+    // from being propagated into subsequent context-dependent ops.
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Build: setval(5), special(BugContestJudging=20), special(MapRadio=40)
+    // BugContestJudging writes wScriptVar → context invalidated → MapRadio cannot fold
+    Cmd_Setval sv; sv.value = 5;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 5};
+    
+    Cmd_Special bugContest; bugContest.special_id = 20;  // BugContestJudging
+    CrystalCommand c2; c2.data = bugContest; c2.span.raw_bytes = {0x0F, 20, 0};
+    
+    Cmd_Special mapRadio; mapRadio.special_id = 40;  // MapRadio (needs context)
+    CrystalCommand c3; c3.data = mapRadio; c3.span.raw_bytes = {0x0F, 40, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_gse_invalidates"; ir.entry_address = 0x10000;
+    ir.commands = {c1, c2, c3};
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_gse_invalidates"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 8;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    
+    // BugContestJudging (writes_var=true) should invalidate context
+    // → MapRadio has no context → unlowered
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.commands_unlowered > 0);
+    
+    // ALSO: verify BugContestJudging produced Sem_GameSpecificEvent
+    bool found_gse = false;
+    for (const auto& b : result.ir.blocks) {
+        for (const auto& inst : b.instructions) {
+            if (auto* gse = std::get_if<Sem_GameSpecificEvent>(&inst.op)) {
+                if (gse->behavior_name == "BugContestJudging") {
+                    found_gse = true;
+                    ASSERT_TRUE(gse->writes_script_var);  // must be true for BugContestJudging
+                }
+            }
+        }
+    }
+    ASSERT_TRUE(found_gse);
+    
+    std::cout << "  [BugContestJudging(writes_var=true) invalidates → MapRadio unlowered ✓]\n";
+}
+
+TEST(sem_game_specific_event_no_write_preserves_context) {
+    // Verify that a Special with writes_script_var=false (e.g., OverworldTownMap=38)
+    // does NOT invalidate block-local ScriptVar context.
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Build: setval(3), special(OverworldTownMap=38), special(MapRadio=40)
+    // OverworldTownMap does NOT write wScriptVar → context preserved → MapRadio folds to channel 3
+    Cmd_Setval sv; sv.value = 3;
+    CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 3};
+    
+    Cmd_Special townMap; townMap.special_id = 38;  // OverworldTownMap
+    CrystalCommand c2; c2.data = townMap; c2.span.raw_bytes = {0x0F, 38, 0};
+    
+    Cmd_Special mapRadio; mapRadio.special_id = 40;  // MapRadio (needs context = channel 3)
+    CrystalCommand c3; c3.data = mapRadio; c3.span.raw_bytes = {0x0F, 40, 0};
+    
+    CrystalScriptIR ir;
+    ir.name = "test_gse_preserves"; ir.entry_address = 0x10000;
+    ir.commands = {c1, c2, c3};
+    
+    CrystalCFG cfg;
+    cfg.script_name = "test_gse_preserves"; cfg.entry_address = 0x10000;
+    BasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.start_address = 0; block.end_address = 8;
+    block.command_start = 0; block.command_count = 3;
+    cfg.blocks.push_back(block); cfg.source_ir = &ir;
+    
+    SemanticLegalizer legalizer;
+    auto result = legalizer.lower(ir, cfg);
+    
+    // OverworldTownMap (writes_var=false) should NOT invalidate context
+    // → MapRadio still has context (channel=3) → lowered to Sem_PlayRadio{channel=3}
+    ASSERT_TRUE(result.success);
+    
+    // Verify OverworldTownMap produced Sem_GameSpecificEvent with writes_var=false
+    bool found_townmap = false;
+    bool found_radio_ch3 = false;
+    for (const auto& b : result.ir.blocks) {
+        for (const auto& inst : b.instructions) {
+            if (auto* gse = std::get_if<Sem_GameSpecificEvent>(&inst.op)) {
+                if (gse->behavior_name == "OverworldTownMap") {
+                    found_townmap = true;
+                    ASSERT_FALSE(gse->writes_script_var);  // must be false for OverworldTownMap
+                }
+            }
+            if (auto* radio = std::get_if<Sem_PlayRadio>(&inst.op)) {
+                if (radio->channel == 3) found_radio_ch3 = true;
+            }
+        }
+    }
+    ASSERT_TRUE(found_townmap);
+    ASSERT_TRUE(found_radio_ch3);  // context preserved → MapRadio folded with channel=3
+    
+    std::cout << "  [OverworldTownMap(writes_var=false) preserves context → MapRadio(3) folded ✓]\n";
+}
+
+TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id) {
+    // Verify that Sem_GameSpecificEvent carries the source behavior name,
+    // not a raw Crystal Special table index. This is the key distinction
+    // from Sem_Special (which carried the raw numeric index).
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace lowering_rules;
+    
+    // Test HealMachineAnim (62) and BattleTowerAction (134)
+    for (auto&& [special_id, expected_name] : std::vector<std::pair<uint16_t, std::string>>{
+            {62, "HealMachineAnim"},
+            {134, "BattleTowerAction"},
+            {38, "OverworldTownMap"},
+            {89, "GetFirstPokemonHappiness"}}) {
+        
+        Cmd_Special spec; spec.special_id = special_id;
+        CrystalCommand cmd; cmd.data = spec; cmd.span.raw_bytes = {0x0F, (uint8_t)(special_id & 0xFF), (uint8_t)(special_id >> 8)};
+        
+        CrystalScriptIR ir;
+        ir.name = "test_name_" + std::to_string(special_id); ir.entry_address = 0x10000;
+        ir.commands = {cmd};
+        
+        CrystalCFG cfg;
+        cfg.script_name = ir.name; cfg.entry_address = 0x10000;
+        BasicBlock block;
+        block.id = 0; block.is_entry = true;
+        block.start_address = 0; block.end_address = 3;
+        block.command_start = 0; block.command_count = 1;
+        cfg.blocks.push_back(block); cfg.source_ir = &ir;
+        
+        SemanticLegalizer leg;
+        auto result = leg.lower(ir, cfg);
+        ASSERT_TRUE(result.success);
+        
+        bool found = false;
+        for (const auto& b : result.ir.blocks) {
+            for (const auto& inst : b.instructions) {
+                if (auto* gse = std::get_if<Sem_GameSpecificEvent>(&inst.op)) {
+                    ASSERT_STR_EQ(gse->behavior_name.c_str(), expected_name.c_str());
+                    // Must NOT be a raw numeric string like "special_62"
+                    ASSERT_TRUE(gse->behavior_name.find("special_") == std::string::npos);
+                    ASSERT_TRUE(gse->behavior_name.find("0x") == std::string::npos);
+                    found = true;
+                }
+            }
+        }
+        ASSERT_TRUE(found);
+    }
+    
+    std::cout << "  [Sem_GameSpecificEvent carries source name not raw numeric ID ✓]\n";
+}
+
+// =============================================================================
 // SHARED TEST HELPER — build a minimal single-command IR for lowering tests
 // Defined here so it's available to all test blocks that follow.
 // =============================================================================
@@ -17340,6 +17634,13 @@ int main(int argc, char* argv[]) {
     RUN_TEST(semantic_fix_sdefer_bank_resolution);
     RUN_TEST(semantic_fix_text_identity_distinguishes_controls);
     RUN_TEST(semantic_fix_text_identity_distinguishes_ram_addresses);
+    RUN_TEST(text_string_buffer_slot1_maps_to_arg_slot0);
+    RUN_TEST(text_string_buffer_slot5_maps_to_arg_slot4);
+    RUN_TEST(text_string_buffer_invalid_id0_maps_to_arg_slot0);
+    RUN_TEST(text_tx_ram_does_not_silently_collapse_to_empty);
+    RUN_TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation);
+    RUN_TEST(sem_game_specific_event_no_write_preserves_context);
+    RUN_TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id);
 
     // 11-Finding semantic fidelity pass tests (August 2026)
     RUN_TEST(fidelity11_writetext_distinct_pointers_distinct_sequences);

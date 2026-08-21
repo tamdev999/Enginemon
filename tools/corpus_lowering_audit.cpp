@@ -9,6 +9,8 @@
 #include "crystal/script/legality_gate.hpp"
 #include "crystal/script/native_registry.hpp"
 #include "crystal/script/elevator_registry.hpp"
+#include "crystal/script/text_registry.hpp"
+#include "crystal/script/decoder.hpp"
 #include "crystal/extract/map_extractor.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
@@ -255,6 +257,16 @@ int main(int argc, char* argv[]) {
     // which only operates on supported vanilla Crystal ROM profiles.
     // The profile system guarantees this matches profile.counts.num_pokemon.
     legalizer.set_num_pokemon(profile->counts.num_pokemon);
+    
+    // Initialize TextRegistry so text-sequence lowering produces populated sequences.
+    // Without this, writetext/jumptext bodies would produce empty Sem_ShowText sequences
+    // which the legality gate rejects — giving a false impression of legality failures.
+    // Uses ScriptDecoder (not TypedScriptDecoder) for text decoding, matching FullGameCompiler.
+    crystal::SymbolMap text_symbols;
+    ScriptDecoder script_decoder(*rom, text_symbols);
+    TextRegistry text_registry(
+        [&script_decoder](uint32_t addr) { return script_decoder.decode_text_sequence(addr); });
+    legalizer.set_text_registry(&text_registry);
     
     LegalityGate legality_gate;
     
