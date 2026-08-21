@@ -165,7 +165,7 @@ namespace crystal {
 //          layout changes (padding, reordering) now produce compile-time failures.
 //        Adjacent: load_sprite() in package_reader.cpp hardened — stream failures
 //          during sprite deserialization now return nullopt instead of partial sprite.
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.14.0";
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-2.15.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================
