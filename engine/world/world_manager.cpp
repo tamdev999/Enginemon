@@ -310,29 +310,32 @@ bool WorldManager::calculate_connection_landing(
     int dest_w = dest->collision_width();
     int dest_h = dest->collision_height();
     
-    // Strip offset is in blocks, convert to tiles (*2)
-    int offset_tiles = conn.strip_offset * 2;
-    
+    // coord_adjust_tiles is already in tile units (Crystal: offset*-2).
+    // Apply directly — no multiplication.
+    // Reference: Gen2Recomped connectionLanding: destX = curX - offset*2
+    // which equals curX + coord_adjust_tiles (since coord_adjust_tiles = offset*-2)
+    int adj = conn.coord_adjust_tiles;
+
     switch (facing) {
         case Direction::Up:
-            // Crossing north: land at bottom of destination
-            out_x = player_x - offset_tiles;
+            // Crossing north: land at bottom row of destination, X adjusted
+            out_x = player_x + adj;
             out_y = dest_h - 1;
             break;
         case Direction::Down:
-            // Crossing south: land at top of destination
-            out_x = player_x - offset_tiles;
+            // Crossing south: land at top row of destination, X adjusted
+            out_x = player_x + adj;
             out_y = 0;
             break;
         case Direction::Left:
-            // Crossing west: land at right edge of destination
+            // Crossing west: land at right column of destination, Y adjusted
             out_x = dest_w - 1;
-            out_y = player_y - offset_tiles;
+            out_y = player_y + adj;
             break;
         case Direction::Right:
-            // Crossing east: land at left edge of destination
+            // Crossing east: land at left column of destination, Y adjusted
             out_x = 0;
-            out_y = player_y - offset_tiles;
+            out_y = player_y + adj;
             break;
     }
     
@@ -368,19 +371,17 @@ ConnectionResult WorldManager::resolve_connection(
         return result;
     }
     
-    // CRITICAL: Enforce connection strip bounds
-    // The connection only exists for a portion of the edge defined by:
-    //   strip_offset (starting position in collision cells)
-    //   strip_length (length in collision cells)
+    // Source-edge activation bounds.
+    // src_skip_blocks: how many blocks from the map edge before the strip begins.
+    // strip_length_blocks: how many blocks the strip spans.
+    // Both are in blocks; collision cells = blocks * 2.
     //
-    // For North/South connections: check player X against strip bounds
-    // For East/West connections: check player Y against strip bounds
-    //
-    // Reference: Crystal map connection format - strip defines which tiles connect
-    // Strip offset is in blocks, converted to collision cells (*2)
-    int strip_start_cells = conn->strip_offset * 2;
-    int strip_length_cells = conn->strip_length * 2;  // Length is also in blocks
-    int strip_end_cells = strip_start_cells + strip_length_cells;
+    // Reference: Crystal connection macro
+    //   _src = max(0, -(offset + PAD))  — blocks to skip on the source edge
+    //   data[6] = _len - _src           — overlap strip length in blocks
+    int strip_start_cells  = conn->src_skip_blocks * 2;
+    int strip_length_cells = conn->strip_length_blocks * 2;
+    int strip_end_cells    = strip_start_cells + strip_length_cells;
     
     // Determine which coordinate to check based on direction
     int check_coord = 0;

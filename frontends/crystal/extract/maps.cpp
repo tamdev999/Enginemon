@@ -803,37 +803,48 @@ bool MapExtractor::extract_connections(uint32_t map_attr_addr, uint8_t conn_byte
         conn.direction = dir;
         
         // Connection data format (from connection macro in attributes.asm):
-        // 0-1: map_id (group, map)
-        // 2-3: blocks pointer offset in source map
-        // 4-5: blocks pointer offset in target map  
-        // 6: strip length (_len - _src)
-        // 7: target width
-        // 8: y offset (_y)
-        // 9: x offset (_x)
-        // 10-11: window pointer offset
+        // 0-1: target group, target map index
+        // 2-3: source block pointer offset (_blk)
+        // 4-5: target block pointer offset (_map)
+        // 6:   _len - _src  (overlap strip length in blocks)
+        // 7:   target map width in blocks
+        // 8:   _y  (for N/S: TGT_H*2-1 or 0; for E/W: offset*-2, in tiles)
+        // 9:   _x  (for N/S: offset*-2, in tiles; for E/W: TGT_W*2-1 or 0)
+        // 10-11: window pointer offset (_win)
         //
-        // CRITICAL: The semantic "strip offset" depends on direction:
-        // - North/South: player moves along X axis, strip_offset = _x = data[9]
-        // - East/West: player moves along Y axis, strip_offset = _y = data[8]
-        //
-        // From Crystal macro:
-        //   North: _y = dest_height*2-1 (landing row), _x = offset*-2 (X position adjust)
-        //   South: _y = 0 (landing row), _x = offset*-2 (X position adjust)
-        //   West:  _y = offset*-2 (Y position adjust), _x = dest_width*2-1 (landing col)
-        //   East:  _y = offset*-2 (Y position adjust), _x = 0 (landing col)
+        // The three semantic quantities extracted:
+        //   strip_length_blocks  = data[6]            (overlap length, blocks)
+        //   coord_adjust_tiles   = data[9] or data[8] (landing adjustment, ALREADY tiles)
+        //   src_skip_blocks      = max(0, coord_adjust_tiles/2 - 3)
+        //                          (source-edge skip before strip, blocks)
         
         uint8_t target_group = data[0];
         uint8_t target_index = data[1];
         conn.target_map_id = make_map_id(target_group, target_index);
-        conn.strip_length = data[6];
-        
-        // Select correct offset byte based on direction
-        // N/S: strip is along X axis, use X offset (data[9])
-        // E/W: strip is along Y axis, use Y offset (data[8])
+
+        // data[6] = _len - _src: overlap strip length in blocks
+        conn.strip_length_blocks = data[6];
+
+        // coord_adjust_tiles: the landing-coordinate adjustment, already in tile units.
+        // Crystal macro: offset * -2
+        //   N/S: uses data[9] = _x = offset*-2  (X position adjust)
+        //   E/W: uses data[8] = _y = offset*-2  (Y position adjust)
+        // Read as signed byte — value is already in tiles, NOT blocks.
         if (dir == Direction::North || dir == Direction::South) {
-            conn.strip_offset = static_cast<int8_t>(data[9]);  // X offset for N/S
+            conn.coord_adjust_tiles = static_cast<int8_t>(data[9]);  // _x for N/S
         } else {
-            conn.strip_offset = static_cast<int8_t>(data[8]);  // Y offset for E/W
+            conn.coord_adjust_tiles = static_cast<int8_t>(data[8]);  // _y for E/W
+        }
+
+        // src_skip_blocks: how many blocks of the source edge to skip before the
+        // overlap strip begins.
+        // Crystal: _src = max(0, -(offset + PAD))  where PAD=3
+        // From coord_adjust_tiles = offset*-2  →  offset = -coord_adjust_tiles/2
+        // Therefore: _src = max(0, -(-coord_adjust_tiles/2 + 3))
+        //                  = max(0, coord_adjust_tiles/2 - 3)
+        {
+            int32_t half = conn.coord_adjust_tiles / 2;
+            conn.src_skip_blocks = (half > 3) ? (half - 3) : 0;
         }
         
         out.push_back(conn);

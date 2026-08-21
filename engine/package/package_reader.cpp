@@ -244,8 +244,9 @@ static RuntimeConnection read_connection(std::istream& in) {
                             static_cast<int>(raw_dir)));
     }
     
-    conn.strip_offset = read_le<int32_t>(in);
-    conn.strip_length = in.get();
+    conn.src_skip_blocks    = read_le<int32_t>(in);
+    conn.strip_length_blocks = in.get();
+    conn.coord_adjust_tiles = read_le<int32_t>(in);
     if (!read_length_string(in, conn.target_map_id)) {
         conn.target_map_id.clear();
     }

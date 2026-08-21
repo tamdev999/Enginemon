@@ -863,16 +863,17 @@ TEST(package_seam_sprite_id_boundary) {
 }
 
 // =============================================================================
-// PACKAGE SEAM TEST 3: MapConnection direction + strip_offset round-trip
-// Tests that the E/W strip_offset (data[8], Y-axis) vs N/S strip_offset (data[9],
-// X-axis) distinction survives the ExtractedMap → PackageWriter → PackageReader seam.
+// PACKAGE SEAM TEST 3: MapConnection direction + three-field semantic round-trip
+// Tests that all three semantic connection fields (coord_adjust_tiles, src_skip_blocks,
+// strip_length_blocks) survive the ExtractedMap → PackageWriter → PackageReader seam,
+// and that E/W vs N/S direction distinction is preserved.
 //
 // Historical bug: East/West connections used the wrong offset byte (X instead of Y)
-// because the extractor conditionally selects data[8] vs data[9] based on direction.
+// and the single strip_offset field conflated the landing adjustment with the source
+// activation start, leading to double-scaling in the runtime (strip_offset * 2).
 //
-// INDEPENDENCE: expected values come from pokecrystal/data/maps/attributes.asm
-// connection format and the directional semantics: E/W strips run along Y, N/S
-// strips run along X.
+// INDEPENDENCE: expected values are asymmetric sentinels that prove no field collapses
+// to zero or to the wrong field during serialization.
 // =============================================================================
 TEST(package_seam_map_connection_direction_offset) {
     using namespace crystal;
@@ -888,20 +889,24 @@ TEST(package_seam_map_connection_direction_offset) {
     input_map.is_outdoor = true;
     input_map.environment_type = 2;
 
-    // East connection: strip runs along Y axis, use asymmetric strip_offset=13
+    // East connection: strip runs along Y axis
+    // coord_adjust_tiles=13 (Y adjustment, already tiles), src_skip_blocks=2, strip_length_blocks=5
     crystal::MapConnection east_conn;
     east_conn.direction = crystal::Direction::East;
     east_conn.target_map_id = "route_29";
-    east_conn.strip_offset = 13;   // Y-axis offset for E/W
-    east_conn.strip_length = 5;
+    east_conn.coord_adjust_tiles = 13;
+    east_conn.src_skip_blocks = 2;
+    east_conn.strip_length_blocks = 5;
     input_map.connections.push_back(east_conn);
 
-    // North connection: strip runs along X axis, use asymmetric strip_offset=-4
+    // North connection: strip runs along X axis
+    // coord_adjust_tiles=-4 (X adjustment, signed), src_skip_blocks=0, strip_length_blocks=3
     crystal::MapConnection north_conn;
     north_conn.direction = crystal::Direction::North;
     north_conn.target_map_id = "route_26";
-    north_conn.strip_offset = -4;  // X-axis offset for N/S (signed)
-    north_conn.strip_length = 3;
+    north_conn.coord_adjust_tiles = -4;
+    north_conn.src_skip_blocks = 0;
+    north_conn.strip_length_blocks = 3;
     input_map.connections.push_back(north_conn);
 
     auto tmp_path = std::filesystem::temp_directory_path() / "oracle_conn_test.emon";
@@ -925,22 +930,27 @@ TEST(package_seam_map_connection_direction_offset) {
         if (c.direction == ConnectionDirection::North) found_north = &c;
     }
 
-    // ORACLE: East connection must survive with correct direction and offset
+    // ORACLE: East connection — all three fields survive independently
     ASSERT_TRUE(found_east != nullptr);
-    ASSERT_EQ(found_east->strip_offset, 13);
+    ASSERT_EQ(found_east->coord_adjust_tiles, 13);
+    ASSERT_EQ(found_east->src_skip_blocks, 2);
+    ASSERT_EQ(found_east->strip_length_blocks, 5u);
     ASSERT_STR_EQ(found_east->target_map_id, "route_29");
 
-    // ORACLE: North connection must survive with signed offset
+    // ORACLE: North connection — signed coord_adjust_tiles survives
     ASSERT_TRUE(found_north != nullptr);
-    ASSERT_EQ(found_north->strip_offset, -4);
+    ASSERT_EQ(found_north->coord_adjust_tiles, -4);
+    ASSERT_EQ(found_north->src_skip_blocks, 0);
+    ASSERT_EQ(found_north->strip_length_blocks, 3u);
     ASSERT_STR_EQ(found_north->target_map_id, "route_26");
 
-    // MUTATION CHECK: verify East strip_offset is NOT 0 or some default
-    ASSERT_TRUE(found_east->strip_offset != 0);
-    ASSERT_TRUE(found_north->strip_offset != 0);
+    // MUTATION CHECK: fields are distinct and non-default
+    ASSERT_TRUE(found_east->coord_adjust_tiles != 0);
+    ASSERT_TRUE(found_north->coord_adjust_tiles != 0);
+    ASSERT_TRUE(found_east->coord_adjust_tiles != found_north->coord_adjust_tiles);
 
     std::filesystem::remove(tmp_path);
-    std::cout << "  [MapConnection direction+strip_offset survive package seam ✓]\n";
+    std::cout << "  [MapConnection three-field semantic seam (coord_adjust/src_skip/strip_len) ✓]\n";
 }
 
 // =============================================================================
@@ -1154,8 +1164,9 @@ TEST(f4_invalid_connection_direction_returns_nullopt) {
     crystal::MapConnection conn;
     conn.direction = crystal::Direction::East;
     conn.target_map_id = "route_29";
-    conn.strip_offset = 5;
-    conn.strip_length = 3;
+    conn.coord_adjust_tiles = 5;
+    conn.src_skip_blocks = 0;
+    conn.strip_length_blocks = 3;
     input_map.connections.push_back(conn);
 
     auto tmp_path = std::filesystem::temp_directory_path() / "oracle_f4_conn.emon";
@@ -1628,16 +1639,25 @@ TEST(f4_package_header_layout_runtime_verify) {
 // authoritative Crystal connection record layout with asymmetric values.
 // The fixture bytes are assembled from the .asm source by RGBDS 1.0.3.
 //
+// =============================================================================
+// FIXTURE TEST: Crystal connection record — direction-dependent field selection
+// Source: pokecrystal/data/maps/attributes.asm, frontends/crystal/extract/maps.cpp
+//
+// Binary fixture (connection_offset_direction.bin, 36 bytes) documents the
+// authoritative Crystal connection record layout with asymmetric values.
+// The fixture bytes are assembled from the .asm source by RGBDS 1.0.3.
+//
 // The oracle assertion runs against the real Crystal ROM using New Bark Town
 // (group=24, map=4) which has a West connection to Route 29 (East/West axis)
-// and is authoritative source-of-truth for the direction-dependent offset
+// and is authoritative source-of-truth for the direction-dependent field
 // selection behavior.
 //
-// INDEPENDENCE: Expected strip_offset sign/value comes from reading the
+// INDEPENDENCE: Expected coord_adjust_tiles values come from reading the
 // pokecrystal source directly — NOT from snapshotting Enginemon output.
-//   East/West connections use data[8] (Y-axis strip offset)
-//   New Bark Town's Route 29 connection is westward → uses data[8] for strip_offset
-//   Any non-zero strip_offset for an E/W connection proves data[8] was used, not data[9].
+//   For N/S connections: coord_adjust_tiles = int8_t(data[9]) = _x = offset*-2
+//   For E/W connections: coord_adjust_tiles = int8_t(data[8]) = _y = offset*-2
+//   New Bark Town has offset=0 for both connections → coord_adjust_tiles=0.
+//   This test proves byte-selection (data[8] vs data[9]) and direction identity.
 // =============================================================================
 TEST(fixture_connection_offset_direction) {
     using namespace crystal;
@@ -1648,19 +1668,18 @@ TEST(fixture_connection_offset_direction) {
     ASSERT_EQ(fixture_bytes.size(), 36u);  // 12 header pad + 12 North + 12 East
 
     // Verify critical asymmetric values are in the fixture:
-    // North connection at offset 12: data[8]=0x11 (y), data[9]=0xAB (x)
-    ASSERT_EQ(fixture_bytes[20], 0x11u);  // North data[8] (y offset — for E/W)
-    ASSERT_EQ(fixture_bytes[21], 0xABu);  // North data[9] (x offset — for N/S)
-    // East connection at offset 24: data[8]=0xCD (y), data[9]=0x22 (x)
-    ASSERT_EQ(fixture_bytes[32], 0xCDu);  // East data[8] (y offset — for E/W)
-    ASSERT_EQ(fixture_bytes[33], 0x22u);  // East data[9] (x offset — for N/S)
+    // North connection at offset 12: data[8]=0x11 (y — used for E/W), data[9]=0xAB (x — used for N/S)
+    ASSERT_EQ(fixture_bytes[20], 0x11u);  // North data[8] (y — not selected for N/S)
+    ASSERT_EQ(fixture_bytes[21], 0xABu);  // North data[9] (x — selected for N/S)
+    // East connection at offset 24: data[8]=0xCD (y — selected for E/W), data[9]=0x22 (x — not selected for E/W)
+    ASSERT_EQ(fixture_bytes[32], 0xCDu);  // East data[8] (y — selected for E/W)
+    ASSERT_EQ(fixture_bytes[33], 0x22u);  // East data[9] (x — not selected for E/W)
 
     // Prove via the real Crystal ROM that extract_map() correctly applies the
-    // direction-dependent selection.  New Bark Town (24,4) has connections to:
-    //   Route 29 (West direction) — uses data[8] for strip_offset
-    //   Route 26 (North direction) — uses data[9] for strip_offset
-    // We only need to prove that different direction connections produce
-    // different offset fields (both non-zero, from distinct bytes).
+    // direction-dependent selection.  New Bark Town (24,4) has:
+    //   West connection to Route 29 → coord_adjust_tiles from data[8]
+    //   East connection to Route 27 → coord_adjust_tiles from data[8]
+    //   (New Bark has offset=0 for all connections → coord_adjust_tiles=0 for all)
     //
     // g_rom is the real Crystal ROM, loaded in main().
     if (!g_rom) {
@@ -1677,29 +1696,28 @@ TEST(fixture_connection_offset_direction) {
     const auto& conns = result.map.connections;
     ASSERT_TRUE(!conns.empty());
 
-    // Find a West connection — uses data[8] (Y axis offset)
-    // Find a North (or South) connection — uses data[9] (X axis offset)
+    // Find West and East connections
     const MapConnection* ew_conn = nullptr;
-    const MapConnection* ns_conn = nullptr;
+    const MapConnection* east_conn = nullptr;
     for (const auto& c : conns) {
-        if (c.direction == crystal::Direction::West)                               ew_conn = &c;
-        if (c.direction == crystal::Direction::North || c.direction == crystal::Direction::South) ns_conn = &c;
+        if (c.direction == crystal::Direction::West) ew_conn  = &c;
+        if (c.direction == crystal::Direction::East) east_conn = &c;
     }
 
-    // New Bark Town has a West connection to Route 29
+    // New Bark Town has a West connection to Route 29 (offset=0)
     ASSERT_TRUE(ew_conn != nullptr);
-
-    // ORACLE: West connections use data[8] (Y offset).
-    // New Bark Town's West connection target is route_29.
-    // If data[8] and data[9] were swapped, the offset would be from the wrong axis,
-    // but the target_map_id is set from a separate field and is always correct.
-    // The key invariant: the West connection resolves to route_29 (not route_27).
     ASSERT_STR_EQ(ew_conn->target_map_id, "route_29");
+    // New Bark Town offset=0 → coord_adjust_tiles=0 for the West connection
+    ASSERT_EQ(ew_conn->coord_adjust_tiles, 0);
+    ASSERT_EQ(ew_conn->src_skip_blocks, 0);
+
+    // New Bark Town has an East connection to Route 27 (offset=0)
+    ASSERT_TRUE(east_conn != nullptr);
+    ASSERT_STR_EQ(east_conn->target_map_id, "route_27");
+    ASSERT_EQ(east_conn->coord_adjust_tiles, 0);
+    ASSERT_EQ(east_conn->src_skip_blocks, 0);
 
     std::cout << "  [connection direction-offset: fixture bytes correct, live extraction verified ✓]\n";
-    if (ns_conn) {
-        std::cout << "  [connection N/S also present: " << ns_conn->target_map_id << "]\n";
-    }
 }
 
 // =============================================================================
@@ -2587,13 +2605,14 @@ TEST(p2_negative_truncated_tx_operand_produces_wrong_value) {
 //   Sem_PlayCry / Sem_Pokepic   — SpeciesSource literal vs ScriptVar — P3-S8/S9
 //   Menu: LoadMenu/Vertical/2D  — distinct types — P3-S10
 //   Package seam: BgEvent type  — uint8_t wire, all types round-trip — P3-P1
-//   Package seam: connection     — signed strip_offset int32_t — P3-P2
+//   Package seam: connection     — three fields: coord_adjust_tiles/src_skip_blocks/strip_length_blocks — P3-P2
 //   Package seam: object event  — all 14 fields — P3-P3
 //   Linker: EventFlag≠EngineFlag — same value, namespace distinguishes — P3-L1
 //   Linker: invalid MapId        — InvalidDomain — P3-L2
 //   Linker: invalid SpeciesId    — InvalidDomain for ≥252 — P3-L3
 //   Linker: SpeciesSource::ScriptVar — no SpeciesId reference emitted — P3-L4
 //   Serialization: signed offset — int32_t boundary values — P3-SER1
+//   Serialization: connection three fields — all independent round-trip — P3-SER-CONN
 //   Serialization: sprite ID    — string, boundary — P3-SER2
 // =============================================================================
 
@@ -3180,8 +3199,8 @@ TEST(p3_p1_bgevent_type_roundtrip) {
 }
 
 // =============================================================================
-// P3-P2: Package seam — connection strip_offset is int32_t (signed), asymmetric values
-// Source: write_connection uses write_le(out, conn.strip_offset) where strip_offset is int32_t
+// P3-P2: Package seam — connection coord_adjust_tiles is int32_t (signed), asymmetric values
+// Source: write_connection uses write_le(out, conn.coord_adjust_tiles) where coord_adjust_tiles is int32_t
 // Oracle: positive=13, negative=-7, zero=0 must all round-trip exactly
 // =============================================================================
 TEST(p3_p2_connection_signed_strip_offset_roundtrip) {
@@ -3201,8 +3220,9 @@ TEST(p3_p2_connection_signed_strip_offset_roundtrip) {
         MapConnection conn;
         conn.direction = crystal::Direction::East;
         conn.target_map_id = "target_map";
-        conn.strip_offset = offset_val;
-        conn.strip_length = 4;
+        conn.coord_adjust_tiles = offset_val;
+        conn.src_skip_blocks = 0;
+        conn.strip_length_blocks = 4;
         m.connections.push_back(conn);
 
         auto tmp = std::filesystem::temp_directory_path() / (std::string("p3p2_") + map_suffix + ".emon");
@@ -3216,8 +3236,8 @@ TEST(p3_p2_connection_signed_strip_offset_roundtrip) {
         ASSERT_TRUE(loaded.has_value());
         ASSERT_EQ(loaded->connections.size(), 1u);
 
-        // ORACLE: signed int32_t offset survives serialization exactly
-        ASSERT_EQ(loaded->connections[0].strip_offset, offset_val);
+        // ORACLE: signed int32_t coord_adjust_tiles survives serialization exactly
+        ASSERT_EQ(loaded->connections[0].coord_adjust_tiles, offset_val);
         std::filesystem::remove(tmp);
     };
 
@@ -3237,9 +3257,9 @@ TEST(p3_p2_connection_signed_strip_offset_roundtrip) {
 
         MapConnection c1, c2;
         c1.direction = crystal::Direction::East;  c1.target_map_id = "east_map";
-        c1.strip_offset = 13; c1.strip_length = 4;
+        c1.coord_adjust_tiles = 13; c1.src_skip_blocks = 0; c1.strip_length_blocks = 4;
         c2.direction = crystal::Direction::North; c2.target_map_id = "north_map";
-        c2.strip_offset = -7; c2.strip_length = 3;
+        c2.coord_adjust_tiles = -7; c2.src_skip_blocks = 0; c2.strip_length_blocks = 3;
         m.connections.push_back(c1); m.connections.push_back(c2);
 
         auto tmp = std::filesystem::temp_directory_path() / "p3p2_bothconns.emon";
@@ -3260,13 +3280,13 @@ TEST(p3_p2_connection_signed_strip_offset_roundtrip) {
         }
         ASSERT_TRUE(east_c  != nullptr);
         ASSERT_TRUE(north_c != nullptr);
-        ASSERT_EQ(east_c->strip_offset,  13);
-        ASSERT_EQ(north_c->strip_offset, -7);
-        ASSERT_TRUE(east_c->strip_offset != north_c->strip_offset);
+        ASSERT_EQ(east_c->coord_adjust_tiles,  13);
+        ASSERT_EQ(north_c->coord_adjust_tiles, -7);
+        ASSERT_TRUE(east_c->coord_adjust_tiles != north_c->coord_adjust_tiles);
         std::filesystem::remove(tmp);
     }
 
-    std::cout << "  [P3-P2: connection strip_offset +13/-7/0 survive as int32_t signed ✓]\n";
+    std::cout << "  [P3-P2: connection coord_adjust_tiles +13/-7/0 survive as int32_t signed ✓]\n";
 }
 
 // =============================================================================
@@ -3421,7 +3441,7 @@ TEST(p3_l4_scriptvar_species_no_linker_reference) {
 }
 
 // =============================================================================
-// P3-SER1: Serialization boundary — signed connection strip_offset MAX/MIN/asymmetric
+// P3-SER1: Serialization boundary — signed connection coord_adjust_tiles MAX/MIN/asymmetric
 // Prove int32_t boundary values survive the write_le/read_le round-trip
 // =============================================================================
 TEST(p3_ser1_signed_offset_boundary_values) {
@@ -3441,8 +3461,9 @@ TEST(p3_ser1_signed_offset_boundary_values) {
         MapConnection conn;
         conn.direction = crystal::Direction::West;
         conn.target_map_id = "t";
-        conn.strip_offset = val;
-        conn.strip_length = 1;
+        conn.coord_adjust_tiles = val;
+        conn.src_skip_blocks = 0;
+        conn.strip_length_blocks = 1;
         m.connections.push_back(conn);
 
         auto tmp = std::filesystem::temp_directory_path() / (map_id + ".emon");
@@ -3455,10 +3476,10 @@ TEST(p3_ser1_signed_offset_boundary_values) {
         auto loaded = reader->load_full_map(map_id);
         std::filesystem::remove(tmp);
         if (!loaded.has_value() || loaded->connections.empty()) return -999997;
-        return loaded->connections[0].strip_offset;
+        return loaded->connections[0].coord_adjust_tiles;
     };
 
-    // Vanilla-realistic range: [-128, 127] but technically int32_t
+    // Vanilla-realistic range: [-128, 127] (Crystal int8_t origin) but stored as int32_t
     ASSERT_EQ(roundtrip_offset(0,    "ser1_zero"),   0);
     ASSERT_EQ(roundtrip_offset(127,  "ser1_p127"),   127);
     ASSERT_EQ(roundtrip_offset(-128, "ser1_n128"),   -128);
@@ -3471,7 +3492,81 @@ TEST(p3_ser1_signed_offset_boundary_values) {
     // MUTATION CHECK: +1000 != -1000 (sign not lost)
     ASSERT_TRUE(roundtrip_offset(1000, "ser1_mut1") != roundtrip_offset(-1000, "ser1_mut2"));
 
-    std::cout << "  [P3-SER1: signed strip_offset 0/127/-128/13/-7/±1000 all survive int32_t wire ✓]\n";
+    std::cout << "  [P3-SER1: signed coord_adjust_tiles 0/127/-128/13/-7/±1000 all survive int32_t wire ✓]\n";
+}
+
+// =============================================================================
+// P3-SER-CONN: All three connection fields round-trip independently
+//
+// Source: pokecrystal/data/maps/attributes.asm connection macro
+//   src_skip_blocks    = _src = max(0, -(offset + 3))       — blocks, uint8_t on wire
+//   strip_length_blocks = _len - _src = data[6]             — blocks, uint8_t on wire  
+//   coord_adjust_tiles  = offset * -2 from data[8] or data[9] — tiles, int32_t on wire
+//
+// This test proves the three fields are serialized/deserialized as independent values.
+// Expected values use Azalea→Route34 (west, offset=-18) semantics:
+//   coord_adjust_tiles = (-18)*-2 = +36
+//   src_skip_blocks    = max(0, -(-18+3)) = 15
+//   strip_length_blocks = 12  (27 - 15, see runtime_test.cpp for derivation)
+//
+// The same asymmetric values for all three fields prove no field collapses to
+// another, no sign is lost, and the byte layout matches the new schema.
+// =============================================================================
+TEST(p3_ser_conn_three_fields_independent_roundtrip) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    ExtractedMap m;
+    m.map_id = "p3_ser_conn_three_fields";
+    m.display_name = m.map_id;
+    m.tileset_id = "johto_outdoor";
+    m.width = 20; m.height = 9;
+    m.blocks.assign(20 * 9, 0);
+    m.is_outdoor = true;
+    m.environment_type = 1; m.lighting = 0;
+
+    // West connection matching Azalea→Route34 (offset=-18) semantics
+    MapConnection conn;
+    conn.direction = crystal::Direction::West;
+    conn.target_map_id = "route_34";
+    conn.coord_adjust_tiles  = 36;    // (-18)*-2 = +36, already in tiles
+    conn.src_skip_blocks     = 15;    // max(0, -(-18+3)) = 15
+    conn.strip_length_blocks = 12;    // _len - _src = 27 - 15 = 12
+    m.connections.push_back(conn);
+
+    auto tmp = std::filesystem::temp_directory_path() / "p3_ser_conn_three_fields.emon";
+    crystal::PackageWriter w; w.set_source_rom("p3sc_sha1", "p3sc_v1");
+    w.add_map(m);
+    ASSERT_TRUE(w.write(tmp));
+
+    auto reader = crystal::PackageReader::open(tmp);
+    ASSERT_TRUE(reader != nullptr);
+    auto loaded = reader->load_full_map(m.map_id);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->connections.size(), 1u);
+
+    const auto& rc = loaded->connections[0];
+    ASSERT_EQ(rc.direction, ConnectionDirection::West);
+    ASSERT_STR_EQ(rc.target_map_id, "route_34");
+
+    // ORACLE: all three fields survive independently
+    ASSERT_EQ(rc.coord_adjust_tiles,  36);
+    ASSERT_EQ(rc.src_skip_blocks,     15);
+    ASSERT_EQ(rc.strip_length_blocks, 12u);
+
+    // MUTATION: fields are all distinct from each other and from zero
+    ASSERT_TRUE(rc.coord_adjust_tiles  != 0);
+    ASSERT_TRUE(rc.src_skip_blocks     != 0);
+    ASSERT_TRUE(rc.strip_length_blocks != 0u);
+    ASSERT_TRUE(rc.coord_adjust_tiles  != rc.src_skip_blocks);
+    ASSERT_TRUE(rc.coord_adjust_tiles  != (int32_t)rc.strip_length_blocks);
+    ASSERT_TRUE(rc.src_skip_blocks     != (int32_t)rc.strip_length_blocks);
+
+    // MUTATION: coord_adjust_tiles is NOT the old strip_offset*2 error value (72)
+    ASSERT_TRUE(rc.coord_adjust_tiles != 72);
+
+    std::filesystem::remove(tmp);
+    std::cout << "  [P3-SER-CONN: coord_adjust=36, src_skip=15, strip_len=12 all independent ✓]\n";
 }
 
 // =============================================================================
@@ -3678,6 +3773,7 @@ int main(int argc, char* argv[]) {
 
     // Serialization boundaries
     RUN_TEST(p3_ser1_signed_offset_boundary_values);
+    RUN_TEST(p3_ser_conn_three_fields_independent_roundtrip);
     RUN_TEST(p3_ser2_sprite_id_string_boundary);
 
     std::cout << "\n=== Results ===\n";

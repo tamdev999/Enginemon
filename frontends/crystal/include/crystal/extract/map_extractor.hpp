@@ -30,11 +30,50 @@ enum class Direction { North, South, East, West };
 
 // Map connection (how maps link together)
 // Stored raw first, then resolved to world coordinates in a separate stage
+//
+// Source: pokecrystal/data/maps/attributes.asm `connection` macro
+// All values are derived directly from the Crystal connection record.
+//
+// Crystal record layout (12 bytes):
+//   data[0-1]  = target group, target map index
+//   data[2-3]  = source block pointer offset
+//   data[4-5]  = target block pointer offset
+//   data[6]    = _len - _src  (overlap strip length in blocks)
+//   data[7]    = target map width in blocks
+//   data[8]    = _y (for N/S: TGT_H*2-1 or 0; for E/W: offset*-2, in tiles)
+//   data[9]    = _x (for N/S: offset*-2, in tiles; for E/W: TGT_W*2-1 or 0)
+//   data[10-11]= window pointer offset
+//
+// Three distinct semantic quantities extracted from the record:
+//
+//   src_skip_blocks  — source-edge skip before the overlap strip begins (blocks).
+//                      Crystal: _src = max(0, -(offset + PAD)).
+//                      Derived: max(0, coord_adjust_tiles/2 - 3).
+//                      Used for: determining where the active source strip begins.
+//
+//   strip_length_blocks — number of blocks in the overlap strip (data[6]).
+//                         Crystal: _len - _src.
+//                         Used for: source-edge activation bounds.
+//
+//   coord_adjust_tiles — landing coordinate adjustment, ALREADY in tile units.
+//                        Crystal: offset * -2 (for N/S: data[9]; for E/W: data[8]).
+//                        Used for: computing destination X or Y on crossing.
+//                        NOT a block count. Do NOT multiply by 2.
 struct MapConnection {
     Direction direction;
     std::string target_map_id;      // Semantic ID, e.g., "route_29"
-    int32_t strip_offset;           // Tile offset within connection strip
-    uint8_t strip_length;           // Length of connection in tiles
+
+    // Source: _src = max(0, -(offset + 3))
+    // Units: blocks
+    int32_t src_skip_blocks;
+
+    // Source: data[6] = _len - _src
+    // Units: blocks
+    uint8_t strip_length_blocks;
+
+    // Source: data[9] for N/S (= offset*-2), data[8] for E/W (= offset*-2)
+    // Units: tiles (already scaled — do NOT multiply by 2)
+    int32_t coord_adjust_tiles;
 };
 
 // Warp destination

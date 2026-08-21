@@ -188,8 +188,9 @@ static void write_object(std::ostream& out, const ObjectEvent& obj) {
 
 static void write_connection(std::ostream& out, const MapConnection& conn) {
     out.put(static_cast<uint8_t>(conn.direction));
-    write_le(out, conn.strip_offset);
-    out.put(conn.strip_length);
+    write_le(out, conn.src_skip_blocks);
+    out.put(conn.strip_length_blocks);
+    write_le(out, conn.coord_adjust_tiles);
     write_length_string(out, conn.target_map_id);
 }
 
@@ -309,8 +310,9 @@ static ObjectEvent read_object(std::istream& in) {
 static MapConnection read_connection(std::istream& in) {
     MapConnection conn;
     conn.direction = static_cast<Direction>(in.get());
-    conn.strip_offset = read_le<int32_t>(in);
-    conn.strip_length = in.get();
+    conn.src_skip_blocks = read_le<int32_t>(in);
+    conn.strip_length_blocks = in.get();
+    conn.coord_adjust_tiles = read_le<int32_t>(in);
     uint16_t id_len = read_le<uint16_t>(in);
     conn.target_map_id.resize(id_len);
     in.read(conn.target_map_id.data(), id_len);
@@ -1457,8 +1459,9 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         enginemon::RuntimeConnection rc;
         rc.direction = convert_direction(conn.direction);
         rc.target_map_id = std::move(conn.target_map_id);
-        rc.strip_offset = conn.strip_offset;
-        rc.strip_length = conn.strip_length;
+        rc.src_skip_blocks    = conn.src_skip_blocks;
+        rc.strip_length_blocks = conn.strip_length_blocks;
+        rc.coord_adjust_tiles = conn.coord_adjust_tiles;
         result.connections.push_back(std::move(rc));
     }
     

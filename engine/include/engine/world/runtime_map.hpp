@@ -142,11 +142,37 @@ enum class ConnectionDirection : uint8_t {
 };
 
 // Map connection (how maps link together)
+//
+// Source: pokecrystal/data/maps/attributes.asm `connection` macro
+// All values are derived directly from the Crystal connection record.
+//
+// Three distinct semantic quantities (see MapConnection in map_extractor.hpp for
+// full derivation documentation):
+//
+//   src_skip_blocks    — source-edge skip before the overlap strip begins (blocks).
+//                        Used by resolve_connection() to compute activation bounds.
+//
+//   strip_length_blocks — number of blocks in the overlap strip.
+//                         Used by resolve_connection() to compute activation bounds.
+//
+//   coord_adjust_tiles — landing coordinate adjustment in TILE units.
+//                        Crystal: offset*-2, already in tiles.
+//                        Used by calculate_connection_landing() DIRECTLY — no *2.
 struct RuntimeConnection {
     ConnectionDirection direction;
     std::string target_map_id;      // Semantic ID
-    int32_t strip_offset;           // Tile offset within connection strip
-    uint8_t strip_length;           // Length of connection in tiles
+
+    // Crystal _src = max(0, -(offset + 3))
+    // Units: blocks
+    int32_t src_skip_blocks;
+
+    // Crystal data[6] = _len - _src
+    // Units: blocks
+    uint8_t strip_length_blocks;
+
+    // Crystal offset*-2, from data[9] (N/S) or data[8] (E/W)
+    // Units: tiles — apply DIRECTLY, no multiplication
+    int32_t coord_adjust_tiles;
 };
 
 //=============================================================================

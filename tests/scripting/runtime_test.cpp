@@ -4034,8 +4034,9 @@ static RuntimeMap extracted_to_runtime(const ExtractedMap& ext) {
         RuntimeConnection rconn;
         rconn.direction = static_cast<ConnectionDirection>(conn.direction);
         rconn.target_map_id = conn.target_map_id;
-        rconn.strip_offset = conn.strip_offset;
-        rconn.strip_length = conn.strip_length;
+        rconn.src_skip_blocks    = conn.src_skip_blocks;
+        rconn.strip_length_blocks = conn.strip_length_blocks;
+        rconn.coord_adjust_tiles = conn.coord_adjust_tiles;
         rt.connections.push_back(rconn);
     }
     
@@ -5127,13 +5128,14 @@ TEST(connection_strip_first_valid_coordinate) {
     source.width = 10;
     source.height = 10;
     
-    // Create west connection with strip_offset=2, strip_length=3
-    // Strip covers cells 4-9 (offset*2=4, length*2=6)
+    // Create west connection with src_skip_blocks=2, strip_length_blocks=3
+    // Strip covers cells 4-9 (src_skip_blocks*2=4, strip_length_blocks*2=6)
     RuntimeConnection conn;
     conn.direction = ConnectionDirection::West;
     conn.target_map_id = "dest";
-    conn.strip_offset = 2;
-    conn.strip_length = 3;
+    conn.src_skip_blocks = 2;
+    conn.strip_length_blocks = 3;
+    conn.coord_adjust_tiles = 0;
     source.connections.push_back(conn);
     
     // Create destination map
@@ -5150,7 +5152,7 @@ TEST(connection_strip_first_valid_coordinate) {
     
     wm.load_map("source");
     
-    // First valid Y coordinate in strip (strip_offset*2 = 4)
+    // First valid Y coordinate in strip (src_skip_blocks*2 = 4)
     auto result = wm.resolve_connection(0, 4, enginemon::Direction::Left);
     ASSERT_TRUE(result.success);
     
@@ -5168,12 +5170,13 @@ TEST(connection_strip_last_valid_coordinate) {
     source.width = 10;
     source.height = 10;
     
-    // Strip_offset=2, strip_length=3 → cells 4-9 (exclusive: 4,5,6,7,8,9)
+    // src_skip_blocks=2, strip_length_blocks=3 → cells 4-9 (exclusive: 4,5,6,7,8,9)
     RuntimeConnection conn;
     conn.direction = ConnectionDirection::West;
     conn.target_map_id = "dest";
-    conn.strip_offset = 2;
-    conn.strip_length = 3;
+    conn.src_skip_blocks = 2;
+    conn.strip_length_blocks = 3;
+    conn.coord_adjust_tiles = 0;
     source.connections.push_back(conn);
     
     RuntimeMap dest;
@@ -5189,7 +5192,7 @@ TEST(connection_strip_last_valid_coordinate) {
     
     wm.load_map("source");
     
-    // Last valid Y coordinate in strip (strip_offset*2 + strip_length*2 - 1 = 9)
+    // Last valid Y coordinate in strip (src_skip_blocks*2 + strip_length_blocks*2 - 1 = 9)
     auto result = wm.resolve_connection(0, 9, enginemon::Direction::Left);
     ASSERT_TRUE(result.success);
     
@@ -5207,12 +5210,13 @@ TEST(connection_strip_before_strip_rejected) {
     source.width = 10;
     source.height = 10;
     
-    // Strip_offset=2, strip_length=3 → cells 4-9
+    // src_skip_blocks=2, strip_length_blocks=3 → cells 4-9
     RuntimeConnection conn;
     conn.direction = ConnectionDirection::West;
     conn.target_map_id = "dest";
-    conn.strip_offset = 2;
-    conn.strip_length = 3;
+    conn.src_skip_blocks = 2;
+    conn.strip_length_blocks = 3;
+    conn.coord_adjust_tiles = 0;
     source.connections.push_back(conn);
     
     RuntimeMap dest;
@@ -5247,12 +5251,13 @@ TEST(connection_strip_after_strip_rejected) {
     source.width = 10;
     source.height = 10;
     
-    // Strip_offset=2, strip_length=3 → cells 4-9
+    // src_skip_blocks=2, strip_length_blocks=3 → cells 4-9
     RuntimeConnection conn;
     conn.direction = ConnectionDirection::West;
     conn.target_map_id = "dest";
-    conn.strip_offset = 2;
-    conn.strip_length = 3;
+    conn.src_skip_blocks = 2;
+    conn.strip_length_blocks = 3;
+    conn.coord_adjust_tiles = 0;
     source.connections.push_back(conn);
     
     RuntimeMap dest;
@@ -5533,6 +5538,225 @@ TEST(connection_landing_math) {
     // Landing Y should follow the strip offset formula
     std::cout << "  [Landing at (" << result.target_x << "," << result.target_y 
               << ") in " << result.target_map_id << "]\n";
+}
+
+// =============================================================================
+// CONNECTION SEMANTIC TESTS — Vanilla cases with nonzero asymmetric offsets
+//
+// All expected values are hand-authored from pokecrystal/data/maps/attributes.asm
+// and pokecrystal/constants/map_constants.asm.
+// They are NEVER derived from Enginemon encoder/decoder output.
+//
+// Crystal connection macro formula (PAD = MAP_CONNECTION_PADDING_WIDTH = 3):
+//   coord_adjust_tiles = offset * -2      (already in tiles, from data[9] or data[8])
+//   src_skip_blocks    = max(0, -(offset + 3))
+//   strip_length_blocks = _len - _src     (data[6])
+//
+// These tests require the real Crystal ROM (g_rom). They skip when ROM is absent.
+// =============================================================================
+
+TEST(connection_semantic_cherrygrove_north_to_route30) {
+    // Source: pokecrystal/data/maps/attributes.asm
+    //   map_attributes CherrygroveCity, CHERRYGROVE_CITY, $35
+    //   connection north, Route30, ROUTE_30, 5
+    //
+    // CHERRYGROVE_CITY: 20w x 9h  (map_constants.asm)
+    // ROUTE_30:         10w x 27h
+    // offset = +5, direction = north
+    //
+    // Crystal macro (north):
+    //   _x = offset * -2 = 5 * -2 = -10  → coord_adjust_tiles = -10
+    //   _src = max(0, -(5 + 3)) = max(0, -8) = 0  → src_skip_blocks = 0
+    //   _len = CHERRYGROVE_W + PAD - offset = 20 + 3 - 5 = 18
+    //   clamped to min(18, ROUTE_30_W=10) = 10
+    //   data[6] = _len - _src = 10 - 0 = 10  → strip_length_blocks = 10
+    //
+    // PROOF: positive offset → coord_adjust_tiles negative, src_skip_blocks zero.
+    if (!g_rom) {
+        std::cout << "  [SKIP: ROM not loaded]\n";
+        return;
+    }
+
+    crystal::MapExtractor extractor(*g_rom, *g_profile);
+    // Cherrygrove City: group 26, map 3 (from map_constants.asm newgroup CHERRYGROVE + map offset)
+    auto result = extractor.extract_map(26, 3);
+    ASSERT_TRUE(result.success);
+
+    const crystal::MapConnection* north_conn = nullptr;
+    for (const auto& c : result.map.connections) {
+        if (c.direction == crystal::Direction::North) { north_conn = &c; break; }
+    }
+    ASSERT_TRUE(north_conn != nullptr);
+    ASSERT_STR_EQ(north_conn->target_map_id.c_str(), "route_30");
+
+    // coord_adjust_tiles: offset*-2 = 5*-2 = -10 (already tiles, no *2 needed)
+    ASSERT_EQ(north_conn->coord_adjust_tiles, -10);
+    // src_skip_blocks: max(0, -(5+3)) = 0 (positive offset → no source-edge skip)
+    ASSERT_EQ(north_conn->src_skip_blocks, 0);
+    // strip_length_blocks: min(CHERRYGROVE_W+PAD-offset, ROUTE_30_W) - _src = 10 - 0 = 10
+    ASSERT_EQ(north_conn->strip_length_blocks, 10u);
+
+    // MUTATION: coord_adjust_tiles must not be zero or the old strip_offset*2 value
+    ASSERT_TRUE(north_conn->coord_adjust_tiles != 0);
+    ASSERT_TRUE(north_conn->coord_adjust_tiles != -20);  // old bug: -10 * 2 = -20
+
+    std::cout << "  [Cherrygrove→Route30 (north, offset=+5): "
+              << "coord_adjust=-10, src_skip=0, len=10 ✓]\n";
+}
+
+TEST(connection_semantic_azalea_west_to_route34) {
+    // Source: pokecrystal/data/maps/attributes.asm
+    //   map_attributes AzaleaTown, AZALEA_TOWN, $05
+    //   connection west, Route34, ROUTE_34, -18
+    //
+    // AZALEA_TOWN: 20w x 9h  (map_constants.asm)
+    // ROUTE_34:    10w x 27h
+    // offset = -18, direction = west
+    //
+    // Crystal macro (west):
+    //   _y = offset * -2 = (-18) * -2 = +36  → coord_adjust_tiles = +36
+    //   _src = max(0, -(-18 + 3)) = max(0, 15) = 15  → src_skip_blocks = 15
+    //   _len = AZALEA_H + PAD - offset = 9 + 3 - (-18) = 30
+    //   clamped to min(30, ROUTE_34_H=27) = 27
+    //   data[6] = _len - _src = 27 - 15 = 12  → strip_length_blocks = 12
+    //
+    // PROOF: negative offset → coord_adjust_tiles positive, src_skip_blocks nonzero.
+    if (!g_rom) {
+        std::cout << "  [SKIP: ROM not loaded]\n";
+        return;
+    }
+
+    crystal::MapExtractor extractor(*g_rom, *g_profile);
+    // Azalea Town: group 8, map 7 (from map_constants.asm newgroup AZALEA + map offset)
+    auto result = extractor.extract_map(8, 7);
+    ASSERT_TRUE(result.success);
+
+    const crystal::MapConnection* west_conn = nullptr;
+    for (const auto& c : result.map.connections) {
+        if (c.direction == crystal::Direction::West) { west_conn = &c; break; }
+    }
+    ASSERT_TRUE(west_conn != nullptr);
+    // target_map_id will be a fallback ID ("map_g11_i01") since Route 34's group
+    // is not in the known-group table; semantic field values are the proof here
+    ASSERT_FALSE(west_conn->target_map_id.empty());
+
+    // coord_adjust_tiles: offset*-2 = (-18)*-2 = +36 (already tiles)
+    ASSERT_EQ(west_conn->coord_adjust_tiles, 36);
+    // src_skip_blocks: max(0, -(-18+3)) = max(0, 15) = 15 (negative offset → large skip)
+    ASSERT_EQ(west_conn->src_skip_blocks, 15);
+    // strip_length_blocks: min(AZALEA_H+PAD-offset, ROUTE_34_H) - _src = 27 - 15 = 12
+    ASSERT_EQ(west_conn->strip_length_blocks, 12u);
+
+    // MUTATION: coord_adjust_tiles must not be zero or the old strip_offset*2 value
+    ASSERT_TRUE(west_conn->coord_adjust_tiles != 0);
+    ASSERT_TRUE(west_conn->coord_adjust_tiles != 72);  // old bug: 36 * 2 = 72
+    // MUTATION: src_skip_blocks must not be zero (negative offset drives this nonzero)
+    ASSERT_TRUE(west_conn->src_skip_blocks != 0);
+
+    std::cout << "  [Azalea→Route34 (west, offset=-18): "
+              << "coord_adjust=+36, src_skip=15, len=12 ✓]\n";
+}
+
+TEST(connection_semantic_route26_west_to_route27) {
+    // Source: pokecrystal/data/maps/attributes.asm
+    //   map_attributes Route26, ROUTE_26, $05
+    //   connection west, Route27, ROUTE_27, 45
+    //
+    // ROUTE_26: 10w x 54h  (map_constants.asm)
+    // ROUTE_27: 40w x 9h
+    // offset = +45, direction = west (large positive — extreme alignment shift)
+    //
+    // Crystal macro (west):
+    //   _y = offset * -2 = 45 * -2 = -90  → coord_adjust_tiles = -90
+    //   _src = max(0, -(45 + 3)) = max(0, -48) = 0  → src_skip_blocks = 0
+    //   _len = ROUTE_26_H + PAD - offset = 54 + 3 - 45 = 12
+    //   clamped to min(12, ROUTE_27_H=9) = 9
+    //   data[6] = _len - _src = 9 - 0 = 9  → strip_length_blocks = 9
+    //
+    // PROOF: large positive offset → large negative coord_adjust_tiles, src_skip_blocks zero.
+    // Also tests that coord_adjust_tiles=-90 is NOT confused with the old strip_offset*2=-180.
+    if (!g_rom) {
+        std::cout << "  [SKIP: ROM not loaded]\n";
+        return;
+    }
+
+    crystal::MapExtractor extractor(*g_rom, *g_profile);
+    // Route 26: confirmed from map_constants.asm; group index requires checking attributes
+    // Route 26 is at attributes.asm directly under its map_attributes label
+    // From map_constants.asm: map_const ROUTE_26, 10, 54 with no explicit group offset shown
+    // Use extract_map by semantic ID to avoid hardcoding group/index
+    auto result = extractor.extract_map("route_26");
+    ASSERT_TRUE(result.success);
+
+    const crystal::MapConnection* west_conn = nullptr;
+    for (const auto& c : result.map.connections) {
+        if (c.direction == crystal::Direction::West) { west_conn = &c; break; }
+    }
+    ASSERT_TRUE(west_conn != nullptr);
+    ASSERT_STR_EQ(west_conn->target_map_id.c_str(), "route_27");
+
+    // coord_adjust_tiles: offset*-2 = 45*-2 = -90 (already tiles — large negative)
+    ASSERT_EQ(west_conn->coord_adjust_tiles, -90);
+    // src_skip_blocks: max(0, -(45+3)) = 0 (large positive offset → no source skip)
+    ASSERT_EQ(west_conn->src_skip_blocks, 0);
+    // strip_length_blocks: min(ROUTE_26_H+PAD-offset, ROUTE_27_H) - _src = 9 - 0 = 9
+    ASSERT_EQ(west_conn->strip_length_blocks, 9u);
+
+    // MUTATION: must not be the old strip_offset*2 error value
+    ASSERT_TRUE(west_conn->coord_adjust_tiles != -180);  // old bug: -90 * 2 = -180
+    ASSERT_TRUE(west_conn->src_skip_blocks != 48);       // would be wrong: -(45+3)
+
+    std::cout << "  [Route26→Route27 (west, offset=+45): "
+              << "coord_adjust=-90, src_skip=0, len=9 ✓]\n";
+}
+
+TEST(connection_semantic_route27_east_to_route26) {
+    // Source: pokecrystal/data/maps/attributes.asm
+    //   map_attributes Route27, ROUTE_27, $35
+    //   connection east, Route26, ROUTE_26, -45
+    //
+    // ROUTE_27: 40w x 9h  (map_constants.asm)
+    // ROUTE_26: 10w x 54h
+    // offset = -45, direction = east (mirror of Route26→Route27)
+    //
+    // Crystal macro (east):
+    //   _y = offset * -2 = (-45) * -2 = +90  → coord_adjust_tiles = +90
+    //   _src = max(0, -(-45 + 3)) = max(0, 42) = 42  → src_skip_blocks = 42
+    //   _len = ROUTE_27_H + PAD - offset = 9 + 3 - (-45) = 57
+    //   clamped to min(57, ROUTE_26_H=54) = 54
+    //   data[6] = _len - _src = 54 - 42 = 12  → strip_length_blocks = 12
+    //
+    // PROOF: large negative offset → large positive coord_adjust and large src_skip.
+    if (!g_rom) {
+        std::cout << "  [SKIP: ROM not loaded]\n";
+        return;
+    }
+
+    crystal::MapExtractor extractor(*g_rom, *g_profile);
+    auto result = extractor.extract_map("route_27");
+    ASSERT_TRUE(result.success);
+
+    const crystal::MapConnection* east_conn = nullptr;
+    for (const auto& c : result.map.connections) {
+        if (c.direction == crystal::Direction::East) { east_conn = &c; break; }
+    }
+    ASSERT_TRUE(east_conn != nullptr);
+    ASSERT_STR_EQ(east_conn->target_map_id.c_str(), "route_26");
+
+    // coord_adjust_tiles: offset*-2 = (-45)*-2 = +90 (already tiles)
+    ASSERT_EQ(east_conn->coord_adjust_tiles, 90);
+    // src_skip_blocks: max(0, -(-45+3)) = max(0, 42) = 42
+    ASSERT_EQ(east_conn->src_skip_blocks, 42);
+    // strip_length_blocks: min(ROUTE_27_H+PAD-offset, ROUTE_26_H) - _src = 54 - 42 = 12
+    ASSERT_EQ(east_conn->strip_length_blocks, 12u);
+
+    // MUTATION: coord_adjust_tiles != old strip_offset*2 error value
+    ASSERT_TRUE(east_conn->coord_adjust_tiles != 180);  // old bug: 90 * 2 = 180
+    // MUTATION: src_skip_blocks is large — must not be zero
+    ASSERT_TRUE(east_conn->src_skip_blocks != 0);
+
+    std::cout << "  [Route27→Route26 (east, offset=-45): "
+              << "coord_adjust=+90, src_skip=42, len=12 ✓]\n";
 }
 
 // =============================================================================
@@ -16514,6 +16738,10 @@ int main(int argc, char* argv[]) {
     
     RUN_TEST(connection_newbark_to_route29);
     RUN_TEST(connection_landing_math);
+    RUN_TEST(connection_semantic_cherrygrove_north_to_route30);
+    RUN_TEST(connection_semantic_azalea_west_to_route34);
+    RUN_TEST(connection_semantic_route26_west_to_route27);
+    RUN_TEST(connection_semantic_route27_east_to_route26);
     
     // Save/load tests - GameState serialization
     RUN_TEST(gamestate_serialize_roundtrip);
