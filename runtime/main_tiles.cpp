@@ -354,19 +354,31 @@ static bool transition_to_map(
         PaletteRow::Day  // RTC time - hardcoded to Day for now
     );
     
-    // All GPU upload operations — still using staged data.
-    // On any failure: world_state is still old, gameplay state is still old.
-    if (!ctx.tile_renderer->set_tileset(*ctx.vulkan, staged.tileset, active_palette)) {
-        error = "Failed to upload tileset for " + new_map_id;
-        return false;
+    //=========================================================================
+    // RENDERER STAGED PREPARATION — all three must succeed before any commit.
+    // Each prepare_* call creates GPU resources locally without touching the
+    // live renderer. Only after all three succeed do we commit atomically.
+    // If any prepare_* fails the live renderer is entirely unchanged.
+    //=========================================================================
+    auto prepared_tile = ctx.tile_renderer->prepare_tileset(*ctx.vulkan, staged.tileset, active_palette);
+    if (!prepared_tile) {
+        error = "Failed to prepare tileset for " + new_map_id;
+        return false;  // live renderer unchanged
     }
-    if (!ctx.tile_renderer->build_map(*ctx.vulkan, staged.map, staged.tileset)) {
-        error = "Failed to build map geometry for " + new_map_id;
-        return false;
+    
+    auto prepared_map = ctx.tile_renderer->prepare_map(*ctx.vulkan, staged.map,
+                                                         prepared_tile->tile_uvs,
+                                                         prepared_tile->palette_map,
+                                                         prepared_tile->blocks);
+    if (!prepared_map) {
+        error = "Failed to prepare map geometry for " + new_map_id;
+        return false;  // live renderer unchanged; prepared_tile destroyed by its dtor
     }
-    if (!ctx.sprite_renderer->set_atlas(*ctx.vulkan, staged.sprite_atlas)) {
-        error = "Failed to upload sprite atlas for " + new_map_id;
-        return false;
+    
+    auto prepared_atlas = ctx.sprite_renderer->prepare_atlas(*ctx.vulkan, staged.sprite_atlas);
+    if (!prepared_atlas) {
+        error = "Failed to prepare sprite atlas for " + new_map_id;
+        return false;  // live renderer unchanged; prepared_tile/map destroyed by dtors
     }
     
     //=========================================================================
@@ -374,6 +386,10 @@ static bool transition_to_map(
     // Commit: replace live world_state and update authoritative gameplay state.
     //=========================================================================
     world_state = std::move(staged);
+    
+    // Commit renderer resources atomically — single non-failing swap phase.
+    ctx.tile_renderer->commit(std::move(*prepared_tile), std::move(*prepared_map));
+    ctx.sprite_renderer->commit(std::move(*prepared_atlas));
     
     ctx.sprite_renderer->set_sprite_data(world_state.sprites);
     

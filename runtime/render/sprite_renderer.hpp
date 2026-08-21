@@ -14,6 +14,7 @@
 #include <string>
 #include <array>
 #include <unordered_map>
+#include <optional>
 
 namespace enginemon {
 
@@ -79,6 +80,18 @@ public:
     
     // Set sprite atlas (uploads to GPU)
     bool set_atlas(VulkanBootstrap& vk, const RuntimeSpriteAtlas& atlas);
+
+    // === STAGED TRANSITION API ===
+    struct PreparedAtlas {
+        VulkanTexture texture;
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        std::unordered_map<std::string, RuntimeSpriteAtlas::SpriteUVs> sprite_uvs;
+        bool valid = false;
+    };
+
+    std::optional<PreparedAtlas> prepare_atlas(VulkanBootstrap& vk,
+                                                const RuntimeSpriteAtlas& atlas);
+    void commit(PreparedAtlas&& atlas);
     
     // Set sprite data for semantic frame selection
     void set_sprite_data(const std::vector<RuntimeSprite>& sprites);

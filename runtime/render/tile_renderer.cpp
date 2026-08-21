@@ -23,6 +23,228 @@ TileRenderer::~TileRenderer() {
     destroy();
 }
 
+// ─── PreparedMapGeometry move semantics ────────────────────────────────────
+
+TileRenderer::PreparedMapGeometry::PreparedMapGeometry(PreparedMapGeometry&& o) noexcept
+    : device(o.device), vertex_buffer(o.vertex_buffer), vertex_memory(o.vertex_memory),
+      index_buffer(o.index_buffer), index_memory(o.index_memory),
+      index_count(o.index_count), map_width(o.map_width), map_height(o.map_height),
+      valid(o.valid)
+{
+    o.device = VK_NULL_HANDLE;
+    o.vertex_buffer = VK_NULL_HANDLE; o.vertex_memory = VK_NULL_HANDLE;
+    o.index_buffer  = VK_NULL_HANDLE; o.index_memory  = VK_NULL_HANDLE;
+    o.valid = false;
+}
+
+TileRenderer::PreparedMapGeometry& TileRenderer::PreparedMapGeometry::operator=(PreparedMapGeometry&& o) noexcept {
+    if (this != &o) {
+        // Destroy any resources we own
+        if (vertex_buffer != VK_NULL_HANDLE) { vkDestroyBuffer(device, vertex_buffer, nullptr); }
+        if (vertex_memory != VK_NULL_HANDLE) { vkFreeMemory(device, vertex_memory, nullptr); }
+        if (index_buffer  != VK_NULL_HANDLE) { vkDestroyBuffer(device, index_buffer, nullptr); }
+        if (index_memory  != VK_NULL_HANDLE) { vkFreeMemory(device, index_memory, nullptr); }
+        device = o.device; vertex_buffer = o.vertex_buffer; vertex_memory = o.vertex_memory;
+        index_buffer = o.index_buffer; index_memory = o.index_memory;
+        index_count = o.index_count; map_width = o.map_width; map_height = o.map_height;
+        valid = o.valid;
+        o.device = VK_NULL_HANDLE;
+        o.vertex_buffer = VK_NULL_HANDLE; o.vertex_memory = VK_NULL_HANDLE;
+        o.index_buffer  = VK_NULL_HANDLE; o.index_memory  = VK_NULL_HANDLE;
+        o.valid = false;
+    }
+    return *this;
+}
+
+TileRenderer::PreparedMapGeometry::~PreparedMapGeometry() {
+    if (device == VK_NULL_HANDLE) return;
+    if (vertex_buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, vertex_buffer, nullptr);
+    if (vertex_memory != VK_NULL_HANDLE) vkFreeMemory(device, vertex_memory, nullptr);
+    if (index_buffer  != VK_NULL_HANDLE) vkDestroyBuffer(device, index_buffer, nullptr);
+    if (index_memory  != VK_NULL_HANDLE) vkFreeMemory(device, index_memory, nullptr);
+}
+
+void TileRenderer::PreparedMapGeometry::release() {
+    // Nullify handles so the destructor doesn't free them
+    // (ownership transferred to the renderer's live members)
+    device = VK_NULL_HANDLE;
+    vertex_buffer = VK_NULL_HANDLE; vertex_memory = VK_NULL_HANDLE;
+    index_buffer  = VK_NULL_HANDLE; index_memory  = VK_NULL_HANDLE;
+    valid = false;
+}
+
+// ─── prepare_tileset ────────────────────────────────────────────────────────
+
+std::optional<TileRenderer::PreparedTileset> TileRenderer::prepare_tileset(
+    VulkanBootstrap& vk, const RuntimeTileset& tileset, PaletteRow active_row)
+{
+    // Resolve palette set
+    const RuntimePaletteSet* palette_set = nullptr;
+    if (tileset.fixed_special_palette) {
+        palette_set = &(*tileset.fixed_special_palette);
+    } else {
+        palette_set = &tileset.standard_palette_rows[static_cast<size_t>(active_row)];
+    }
+
+    TileAtlas atlas = TileAtlas::from_tileset_with_palette(tileset, *palette_set);
+    if (atlas.pixels.empty()) return std::nullopt;
+
+    PreparedTileset out;
+    if (!out.texture.create(vk, atlas.width, atlas.height, atlas.pixels.data())) {
+        return std::nullopt;
+    }
+
+    out.tile_uvs   = atlas.tile_uvs;
+    out.blocks     = tileset.blocks;
+    out.palette_map = tileset.palette_map;
+
+    // Allocate descriptor set against the prepared texture — NOT live descriptor_pool_
+    vkResetDescriptorPool(device_, descriptor_pool_, 0);
+
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = descriptor_pool_;
+    alloc.descriptorSetCount = 1;
+    alloc.pSetLayouts = &descriptor_layout_;
+
+    if (vkAllocateDescriptorSets(device_, &alloc, &out.descriptor_set) != VK_SUCCESS) {
+        return std::nullopt;  // out.texture destroyed by PreparedTileset dtor
+    }
+
+    VkDescriptorImageInfo img{};
+    img.sampler = out.texture.sampler();
+    img.imageView = out.texture.view();
+    img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet wr{};
+    wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wr.dstSet = out.descriptor_set;
+    wr.dstBinding = 0;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.descriptorCount = 1;
+    wr.pImageInfo = &img;
+    vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+
+    out.valid = true;
+    return out;
+}
+
+// ─── prepare_map ────────────────────────────────────────────────────────────
+
+std::optional<TileRenderer::PreparedMapGeometry> TileRenderer::prepare_map(
+    VulkanBootstrap& vk, const RuntimeMap& map,
+    const std::vector<TileUV>& tileset_uvs,
+    const std::vector<uint8_t>& tileset_pal_map,
+    const std::vector<RuntimeBlock>& tileset_blocks)
+{
+    // Build geometry using the STAGED tileset data (not live tile_uvs_/palette_map_)
+    const float tile_size = static_cast<float>(config_.tile_size);
+    std::vector<TileVertex> vertices;
+    std::vector<uint32_t>   indices;
+    vertices.reserve(static_cast<size_t>(map.width) * map.height * 16 * 4);
+    indices.reserve(static_cast<size_t>(map.width) * map.height * 16 * 6);
+
+    for (uint8_t by = 0; by < map.height; ++by) {
+        for (uint8_t bx = 0; bx < map.width; ++bx) {
+            uint8_t block_idx = map.blocks[by * map.width + bx];
+            if (block_idx >= tileset_blocks.size()) block_idx = 0;
+            const RuntimeBlock& block = tileset_blocks[block_idx];
+            for (int ty = 0; ty < 4; ++ty) {
+                for (int tx = 0; tx < 4; ++tx) {
+                    uint16_t tile_id = block.tile_ids[ty * 4 + tx];
+                    TileUV uv{};
+                    if (!tileset_uvs.empty() && tile_id < tileset_uvs.size())
+                        uv = tileset_uvs[tile_id];
+                    float pal_id = 0.0f;
+                    if (!tileset_pal_map.empty() && tile_id < tileset_pal_map.size())
+                        pal_id = static_cast<float>(tileset_pal_map[tile_id]);
+                    float px = (bx * 4 + tx) * tile_size;
+                    float py = (by * 4 + ty) * tile_size;
+                    uint32_t base = static_cast<uint32_t>(vertices.size());
+                    vertices.push_back({px,             py,             uv.u0, uv.v0, pal_id});
+                    vertices.push_back({px + tile_size, py,             uv.u1, uv.v0, pal_id});
+                    vertices.push_back({px + tile_size, py + tile_size, uv.u1, uv.v1, pal_id});
+                    vertices.push_back({px,             py + tile_size, uv.u0, uv.v1, pal_id});
+                    indices.push_back(base+0); indices.push_back(base+1); indices.push_back(base+2);
+                    indices.push_back(base+0); indices.push_back(base+2); indices.push_back(base+3);
+                }
+            }
+        }
+    }
+
+    // Allocate GPU buffers into local handles — live buffers untouched
+    PreparedMapGeometry out;
+    out.device = device_;
+
+    VkDeviceSize vsize = vertices.size() * sizeof(TileVertex);
+    VkDeviceSize isize = indices.size()  * sizeof(uint32_t);
+
+    VkBufferCreateInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    auto alloc_buf = [&](VkDeviceSize sz, VkBufferUsageFlags usage,
+                         VkBuffer& buf, VkDeviceMemory& mem) -> bool {
+        bi.size = sz; bi.usage = usage;
+        if (vkCreateBuffer(device_, &bi, nullptr, &buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(device_, buf, &mr);
+        VkMemoryAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = find_memory_type(vk.physical_device(), mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(device_, &ai, nullptr, &mem) != VK_SUCCESS) {
+            vkDestroyBuffer(device_, buf, nullptr); buf = VK_NULL_HANDLE; return false;
+        }
+        vkBindBufferMemory(device_, buf, mem, 0);
+        return true;
+    };
+
+    if (!alloc_buf(vsize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, out.vertex_buffer, out.vertex_memory))
+        return std::nullopt;  // PreparedMapGeometry dtor cleans up
+    if (!alloc_buf(isize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, out.index_buffer, out.index_memory))
+        return std::nullopt;
+
+    // Copy data
+    void* data;
+    vkMapMemory(device_, out.vertex_memory, 0, vsize, 0, &data);
+    std::memcpy(data, vertices.data(), vsize);
+    vkUnmapMemory(device_, out.vertex_memory);
+
+    vkMapMemory(device_, out.index_memory, 0, isize, 0, &data);
+    std::memcpy(data, indices.data(), isize);
+    vkUnmapMemory(device_, out.index_memory);
+
+    out.index_count = static_cast<uint32_t>(indices.size());
+    out.map_width   = map.width;
+    out.map_height  = map.height;
+    out.valid = true;
+    return out;
+}
+
+// ─── commit (tile + map) ─────────────────────────────────────────────────────
+
+void TileRenderer::commit(PreparedTileset&& tile, PreparedMapGeometry&& map) {
+    // Destroy old live resources
+    destroy_buffers();
+    // tile_texture_ destructor runs on move assignment
+    tile_texture_   = std::move(tile.texture);
+    tile_uvs_       = std::move(tile.tile_uvs);
+    blocks_         = std::move(tile.blocks);
+    palette_map_    = std::move(tile.palette_map);
+    descriptor_set_ = tile.descriptor_set;
+
+    vertex_buffer_ = map.vertex_buffer;
+    vertex_memory_ = map.vertex_memory;
+    index_buffer_  = map.index_buffer;
+    index_memory_  = map.index_memory;
+    index_count_   = map.index_count;
+    map_width_     = map.map_width;
+    map_height_    = map.map_height;
+    map.release();  // ownership transferred — prevent dtor from double-freeing
+}
+
 void TileRenderer::destroy() {
     if (device_ == VK_NULL_HANDLE) return;
     

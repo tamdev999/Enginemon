@@ -19,6 +19,7 @@
 #include "engine/world/runtime_tileset.hpp"
 #include "render/vulkan_texture.hpp"
 #include <vector>
+#include <optional>
 
 namespace enginemon {
 
@@ -60,12 +61,66 @@ public:
     // Initialize renderer
     bool initialize(VulkanBootstrap& vk, const TileRendererConfig& config);
     
-    // Set tileset (uploads indexed tile atlas + palette data to GPU)
-    // The active_row parameter selects which palette row to use based on
-    // the map's environment + time_policy resolved against RTC
+    // === STAGED TRANSITION API ===
+    // Prepare all destination renderer resources without touching live state.
+    // Returns false if any preparation step fails.
+    // On failure: live renderer state is entirely unchanged.
+
+    // Staged tileset resources — holds a fully prepared GPU texture + descriptor
+    // ready to swap into live state.
+    struct PreparedTileset {
+        VulkanTexture texture;                  // New GPU texture (owned)
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        std::vector<TileUV>      tile_uvs;
+        std::vector<RuntimeBlock> blocks;
+        std::vector<uint8_t>     palette_map;
+        bool valid = false;
+    };
+
+    // Staged map geometry resources — holds fully allocated vertex/index buffers.
+    struct PreparedMapGeometry {
+        VkDevice device = VK_NULL_HANDLE;
+        VkBuffer vertex_buffer = VK_NULL_HANDLE;
+        VkDeviceMemory vertex_memory = VK_NULL_HANDLE;
+        VkBuffer index_buffer = VK_NULL_HANDLE;
+        VkDeviceMemory index_memory = VK_NULL_HANDLE;
+        uint32_t index_count = 0;
+        uint8_t map_width = 0;
+        uint8_t map_height = 0;
+        bool valid = false;
+
+        PreparedMapGeometry() = default;
+        PreparedMapGeometry(const PreparedMapGeometry&) = delete;
+        PreparedMapGeometry& operator=(const PreparedMapGeometry&) = delete;
+        PreparedMapGeometry(PreparedMapGeometry&& o) noexcept;
+        PreparedMapGeometry& operator=(PreparedMapGeometry&& o) noexcept;
+        ~PreparedMapGeometry();
+        void release(); // transfer ownership out (called by TileRenderer::commit)
+    };
+
+    // Prepare tileset GPU resources without committing to live renderer.
+    // Returns nullopt on failure — live state unchanged.
+    std::optional<PreparedTileset>     prepare_tileset(VulkanBootstrap& vk,
+                                                         const RuntimeTileset& tileset,
+                                                         PaletteRow active_row);
+
+    // Prepare map geometry without committing to live renderer.
+    // tileset_uvs and tileset_pal_map are from the already-prepared PreparedTileset.
+    // Returns nullopt on failure — live state unchanged.
+    std::optional<PreparedMapGeometry> prepare_map(VulkanBootstrap& vk,
+                                                     const RuntimeMap& map,
+                                                     const std::vector<TileUV>& tileset_uvs,
+                                                     const std::vector<uint8_t>& tileset_pal_map,
+                                                     const std::vector<RuntimeBlock>& tileset_blocks);
+
+    // Commit all prepared tile resources atomically.
+    // Pre-condition: both prepared values are valid (prepared successfully).
+    // Destroys old live resources and installs the new ones.
+    // This is the single commit point — non-failing once called.
+    void commit(PreparedTileset&& tile, PreparedMapGeometry&& map);
+
+    // Legacy combined API (kept for callers that don't need the staged path)
     bool set_tileset(VulkanBootstrap& vk, const RuntimeTileset& tileset, PaletteRow active_row);
-    
-    // Build map geometry (expands blocks to tile instances with palette_id)
     bool build_map(VulkanBootstrap& vk, const RuntimeMap& map, const RuntimeTileset& tileset);
     
     // Update view (camera position in pixels)

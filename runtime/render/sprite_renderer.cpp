@@ -19,6 +19,58 @@ namespace enginemon {
 
 SpriteRenderer::SpriteRenderer() = default;
 
+// ─── prepare_atlas ──────────────────────────────────────────────────────────
+
+std::optional<SpriteRenderer::PreparedAtlas> SpriteRenderer::prepare_atlas(
+    VulkanBootstrap& vk, const RuntimeSpriteAtlas& atlas)
+{
+    PreparedAtlas out;
+    if (!out.texture.create(vk, atlas.atlas_width, atlas.atlas_height, atlas.pixels.data())) {
+        return std::nullopt;
+    }
+
+    for (const auto& uvs : atlas.sprite_uvs) {
+        out.sprite_uvs[uvs.sprite_id] = uvs;
+    }
+
+    vkResetDescriptorPool(device_, descriptor_pool_, 0);
+
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = descriptor_pool_;
+    alloc.descriptorSetCount = 1;
+    alloc.pSetLayouts = &descriptor_layout_;
+
+    if (vkAllocateDescriptorSets(device_, &alloc, &out.descriptor_set) != VK_SUCCESS) {
+        return std::nullopt;
+    }
+
+    VkDescriptorImageInfo img{};
+    img.sampler = out.texture.sampler();
+    img.imageView = out.texture.view();
+    img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet wr{};
+    wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wr.dstSet = out.descriptor_set;
+    wr.dstBinding = 0;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.descriptorCount = 1;
+    wr.pImageInfo = &img;
+    vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+
+    out.valid = true;
+    return out;
+}
+
+// ─── commit (atlas) ─────────────────────────────────────────────────────────
+
+void SpriteRenderer::commit(PreparedAtlas&& atlas) {
+    atlas_texture_  = std::move(atlas.texture);
+    sprite_uvs_     = std::move(atlas.sprite_uvs);
+    descriptor_set_ = atlas.descriptor_set;
+}
+
 SpriteRenderer::~SpriteRenderer() {
     destroy();
 }
