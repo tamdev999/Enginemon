@@ -23,6 +23,8 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <stdexcept>
+#include <cstdio>
 
 namespace crystal {
 
@@ -234,10 +236,15 @@ inline std::string crystal_sprite_byte_to_id(uint8_t byte) {
     }
 
     // Everything else (0x00, 0x67-0x7F, 0xA3-0xDF, 0xFD-0xFF) is genuinely invalid.
-    // Return a surfacing tag rather than "".
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "unknown:%02x", byte);
-    return buf;
+    // There is no source-proven Crystal overworld behavior for these bytes.
+    // Callers must never reach this path with a byte from a known-valid object event;
+    // throw so the invalid byte surfaces at extraction time rather than silently
+    // producing a runtime identity.
+    throw std::runtime_error(
+        std::string("crystal_sprite_byte_to_id: byte 0x") +
+        [byte]{ char buf[3]; std::snprintf(buf, sizeof(buf), "%02x", byte); return std::string(buf); }() +
+        " is outside all defined Crystal sprite namespaces "
+        "(fixed 0x01-0x66, pokemon_icon 0x80-0xA2, daycare 0xE0-0xE1, variable 0xF0-0xFC)");
 }
 
 //=============================================================================

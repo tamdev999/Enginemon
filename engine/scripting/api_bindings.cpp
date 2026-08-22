@@ -621,6 +621,29 @@ int apply_movement(lua_State* L) {
     return 0;
 }
 
+// ctx.world:set_variable_sprite(slot_name, sprite_index)
+// Assigns a fixed sprite (by 1-102 index) to the named variable slot.
+// Stores the index in GameState::variables["var_sprite_<slot>"].
+// sprite_index: 1-102 for fixed sprites; 0 = unset/unsupported namespace.
+// Source: Crystal variablesprite opcode 0x6D + wVariableSprites semantic.
+int set_variable_sprite(lua_State* L) {
+    const char* slot_name   = luaL_checkstring(L, 2);
+    int         sprite_index = static_cast<int>(luaL_checkinteger(L, 3));
+    LuaRuntime* runtime = get_runtime(L);
+
+    std::string key = std::string("var_sprite_") + slot_name;
+
+    if (GameState* gs = runtime->get_game_state()) {
+        gs->variables[key] = sprite_index;
+    } else {
+        // Stub mode: store in last_variable_sprite fields for test inspection.
+        auto& stubs = runtime->get_stub_services();
+        stubs.last_variable_sprite_slot = slot_name;
+        stubs.last_variable_sprite_index = sprite_index;
+    }
+    return 0;
+}
+
 } // namespace world_api
 
 // =============================================================================
@@ -771,41 +794,100 @@ int count(lua_State* L) {
 }
 
 // ctx.inventory:give_money(amount, account?) - account: 0=player, 1=mom
+// Production path: write through GameState::variables when bound.
 int give_money(lua_State* L) {
-    int amount = luaL_checkinteger(L, 2);
+    int amount  = luaL_checkinteger(L, 2);
     int account = static_cast<int>(luaL_optinteger(L, 3, 0));
     LuaRuntime* runtime = get_runtime(L);
-    auto& stubs = runtime->get_stub_services();
-    stubs.last_give_money_amount = amount;
-    stubs.last_give_money_account = account;
+    // Canonical money keys in GameState::variables
+    // Source: Crystal wMoney (player) / wMomsMoney (mom)
+    const char* key = (account == 1) ? "money_mom" : "money_player";
+    if (GameState* gs = runtime->get_game_state()) {
+        auto it = gs->variables.find(key);
+        int32_t current = (it != gs->variables.end()) ? it->second : 0;
+        gs->variables[key] = current + static_cast<int32_t>(amount);
+    } else {
+        auto& stubs = runtime->get_stub_services();
+        stubs.last_give_money_amount  = amount;
+        stubs.last_give_money_account = account;
+    }
     return 0;
 }
 
 // ctx.inventory:take_money(amount, account?) -> bool
 int take_money(lua_State* L) {
-    int amount = luaL_checkinteger(L, 2);
+    int amount  = luaL_checkinteger(L, 2);
     int account = static_cast<int>(luaL_optinteger(L, 3, 0));
     LuaRuntime* runtime = get_runtime(L);
-    auto& stubs = runtime->get_stub_services();
-    stubs.last_take_money_amount = amount;
-    stubs.last_take_money_account = account;
-    lua_pushboolean(L, true);
+    const char* key = (account == 1) ? "money_mom" : "money_player";
+    bool success = false;
+    if (GameState* gs = runtime->get_game_state()) {
+        auto it = gs->variables.find(key);
+        int32_t current = (it != gs->variables.end()) ? it->second : 0;
+        if (current >= static_cast<int32_t>(amount)) {
+            gs->variables[key] = current - static_cast<int32_t>(amount);
+            success = true;
+        }
+    } else {
+        auto& stubs = runtime->get_stub_services();
+        stubs.last_take_money_amount  = amount;
+        stubs.last_take_money_account = account;
+        success = true;  // stub always succeeds
+    }
+    lua_pushboolean(L, success);
     return 1;
 }
 
 // ctx.inventory:has_money(amount, account?) -> bool
 int has_money(lua_State* L) {
-    int amount = luaL_checkinteger(L, 2);
+    int amount  = luaL_checkinteger(L, 2);
     int account = static_cast<int>(luaL_optinteger(L, 3, 0));
-    (void)amount; (void)account;
-    lua_pushboolean(L, false);
+    LuaRuntime* runtime = get_runtime(L);
+    const char* key = (account == 1) ? "money_mom" : "money_player";
+    bool result = false;
+    if (GameState* gs = runtime->get_game_state()) {
+        auto it = gs->variables.find(key);
+        int32_t current = (it != gs->variables.end()) ? it->second : 0;
+        result = (current >= static_cast<int32_t>(amount));
+    }
+    lua_pushboolean(L, result);
     return 1;
 }
 
-// ctx.inventory:money() -> number
+// ctx.inventory:money(account?) -> number
+// Returns the current money balance for the given account.
 int money(lua_State* L) {
-    lua_pushinteger(L, 3000);  // Stub
+    int account = static_cast<int>(luaL_optinteger(L, 2, 0));
+    LuaRuntime* runtime = get_runtime(L);
+    const char* key = (account == 1) ? "money_mom" : "money_player";
+    int32_t balance = 0;
+    if (GameState* gs = runtime->get_game_state()) {
+        auto it = gs->variables.find(key);
+        balance = (it != gs->variables.end()) ? it->second : 0;
+    }
+    lua_pushinteger(L, balance);
     return 1;
+}
+
+// ctx.inventory:prepare_money_text(account, buffer_slot)
+// Prepares the money value for the given account into a text buffer slot for display.
+// account: 0=player (money_player), 1=mom (money_mom)
+// buffer_slot: strbuf index 0-2 (matches Sem_PrepareTextArg buffer_slot)
+// Stores the formatted value in GameState::variables["strbuf<N>_money"].
+// Source: Crystal getmoney opcode → text buffer substitution.
+int prepare_money_text(lua_State* L) {
+    int account     = static_cast<int>(luaL_checkinteger(L, 2));
+    int buffer_slot = static_cast<int>(luaL_checkinteger(L, 3));
+    LuaRuntime* runtime = get_runtime(L);
+    const char* src_key  = (account == 1) ? "money_mom" : "money_player";
+    std::string dest_key = "strbuf" + std::to_string(buffer_slot) + "_money";
+    if (GameState* gs = runtime->get_game_state()) {
+        auto it = gs->variables.find(src_key);
+        int32_t bal = (it != gs->variables.end()) ? it->second : 0;
+        gs->variables[dest_key] = bal;
+    }
+    // In stub mode the text renderer will render nothing, which is correct.
+    return 0;
 }
 
 } // namespace inventory_api

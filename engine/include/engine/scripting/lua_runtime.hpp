@@ -149,6 +149,10 @@ struct StubServices {
     std::string last_behavior_name;
     int current_scene = 0;
 
+    // Variable sprite stub state
+    std::string last_variable_sprite_slot;
+    int last_variable_sprite_index = 0;
+
     // Deferred script callback — called when ctx.game:behavior("Sdefer_<id>") is invoked.
     // Wired by HeadlessGameLoop (or test code) to schedule_deferred_script().
     // When null, deferred scheduling is silently skipped (test/stub mode only).
@@ -181,6 +185,8 @@ struct StubServices {
         field_config = StubFieldConfig{};
         last_behavior_name.clear();
         current_scene = 0;
+        last_variable_sprite_slot.clear();
+        last_variable_sprite_index = 0;
         // deferred_script_fn is NOT reset — caller owns the binding lifetime
     }
     

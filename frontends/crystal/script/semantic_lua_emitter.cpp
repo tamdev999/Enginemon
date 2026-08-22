@@ -5,6 +5,7 @@
 // See semantic_lua_emitter.hpp for contract.
 
 #include "crystal/script/semantic_lua_emitter.hpp"
+#include "crystal/extract/sprite_ids.hpp"
 #include <sstream>
 #include <stdexcept>
 #include <iomanip>
@@ -340,16 +341,21 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
             case TextArgType::Number:
                 switch (o->number_source) {
                     case NumberSource::Money:
-                        // Prepare player money for text display.
-                        // account: 0=player (wMoney), 1=mom (wMomsMoney).
-                        // The text renderer resolves this at display time; no Lua
-                        // call is needed — the account index is encoded in the emit.
-                        out << "-- prepare_money account=" << (int)o->account
-                            << " strbuf=" << (int)o->buffer_slot << "\n"; break;
+                        // Prepare the player/mom money balance into a text buffer slot.
+                        // account: 0=player (money_player), 1=mom (money_mom).
+                        // Stores the balance in GameState::variables["strbuf<N>_money"]
+                        // for text renderer substitution.
+                        out << "ctx.inventory:prepare_money_text("
+                            << (int)o->account << ", " << (int)o->buffer_slot << ")\n"; break;
                     case NumberSource::Coins:
-                        out << "-- prepare_coins strbuf=" << (int)o->buffer_slot << "\n"; break;
+                        // getcoins: no runtime implementation yet — explicit capability error.
+                        out << "error(\"prepare_coins: not yet implemented (strbuf="
+                            << (int)o->buffer_slot << ")\")\n"; break;
                     case NumberSource::ScriptVar:
-                        out << "-- prepare_scriptvar strbuf=" << (int)o->buffer_slot << "\n"; break;
+                        // getnum: stores wScriptVar value in text buffer.
+                        // GameState::variables["var_0"] holds the current script var value.
+                        out << "ctx.flags:set_var(\"strbuf" << (int)o->buffer_slot
+                            << "_scriptvar\", ctx.flags:get_var(0))\n"; break;
                 }
                 break;
             case TextArgType::String:
@@ -453,7 +459,25 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "-- set_last_talked " << (int)o->object_id << "\n"; return true;
     }
     if (auto* o = std::get_if<Sem_VariableSprite>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "-- variable_sprite slot=" << (int)o->slot << " sprite=" << (int)o->sprite << "\n"; return true;
+        // Assign a fixed sprite to a named variable slot at runtime.
+        // slot_name: semantic slot identity (e.g., "copycat")
+        // assigned_sprite_id: typed sprite_ref (e.g., "fixed:lass")
+        // The binding takes (slot_name, sprite_index) where sprite_index is
+        // the 1-102 fixed sprite table index. Non-fixed namespaces pass 0 (unset).
+        SemanticLuaEmitter::indent_line(out, I);
+        // Resolve assigned_sprite_id to integer index for engine-layer binding.
+        int sprite_index = 0;
+        if (o->assigned_sprite_id.starts_with("fixed:")) {
+            std::string bare = o->assigned_sprite_id.substr(6);
+            sprite_index = static_cast<int>(
+                crystal_sprite_id_to_index(bare));  // 1-102 or 0
+        }
+        // For non-fixed (pokemon_icon, daycare, variable): sprite_index = 0 (unset).
+        // Those capability milestones will add their own assignment mechanism.
+        out << "ctx.world:set_variable_sprite(\""
+            << SemanticLuaEmitter::escape_lua_string(o->slot_name) << "\", "
+            << sprite_index << ")\n";
+        return true;
     }
     if (auto* o = std::get_if<Sem_Follow>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "-- follow " << (int)o->object1 << " follows " << (int)o->object2 << "\n"; return true;

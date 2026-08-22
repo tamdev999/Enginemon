@@ -1121,7 +1121,19 @@ struct Sem_ShowObject { uint8_t object_id; };
 struct Sem_HideObject { uint8_t object_id; };
 struct Sem_MoveObject { uint8_t object_id; uint8_t x; uint8_t y; };
 struct Sem_SetLastTalked { uint8_t object_id; };
-struct Sem_VariableSprite { uint8_t slot; uint8_t sprite; };
+
+// Sem_VariableSprite: assign a sprite to a named variable slot at runtime.
+// Source: Crystal variablesprite opcode (0x6D).
+//   slot_name: semantic slot identity (e.g., "copycat", "fuchsia_gym_1").
+//              Corresponds to SPRITE_* constant minus SPRITE_VARS offset.
+//   assigned_sprite_id: the typed semantic sprite_id to assign
+//              (e.g., "fixed:lass", "fixed:janine"). Resolved from the
+//              raw Crystal sprite byte via crystal_sprite_byte_to_id() at
+//              legalizer time — no raw byte survives.
+struct Sem_VariableSprite {
+    std::string slot_name;          // Semantic slot name (e.g., "copycat")
+    std::string assigned_sprite_id; // Typed sprite reference (e.g., "fixed:lass")
+};
 struct Sem_Follow { uint8_t object1; uint8_t object2; };
 struct Sem_StopFollow {};
 struct Sem_Emote { uint8_t emote_id; uint8_t object_id; uint8_t duration; };

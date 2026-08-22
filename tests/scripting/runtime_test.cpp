@@ -18166,22 +18166,24 @@ TEST(sprite_namespace_variable_range_never_empty) {
     }
 }
 
-TEST(sprite_namespace_zero_is_unknown) {
+TEST(sprite_namespace_zero_is_unknown_throws) {
     using namespace crystal;
-    // SPRITE_NONE = 0 is genuinely invalid and should surface as unknown
-    std::string id = crystal_sprite_byte_to_id(0x00);
-    ASSERT_TRUE(id.starts_with("unknown:"));
-    ASSERT_FALSE(id.empty());
+    // SPRITE_NONE = 0 is genuinely invalid — must throw, not produce a tag
+    bool threw = false;
+    try { crystal_sprite_byte_to_id(0x00); }
+    catch (const std::runtime_error&) { threw = true; }
+    ASSERT_TRUE(threw);
 }
 
-TEST(sprite_namespace_gap_bytes_are_unknown) {
+TEST(sprite_namespace_gap_bytes_throw) {
     using namespace crystal;
-    // Bytes 0x67-0x7F (between fixed and pokemon_icon ranges) are undefined
-    // They should produce "unknown:<hex>" not ""
-    std::string id_67 = crystal_sprite_byte_to_id(0x67);
-    std::string id_7f = crystal_sprite_byte_to_id(0x7F);
-    ASSERT_TRUE(id_67.starts_with("unknown:"));
-    ASSERT_TRUE(id_7f.starts_with("unknown:"));
+    // Bytes 0x67-0x7F (between fixed and pokemon_icon ranges) are undefined.
+    // crystal_sprite_byte_to_id() must throw, not produce "unknown:<hex>" or "".
+    bool threw_67 = false, threw_7f = false;
+    try { crystal_sprite_byte_to_id(0x67); } catch (const std::runtime_error&) { threw_67 = true; }
+    try { crystal_sprite_byte_to_id(0x7F); } catch (const std::runtime_error&) { threw_7f = true; }
+    ASSERT_TRUE(threw_67);
+    ASSERT_TRUE(threw_7f);
 }
 
 TEST(sprite_namespace_tag_query_helpers) {
@@ -18214,11 +18216,9 @@ TEST(sprite_namespace_backward_compat_index_to_id) {
 // Verify fixed emitter/binding mismatches and new policy.
 //=============================================================================
 
-TEST(stage7_money_text_arg_emits_set_var_not_show_money) {
-    // Prerequisite A fix: Sem_PrepareTextArg with NumberSource::Money must NOT
-    // emit ctx.inventory:show_money() — that binding does not exist.
-    // It must emit a comment encoding the account index (no executable Lua call
-    // is needed since money display is a renderer concern, not script state).
+TEST(stage7_money_text_arg_emits_prepare_money_text_not_show_money) {
+    // Money text arg must emit ctx.inventory:prepare_money_text(account, slot)
+    // NOT ctx.inventory:show_money() (unregistered) and NOT a comment (no-op).
     using namespace enginemon;
     crystal::SemanticLuaEmitter emitter;
 
@@ -18240,9 +18240,11 @@ TEST(stage7_money_text_arg_emits_set_var_not_show_money) {
 
     // Must NOT call show_money() — that binding does not exist
     ASSERT_TRUE(lua.find("show_money") == std::string::npos);
-    // Must encode the money account identity (as comment)
-    ASSERT_TRUE(lua.find("money") != std::string::npos);
-    ASSERT_TRUE(lua.find("account=0") != std::string::npos);
+    // Must call prepare_money_text with the account index
+    ASSERT_TRUE(lua.find("ctx.inventory:prepare_money_text(") != std::string::npos);
+    ASSERT_TRUE(lua.find("0,") != std::string::npos);  // account=0 (player)
+    // Must NOT be a comment (comments would be no-ops)
+    ASSERT_TRUE(lua.find("-- prepare_money") == std::string::npos);
 
     // Must be loadable by LuaRuntime without error
     LuaRuntime runtime;
@@ -18458,6 +18460,300 @@ return script
     ASSERT_TRUE(flag_api::get_test_flag(&runtime, 301));
     // B ran after A (flag 302 set by B)
     ASSERT_TRUE(flag_api::get_test_flag(&runtime, 302));
+}
+
+
+//=============================================================================
+// POST-STAGE-7 SPRITE COMPLETION TESTS
+// Unknown byte → throw, variable sprite → GameState, money → GameState
+//=============================================================================
+
+TEST(unknown_sprite_byte_throws) {
+    // Unknown sprite bytes must throw at crystal_sprite_byte_to_id(), not produce tags.
+    using namespace crystal;
+    // byte 0x00 (SPRITE_NONE) — invalid
+    bool threw = false;
+    try { crystal_sprite_byte_to_id(0x00); }
+    catch (const std::runtime_error&) { threw = true; }
+    ASSERT_TRUE(threw);
+    // byte 0x67 (above fixed range, below pokemon_icon range) — invalid gap
+    threw = false;
+    try { crystal_sprite_byte_to_id(0x67); }
+    catch (const std::runtime_error&) { threw = true; }
+    ASSERT_TRUE(threw);
+    // byte 0xFD (above variable range) — invalid
+    threw = false;
+    try { crystal_sprite_byte_to_id(0xFD); }
+    catch (const std::runtime_error&) { threw = true; }
+    ASSERT_TRUE(threw);
+}
+
+TEST(variable_sprite_emitter_produces_set_variable_sprite_call) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_VariableSprite vs;
+    vs.slot_name = "copycat";
+    vs.assigned_sprite_id = "fixed:lass";
+
+    SemanticScriptIR ir;
+    ir.script_id = "t";
+    SemanticBasicBlock b;
+    b.id = 0;
+    b.instructions.push_back({vs});
+    b.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(b);
+
+    std::string lua = emitter.emit(ir);
+
+    // Must call ctx.world:set_variable_sprite, not a comment
+    ASSERT_TRUE(lua.find("ctx.world:set_variable_sprite(") != std::string::npos);
+    ASSERT_TRUE(lua.find("copycat") != std::string::npos);
+    // Must not be a comment
+    ASSERT_TRUE(lua.find("-- variable_sprite") == std::string::npos);
+}
+
+TEST(variable_sprite_emitter_passes_integer_index) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_VariableSprite vs;
+    vs.slot_name = "fuchsia_gym_1";
+    vs.assigned_sprite_id = "fixed:janine";  // janine is index 10
+
+    SemanticScriptIR ir;
+    ir.script_id = "t";
+    SemanticBasicBlock b;
+    b.id = 0;
+    b.instructions.push_back({vs});
+    b.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(b);
+
+    std::string lua = emitter.emit(ir);
+
+    // Must contain the integer index for "janine" (index 10 in fixed sprite table)
+    ASSERT_TRUE(lua.find("fuchsia_gym_1") != std::string::npos);
+    ASSERT_TRUE(lua.find(", 10)") != std::string::npos);  // janine = index 10 = 0x0A
+}
+
+TEST(variable_sprite_gamestate_roundtrip) {
+    using namespace enginemon;
+    // Execute a variablesprite script and verify GameState stores the assignment.
+    std::string script_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:set_variable_sprite("copycat", 28)  -- 28=lass
+    return
+end
+return script
+)";
+
+    LuaRuntime runtime;
+    GameState gs;
+    runtime.set_game_state(&gs);
+    runtime.execute_string(script_lua, "var_sprite_test");
+    uint32_t co = runtime.start_script("script");
+    ASSERT_EQ(static_cast<int>(runtime.get_state(co)), static_cast<int>(ScriptState::Finished));
+
+    // GameState::variables["var_sprite_copycat"] must be 28 (lass index)
+    auto it = gs.variables.find("var_sprite_copycat");
+    ASSERT_TRUE(it != gs.variables.end());
+    ASSERT_EQ(it->second, 28);
+}
+
+TEST(variable_sprite_distinct_slots_independent) {
+    using namespace enginemon;
+    // Two different slots must be stored independently.
+    std::string script_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:set_variable_sprite("copycat", 96)     -- 96=kris
+    ctx.world:set_variable_sprite("fuchsia_gym_1", 10)  -- 10=janine
+    return
+end
+return script
+)";
+
+    LuaRuntime runtime;
+    GameState gs;
+    runtime.set_game_state(&gs);
+    runtime.execute_string(script_lua, "var_sprite_two");
+    runtime.start_script("script");
+
+    ASSERT_EQ(gs.variables["var_sprite_copycat"], 96);
+    ASSERT_EQ(gs.variables["var_sprite_fuchsia_gym_1"], 10);
+}
+
+TEST(money_give_writes_to_gamestate_player) {
+    using namespace enginemon;
+    // ctx.inventory:give_money(amount, 0) must increment money_player in GameState.
+    std::string script_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.inventory:give_money(500, 0)
+    return
+end
+return script
+)";
+
+    LuaRuntime runtime;
+    GameState gs;
+    runtime.set_game_state(&gs);
+    runtime.execute_string(script_lua, "money_test");
+    runtime.start_script("script");
+
+    auto it = gs.variables.find("money_player");
+    ASSERT_TRUE(it != gs.variables.end());
+    ASSERT_EQ(it->second, 500);
+}
+
+TEST(money_player_vs_mom_account_distinct) {
+    using namespace enginemon;
+    // Player money and mom money must be stored independently.
+    std::string script_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.inventory:give_money(1000, 0)   -- player
+    ctx.inventory:give_money(2000, 1)   -- mom
+    return
+end
+return script
+)";
+
+    LuaRuntime runtime;
+    GameState gs;
+    runtime.set_game_state(&gs);
+    runtime.execute_string(script_lua, "money_accounts");
+    runtime.start_script("script");
+
+    ASSERT_EQ(gs.variables["money_player"], 1000);
+    ASSERT_EQ(gs.variables["money_mom"], 2000);
+    // Verify they are stored under different keys
+    ASSERT_TRUE(gs.variables["money_player"] != gs.variables["money_mom"]);
+}
+
+TEST(money_has_money_reads_gamestate) {
+    using namespace enginemon;
+    // has_money returns true only if GameState has enough.
+    std::string script_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.inventory:give_money(300, 0)
+    result = ctx.inventory:has_money(200, 0)   -- have 300, need 200 → true
+    return
+end
+return script
+)";
+
+    LuaRuntime runtime;
+    GameState gs;
+    runtime.set_game_state(&gs);
+    runtime.execute_string(script_lua, "has_money");
+    uint32_t co = runtime.start_script("script");
+
+    ASSERT_EQ(static_cast<int>(runtime.get_state(co)), static_cast<int>(ScriptState::Finished));
+    // Not enough after take
+    std::string script_lua2 = R"(
+script = {}
+function script.main(ctx)
+    result = ctx.inventory:has_money(500, 0)   -- have 300, need 500 → false
+    return
+end
+return script
+)";
+    runtime.execute_string(script_lua2, "has_money2");
+    uint32_t co2 = runtime.start_script("script");
+    ASSERT_EQ(static_cast<int>(runtime.get_state(co2)), static_cast<int>(ScriptState::Finished));
+}
+
+TEST(money_prepare_money_text_stores_balance) {
+    using namespace enginemon;
+    // ctx.inventory:prepare_money_text(account, slot) copies the current balance
+    // into GameState::variables["strbuf<N>_money"].
+    std::string script_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.inventory:give_money(750, 0)
+    ctx.inventory:prepare_money_text(0, 1)   -- account=player, slot=1
+    return
+end
+return script
+)";
+
+    LuaRuntime runtime;
+    GameState gs;
+    runtime.set_game_state(&gs);
+    runtime.execute_string(script_lua, "prep_money");
+    runtime.start_script("script");
+
+    // strbuf1_money must be 750 (same as money_player after give)
+    auto it = gs.variables.find("strbuf1_money");
+    ASSERT_TRUE(it != gs.variables.end());
+    ASSERT_EQ(it->second, 750);
+}
+
+TEST(money_emitter_produces_prepare_money_text) {
+    // Sem_PrepareTextArg with NumberSource::Money must emit
+    // ctx.inventory:prepare_money_text(account, slot), not a comment.
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_PrepareTextArg arg;
+    arg.arg_type = TextArgType::Number;
+    arg.number_source = NumberSource::Money;
+    arg.buffer_slot = 2;
+    arg.account = MoneyAccount::Mom;  // account=1
+
+    SemanticScriptIR ir;
+    ir.script_id = "t";
+    SemanticBasicBlock b;
+    b.id = 0;
+    b.instructions.push_back({arg});
+    b.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(b);
+
+    std::string lua = emitter.emit(ir);
+
+    // Must call prepare_money_text with account=1 (mom), slot=2
+    ASSERT_TRUE(lua.find("ctx.inventory:prepare_money_text(1, 2)") != std::string::npos);
+    // Must not be a comment
+    ASSERT_TRUE(lua.find("-- prepare_money") == std::string::npos);
+    ASSERT_TRUE(lua.find("show_money") == std::string::npos);
+}
+
+TEST(pokemon_icon_and_daycare_sprites_are_valid_semantic_ids) {
+    using namespace crystal;
+    // pokemon_icon and daycare bytes produce valid typed semantic ids (not empty).
+    // These ids are preserved in the package for future capability milestones.
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0x80), "pokemon_icon:0");  // SPRITE_UNOWN
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xA2), "pokemon_icon:34"); // SPRITE_HO_OH
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xE0), "daycare:1");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xE1), "daycare:2");
+    // None are empty or unknown
+    for (int b = 0x80; b <= 0xA2; ++b) {
+        std::string id = crystal_sprite_byte_to_id(static_cast<uint8_t>(b));
+        ASSERT_FALSE(id.empty());
+        ASSERT_TRUE(id.starts_with("pokemon_icon:"));
+    }
+}
+
+TEST(variable_sprite_legalizer_slot_offset_encoding) {
+    // Prove that variablesprite opcode slot byte (offset from SPRITE_VARS=0xF0)
+    // is correctly resolved to the semantic slot name.
+    // Source: pokecrystal macro: db \1 - SPRITE_VARS
+    //   SPRITE_COPYCAT (0xFB) - SPRITE_VARS (0xF0) = 0x0B
+    using namespace crystal;
+    // slot_offset=0x0B → SPRITE_VARS+0x0B = 0xFB = SPRITE_COPYCAT → "copycat"
+    uint8_t full_byte = static_cast<uint8_t>(CRYSTAL_SPRITE_VARS_MIN + 0x0B);
+    ASSERT_EQ(full_byte, 0xFB);
+    const char* name = crystal_variable_sprite_name(full_byte);
+    ASSERT_TRUE(name != nullptr);
+    ASSERT_STR_EQ(std::string(name), "copycat");
+    // slot_offset=0x07 → 0xF7 = SPRITE_FUCHSIA_GYM_1 → "fuchsia_gym_1"
+    const char* gym1 = crystal_variable_sprite_name(
+        static_cast<uint8_t>(CRYSTAL_SPRITE_VARS_MIN + 0x07));
+    ASSERT_TRUE(gym1 != nullptr);
+    ASSERT_STR_EQ(std::string(gym1), "fuchsia_gym_1");
 }
 
 //=============================================================================
@@ -19117,13 +19413,13 @@ int main(int argc, char* argv[]) {
     RUN_TEST(sprite_namespace_variable_console_and_dolls);
     RUN_TEST(sprite_namespace_variable_copycat_and_janine_impersonator);
     RUN_TEST(sprite_namespace_variable_range_never_empty);
-    RUN_TEST(sprite_namespace_zero_is_unknown);
-    RUN_TEST(sprite_namespace_gap_bytes_are_unknown);
+    RUN_TEST(sprite_namespace_zero_is_unknown_throws);
+    RUN_TEST(sprite_namespace_gap_bytes_throw);
     RUN_TEST(sprite_namespace_tag_query_helpers);
     RUN_TEST(sprite_namespace_backward_compat_index_to_id);
 
     // Post-Stage-7 emitter contract tests (August 2026)
-    RUN_TEST(stage7_money_text_arg_emits_set_var_not_show_money);
+    RUN_TEST(stage7_money_text_arg_emits_prepare_money_text_not_show_money);
     RUN_TEST(stage7_check_time_morning_emits_is_morning);
     RUN_TEST(stage7_check_time_night_emits_is_night);
     RUN_TEST(stage7_check_just_battled_emits_error_not_false);
@@ -19131,6 +19427,20 @@ int main(int argc, char* argv[]) {
     RUN_TEST(stage7_pokepic_emits_error_not_comment);
     RUN_TEST(stage7_sdefer_schedules_deferred_script);
     RUN_TEST(stage7_sdefer_deferred_script_after_current_not_concurrent);
+
+    // Post-Stage-7 sprite completion + contract fixes (August 2026)
+    RUN_TEST(unknown_sprite_byte_throws);
+    RUN_TEST(variable_sprite_emitter_produces_set_variable_sprite_call);
+    RUN_TEST(variable_sprite_emitter_passes_integer_index);
+    RUN_TEST(variable_sprite_gamestate_roundtrip);
+    RUN_TEST(variable_sprite_distinct_slots_independent);
+    RUN_TEST(money_give_writes_to_gamestate_player);
+    RUN_TEST(money_player_vs_mom_account_distinct);
+    RUN_TEST(money_has_money_reads_gamestate);
+    RUN_TEST(money_prepare_money_text_stores_balance);
+    RUN_TEST(money_emitter_produces_prepare_money_text);
+    RUN_TEST(pokemon_icon_and_daycare_sprites_are_valid_semantic_ids);
+    RUN_TEST(variable_sprite_legalizer_slot_offset_encoding);
 
     // Summary
     std::cout << "\n=== Results ===\n";

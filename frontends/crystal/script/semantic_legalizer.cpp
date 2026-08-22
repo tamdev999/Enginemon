@@ -7,6 +7,7 @@
 #include "crystal/script/pokemail_registry.hpp"
 #include "crystal/script/text_registry.hpp"
 #include "crystal/rom/bank_utils.hpp"
+#include "crystal/extract/sprite_ids.hpp"
 #include <sstream>
 #include <iomanip>
 #include <optional>
@@ -3036,8 +3037,28 @@ RuleResult rule_variable_sprite(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_VariableSprite op;
-        op.slot = p->slot;
-        op.sprite = p->sprite;
+
+        // Resolve slot byte → semantic slot name.
+        // The variablesprite macro encodes: slot = SPRITE_CONST - SPRITE_VARS (0xF0).
+        // So slot 0x00 = SPRITE_CONSOLE (0xF0), slot 0x0B = SPRITE_COPYCAT (0xFB).
+        // crystal_variable_sprite_name() expects the full byte (0xF0+offset).
+        uint8_t full_slot_byte = static_cast<uint8_t>(
+            CRYSTAL_SPRITE_VARS_MIN + p->slot);
+        const char* slot_name = crystal_variable_sprite_name(full_slot_byte);
+        if (!slot_name) {
+            // slot byte outside SPRITE_VARS range — hard lowering failure
+            return {};  // unmatched → unlowered → legality gate rejects
+        }
+        op.slot_name = slot_name;
+
+        // Resolve sprite byte → typed semantic sprite_id.
+        // Throws std::runtime_error for genuinely invalid bytes (outside all namespaces).
+        try {
+            op.assigned_sprite_id = crystal_sprite_byte_to_id(p->sprite);
+        } catch (const std::exception&) {
+            return {};  // unmatched → unlowered → legality gate rejects
+        }
+
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }

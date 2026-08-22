@@ -447,12 +447,9 @@ void FullGameCompiler::discover_sprites() {
                 std::string pkg_name;
                 if (sprite_id_is_fixed(obj.sprite_id)) {
                     pkg_name = sprite_id_fixed_name(obj.sprite_id);
-                } else if (!obj.sprite_id.starts_with("unknown:")) {
+                } else {
                     // pokemon_icon / daycare / variable — no compiled asset yet.
                     // Do not add to content_.sprites; no extraction needed.
-                    continue;
-                } else {
-                    // Unknown/invalid sprite byte — skip, don't attempt extraction.
                     continue;
                 }
 

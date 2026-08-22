@@ -29,6 +29,7 @@
 #include "engine/core/timing.hpp"
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
+#include "crystal/extract/sprite_ids.hpp"
 
 #include <iostream>
 #include <cmath>
@@ -44,40 +45,46 @@ using namespace enginemon;
 // Converts typed sprite_id strings (tagged with namespace prefix) to the
 // package lookup key used to fetch RuntimeSprite assets.
 //
-// The package stores fixed-namespace sprites under their bare names.
-// Non-fixed namespaces (pokemon_icon, daycare, variable) require runtime
-// state resolution not yet implemented; they fall back to a visible
-// placeholder sprite ("poke_ball") rather than silently disappearing.
-//
 // Tag format (from crystal/extract/sprite_ids.hpp):
 //   "fixed:<name>"          → package key = <name>
-//   "pokemon_icon:<index>"  → not yet resolvable from package → placeholder
-//   "daycare:<1|2>"         → not yet resolvable from package → placeholder
-//   "variable:<slot>"       → not yet resolvable from package → placeholder
-//   "unknown:<hex>"         → invalid byte in source ROM → placeholder
+//   "variable:<slot>"       → resolved from GameState::variables at map-load time
+//   "pokemon_icon:<index>"  → capability not yet implemented → hard failure
+//   "daycare:<1|2>"         → capability not yet implemented → hard failure
+//
+// Invalid bytes can no longer produce any sprite_id string — crystal_sprite_byte_to_id()
+// throws at extraction/compile time, so no invalid tags reach here.
 //=============================================================================
 
-// Fallback sprite used when a non-fixed namespace can't be resolved yet.
-// This is a real package sprite, so it renders visibly rather than invisibly.
-static const std::string SPRITE_PLACEHOLDER_ID = "poke_ball";
-
-// Resolve a typed sprite_id to the package lookup key.
-// Returns the bare name for fixed sprites, or SPRITE_PLACEHOLDER_ID otherwise.
-static std::string resolve_sprite_package_key(const std::string& sprite_id) {
+// Resolve a fixed sprite_id to its package lookup key (bare name).
+// Returns empty string for non-fixed namespaces.
+static std::string sprite_id_fixed_package_key(const std::string& sprite_id) {
     if (sprite_id.starts_with("fixed:")) {
-        return sprite_id.substr(6);  // "fixed:teacher" → "teacher"
+        return sprite_id.substr(6);
     }
-    if (sprite_id.starts_with("pokemon_icon:") ||
-        sprite_id.starts_with("daycare:")      ||
-        sprite_id.starts_with("variable:")     ||
-        sprite_id.starts_with("unknown:")) {
-        // Not yet package-resolvable; use visible placeholder
-        return SPRITE_PLACEHOLDER_ID;
-    }
-    // Legacy bare names (pre-SpriteRef migration) — pass through unchanged.
-    // This keeps backward compatibility with any packages compiled before
-    // the namespace tagging was introduced.
-    return sprite_id;
+    return "";
+}
+
+// Resolve a variable sprite slot to the fixed sprite it currently maps to,
+// using GameState::variables["var_sprite_<slot_name>"].
+// Returns "" if no assignment is stored (object renders as nothing — not a
+// capability error; the slot just hasn't been set by a variablesprite command yet).
+static std::string sprite_id_variable_resolve(const std::string& sprite_id,
+                                              const GameState* gs) {
+    if (!sprite_id.starts_with("variable:")) return "";
+    std::string slot_name = sprite_id.substr(9);  // "variable:copycat" → "copycat"
+    if (!gs) return "";
+    // Variable sprite assignments are stored under "var_sprite_<slot_name>"
+    auto it = gs->variables.find("var_sprite_" + slot_name);
+    if (it == gs->variables.end()) return "";
+    // The value is a packed fixed sprite identifier stored as an integer index
+    // matching the crystal_fixed_sprite_name() table (1-102 → name).
+    // This is set by ctx.world:set_variable_sprite(slot, fixed_sprite_name).
+    // A value of 0 means unset.
+    if (it->second <= 0) return "";
+    // Look up fixed sprite name by index
+    const char* name = crystal::crystal_fixed_sprite_name(
+        static_cast<uint8_t>(it->second));
+    return name ? name : "";
 }
 
 //=============================================================================
@@ -213,6 +220,10 @@ struct WarpArrivalState {
 struct PackageContext {
     PackageReader* package = nullptr;
     
+    // GameState pointer for variable sprite resolution.
+    // NOT owned by PackageContext — caller maintains lifetime.
+    const GameState* game_state = nullptr;
+
     // Sprite data loaded from package
     SpriteObjPalettes obj_palettes;
     RuntimeSprite player_sprite;
@@ -289,32 +300,83 @@ static bool load_world_state(
     for (const auto& obj : state.map.objects) {
         if (state.extracted_sprite_ids.contains(obj.sprite_id)) continue;
 
-        // Resolve tagged sprite_id to a package lookup key.
-        // "fixed:teacher" → "teacher"; other namespaces → placeholder.
-        std::string pkg_key = resolve_sprite_package_key(obj.sprite_id);
+        if (obj.sprite_id.starts_with("fixed:")) {
+            // Fixed namespace: resolve to bare package key and load
+            std::string pkg_key = sprite_id_fixed_package_key(obj.sprite_id);
+            if (pkg_key.empty()) continue;
 
-        // Check cache first (per-instance, keyed by sprite_id not pkg_key so
-        // two objects with different sprite_ids that resolve to the same key
-        // each get their own cache entry and we don't accidentally skip one).
-        auto cache_it = pkg_ctx.sprite_cache.find(pkg_key);
-        if (cache_it != pkg_ctx.sprite_cache.end()) {
-            state.sprites.push_back(cache_it->second);
-            state.extracted_sprite_ids.insert(obj.sprite_id);
-            continue;
-        }
+            auto cache_it = pkg_ctx.sprite_cache.find(pkg_key);
+            if (cache_it != pkg_ctx.sprite_cache.end()) {
+                state.sprites.push_back(cache_it->second);
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+                continue;
+            }
+            auto sprite_opt = pkg_ctx.package->load_sprite(pkg_key);
+            if (sprite_opt) {
+                pkg_ctx.sprite_cache[pkg_key] = *sprite_opt;
+                state.sprites.push_back(std::move(*sprite_opt));
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+            } else {
+                std::cerr << "[SPRITE] Package missing fixed sprite '" << pkg_key
+                          << "' (from sprite_id '" << obj.sprite_id << "')\n";
+            }
 
-        // Load from package
-        auto sprite_opt = pkg_ctx.package->load_sprite(pkg_key);
-        if (sprite_opt) {
-            pkg_ctx.sprite_cache[pkg_key] = *sprite_opt;
-            state.sprites.push_back(std::move(*sprite_opt));
-            state.extracted_sprite_ids.insert(obj.sprite_id);
-        } else if (pkg_key != SPRITE_PLACEHOLDER_ID) {
-            // Fixed sprite that's genuinely missing from the package — log it.
-            std::cerr << "[SPRITE] Package missing sprite '" << pkg_key
-                      << "' (from sprite_id '" << obj.sprite_id << "')\n";
+        } else if (obj.sprite_id.starts_with("variable:")) {
+            // Variable namespace: resolved from GameState at map-load time.
+            // If no assignment is stored, the object has no sprite yet — not an error.
+            std::string pkg_key = sprite_id_variable_resolve(
+                obj.sprite_id, pkg_ctx.game_state);
+            if (pkg_key.empty()) {
+                // Slot not yet assigned via variablesprite — silently no sprite.
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+                continue;
+            }
+            auto cache_it = pkg_ctx.sprite_cache.find(pkg_key);
+            if (cache_it != pkg_ctx.sprite_cache.end()) {
+                state.sprites.push_back(cache_it->second);
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+                continue;
+            }
+            auto sprite_opt = pkg_ctx.package->load_sprite(pkg_key);
+            if (sprite_opt) {
+                pkg_ctx.sprite_cache[pkg_key] = *sprite_opt;
+                state.sprites.push_back(std::move(*sprite_opt));
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+            } else {
+                std::cerr << "[SPRITE] Variable sprite '" << obj.sprite_id
+                          << "' resolved to '" << pkg_key
+                          << "' but that sprite is not in the package\n";
+            }
+
+        } else if (obj.sprite_id.starts_with("pokemon_icon:")) {
+            // Pokémon icon namespace — capability not yet implemented.
+            // Pokémon icon sprites require a separate extraction path from the ROM
+            // (MonMenuIcons → IconPointers → 32×32 2bpp icon GFX, bank 0x23).
+            // This is a future milestone. Fail hard — do not silently render nothing.
+            throw std::runtime_error(
+                "Map '" + state.map_id + "' object has sprite_id '" + obj.sprite_id +
+                "': pokemon_icon namespace is a valid semantic identity but the "
+                "pokemon icon extraction milestone has not been implemented yet. "
+                "Implement SpriteExtractor::extract_pokemon_icon() and compile "
+                "icon sprites into the package under pokemon_icon:N keys.");
+
+        } else if (obj.sprite_id.starts_with("daycare:")) {
+            // Day Care namespace — capability not yet implemented.
+            // Day Care sprite resolution requires GameState::daycare_slot[1/2] species
+            // fields, which are not yet defined. This is a future milestone.
+            throw std::runtime_error(
+                "Map '" + state.map_id + "' object has sprite_id '" + obj.sprite_id +
+                "': daycare namespace is a valid semantic identity but the "
+                "Day Care species runtime state (GameState::daycare_slot) has not "
+                "been implemented yet. Add daycare_slot fields to GameState and wire "
+                "ctx.world:set_daycare_species(slot, species_id).");
+
+        } else {
+            // Any other prefix is a programming error — should never reach here since
+            // crystal_sprite_byte_to_id() throws for invalid bytes at extraction time.
+            std::cerr << "[SPRITE] Unexpected sprite_id namespace: '" << obj.sprite_id
+                      << "' — this is a compiler/extraction bug\n";
         }
-        // Non-fixed sprites with missing placeholder are silently skipped.
     }
     
     // Render sprite atlas using the render_sprite_atlas function
@@ -650,6 +712,7 @@ int main(int argc, char* argv[]) {
     // Set up package context
     pkg_ctx.package = package.get();
     pkg_ctx.initialized = true;
+    pkg_ctx.game_state = &game_state;
     
     //=========================================================================
     // STEP 3: Load initial map from package
@@ -1503,7 +1566,13 @@ int main(int argc, char* argv[]) {
             if (!npc.visible) continue;
             
             SpriteInstance npc_inst;
-            npc_inst.sprite_id = resolve_sprite_package_key(obj.sprite_id);
+            npc_inst.sprite_id = sprite_id_fixed_package_key(obj.sprite_id);
+            // For variable sprites: resolve to the currently assigned fixed sprite.
+            if (npc_inst.sprite_id.empty() && obj.sprite_id.starts_with("variable:")) {
+                npc_inst.sprite_id = sprite_id_variable_resolve(
+                    obj.sprite_id, pkg_ctx.game_state);
+            }
+            // pokemon_icon / daycare render as nothing until those capabilities land.
             npc_inst.facing = static_cast<SpriteFacing>(npc.facing);
             
             // Calculate walk animation state for moving NPCs

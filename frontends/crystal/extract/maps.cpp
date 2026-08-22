@@ -163,7 +163,7 @@ std::string MapExtractor::make_sprite_id(uint8_t sprite_index) const {
     //   0x80-0xA2: Pokémon icon sprites    → "pokemon_icon:<index>"
     //   0xE0-0xE1: Day Care Pokémon        → "daycare:<1|2>"
     //   0xF0-0xFC: Variable sprite slots   → "variable:<slot_name>"
-    // Unknown bytes produce "unknown:<hex>" so the problem is visible, not silent.
+    // Invalid bytes throw std::runtime_error — the caller propagates extraction failure.
     return crystal_sprite_byte_to_id(sprite_index);
 }
 
@@ -712,7 +712,15 @@ bool MapExtractor::extract_objects(uint32_t ptr, uint8_t count,
         
         ObjectEvent obj;
         obj.local_id = i + 1;  // 1-indexed
-        obj.sprite_id = make_sprite_id(data[0]);
+        try {
+            obj.sprite_id = make_sprite_id(data[0]);
+        } catch (const std::exception& ex) {
+            // Invalid sprite byte in ROM object event — hard extraction failure.
+            // This means the ROM contains a sprite byte outside all defined Crystal
+            // namespaces. Report the byte and bail out for this map.
+            stats_.bounds_check_failures++;
+            return false;
+        }
         obj.y = data[1] - 4;  // Crystal adds 4 to stored Y
         obj.x = data[2] - 4;  // Crystal adds 4 to stored X
         obj.movement_type = data[3];

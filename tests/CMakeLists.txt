@@ -22,7 +22,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     )
     target_include_directories(runtime_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     if(MSVC)
-        target_compile_options(runtime_test PRIVATE /bigobj)
+        target_compile_options(runtime_test PRIVATE /bigobj /Zm300)
     endif()
     # Not added to ctest - requires ROM path argument
 endif()

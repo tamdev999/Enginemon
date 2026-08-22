@@ -85,6 +85,15 @@ namespace world_api {
     // Applies a movement sequence to an object, yields until complete
     int apply_movement(lua_State* L);
     
+    // ctx.world:set_variable_sprite(slot_name, sprite_ref)
+    // Assigns a typed sprite to a named variable slot.
+    // slot_name: semantic slot (e.g., "copycat", "fuchsia_gym_1")
+    // sprite_ref: typed sprite_id (e.g., "fixed:lass", "fixed:janine")
+    // Stores the assignment in GameState::variables["var_sprite_<slot_name>"] as
+    // the crystal_fixed_sprite_name() index (integer).
+    // Source: Crystal variablesprite opcode 0x6D + wVariableSprites semantic.
+    int set_variable_sprite(lua_State* L);
+    
     // Test helpers - operate on specific runtime's stub state
     void reset_world_state(LuaRuntime* runtime);
     void set_actor_pos(LuaRuntime* runtime, int id, int x, int y);
@@ -170,6 +179,12 @@ namespace inventory_api {
     
     // ctx.inventory:money() -> number
     int money(lua_State* L);
+
+    // ctx.inventory:prepare_money_text(account, buffer_slot)
+    // Copies the current money balance for account into strbuf<N>_money in GameState.
+    // account: 0=player, 1=mom. buffer_slot: 0-2.
+    // Source: Crystal getmoney opcode → text display path.
+    int prepare_money_text(lua_State* L);
 }
 
 // ============================================================================

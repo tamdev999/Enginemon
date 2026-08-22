@@ -179,6 +179,9 @@ void LuaRuntime::bind_world_api() {
     
     lua_pushcfunction(L_, world_api::apply_movement);
     lua_setfield(L_, -2, "apply_movement");
+
+    lua_pushcfunction(L_, world_api::set_variable_sprite);
+    lua_setfield(L_, -2, "set_variable_sprite");
     
     lua_setfield(L_, -2, "world");  // Set as ctx.world
 }
@@ -267,6 +270,9 @@ void LuaRuntime::bind_inventory_api() {
     
     lua_pushcfunction(L_, inventory_api::money);
     lua_setfield(L_, -2, "money");
+
+    lua_pushcfunction(L_, inventory_api::prepare_money_text);
+    lua_setfield(L_, -2, "prepare_money_text");
     
     lua_setfield(L_, -2, "inventory");
 }
