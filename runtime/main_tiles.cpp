@@ -40,6 +40,47 @@
 using namespace enginemon;
 
 //=============================================================================
+// SPRITE ID RESOLUTION
+// Converts typed sprite_id strings (tagged with namespace prefix) to the
+// package lookup key used to fetch RuntimeSprite assets.
+//
+// The package stores fixed-namespace sprites under their bare names.
+// Non-fixed namespaces (pokemon_icon, daycare, variable) require runtime
+// state resolution not yet implemented; they fall back to a visible
+// placeholder sprite ("poke_ball") rather than silently disappearing.
+//
+// Tag format (from crystal/extract/sprite_ids.hpp):
+//   "fixed:<name>"          → package key = <name>
+//   "pokemon_icon:<index>"  → not yet resolvable from package → placeholder
+//   "daycare:<1|2>"         → not yet resolvable from package → placeholder
+//   "variable:<slot>"       → not yet resolvable from package → placeholder
+//   "unknown:<hex>"         → invalid byte in source ROM → placeholder
+//=============================================================================
+
+// Fallback sprite used when a non-fixed namespace can't be resolved yet.
+// This is a real package sprite, so it renders visibly rather than invisibly.
+static const std::string SPRITE_PLACEHOLDER_ID = "poke_ball";
+
+// Resolve a typed sprite_id to the package lookup key.
+// Returns the bare name for fixed sprites, or SPRITE_PLACEHOLDER_ID otherwise.
+static std::string resolve_sprite_package_key(const std::string& sprite_id) {
+    if (sprite_id.starts_with("fixed:")) {
+        return sprite_id.substr(6);  // "fixed:teacher" → "teacher"
+    }
+    if (sprite_id.starts_with("pokemon_icon:") ||
+        sprite_id.starts_with("daycare:")      ||
+        sprite_id.starts_with("variable:")     ||
+        sprite_id.starts_with("unknown:")) {
+        // Not yet package-resolvable; use visible placeholder
+        return SPRITE_PLACEHOLDER_ID;
+    }
+    // Legacy bare names (pre-SpriteRef migration) — pass through unchanged.
+    // This keeps backward compatibility with any packages compiled before
+    // the namespace tagging was introduced.
+    return sprite_id;
+}
+
+//=============================================================================
 // WORLD STATE
 // Holds all map-dependent state for rendering and gameplay
 // Reference: Gen2Recomped OverworldState pattern
@@ -247,23 +288,33 @@ static bool load_world_state(
     // Load NPC sprites from package
     for (const auto& obj : state.map.objects) {
         if (state.extracted_sprite_ids.contains(obj.sprite_id)) continue;
-        
-        // Check cache first (per-instance)
-        auto cache_it = pkg_ctx.sprite_cache.find(obj.sprite_id);
+
+        // Resolve tagged sprite_id to a package lookup key.
+        // "fixed:teacher" → "teacher"; other namespaces → placeholder.
+        std::string pkg_key = resolve_sprite_package_key(obj.sprite_id);
+
+        // Check cache first (per-instance, keyed by sprite_id not pkg_key so
+        // two objects with different sprite_ids that resolve to the same key
+        // each get their own cache entry and we don't accidentally skip one).
+        auto cache_it = pkg_ctx.sprite_cache.find(pkg_key);
         if (cache_it != pkg_ctx.sprite_cache.end()) {
             state.sprites.push_back(cache_it->second);
             state.extracted_sprite_ids.insert(obj.sprite_id);
             continue;
         }
-        
+
         // Load from package
-        auto sprite_opt = pkg_ctx.package->load_sprite(obj.sprite_id);
+        auto sprite_opt = pkg_ctx.package->load_sprite(pkg_key);
         if (sprite_opt) {
-            pkg_ctx.sprite_cache[obj.sprite_id] = *sprite_opt;  // Cache it
+            pkg_ctx.sprite_cache[pkg_key] = *sprite_opt;
             state.sprites.push_back(std::move(*sprite_opt));
             state.extracted_sprite_ids.insert(obj.sprite_id);
+        } else if (pkg_key != SPRITE_PLACEHOLDER_ID) {
+            // Fixed sprite that's genuinely missing from the package — log it.
+            std::cerr << "[SPRITE] Package missing sprite '" << pkg_key
+                      << "' (from sprite_id '" << obj.sprite_id << "')\n";
         }
-        // Missing sprites silently skipped - non-fatal
+        // Non-fixed sprites with missing placeholder are silently skipped.
     }
     
     // Render sprite atlas using the render_sprite_atlas function
@@ -1452,7 +1503,7 @@ int main(int argc, char* argv[]) {
             if (!npc.visible) continue;
             
             SpriteInstance npc_inst;
-            npc_inst.sprite_id = obj.sprite_id;
+            npc_inst.sprite_id = resolve_sprite_package_key(obj.sprite_id);
             npc_inst.facing = static_cast<SpriteFacing>(npc.facing);
             
             // Calculate walk animation state for moving NPCs

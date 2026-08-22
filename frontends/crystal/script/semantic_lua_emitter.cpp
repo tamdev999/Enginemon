@@ -339,9 +339,17 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
                 out << "ctx.flags:set_var(\"strbuf" << (int)o->buffer_slot << "_trainer\", " << (int)o->trainer_group << ")\n"; break;
             case TextArgType::Number:
                 switch (o->number_source) {
-                    case NumberSource::Money:    out << "ctx.inventory:show_money(" << (int)o->account << ")\n"; break;
-                    case NumberSource::Coins:    out << "-- getcoins strbuf=" << (int)o->buffer_slot << "\n"; break;
-                    case NumberSource::ScriptVar: out << "-- getnum strbuf=" << (int)o->buffer_slot << "\n"; break;
+                    case NumberSource::Money:
+                        // Prepare player money for text display.
+                        // account: 0=player (wMoney), 1=mom (wMomsMoney).
+                        // The text renderer resolves this at display time; no Lua
+                        // call is needed — the account index is encoded in the emit.
+                        out << "-- prepare_money account=" << (int)o->account
+                            << " strbuf=" << (int)o->buffer_slot << "\n"; break;
+                    case NumberSource::Coins:
+                        out << "-- prepare_coins strbuf=" << (int)o->buffer_slot << "\n"; break;
+                    case NumberSource::ScriptVar:
+                        out << "-- prepare_scriptvar strbuf=" << (int)o->buffer_slot << "\n"; break;
                 }
                 break;
             case TextArgType::String:
@@ -549,10 +557,14 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "-- trainer_text domain=" << (int)o->domain << " id=" << (int)o->text_id << "\n"; return true;
     }
     if (auto* o = std::get_if<Sem_TrainerFlagAction>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "-- trainer_flag_action " << (int)o->action << "\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"trainer_flag_action: not yet implemented (action=" << (int)o->action << ")\")\n"; return true;
     }
     if (std::get_if<Sem_CheckJustBattled>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "result = false -- check_just_battled\n"; return true;
+        // Capability not yet implemented. Error explicitly rather than
+        // silently returning false and letting scripts take the wrong branch.
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"check_just_battled: not yet implemented\")\n"; return true;
     }
     if (std::get_if<Sem_EndIfJustBattled>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "-- end_if_just_battled\n"; return true;
@@ -614,7 +626,28 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.game:deactivate_facing(" << (int)o->duration << ")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_CheckTime>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "result = ctx.time:time_of_day() ~= nil -- check_time " << (int)o->time_flags << "\n"; return true;
+        // time_flags is a bitmask: MORN_F=1, DAY_F=2, NITE_F=4
+        // Source: pokecrystal/engine/events/checktime.asm
+        SemanticLuaEmitter::indent_line(out, I);
+        uint8_t tf = o->time_flags;
+        if (tf == 1) {
+            out << "result = ctx.time:is_morning()\n";
+        } else if (tf == 2) {
+            out << "result = ctx.time:is_day()\n";
+        } else if (tf == 4) {
+            out << "result = ctx.time:is_night()\n";
+        } else if (tf == 3) {
+            out << "result = ctx.time:is_morning() or ctx.time:is_day()\n";
+        } else if (tf == 5) {
+            out << "result = ctx.time:is_morning() or ctx.time:is_night()\n";
+        } else if (tf == 6) {
+            out << "result = ctx.time:is_day() or ctx.time:is_night()\n";
+        } else if (tf == 7) {
+            out << "result = true\n";
+        } else {
+            out << "error(\"check_time: unrecognised time_flags=" << (int)tf << "\")\n";
+        }
+        return true;
     }
     if (auto* o = std::get_if<Sem_SetDaylightSaving>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.game:set_daylight_saving(" << (o->enabled ? 1 : 0) << ")\n"; return true;
@@ -631,10 +664,12 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "-- delete_phone_number " << (int)o->person << "\n"; return true;
     }
     if (auto* o = std::get_if<Sem_CheckPhoneNumber>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "result = false -- check_phone_number " << (int)o->person << "\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"check_phone_number: not yet implemented (person=" << (int)o->person << ")\")\n"; return true;
     }
     if (std::get_if<Sem_CheckPhoneCall>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "result = false -- check_phone_call\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"check_phone_call: not yet implemented\")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_SpecialPhoneCall>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "-- special_phone_call " << (int)o->call_id << "\n"; return true;
@@ -708,23 +743,37 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
     }
     if (auto* o = std::get_if<Sem_Pokepic>(&op)) {
         SemanticLuaEmitter::indent_line(out, I);
-        if (o->source.is_literal()) out << "-- pokepic species=" << (int)o->source.species << "\n";
-        else out << "-- pokepic species=script_var\n"; return true;
+        // Pokepic display is not yet implemented. Scripts that depend on it
+        // (e.g. Pokémon naming screens) will not complete correctly.
+        // Error explicitly so the gap is visible rather than silently missing.
+        if (o->source.is_literal()) {
+            out << "error(\"pokepic: not yet implemented (species=" << (int)o->source.species << ")\")\n";
+        } else {
+            out << "error(\"pokepic: not yet implemented (species=script_var)\")\n";
+        }
+        return true;
     }
     if (std::get_if<Sem_ClosePokepic>(&op)) {
+        // Only reached if pokepic itself didn't error (e.g. if script checks first).
+        // Emit as a no-op — close without an open is benign.
         SemanticLuaEmitter::indent_line(out, I); out << "-- close_pokepic\n"; return true;
     }
     if (auto* o = std::get_if<Sem_Pokemart>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "-- pokemart dialog=" << (int)o->dialog_id << " mart=" << (int)o->mart_id << "\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"pokemart: not yet implemented (dialog=" << (int)o->dialog_id
+            << " mart=" << (int)o->mart_id << ")\")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_Elevator>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "-- elevator id=" << (int)o->elevator_id << "\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"elevator: not yet implemented (id=" << (int)o->elevator_id << ")\")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_Trade>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "-- trade id=" << (int)o->trade_id << "\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"trade: not yet implemented (id=" << (int)o->trade_id << ")\")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_FruitTree>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "-- fruit_tree id=" << (int)o->tree_id << "\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"fruit_tree: not yet implemented (id=" << (int)o->tree_id << ")\")\n"; return true;
     }
     if (std::get_if<Sem_HallOfFame>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.game:hall_of_fame()\n"; return true;

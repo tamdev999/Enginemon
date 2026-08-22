@@ -272,14 +272,21 @@ public:
     // SCRIPTING
     //=========================================================================
     
-    // Set the Lua runtime for script execution
-    void set_lua_runtime(LuaRuntime* runtime) { lua_runtime_ = runtime; }
+    // Set the Lua runtime for script execution.
+    // Also wires the deferred-script scheduling callback so Sem_Sdefer
+    // (emitted as ctx.game:behavior("Sdefer_<id>")) actually schedules.
+    void set_lua_runtime(LuaRuntime* runtime);
     
     // Load and start a script by semantic ID
     bool start_script(const std::string& script_id);
     
     // Resume a yielded script
     bool resume_script();
+    
+    // Schedule a script to run after the current active script completes.
+    // If no script is running the deferred script starts immediately on the next tick.
+    // Source: pokecrystal Script_sdefer — deferred target runs after current script.
+    void schedule_deferred_script(const std::string& script_id);
     
     // Get script code callback (to be set by test/game code)
     using ScriptLoader = std::function<std::string(const std::string& script_id)>;
@@ -387,6 +394,12 @@ private:
     std::string active_script_id_;
     bool script_resumed_this_tick_ = false;  // Set by resume_script(), reset each tick
     bool script_error_this_tick_ = false;    // Set when script errors, reset each tick
+
+    // Deferred scripts — scheduled by Sem_Sdefer while a script is running.
+    // Executed in FIFO order after the current active script finishes (or errors).
+    // Source-proven from pokecrystal Script_sdefer: deferred script runs after
+    // the current script returns, not concurrently.
+    std::vector<std::string> deferred_scripts_;
     
     // Callbacks
     InteractionCallback on_interaction_;

@@ -401,6 +401,18 @@ bool HeadlessGameLoop::update_movement() {
 // SCRIPTING
 //=============================================================================
 
+void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
+    lua_runtime_ = runtime;
+    if (runtime) {
+        // Wire deferred-script scheduling so ctx.game:behavior("Sdefer_<id>")
+        // actually enqueues the target script on this game loop instance.
+        runtime->get_stub_services().deferred_script_fn =
+            [this](const std::string& script_id) {
+                schedule_deferred_script(script_id);
+            };
+    }
+}
+
 bool HeadlessGameLoop::start_script(const std::string& script_id) {
     if (!lua_runtime_) return false;
     
@@ -591,6 +603,15 @@ TickResult HeadlessGameLoop::tick() {
         // This is set by resume_script() itself, independent of resulting state
         result.script_resumed = script_resumed_this_tick_;
     }
+
+    // Drain deferred-script queue when a slot opens (state is now Idle after
+    // script completion above, or was already Idle before any script ran).
+    // Source: pokecrystal Script_sdefer — deferred body runs after current script.
+    if (state_ == LoopState::Idle && !deferred_scripts_.empty()) {
+        std::string next_id = std::move(deferred_scripts_.front());
+        deferred_scripts_.erase(deferred_scripts_.begin());
+        start_script(next_id);  // errors here surface through start_script's return value
+    }
     
     return result;
 }
@@ -648,8 +669,18 @@ void HeadlessGameLoop::reset() {
     active_script_id_.clear();
     script_resumed_this_tick_ = false;
     script_error_this_tick_ = false;
+    deferred_scripts_.clear();
     // Note: game_state_ pointer is NOT reset - caller owns that
     // Note: lua_runtime_ pointer is NOT reset - caller owns that and may reuse it
+}
+
+void HeadlessGameLoop::schedule_deferred_script(const std::string& script_id) {
+    // Enqueue a script to run after the current active script finishes.
+    // Source: pokecrystal Script_sdefer (opcode 0x86):
+    //   writes target script address to wScriptQueue, which the engine
+    //   processes after Script_end unwinds the current script.
+    // We model this as a FIFO queue drained in tick() when state == Idle.
+    deferred_scripts_.push_back(script_id);
 }
 
 //=============================================================================

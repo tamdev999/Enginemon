@@ -18057,6 +18057,409 @@ TEST(stage7_emitted_lua_executes_in_runtime_var) {
     ASSERT_EQ(it->second, 42);
 }
 
+
+//=============================================================================
+// POST-STAGE-7 SPRITE NAMESPACE TESTS
+// Verify crystal_sprite_byte_to_id() covers all four Crystal sprite namespaces
+// and no valid stock sprite byte produces "" or an unknown tag.
+//=============================================================================
+
+TEST(sprite_namespace_fixed_min_and_max) {
+    using namespace crystal;
+    // Fixed range: 0x01-0x66 (1-102)
+    // Boundary: index 1 → "fixed:chris", index 102 → "fixed:standing_youngster"
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0x01), "fixed:chris");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0x66), "fixed:standing_youngster");
+    // Mid-range check: SPRITE_TEACHER = 0x29 = 41
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0x29), "fixed:teacher");
+}
+
+TEST(sprite_namespace_fixed_never_empty) {
+    using namespace crystal;
+    // Every fixed-range byte must produce a non-empty, non-unknown result
+    for (uint8_t i = 0x01; i <= 0x66; ++i) {
+        std::string id = crystal_sprite_byte_to_id(i);
+        ASSERT_FALSE(id.empty());
+        ASSERT_FALSE(id.starts_with("unknown:"));
+        ASSERT_TRUE(id.starts_with("fixed:"));
+    }
+}
+
+TEST(sprite_namespace_pokemon_icon_range) {
+    using namespace crystal;
+    // Pokémon icon range: 0x80-0xA2
+    // SPRITE_UNOWN = 0x80 → "pokemon_icon:0"
+    // SPRITE_HO_OH = 0xA2 → "pokemon_icon:34"
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0x80), "pokemon_icon:0");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xA2), "pokemon_icon:34");
+    // Never empty
+    for (int i = 0x80; i <= 0xA2; ++i) {
+        std::string id = crystal_sprite_byte_to_id(static_cast<uint8_t>(i));
+        ASSERT_FALSE(id.empty());
+        ASSERT_TRUE(id.starts_with("pokemon_icon:"));
+    }
+}
+
+TEST(sprite_namespace_daycare_route34) {
+    using namespace crystal;
+    // Route 34 Day Care uses 0xE0 and 0xE1 directly in object_event macros
+    // Source: references/pokecrystal/data/maps/outdoor_sprites.asm
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xE0), "daycare:1");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xE1), "daycare:2");
+    // Must not be empty or unknown
+    ASSERT_FALSE(crystal_sprite_byte_to_id(0xE0).empty());
+    ASSERT_FALSE(crystal_sprite_byte_to_id(0xE1).empty());
+    ASSERT_FALSE(crystal_sprite_byte_to_id(0xE0).starts_with("unknown:"));
+    ASSERT_FALSE(crystal_sprite_byte_to_id(0xE1).starts_with("unknown:"));
+}
+
+TEST(sprite_namespace_variable_olivine_rival) {
+    using namespace crystal;
+    // SPRITE_OLIVINE_RIVAL = 0xF5 — used in outdoor_sprites.asm
+    // Source: references/pokecrystal/constants/sprite_constants.asm
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xF5), "variable:olivine_rival");
+    ASSERT_FALSE(crystal_sprite_byte_to_id(0xF5).empty());
+}
+
+TEST(sprite_namespace_variable_azalea_rocket) {
+    using namespace crystal;
+    // SPRITE_AZALEA_ROCKET = 0xF6 — used in outdoor_sprites.asm
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xF6), "variable:azalea_rocket");
+    ASSERT_FALSE(crystal_sprite_byte_to_id(0xF6).empty());
+}
+
+TEST(sprite_namespace_variable_fuchsia_gym_1_to_4) {
+    using namespace crystal;
+    // FuchsiaGym uses SPRITE_FUCHSIA_GYM_1-4 (0xF7-0xFA) directly in object_event macros
+    // Source: references/pokecrystal/maps/FuchsiaGym.asm
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xF7), "variable:fuchsia_gym_1");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xF8), "variable:fuchsia_gym_2");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xF9), "variable:fuchsia_gym_3");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xFA), "variable:fuchsia_gym_4");
+}
+
+TEST(sprite_namespace_variable_console_and_dolls) {
+    using namespace crystal;
+    // PlayersHouse2F uses SPRITE_CONSOLE (0xF0), DOLL_1 (0xF1), DOLL_2 (0xF2)
+    // Source: references/pokecrystal/maps/PlayersHouse2F.asm
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xF0), "variable:console");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xF1), "variable:doll_1");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xF2), "variable:doll_2");
+}
+
+TEST(sprite_namespace_variable_copycat_and_janine_impersonator) {
+    using namespace crystal;
+    // CopycatsHouse2F uses SPRITE_COPYCAT (0xFB)
+    // FuchsiaPokecenter1F uses SPRITE_JANINE_IMPERSONATOR (0xFC)
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xFB), "variable:copycat");
+    ASSERT_STR_EQ(crystal_sprite_byte_to_id(0xFC), "variable:janine_impersonator");
+}
+
+TEST(sprite_namespace_variable_range_never_empty) {
+    using namespace crystal;
+    // All variable sprite bytes (0xF0-0xFC) must produce non-empty, non-unknown results
+    for (int i = 0xF0; i <= 0xFC; ++i) {
+        std::string id = crystal_sprite_byte_to_id(static_cast<uint8_t>(i));
+        ASSERT_FALSE(id.empty());
+        ASSERT_FALSE(id.starts_with("unknown:"));
+        ASSERT_TRUE(id.starts_with("variable:"));
+    }
+}
+
+TEST(sprite_namespace_zero_is_unknown) {
+    using namespace crystal;
+    // SPRITE_NONE = 0 is genuinely invalid and should surface as unknown
+    std::string id = crystal_sprite_byte_to_id(0x00);
+    ASSERT_TRUE(id.starts_with("unknown:"));
+    ASSERT_FALSE(id.empty());
+}
+
+TEST(sprite_namespace_gap_bytes_are_unknown) {
+    using namespace crystal;
+    // Bytes 0x67-0x7F (between fixed and pokemon_icon ranges) are undefined
+    // They should produce "unknown:<hex>" not ""
+    std::string id_67 = crystal_sprite_byte_to_id(0x67);
+    std::string id_7f = crystal_sprite_byte_to_id(0x7F);
+    ASSERT_TRUE(id_67.starts_with("unknown:"));
+    ASSERT_TRUE(id_7f.starts_with("unknown:"));
+}
+
+TEST(sprite_namespace_tag_query_helpers) {
+    using namespace crystal;
+    // Verify tag-query helper functions work correctly
+    ASSERT_TRUE(sprite_id_is_fixed("fixed:teacher"));
+    ASSERT_FALSE(sprite_id_is_fixed("variable:copycat"));
+    ASSERT_TRUE(sprite_id_is_variable("variable:copycat"));
+    ASSERT_TRUE(sprite_id_is_daycare("daycare:1"));
+    ASSERT_TRUE(sprite_id_is_pokemon_icon("pokemon_icon:0"));
+
+    ASSERT_STR_EQ(sprite_id_fixed_name("fixed:teacher"), "teacher");
+    ASSERT_EQ(sprite_id_pokemon_icon_index("pokemon_icon:5"), 5);
+    ASSERT_EQ(sprite_id_daycare_slot("daycare:2"), 2);
+    ASSERT_STR_EQ(sprite_id_variable_name("variable:olivine_rival"), "olivine_rival");
+}
+
+TEST(sprite_namespace_backward_compat_index_to_id) {
+    using namespace crystal;
+    // crystal_sprite_index_to_id() still returns bare name for fixed range
+    // (backward compat for old oracle test code)
+    ASSERT_STR_EQ(crystal_sprite_index_to_id(1), "chris");
+    ASSERT_STR_EQ(crystal_sprite_index_to_id(102), "standing_youngster");
+    ASSERT_STR_EQ(crystal_sprite_index_to_id(0), "");    // SPRITE_NONE still ""
+    ASSERT_STR_EQ(crystal_sprite_index_to_id(103), "");  // Out of range still ""
+}
+
+//=============================================================================
+// POST-STAGE-7 EMITTER CONTRACT TESTS
+// Verify fixed emitter/binding mismatches and new policy.
+//=============================================================================
+
+TEST(stage7_money_text_arg_emits_set_var_not_show_money) {
+    // Prerequisite A fix: Sem_PrepareTextArg with NumberSource::Money must NOT
+    // emit ctx.inventory:show_money() — that binding does not exist.
+    // It must emit a comment encoding the account index (no executable Lua call
+    // is needed since money display is a renderer concern, not script state).
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_PrepareTextArg arg;
+    arg.arg_type = TextArgType::Number;
+    arg.number_source = NumberSource::Money;
+    arg.buffer_slot = 1;
+    arg.account = MoneyAccount::Player;
+
+    SemanticScriptIR ir;
+    ir.script_id = "test_money_arg";
+    SemanticBasicBlock block;
+    block.id = 0;
+    block.instructions.push_back({arg});
+    block.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(block);
+
+    std::string lua = emitter.emit(ir);
+
+    // Must NOT call show_money() — that binding does not exist
+    ASSERT_TRUE(lua.find("show_money") == std::string::npos);
+    // Must encode the money account identity (as comment)
+    ASSERT_TRUE(lua.find("money") != std::string::npos);
+    ASSERT_TRUE(lua.find("account=0") != std::string::npos);
+
+    // Must be loadable by LuaRuntime without error
+    LuaRuntime runtime;
+    runtime.execute_string(lua, "test_money_arg");
+    uint32_t co = runtime.start_script("script");
+    ASSERT_EQ(static_cast<int>(runtime.get_state(co)), static_cast<int>(ScriptState::Finished));
+}
+
+TEST(stage7_check_time_morning_emits_is_morning) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    // MORN_F = 1
+    Sem_CheckTime ct;
+    ct.time_flags = 1;
+    SemanticScriptIR ir;
+    ir.script_id = "t";
+    SemanticBasicBlock b;
+    b.id = 0;
+    b.instructions.push_back({ct});
+    b.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(b);
+
+    std::string lua = emitter.emit(ir);
+    ASSERT_TRUE(lua.find("ctx.time:is_morning()") != std::string::npos);
+    ASSERT_TRUE(lua.find("~= nil") == std::string::npos);
+}
+
+TEST(stage7_check_time_night_emits_is_night) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    // NITE_F = 4
+    Sem_CheckTime ct;
+    ct.time_flags = 4;
+    SemanticScriptIR ir;
+    ir.script_id = "t";
+    SemanticBasicBlock b;
+    b.id = 0;
+    b.instructions.push_back({ct});
+    b.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(b);
+
+    std::string lua = emitter.emit(ir);
+    ASSERT_TRUE(lua.find("ctx.time:is_night()") != std::string::npos);
+    ASSERT_TRUE(lua.find("~= nil") == std::string::npos);
+}
+
+TEST(stage7_check_just_battled_emits_error_not_false) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    SemanticScriptIR ir;
+    ir.script_id = "t";
+    SemanticBasicBlock b;
+    b.id = 0;
+    b.instructions.push_back({Sem_CheckJustBattled{}});
+    b.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(b);
+
+    std::string lua = emitter.emit(ir);
+
+    // Must emit error(), not "result = false" as a control-flow fabrication
+    ASSERT_TRUE(lua.find("error(") != std::string::npos);
+    ASSERT_TRUE(lua.find("check_just_battled: not yet implemented") != std::string::npos);
+    // Must NOT have the old fabricated-result pattern
+    ASSERT_TRUE(lua.find("result = false -- check_just_battled") == std::string::npos);
+}
+
+TEST(stage7_check_phone_number_emits_error_not_false) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_CheckPhoneNumber cpn;
+    cpn.person = 3;
+    SemanticScriptIR ir;
+    ir.script_id = "t";
+    SemanticBasicBlock b;
+    b.id = 0;
+    b.instructions.push_back({cpn});
+    b.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(b);
+
+    std::string lua = emitter.emit(ir);
+    // Must emit error() call
+    ASSERT_TRUE(lua.find("error(") != std::string::npos);
+    // Must NOT assign result = false as a control-flow fabrication
+    // (note: "local result = false" in the header is initialization, not fabrication)
+    ASSERT_TRUE(lua.find("result = false -- check_phone") == std::string::npos);
+    ASSERT_TRUE(lua.find("check_phone_number: not yet implemented") != std::string::npos);
+}
+
+TEST(stage7_pokepic_emits_error_not_comment) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_Pokepic pp;
+    pp.source = SpeciesSource::literal(25);
+    SemanticScriptIR ir;
+    ir.script_id = "t";
+    SemanticBasicBlock b;
+    b.id = 0;
+    b.instructions.push_back({pp});
+    b.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(b);
+
+    std::string lua = emitter.emit(ir);
+    // Must emit error() not a Lua comment
+    ASSERT_TRUE(lua.find("error(") != std::string::npos);
+    // Must not be a plain comment (which would silently succeed)
+    ASSERT_TRUE(lua.find("-- pokepic") == std::string::npos);
+}
+
+TEST(stage7_sdefer_schedules_deferred_script) {
+    // End-to-end: emit Lua for a script that calls ctx.game:behavior("Sdefer_target"),
+    // load it into HeadlessGameLoop, run it to completion, then verify the
+    // deferred script actually runs on the next tick.
+    using namespace enginemon;
+
+    // Script A: sets flag 200, then defers script B
+    std::string script_a_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.flags:set(200)
+    ctx.game:behavior("Sdefer_script_b")
+    return
+end
+return script
+)";
+
+    // Script B: sets flag 201
+    std::string script_b_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.flags:set(201)
+    return
+end
+return script
+)";
+
+    HeadlessGameLoop loop;
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+
+    loop.set_script_loader([&](const std::string& id) -> std::string {
+        if (id == "script_a") return script_a_lua;
+        if (id == "script_b") return script_b_lua;
+        return "";
+    });
+
+    // Start script A — it may finish immediately within start_script
+    bool started = loop.start_script("script_a");
+    ASSERT_TRUE(started);
+
+    // Tick several times to allow both A and deferred B to complete
+    for (int i = 0; i < 5; ++i) {
+        loop.tick();
+        if (loop.is_idle() && flag_api::get_test_flag(&runtime, 201)) break;
+    }
+
+    // Flag 200 was set by A
+    ASSERT_TRUE(flag_api::get_test_flag(&runtime, 200));
+    // Flag 201 was set by B (deferred)
+    ASSERT_TRUE(flag_api::get_test_flag(&runtime, 201));
+}
+
+TEST(stage7_sdefer_deferred_script_after_current_not_concurrent) {
+    // Verify B does NOT run before A's remaining instructions complete.
+    // Script A sets flag 300, defers B, then sets flag 301.
+    // B must not run until after flag 301 is set.
+    using namespace enginemon;
+
+    std::string script_a_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.flags:set(300)
+    ctx.game:behavior("Sdefer_script_b")
+    -- A continues here; B must not have started yet
+    ctx.flags:set(301)
+    return
+end
+return script
+)";
+
+    std::string script_b_lua = R"(
+script = {}
+function script.main(ctx)
+    ctx.flags:set(302)
+    return
+end
+return script
+)";
+
+    HeadlessGameLoop loop;
+    LuaRuntime runtime;
+    loop.set_lua_runtime(&runtime);
+    loop.set_script_loader([&](const std::string& id) -> std::string {
+        if (id == "script_a") return script_a_lua;
+        if (id == "script_b") return script_b_lua;
+        return "";
+    });
+
+    loop.start_script("script_a");
+
+    // Let everything run
+    for (int i = 0; i < 10; ++i) {
+        loop.tick();
+        if (loop.is_idle() && flag_api::get_test_flag(&runtime, 302)) break;
+    }
+
+    // A set both 300 and 301 (proof it ran to completion before B)
+    ASSERT_TRUE(flag_api::get_test_flag(&runtime, 300));
+    ASSERT_TRUE(flag_api::get_test_flag(&runtime, 301));
+    // B ran after A (flag 302 set by B)
+    ASSERT_TRUE(flag_api::get_test_flag(&runtime, 302));
+}
+
 //=============================================================================
 // MAIN
 //=============================================================================
@@ -18702,6 +19105,32 @@ int main(int argc, char* argv[]) {
     RUN_TEST(stage7_unimplemented_op_throws);
     RUN_TEST(stage7_emitted_lua_executes_in_runtime_flag);
     RUN_TEST(stage7_emitted_lua_executes_in_runtime_var);
+
+    // Post-Stage-7 sprite namespace tests (August 2026)
+    RUN_TEST(sprite_namespace_fixed_min_and_max);
+    RUN_TEST(sprite_namespace_fixed_never_empty);
+    RUN_TEST(sprite_namespace_pokemon_icon_range);
+    RUN_TEST(sprite_namespace_daycare_route34);
+    RUN_TEST(sprite_namespace_variable_olivine_rival);
+    RUN_TEST(sprite_namespace_variable_azalea_rocket);
+    RUN_TEST(sprite_namespace_variable_fuchsia_gym_1_to_4);
+    RUN_TEST(sprite_namespace_variable_console_and_dolls);
+    RUN_TEST(sprite_namespace_variable_copycat_and_janine_impersonator);
+    RUN_TEST(sprite_namespace_variable_range_never_empty);
+    RUN_TEST(sprite_namespace_zero_is_unknown);
+    RUN_TEST(sprite_namespace_gap_bytes_are_unknown);
+    RUN_TEST(sprite_namespace_tag_query_helpers);
+    RUN_TEST(sprite_namespace_backward_compat_index_to_id);
+
+    // Post-Stage-7 emitter contract tests (August 2026)
+    RUN_TEST(stage7_money_text_arg_emits_set_var_not_show_money);
+    RUN_TEST(stage7_check_time_morning_emits_is_morning);
+    RUN_TEST(stage7_check_time_night_emits_is_night);
+    RUN_TEST(stage7_check_just_battled_emits_error_not_false);
+    RUN_TEST(stage7_check_phone_number_emits_error_not_false);
+    RUN_TEST(stage7_pokepic_emits_error_not_comment);
+    RUN_TEST(stage7_sdefer_schedules_deferred_script);
+    RUN_TEST(stage7_sdefer_deferred_script_after_current_not_concurrent);
 
     // Summary
     std::cout << "\n=== Results ===\n";

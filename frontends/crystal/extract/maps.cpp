@@ -157,15 +157,14 @@ std::string MapExtractor::make_tileset_id(uint8_t tileset_index) const {
 }
 
 std::string MapExtractor::make_sprite_id(uint8_t sprite_index) const {
-    // Use shared authoritative sprite ID mapping
-    // Valid Crystal sprite indices are 1..102
-    std::string id = crystal_sprite_index_to_id(sprite_index);
-    if (!id.empty()) {
-        return id;
-    }
-    // Invalid index - return empty string to signal failure
-    // Caller should handle invalid sprite indices explicitly
-    return "";
+    // Use typed namespace-aware sprite ID mapping.
+    // Covers all four Crystal sprite namespaces:
+    //   0x01-0x66: fixed overworld sprites → "fixed:<name>"
+    //   0x80-0xA2: Pokémon icon sprites    → "pokemon_icon:<index>"
+    //   0xE0-0xE1: Day Care Pokémon        → "daycare:<1|2>"
+    //   0xF0-0xFC: Variable sprite slots   → "variable:<slot_name>"
+    // Unknown bytes produce "unknown:<hex>" so the problem is visible, not silent.
+    return crystal_sprite_byte_to_id(sprite_index);
 }
 
 std::string MapExtractor::make_music_id(uint8_t music_index) const {

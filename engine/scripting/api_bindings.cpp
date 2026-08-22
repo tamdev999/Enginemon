@@ -12,6 +12,7 @@
 #include <utility>
 #include <memory>
 #include <functional>
+#include <string_view>
 
 namespace enginemon {
 
@@ -1411,6 +1412,19 @@ int behavior(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
     auto& stubs = runtime->get_stub_services();
     stubs.last_behavior_name = name;
+
+    // Handle Sem_Sdefer deferred-script scheduling.
+    // The emitter encodes "Sdefer_<script_id>" as the behavior name.
+    static constexpr std::string_view SDEFER_PREFIX = "Sdefer_";
+    std::string_view name_sv(name);
+    if (name_sv.starts_with(SDEFER_PREFIX)) {
+        std::string script_id(name_sv.substr(SDEFER_PREFIX.size()));
+        if (stubs.deferred_script_fn) {
+            stubs.deferred_script_fn(script_id);
+        }
+        // If no callback is wired (test/stub mode), the deferred script is
+        // silently dropped — not a fabricated result, just no-op in isolation.
+    }
     return 0;
 }
 

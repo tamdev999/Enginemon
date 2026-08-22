@@ -16,6 +16,7 @@
 #include "crystal/script/pokemail_registry.hpp"
 #include "crystal/script/text_registry.hpp"
 #include "crystal/script/semantic_lua_emitter.hpp"
+#include "crystal/extract/sprite_ids.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
 #include <iomanip>
@@ -423,8 +424,10 @@ void FullGameCompiler::discover_sprites() {
     
     // Discover NPC sprites from all map objects.
     // Maps in content_.maps already passed extraction — failure is structural.
-    std::unordered_set<std::string> seen;
+    std::unordered_set<std::string> seen;   // tracks raw tagged sprite_ids (dedup per obj)
+    std::unordered_set<std::string> seen_pkg;  // tracks resolved bare names (dedup per asset)
     seen.insert("chris");
+    seen_pkg.insert("chris");
     
     for (const auto& dm : content_.maps) {
         auto result = map_extractor_->extract_map(dm.group, dm.index);
@@ -437,13 +440,32 @@ void FullGameCompiler::discover_sprites() {
         for (const auto& obj : result.map.objects) {
             if (!obj.sprite_id.empty() && !seen.contains(obj.sprite_id)) {
                 seen.insert(obj.sprite_id);
-                
+
+                // Resolve the tagged sprite_id to a package/extractor key.
+                // Only fixed-namespace sprites (prefix "fixed:") have compiled
+                // package assets; all other namespaces are runtime-resolved.
+                std::string pkg_name;
+                if (sprite_id_is_fixed(obj.sprite_id)) {
+                    pkg_name = sprite_id_fixed_name(obj.sprite_id);
+                } else if (!obj.sprite_id.starts_with("unknown:")) {
+                    // pokemon_icon / daycare / variable — no compiled asset yet.
+                    // Do not add to content_.sprites; no extraction needed.
+                    continue;
+                } else {
+                    // Unknown/invalid sprite byte — skip, don't attempt extraction.
+                    continue;
+                }
+
+                if (pkg_name.empty()) continue;
+                if (seen_pkg.contains(pkg_name)) continue;
+                seen_pkg.insert(pkg_name);
+
                 DiscoveredSprite ds;
-                ds.sprite_id = obj.sprite_id;
+                ds.sprite_id = pkg_name;  // store bare name as the extraction key
                 ds.sprite_index = 0;
                 ds.is_player = false;
-                
-                content_.sprite_index[ds.sprite_id] = content_.sprites.size();
+
+                content_.sprite_index[pkg_name] = content_.sprites.size();
                 content_.sprites.push_back(ds);
             }
         }
@@ -1324,13 +1346,18 @@ CompilerValidationResult FullGameCompiler::validate_references() {
         
         // Validate object sprites against EMITTED inventory (hard error, not warning)
         for (const auto& obj : map.objects) {
-            if (!obj.sprite_id.empty() && !emitted_sprite_ids_.contains(obj.sprite_id)) {
+            if (obj.sprite_id.empty()) continue;
+            // Non-fixed sprite namespaces have no compiled package asset — skip validation.
+            if (!sprite_id_is_fixed(obj.sprite_id)) continue;
+            // Resolve tagged id → bare name to match emitted_sprite_ids_ keys.
+            std::string pkg_name = sprite_id_fixed_name(obj.sprite_id);
+            if (!pkg_name.empty() && !emitted_sprite_ids_.contains(pkg_name)) {
                 result.errors.push_back({
                     CompilerValidationError::Type::MissingSprite,
                     map.map_id,
                     obj.sprite_id,
-                    std::format("Object in {} references sprite '{}' not in emitted package",
-                               map.map_id, obj.sprite_id)
+                    std::format("Object in {} references sprite '{}' (key '{}') not in emitted package",
+                               map.map_id, obj.sprite_id, pkg_name)
                 });
                 result.success = false;
             }

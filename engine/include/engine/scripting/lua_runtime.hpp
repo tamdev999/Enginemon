@@ -148,6 +148,11 @@ struct StubServices {
     // Game API stub state
     std::string last_behavior_name;
     int current_scene = 0;
+
+    // Deferred script callback — called when ctx.game:behavior("Sdefer_<id>") is invoked.
+    // Wired by HeadlessGameLoop (or test code) to schedule_deferred_script().
+    // When null, deferred scheduling is silently skipped (test/stub mode only).
+    std::function<void(const std::string& script_id)> deferred_script_fn;
     
     // Reset all stub state
     void reset() {
@@ -174,6 +179,9 @@ struct StubServices {
         last_take_money_amount = 0;
         last_take_money_account = 0;
         field_config = StubFieldConfig{};
+        last_behavior_name.clear();
+        current_scene = 0;
+        // deferred_script_fn is NOT reset — caller owns the binding lifetime
     }
     
     // Get or create movement manager
