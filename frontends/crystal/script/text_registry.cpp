@@ -110,22 +110,29 @@ enginemon::SemanticTextSequence TextDefinition::to_semantic_sequence(
             // in battle text / mobile paths, not in map script text sequences.
             // ---------------------------------------------------------------
             case TextOp::TextRam: {
-                // TX_RAM WRAM address → Arg(slot) via StringBufferPointers table.
+                // TX_RAM WRAM address → typed semantic text source.
                 //
-                // Source: data/text_buffers.asm StringBufferPointers:
-                //   0: wStringBuffer3  (0xD099)    → Arg(0)
-                //   1: wStringBuffer4  (0xD0AC)    → Arg(1)
-                //   2: wStringBuffer5  (0xD0BF)    → Arg(2)
-                //   3: wStringBuffer2  (0xD086)    → Arg(3)
-                //   4: wStringBuffer1  (0xD073)    → Arg(4)
-                //   5: wEnemyMonNickname (0xC616)  → Arg(5)
-                //   6: wBattleMonNickname (0xC621) → Arg(6)
+                // TWO distinct domains:
                 //
-                // TX_RAM to any of these addresses displays the string prepared
-                // in that buffer by a preceding Sem_PrepareTextArg. The Arg(slot)
-                // number matches the StringBufferPointers table index.
+                // Domain A — GetStringBuffer destination slots (Arg):
+                //   These are populated by a preceding Sem_PrepareTextArg(buffer_slot=N).
+                //   GetStringBuffer: ld hl, wStringBuffer3; AddNTimes(strbuf) → copy.
+                //   strbuf=0 → wStringBuffer3 (0xD099)  → Arg(0)
+                //   strbuf=1 → wStringBuffer4 (0xD0AC)  → Arg(1)
+                //   strbuf=2 → wStringBuffer5 (0xD0BF)  → Arg(2)
+                //   NUM_STRING_BUFFERS = 3; no strbuf > 2 reaches here via GetStringBuffer.
                 //
-                // Addresses from pokecrystal11.sym:
+                // Domain B — Direct WRAM reads (RamSource):
+                //   These buffers are NOT GetStringBuffer destinations.
+                //   No Sem_PrepareTextArg produces buffer_slot 3/4/5/6 in vanilla Crystal.
+                //   They are read directly by TX_RAM in text bodies (often via TX_FAR expansion).
+                //   Source: StringBufferPointers[3..6] + corpus TX_RAM analysis.
+                //   wStringBuffer2  (0xD086) → RamSource(PreparedString2)
+                //   wStringBuffer1  (0xD073) → RamSource(PreparedString1)
+                //   wEnemyMonNickname (0xC616) → RamSource(EnemyNickname)
+                //   wBattleMonNickname (0xC621) → RamSource(BattleNickname)
+                //
+                // Addresses from pokecrystal11.sym (authoritative):
                 //   wStringBuffer1=0xD073  wStringBuffer2=0xD086
                 //   wStringBuffer3=0xD099  wStringBuffer4=0xD0AC  wStringBuffer5=0xD0BF
                 //   wEnemyMonNickname=0xC616  wBattleMonNickname=0xC621
@@ -137,15 +144,39 @@ enginemon::SemanticTextSequence TextDefinition::to_semantic_sequence(
                 constexpr uint16_t WENEMYMONNICKNAME  = 0xC616;
                 constexpr uint16_t WBATTLEMONNICKNAME = 0xC621;
                 switch (elem.addr) {
-                    case WSTRINGBUFFER3:     sem.elements.push_back(enginemon::SemanticTextElement::make_arg(0)); break;
-                    case WSTRINGBUFFER4:     sem.elements.push_back(enginemon::SemanticTextElement::make_arg(1)); break;
-                    case WSTRINGBUFFER5:     sem.elements.push_back(enginemon::SemanticTextElement::make_arg(2)); break;
-                    case WSTRINGBUFFER2:     sem.elements.push_back(enginemon::SemanticTextElement::make_arg(3)); break;
-                    case WSTRINGBUFFER1:     sem.elements.push_back(enginemon::SemanticTextElement::make_arg(4)); break;
-                    case WENEMYMONNICKNAME:  sem.elements.push_back(enginemon::SemanticTextElement::make_arg(5)); break;
-                    case WBATTLEMONNICKNAME: sem.elements.push_back(enginemon::SemanticTextElement::make_arg(6)); break;
+                    // Domain A: GetStringBuffer destination slots → Arg(slot)
+                    case WSTRINGBUFFER3:
+                        sem.elements.push_back(enginemon::SemanticTextElement::make_arg(0));
+                        break;
+                    case WSTRINGBUFFER4:
+                        sem.elements.push_back(enginemon::SemanticTextElement::make_arg(1));
+                        break;
+                    case WSTRINGBUFFER5:
+                        sem.elements.push_back(enginemon::SemanticTextElement::make_arg(2));
+                        break;
+                    // Domain B: direct WRAM reads → RamSource(typed identity)
+                    case WSTRINGBUFFER2:
+                        sem.elements.push_back(
+                            enginemon::SemanticTextElement::make_ram_source(
+                                enginemon::TextRamSource::PreparedString2));
+                        break;
+                    case WSTRINGBUFFER1:
+                        sem.elements.push_back(
+                            enginemon::SemanticTextElement::make_ram_source(
+                                enginemon::TextRamSource::PreparedString1));
+                        break;
+                    case WENEMYMONNICKNAME:
+                        sem.elements.push_back(
+                            enginemon::SemanticTextElement::make_ram_source(
+                                enginemon::TextRamSource::EnemyNickname));
+                        break;
+                    case WBATTLEMONNICKNAME:
+                        sem.elements.push_back(
+                            enginemon::SemanticTextElement::make_ram_source(
+                                enginemon::TextRamSource::BattleNickname));
+                        break;
                     default:
-                        // Unknown TX_RAM address — not in StringBufferPointers table.
+                        // Unknown TX_RAM address — not a classified text source.
                         // Hard-fail: the legality gate will reject the empty sequence.
                         return enginemon::SemanticTextSequence{};
                 }
@@ -277,32 +308,65 @@ enginemon::SemanticTextSequence TextDefinition::to_semantic_sequence(
                 break;
 
             // ---------------------------------------------------------------
-            // Presentation-only TX commands: no semantic content.
+            // TX_PROMPT_BUTTON (0x06) — non-terminating in-stream input gate.
+            // Source: home/text.asm TextCommand_PROMPT_BUTTON:
+            //   LoadBlinkingCursor → PromptButton (waits A/B) → UnloadBlinkingCursor
+            //   (In link-battle modes: falls through to WAIT_BUTTON, same effect)
             //
-            // These affect text engine cursor position, layout, or timing only.
-            // They carry no information needed for script semantics, data
-            // relationships, or runtime behavior outside the text box renderer.
+            // DISTINCT from Prompt (which terminates the text stream):
+            //   This waits for input, then text processing CONTINUES.
             //
-            // Source-proven as purely presentational:
-            //   TX_MOVE (0x03): moves text cursor to tilemap position
-            //   TX_BOX  (0x04): draws a text box (cursor/layout change)
-            //   TX_LOW  (0x05): moves cursor to bottom row
-            //   TX_PROMPT_BUTTON (0x06): waits for button (presentation timing)
-            //   TX_SCROLL (0x07): scrolls text up (visual effect)
-            //   TX_START_ASM (0x08): terminates stream; sequence already ended
-            //   TX_PAUSE (0x0a): brief timing pause (visual effect)
+            // Corpus-reachable: 11 occurrences in data/text/ and maps/.
+            //   Including maps/BattleTower1F.asm (Battle Tower prize text),
+            //   data/text/common_1.asm (level-up, item-receive),
+            //   data/text/common_3.asm (NPC trade fanfare text), etc.
+            // ---------------------------------------------------------------
+            case TextOp::TextPromptButton:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_inline_prompt_button());
+                break;
+
+            // ---------------------------------------------------------------
+            // TX_PAUSE (0x0a) — timed/button-skip delay between text elements.
+            // Source: home/text.asm TextCommand_PAUSE:
+            //   GetJoypad; if A|B held → immediate return (0 frames)
+            //   else DelayFrames(30)   → ~0.5 second wait at 60fps
             //
-            // Dropped: emitting nothing for these is semantically lossless.
-            // The text sequence remains non-empty if it has real content.
+            // Observable behavior: ~0.5s pause with button-skip.
+            // Used for dramatic pacing (Radio Tower, Lucky Channel countdown,
+            // level-up move-learning, NPC trade fanfare).
+            //
+            // Corpus-reachable: 12 occurrences in data/text/ reachable from
+            //   overworld scripts. Dropping it silently removes intended pacing.
+            //
+            // frames = 30 for all vanilla Crystal occurrences (preserved explicitly).
+            // ---------------------------------------------------------------
+            case TextOp::TextPause:
+                // Source-proven: all vanilla Crystal uses have the same 30-frame delay.
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_pause(30));
+                break;
+
+            // ---------------------------------------------------------------
+            // Confirmed presentation-only TX commands — safe to drop.
+            // Source-proven: 0 macro call sites in text data corpus for each.
+            //
+            //   TX_MOVE (0x03): repositions text cursor (BC register only)
+            //   TX_BOX  (0x04): draws a bordered textbox at tilemap coordinate
+            //   TX_LOW  (0x05): moves cursor to bottom row (3 uses: HM item text)
+            //   TX_SCROLL (0x07): visual scroll (0 corpus uses)
+            //   TX_START_ASM (0x08): 0 uses in maps/data/ corpus
+            //
+            // TX_LOW has 3 corpus-reachable uses (_ItemUsedText etc.) but only
+            // repositions the print cursor — the text content itself is preserved
+            // and renders correctly at any cursor position on a modern renderer.
             // ---------------------------------------------------------------
             case TextOp::TextMove:
             case TextOp::TextBox:
             case TextOp::TextLow:
-            case TextOp::TextPromptButton:
             case TextOp::TextScroll:
             case TextOp::TextAsm:
-            case TextOp::TextPause:
-                // Intentionally dropped — purely presentational, no semantic content.
+                // Intentionally dropped — confirmed 0 semantic content.
                 break;
 
             // ---------------------------------------------------------------

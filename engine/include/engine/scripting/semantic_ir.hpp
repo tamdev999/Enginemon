@@ -72,25 +72,74 @@ struct SemanticTextArg {
 // addresses, no flat ROM addresses, no raw Crystal opcodes survive into
 // legal Semantic IR.
 //
-// TX_RAM wStringBuffer3/4/5 → Arg(0/1/2)  (source-proven via GetStringBuffer)
+// TX_RAM wStringBuffer3/4/5 → Arg(0/1/2)  (GetStringBuffer strbuf=0/1/2)
+// TX_RAM wStringBuffer2/1   → RamSource(PreparedString2/1) — direct WRAM read
+// TX_RAM wEnemyMonNickname  → RamSource(EnemyNickname)
+// TX_RAM wBattleMonNickname → RamSource(BattleNickname)
+// TX_PROMPT_BUTTON          → InlinePromptButton (non-terminating input gate)
+// TX_PAUSE                  → Pause(frames=30)
 // TX_DECIMAL wScriptVar     → ScriptVarDecimal(bytes_digits)
 // TX_FAR                    → inlined at to_semantic_sequence() time
 // TX_BCD                    → hard-fail (no uses in script text corpus)
-// TX_MOVE/BOX/LOW/etc.      → dropped (presentation-only, no semantic content)
+// TX_MOVE/BOX/LOW/etc.      → dropped (confirmed presentation-only, 0 corpus uses)
 enum class SemanticTextOp : uint8_t {
     // --- Printable / control flow (no Crystal concepts) ---
     Text,       // Printable text run (text field)
-    Arg,        // Text argument placeholder (arg_index into args vector)
-                //   slot 0 = wStringBuffer3  (TX_RAM 0xD099 / strbuf=0)
-                //   slot 1 = wStringBuffer4  (TX_RAM 0xD0AC / strbuf=1)
-                //   slot 2 = wStringBuffer5  (TX_RAM 0xD0BF / strbuf=2)
+
+    // --- Script argument substitution slots ---
+    // Slot 0 = wStringBuffer3 (TX_RAM 0xD099 / strbuf=0, GetStringBuffer dest)
+    // Slot 1 = wStringBuffer4 (TX_RAM 0xD0AC / strbuf=1, GetStringBuffer dest)
+    // Slot 2 = wStringBuffer5 (TX_RAM 0xD0BF / strbuf=2, GetStringBuffer dest)
+    // These match Sem_PrepareTextArg::buffer_slot which uses the same 0-based
+    // GetStringBuffer index. No other slots are valid here.
+    Arg,        // arg_index = 0/1/2 only (GetStringBuffer strbuf=0/1/2)
+
     Line,       // Move to line 2, no wait
     Next,       // Clear box, continue (no wait)
     Para,       // Wait → clear → continue
     Cont,       // Wait → scroll → continue
     Scroll,     // Scroll without wait
     Done,       // End text processing
-    Prompt,     // Show cursor, wait, end
+    Prompt,     // Show cursor, wait, end (TERMINATES text stream)
+
+    // ==========================================================================
+    // InlinePromptButton — non-terminating in-stream input gate
+    // ==========================================================================
+    // Source: home/text.asm TextCommand_PROMPT_BUTTON (TX_PROMPT_BUTTON 0x06):
+    //   LoadBlinkingCursor → PromptButton (waits A/B) → UnloadBlinkingCursor
+    //   In link-battle modes (Colosseum/Mobile): falls through to WAIT_BUTTON.
+    //
+    // DISTINCT from SemanticTextOp::Prompt:
+    //   Prompt    = show cursor + wait + TERMINATE text stream (Done semantics)
+    //   InlinePromptButton = show cursor + wait + CONTINUE text stream
+    //
+    // Source-proven corpus usage: 11 occurrences in data/text/ and maps/.
+    //   Reachable from overworld scripts (Battle Tower, level-up, NPC trade, etc.)
+    //
+    // No operands.
+    // ==========================================================================
+    InlinePromptButton,
+
+    // ==========================================================================
+    // Pause — timed/button-skip delay between text elements
+    // ==========================================================================
+    // Source: home/text.asm TextCommand_PAUSE (TX_PAUSE 0x0a):
+    //   GetJoypad; if A|B held → immediate return
+    //   else DelayFrames(30)   → ~0.5 second wait at 60fps
+    //
+    // Semantic contract:
+    //   Insert a timed pause in the text stream. Runtime should wait `frames`
+    //   real-time frames, skippable if a button is already held at entry time.
+    //
+    // frames = 30 for all vanilla Crystal occurrences.
+    // Preserved explicitly — do not encode as a magic runtime default.
+    //
+    // Source-proven corpus usage: 12 occurrences in data/text/ reachable from
+    //   overworld scripts (Radio Tower, Lucky Channel, NPC trade fanfare, etc.)
+    //
+    // param1 = frames (uint8_t; 30 for all stock uses).
+    // ==========================================================================
+    Pause,      // param1 = frame count (30 for all vanilla uses)
 
     // --- Typed dynamic text sources (no raw addresses or opcodes) ---
 
@@ -111,6 +160,55 @@ enum class SemanticTextOp : uint8_t {
     //   TX_SOUND_FANFARE (0x12)    → Fanfare
     // No raw opcode survives. TextSoundKind is the typed semantic identity.
     Sound,      // param1 = TextSoundKind (see enum below)
+
+    // ==========================================================================
+    // RamSource — typed identity for direct-WRAM text sources
+    // ==========================================================================
+    // Used for TX_RAM addresses that are NOT GetStringBuffer destination slots.
+    // GetStringBuffer destinations (wStringBuffer3/4/5) use Arg(0/1/2).
+    //
+    // These are direct reads from specific WRAM buffers populated by a preceding
+    // get* script command, but without using the GetStringBuffer copy mechanism.
+    // The runtime must read from the corresponding game state context.
+    //
+    // Source: StringBufferPointers[3..6] + corpus TX_RAM analysis:
+    //   wStringBuffer2  (0xD086)  → PreparedString2 (getstring intermediate)
+    //   wStringBuffer1  (0xD073)  → PreparedString1 (get* name intermediate)
+    //   wEnemyMonNickname (0xC616)→ EnemyNickname  (battle mon name)
+    //   wBattleMonNickname(0xC621)→ BattleNickname (player battle mon name)
+    //
+    // No raw WRAM address survives. TextRamSource is the semantic identity.
+    // param1 = TextRamSource (see enum below).
+    // ==========================================================================
+    RamSource,  // param1 = TextRamSource (see enum below)
+};
+
+// Typed source identity for TX_RAM text substitution via direct WRAM reference.
+// Used for StringBufferPointers entries 3–6 that are NOT GetStringBuffer slots.
+//
+// Source-proven from:
+//   references/pokecrystal/data/text_buffers.asm StringBufferPointers
+//   references/pokecrystal/engine/overworld/scripting.asm (Script_getstring, getmonname)
+//   corpus TX_RAM analysis (_UseStrengthText, _UseRockSmashText, etc.)
+enum class TextRamSource : uint8_t {
+    // StringBufferPointers[3]: wStringBuffer2 (0xD086)
+    // Populated by Script_getstring as the intermediate scratch buffer
+    // before CopyConvertedText copies to the GetStringBuffer destination.
+    // TX_RAM wStringBuffer2 reads this intermediate directly.
+    PreparedString2 = 3,    // wStringBuffer2 — getstring/getmonname intermediate
+
+    // StringBufferPointers[4]: wStringBuffer1 (0xD073)
+    // Populated by get*name commands as the initial result buffer
+    // (e.g. Script_getmonname calls GetPokemonName → wStringBuffer1).
+    PreparedString1 = 4,    // wStringBuffer1 — get*name initial result
+
+    // StringBufferPointers[5]: wEnemyMonNickname (0xC616)
+    // The nickname of the opposing Pokemon in battle.
+    EnemyNickname   = 5,    // wEnemyMonNickname — battle enemy mon nickname
+
+    // StringBufferPointers[6]: wBattleMonNickname (0xC621)
+    // The nickname of the player's active Pokemon in battle.
+    BattleNickname  = 6,    // wBattleMonNickname — player battle mon nickname
 };
 
 // Typed sound events that can appear inline in a text sequence.
@@ -128,19 +226,24 @@ enum class TextSoundKind : uint8_t {
 //
 // Fixed-size layout:
 //   op        : 1 byte
-//   arg_index : 1 byte  (Arg)
-//   param1    : 1 byte  (ScriptVarDecimal bytes_digits / Sound TextSoundKind)
+//   arg_index : 1 byte  (Arg, slots 0-2 only)
+//   param1    : 1 byte  (ScriptVarDecimal bytes_digits / Sound TextSoundKind /
+//                        Pause frames / RamSource TextRamSource)
 //   text      : std::string (heap; only populated for Text op)
 struct SemanticTextElement {
     SemanticTextOp op = SemanticTextOp::Text;
     std::string text;        // For SemanticTextOp::Text only
-    uint8_t  arg_index = 0;  // For SemanticTextOp::Arg (slot 0-2)
-    uint8_t  param1    = 0;  // ScriptVarDecimal: bytes_digits  |  Sound: TextSoundKind
+    uint8_t  arg_index = 0;  // For SemanticTextOp::Arg (slot 0-2 only)
+    uint8_t  param1    = 0;  // ScriptVarDecimal: bytes_digits
+                             // Sound: TextSoundKind
+                             // Pause: frame count
+                             // RamSource: TextRamSource
 
     // --- Flow control constructors ---
     static SemanticTextElement make_text(const std::string& s) {
         SemanticTextElement e; e.op = SemanticTextOp::Text; e.text = s; return e;
     }
+    // Arg: slot 0/1/2 only (GetStringBuffer strbuf destinations)
     static SemanticTextElement make_arg(uint8_t slot) {
         SemanticTextElement e; e.op = SemanticTextOp::Arg; e.arg_index = slot; return e;
     }
@@ -152,10 +255,21 @@ struct SemanticTextElement {
     static SemanticTextElement make_done()   { SemanticTextElement e; e.op = SemanticTextOp::Done;   return e; }
     static SemanticTextElement make_prompt() { SemanticTextElement e; e.op = SemanticTextOp::Prompt; return e; }
 
+    // Non-terminating in-stream input gate (TX_PROMPT_BUTTON).
+    static SemanticTextElement make_inline_prompt_button() {
+        SemanticTextElement e; e.op = SemanticTextOp::InlinePromptButton; return e;
+    }
+
+    // Timed/button-skip pause (TX_PAUSE).
+    // frames: number of frames to wait if no button held (30 for all vanilla uses).
+    static SemanticTextElement make_pause(uint8_t frames) {
+        SemanticTextElement e; e.op = SemanticTextOp::Pause; e.param1 = frames; return e;
+    }
+    uint8_t pause_frames() const { return param1; }
+
     // --- Typed dynamic constructors ---
 
     // TX_DECIMAL on wScriptVar: display script result value.
-    // bytes_digits = Crystal nibble-packed byte (high nibble = bytes, low nibble = digits).
     static SemanticTextElement make_script_var_decimal(uint8_t bytes_digits) {
         SemanticTextElement e; e.op = SemanticTextOp::ScriptVarDecimal;
         e.param1 = bytes_digits; return e;
@@ -173,6 +287,16 @@ struct SemanticTextElement {
     }
     TextSoundKind sound_kind() const {
         return static_cast<TextSoundKind>(param1);
+    }
+
+    // Direct WRAM text source (TX_RAM for non-GetStringBuffer addresses).
+    // source = typed identity from TextRamSource enum; no raw address survives.
+    static SemanticTextElement make_ram_source(TextRamSource source) {
+        SemanticTextElement e; e.op = SemanticTextOp::RamSource;
+        e.param1 = static_cast<uint8_t>(source); return e;
+    }
+    TextRamSource ram_source() const {
+        return static_cast<TextRamSource>(param1);
     }
 };
 

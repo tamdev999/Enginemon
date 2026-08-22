@@ -14490,8 +14490,9 @@ TEST(text_tx_sound_fanfare_produces_typed_sound_kind) {
 }
 
 TEST(text_presentation_ops_dropped_not_failed) {
-    // TX_MOVE/BOX/LOW/PROMPT_BUTTON/SCROLL/ASM/PAUSE are presentation-only.
-    // They are dropped silently (no elements emitted).
+    // TX_MOVE/BOX/LOW/SCROLL/ASM are presentation-only with 0 corpus uses — dropped.
+    // TX_PAUSE and TX_PROMPT_BUTTON are now preserved as typed semantic elements.
+    // TX_LOW has 3 corpus-reachable uses but only repositions cursor — safely dropped.
     // The sequence is NOT hard-failed — surrounding text content is preserved.
     using namespace crystal;
     using namespace enginemon;
@@ -14499,22 +14500,22 @@ TEST(text_presentation_ops_dropped_not_failed) {
     TextDefinition def;
     def.source_rom_address = 0x9000;
     def.sequence.elements.push_back(TextElement::make_text("A"));
-    TextElement low_elem; low_elem.op = TextOp::TextLow;
+    TextElement low_elem; low_elem.op = TextOp::TextLow;   // dropped
     def.sequence.elements.push_back(low_elem);
     def.sequence.elements.push_back(TextElement::make_text("B"));
-    TextElement pause_elem; pause_elem.op = TextOp::TextPause;
-    def.sequence.elements.push_back(pause_elem);
+    TextElement move_elem; move_elem.op = TextOp::TextMove; // dropped
+    def.sequence.elements.push_back(move_elem);
     def.sequence.elements.push_back(TextElement::make_text("C"));
 
     auto sem = def.to_semantic_sequence();
 
-    // 3 text elements remain; TX_LOW and TX_PAUSE were dropped
+    // 3 text elements remain; TX_LOW and TX_MOVE were dropped
     ASSERT_EQ(sem.elements.size(), 3u);
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Text);
     ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Text);
     ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
 
-    std::cout << "  [TX_LOW + TX_PAUSE dropped; surrounding text preserved ✓]\n";
+    std::cout << "  [TX_LOW + TX_MOVE dropped; surrounding text preserved ✓]\n";
 }
 
 TEST(text_tx_raw_unknown_opcode_hard_fails) {
@@ -14535,16 +14536,15 @@ TEST(text_tx_raw_unknown_opcode_hard_fails) {
     std::cout << "  [TextRaw(opcode=0xAB) → hard-fail ✓]\n";
 }
 
-// Arg-slot mapping table test — proves all 3 valid TX_RAM slots explicitly.
+// Arg-slot mapping — proves the 3 valid GetStringBuffer TX_RAM slots.
 TEST(text_arg_slot_numbering_table_driven) {
-    // Source: StringBufferPointers table from data/text_buffers.asm:
-    //   0: wStringBuffer3  (0xD099) → Arg(0)
-    //   1: wStringBuffer4  (0xD0AC) → Arg(1)
-    //   2: wStringBuffer5  (0xD0BF) → Arg(2)
-    //   3: wStringBuffer2  (0xD086) → Arg(3)
-    //   4: wStringBuffer1  (0xD073) → Arg(4)
-    //   5: wEnemyMonNickname (0xC616) → Arg(5)
-    //   6: wBattleMonNickname (0xC621) → Arg(6)
+    // Source: GetStringBuffer in scripting.asm:
+    //   ld hl, wStringBuffer3; ld bc, STRING_BUFFER_LENGTH (19); AddNTimes(strbuf)
+    //   strbuf=0 → wStringBuffer3 (0xD099) → Arg(0)
+    //   strbuf=1 → wStringBuffer4 (0xD0AC) → Arg(1)
+    //   strbuf=2 → wStringBuffer5 (0xD0BF) → Arg(2)
+    //   NUM_STRING_BUFFERS = 3. Only slots 0/1/2 are valid GetStringBuffer destinations.
+    //   These match Sem_PrepareTextArg::buffer_slot which uses the same 0-based index.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14558,10 +14558,6 @@ TEST(text_arg_slot_numbering_table_driven) {
         { 0xD099, 0, "wStringBuffer3" },
         { 0xD0AC, 1, "wStringBuffer4" },
         { 0xD0BF, 2, "wStringBuffer5" },
-        { 0xD086, 3, "wStringBuffer2" },
-        { 0xD073, 4, "wStringBuffer1" },
-        { 0xC616, 5, "wEnemyMonNickname" },
-        { 0xC621, 6, "wBattleMonNickname" },
     };
 
     for (const auto& tc : cases) {
@@ -14577,6 +14573,51 @@ TEST(text_arg_slot_numbering_table_driven) {
 
         std::cout << "  [TX_RAM(0x" << std::hex << tc.wram_addr << "=" << tc.symbol
                   << ") → Arg(" << std::dec << (int)tc.expected_slot << ") ✓]\n";
+    }
+}
+
+// RamSource mapping — proves TX_RAM slots 3-6 produce typed RamSource, NOT Arg.
+// These buffers are direct WRAM reads with no Sem_PrepareTextArg producer.
+TEST(text_ram_source_domain_distinct_from_arg_domain) {
+    // Source: StringBufferPointers[3..6] + corpus TX_RAM analysis.
+    //   wStringBuffer2  (0xD086) → RamSource(PreparedString2)
+    //   wStringBuffer1  (0xD073) → RamSource(PreparedString1)
+    //   wEnemyMonNickname (0xC616) → RamSource(EnemyNickname)
+    //   wBattleMonNickname (0xC621) → RamSource(BattleNickname)
+    //
+    // These are NOT Arg(3/4/5/6) — no Sem_PrepareTextArg writes buffer_slot 3-6
+    // in vanilla Crystal (GetStringBuffer clamps to NUM_STRING_BUFFERS=3 max).
+    using namespace crystal;
+    using namespace enginemon;
+
+    struct TestCase {
+        uint16_t wram_addr;
+        TextRamSource expected_source;
+        const char* symbol;
+    };
+
+    const TestCase cases[] = {
+        { 0xD086, TextRamSource::PreparedString2, "wStringBuffer2" },
+        { 0xD073, TextRamSource::PreparedString1, "wStringBuffer1" },
+        { 0xC616, TextRamSource::EnemyNickname,   "wEnemyMonNickname" },
+        { 0xC621, TextRamSource::BattleNickname,  "wBattleMonNickname" },
+    };
+
+    for (const auto& tc : cases) {
+        TextDefinition def;
+        def.source_rom_address = 0xA100;
+        def.sequence.elements.push_back(TextElement::make_text_ram(tc.wram_addr));
+
+        auto sem = def.to_semantic_sequence();
+
+        ASSERT_EQ(sem.elements.size(), 1u);
+        // Must be RamSource, NOT Arg — different semantic domain
+        ASSERT_EQ(sem.elements[0].op, SemanticTextOp::RamSource);
+        ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
+        ASSERT_EQ(sem.elements[0].ram_source(), tc.expected_source);
+
+        std::cout << "  [TX_RAM(0x" << std::hex << tc.wram_addr << "=" << tc.symbol
+                  << ") → RamSource (not Arg) ✓]\n";
     }
 }
 
@@ -14598,8 +14639,188 @@ TEST(text_arg_slot_wplayername_hard_fails) {
 }
 
 // =============================================================================
-// Sem_GameSpecificEvent ADVERSARIAL TESTS
+// INLINE PROMPT BUTTON + PAUSE — Bounded text control cleanup tests
 // =============================================================================
+
+TEST(text_tx_prompt_button_produces_inline_prompt_button_not_dropped) {
+    // TX_PROMPT_BUTTON (0x06) must produce SemanticTextOp::InlinePromptButton.
+    // It must NOT be silently dropped — it gates player progression mid-sequence.
+    //
+    // Source: home/text.asm TextCommand_PROMPT_BUTTON:
+    //   LoadBlinkingCursor → PromptButton (waits A/B) → UnloadBlinkingCursor
+    //   DISTINCT from Prompt (terminating) — text continues after the wait.
+    //
+    // Corpus-reachable: 11 occurrences including maps/BattleTower1F.asm.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0xC000;
+    def.sequence.elements.push_back(TextElement::make_text("WIN!"));
+    TextElement pb; pb.op = TextOp::TextPromptButton;
+    def.sequence.elements.push_back(pb);
+    def.sequence.elements.push_back(TextElement::make_text("PRIZE:"));
+
+    auto sem = def.to_semantic_sequence();
+
+    // 3 elements: text + InlinePromptButton + text
+    ASSERT_EQ(sem.elements.size(), 3u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Text);
+    ASSERT_EQ(sem.elements[1].op, SemanticTextOp::InlinePromptButton);
+    ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
+
+    // Must NOT be Prompt (terminating) — text continues after
+    ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Prompt);
+    // Must NOT be Text (silently dropped to empty string)
+    ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
+    // Sequence is non-empty — legality gate accepts it
+    ASSERT_FALSE(sem.empty());
+
+    std::cout << "  [TX_PROMPT_BUTTON → InlinePromptButton (not dropped, not Prompt) ✓]\n";
+}
+
+TEST(text_tx_prompt_button_standalone_produces_single_element) {
+    // TX_PROMPT_BUTTON in isolation → exactly one InlinePromptButton element.
+    // This matches the Battle Tower corpus case where prompt appears mid-text.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0xC100;
+    TextElement pb; pb.op = TextOp::TextPromptButton;
+    def.sequence.elements.push_back(pb);
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::InlinePromptButton);
+    ASSERT_FALSE(sem.empty());
+
+    std::cout << "  [TX_PROMPT_BUTTON standalone → InlinePromptButton (non-empty) ✓]\n";
+}
+
+TEST(text_tx_pause_produces_pause_with_30_frames) {
+    // TX_PAUSE (0x0a) must produce SemanticTextOp::Pause with frames=30.
+    // It must NOT be silently dropped — it provides observable ~0.5s pacing.
+    //
+    // Source: home/text.asm TextCommand_PAUSE:
+    //   GetJoypad; if A|B held → immediate; else DelayFrames(30)
+    //
+    // Corpus-reachable: 12 occurrences in Radio Tower, Lucky Channel,
+    //   level-up move-learning, NPC trade fanfare text.
+    //
+    // frames = 30: the ONLY value used in all vanilla Crystal occurrences.
+    // Preserved explicitly — not encoded as a magic runtime default.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0xC200;
+    def.sequence.elements.push_back(TextElement::make_text("3..."));
+    TextElement pause; pause.op = TextOp::TextPause;
+    def.sequence.elements.push_back(pause);
+    def.sequence.elements.push_back(TextElement::make_text("2..."));
+
+    auto sem = def.to_semantic_sequence();
+
+    // 3 elements: text + Pause(30) + text
+    ASSERT_EQ(sem.elements.size(), 3u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Text);
+    ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Pause);
+    ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
+
+    // Frame count must be exactly 30 — source-proven value
+    ASSERT_EQ(sem.elements[1].pause_frames(), 30u);
+    // Must NOT be Text (silently dropped)
+    ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
+
+    std::cout << "  [TX_PAUSE → Pause(frames=30), not dropped ✓]\n";
+}
+
+TEST(text_tx_pause_frame_count_preserved_explicitly) {
+    // Adversarial: Pause carries its frame count as an explicit operand.
+    // If the model encoded it as a magic constant, pause_frames() would fail.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0xC300;
+    TextElement pause; pause.op = TextOp::TextPause;
+    def.sequence.elements.push_back(pause);
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Pause);
+    // 30 is the explicit source-proven value, not a default
+    ASSERT_EQ(sem.elements[0].pause_frames(), 30u);
+    // Verify it's not zero (dropped/no-op)
+    ASSERT_TRUE(sem.elements[0].pause_frames() > 0u);
+
+    std::cout << "  [TX_PAUSE frame count = 30 (explicit, source-proven) ✓]\n";
+}
+
+TEST(text_enemy_nickname_is_ram_source_not_arg) {
+    // TX_RAM wEnemyMonNickname (0xC616) → RamSource(EnemyNickname).
+    // Must NOT produce Arg(5) — no Sem_PrepareTextArg(buffer_slot=5) exists.
+    // RamSource is a typed direct-WRAM read identity, not a prepared-slot reference.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0xD000;
+    def.sequence.elements.push_back(TextElement::make_text_ram(0xC616));  // wEnemyMonNickname
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::RamSource);
+    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
+    ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::EnemyNickname);
+
+    std::cout << "  [TX_RAM(wEnemyMonNickname) → RamSource(EnemyNickname), not Arg ✓]\n";
+}
+
+TEST(text_battle_nickname_is_ram_source_not_arg) {
+    // TX_RAM wBattleMonNickname (0xC621) → RamSource(BattleNickname).
+    // Must NOT produce Arg(6) — no such prepared-slot producer in vanilla Crystal.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0xD100;
+    def.sequence.elements.push_back(TextElement::make_text_ram(0xC621));  // wBattleMonNickname
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::RamSource);
+    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
+    ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::BattleNickname);
+
+    std::cout << "  [TX_RAM(wBattleMonNickname) → RamSource(BattleNickname), not Arg ✓]\n";
+}
+
+TEST(text_prepared_string2_is_ram_source_not_arg) {
+    // TX_RAM wStringBuffer2 (0xD086) → RamSource(PreparedString2).
+    // This is the direct-WRAM read used in Strength/RockSmash texts via TX_FAR.
+    // NOT Arg(3) — GetStringBuffer only addresses slots 0-2.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0xD200;
+    def.sequence.elements.push_back(TextElement::make_text_ram(0xD086));  // wStringBuffer2
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::RamSource);
+    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
+    ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::PreparedString2);
+
+    std::cout << "  [TX_RAM(wStringBuffer2) → RamSource(PreparedString2), not Arg ✓]\n";
+}
 
 TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
     // Verify that a Special with writes_script_var=true (e.g., BugContestJudging=20)
@@ -18048,7 +18269,15 @@ int main(int argc, char* argv[]) {
     RUN_TEST(text_presentation_ops_dropped_not_failed);
     RUN_TEST(text_tx_raw_unknown_opcode_hard_fails);
     RUN_TEST(text_arg_slot_numbering_table_driven);
+    RUN_TEST(text_ram_source_domain_distinct_from_arg_domain);
     RUN_TEST(text_arg_slot_wplayername_hard_fails);
+    RUN_TEST(text_tx_prompt_button_produces_inline_prompt_button_not_dropped);
+    RUN_TEST(text_tx_prompt_button_standalone_produces_single_element);
+    RUN_TEST(text_tx_pause_produces_pause_with_30_frames);
+    RUN_TEST(text_tx_pause_frame_count_preserved_explicitly);
+    RUN_TEST(text_enemy_nickname_is_ram_source_not_arg);
+    RUN_TEST(text_battle_nickname_is_ram_source_not_arg);
+    RUN_TEST(text_prepared_string2_is_ram_source_not_arg);
     RUN_TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation);
     RUN_TEST(sem_game_specific_event_no_write_preserves_context);
     RUN_TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id);

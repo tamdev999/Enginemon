@@ -46,6 +46,12 @@ std::string SemanticTextSequence::debug_string() const {
             case SemanticTextOp::Prompt:
                 ss << "Prompt";
                 break;
+            case SemanticTextOp::InlinePromptButton:
+                ss << "InlinePromptButton";
+                break;
+            case SemanticTextOp::Pause:
+                ss << "Pause(" << (int)elem.pause_frames() << "frames)";
+                break;
             case SemanticTextOp::ScriptVarDecimal: {
                 const uint8_t bytes  = (elem.param1 >> 4) & 0xF;
                 const uint8_t digits =  elem.param1       & 0xF;
@@ -63,6 +69,17 @@ std::string SemanticTextSequence::debug_string() const {
                     case TextSoundKind::Fanfare:         kind_name = "Fanfare";         break;
                 }
                 ss << "Sound(" << kind_name << ")";
+                break;
+            }
+            case SemanticTextOp::RamSource: {
+                const char* src_name = "?";
+                switch (elem.ram_source()) {
+                    case TextRamSource::PreparedString2: src_name = "PreparedString2"; break;
+                    case TextRamSource::PreparedString1: src_name = "PreparedString1"; break;
+                    case TextRamSource::EnemyNickname:   src_name = "EnemyNickname";   break;
+                    case TextRamSource::BattleNickname:  src_name = "BattleNickname";  break;
+                }
+                ss << "RamSource(" << src_name << ")";
                 break;
             }
         }
