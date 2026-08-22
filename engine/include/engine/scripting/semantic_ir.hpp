@@ -63,9 +63,16 @@ struct SemanticTextArg {
 };
 
 // Text control operations (semantic text flow, not Crystal-specific)
+//
+// DESIGN: SemanticTextElement must stay small — no std::vector fields.
+// Dynamic text ops (Ram, Bcd, Decimal, FarText, Sound, Raw) carry their
+// operands in the fixed-size fields below.  This avoids the MSVC C1060
+// "out of heap space" that occurs when SemanticOp variant alternatives
+// contain vector<uint8_t> directly.
 enum class SemanticTextOp : uint8_t {
-    Text,       // Printable text run
-    Arg,        // Text argument placeholder (references SemanticTextArg by index)
+    // --- Printable / control flow ---
+    Text,       // Printable text run (text field)
+    Arg,        // Text argument placeholder (arg_index into args vector)
     Line,       // Move to line 2, no wait
     Next,       // Clear box, continue (no wait)
     Para,       // Wait → clear → continue
@@ -73,22 +80,103 @@ enum class SemanticTextOp : uint8_t {
     Scroll,     // Scroll without wait
     Done,       // End text processing
     Prompt,     // Show cursor, wait, end
+
+    // --- Dynamic text sources ---
+    // Each carries semantic operands in the fixed fields; no raw GB RAM address
+    // survives into the Semantic IR — all addresses are classified identities.
+    //
+    Ram,        // TX_RAM: display string from a classified runtime text source
+                //   addr16 = semantic RAM source address (classified identity, not raw GB addr)
+    Bcd,        // TX_BCD: display BCD-formatted number from runtime address
+                //   addr16 = RAM source address (classified identity)
+                //   param1 = flags byte (high nibble=byte_width, low nibble=digit_count)
+    Decimal,    // TX_DECIMAL: display decimal-formatted number from runtime address
+                //   addr16 = RAM source address (classified identity)
+                //   param1 = bytes_digits byte (high nibble=byte_width, low nibble=digit_count)
+    FarText,    // TX_FAR resolved: inline far text reference, fully resolved at frontend
+                //   addr16 = low 16 bits of resolved flat ROM address
+                //   param1 = high 8 bits of flat ROM address (addr = param1<<16 | addr16)
+    Day,        // TX_DAY: display current day of week (no operands)
+    Sound,      // Text sound effect (item jingle, fanfare, etc.)
+                //   param1 = Crystal TX_SOUND_* opcode (0x0f/0x10/0x12 etc.)
+    Raw,        // Small opaque text command with at most 1 parameter byte
+                //   param1 = Crystal TX command opcode
+                //   param2 = parameter byte (0 if none)
 };
 
+// A single element in a SemanticTextSequence.
+//
+// INVARIANT: No std::vector field here — see SemanticTextOp comment above.
+// Fixed-size layout:
+//   op       : 1 byte
+//   arg_index: 1 byte  (Arg)
+//   param1   : 1 byte  (Bcd flags / Decimal bytes_digits / FarText high8 / Sound opcode / Raw opcode)
+//   param2   : 1 byte  (Raw param byte)
+//   text     : std::string (heap, but only used for Text op — others leave it empty)
+//   addr16   : 2 bytes (Ram/Bcd/Decimal classified addr; FarText low16 of flat addr)
 struct SemanticTextElement {
-    SemanticTextOp op;
-    std::string text;       // For SemanticTextOp::Text
-    uint8_t arg_index = 0;  // For SemanticTextOp::Arg (index into args vector)
-    
-    static SemanticTextElement make_text(const std::string& s) { return {SemanticTextOp::Text, s, 0}; }
-    static SemanticTextElement make_arg(uint8_t idx) { return {SemanticTextOp::Arg, "", idx}; }
-    static SemanticTextElement make_line() { return {SemanticTextOp::Line, "", 0}; }
-    static SemanticTextElement make_next() { return {SemanticTextOp::Next, "", 0}; }
-    static SemanticTextElement make_para() { return {SemanticTextOp::Para, "", 0}; }
-    static SemanticTextElement make_cont() { return {SemanticTextOp::Cont, "", 0}; }
-    static SemanticTextElement make_scroll() { return {SemanticTextOp::Scroll, "", 0}; }
-    static SemanticTextElement make_done() { return {SemanticTextOp::Done, "", 0}; }
-    static SemanticTextElement make_prompt() { return {SemanticTextOp::Prompt, "", 0}; }
+    SemanticTextOp op = SemanticTextOp::Text;
+    std::string text;       // For SemanticTextOp::Text only
+    uint8_t  arg_index = 0; // For SemanticTextOp::Arg
+    uint8_t  param1    = 0; // Multi-use — see SemanticTextOp comment
+    uint8_t  param2    = 0; // Multi-use — see SemanticTextOp comment
+    uint16_t addr16    = 0; // Multi-use — see SemanticTextOp comment
+
+    // --- Flow control constructors (unchanged) ---
+    static SemanticTextElement make_text(const std::string& s) {
+        SemanticTextElement e; e.op = SemanticTextOp::Text; e.text = s; return e;
+    }
+    static SemanticTextElement make_arg(uint8_t idx) {
+        SemanticTextElement e; e.op = SemanticTextOp::Arg; e.arg_index = idx; return e;
+    }
+    static SemanticTextElement make_line()   { SemanticTextElement e; e.op = SemanticTextOp::Line;   return e; }
+    static SemanticTextElement make_next()   { SemanticTextElement e; e.op = SemanticTextOp::Next;   return e; }
+    static SemanticTextElement make_para()   { SemanticTextElement e; e.op = SemanticTextOp::Para;   return e; }
+    static SemanticTextElement make_cont()   { SemanticTextElement e; e.op = SemanticTextOp::Cont;   return e; }
+    static SemanticTextElement make_scroll() { SemanticTextElement e; e.op = SemanticTextOp::Scroll; return e; }
+    static SemanticTextElement make_done()   { SemanticTextElement e; e.op = SemanticTextOp::Done;   return e; }
+    static SemanticTextElement make_prompt() { SemanticTextElement e; e.op = SemanticTextOp::Prompt; return e; }
+
+    // --- Dynamic text constructors ---
+
+    // TX_RAM: addr = classified RAM source address (16-bit, bank 0 or 1 WRAM)
+    static SemanticTextElement make_ram(uint16_t addr) {
+        SemanticTextElement e; e.op = SemanticTextOp::Ram; e.addr16 = addr; return e;
+    }
+    // TX_BCD: addr = RAM source, flags = Crystal BCD flags byte
+    static SemanticTextElement make_bcd(uint16_t addr, uint8_t flags) {
+        SemanticTextElement e; e.op = SemanticTextOp::Bcd;
+        e.addr16 = addr; e.param1 = flags; return e;
+    }
+    // TX_DECIMAL: addr = RAM source, bytes_digits = Crystal nibble-packed byte
+    static SemanticTextElement make_decimal(uint16_t addr, uint8_t bytes_digits) {
+        SemanticTextElement e; e.op = SemanticTextOp::Decimal;
+        e.addr16 = addr; e.param1 = bytes_digits; return e;
+    }
+    // TX_FAR resolved: flat_addr = fully resolved ROM address of far text
+    static SemanticTextElement make_far_text(uint32_t flat_addr) {
+        SemanticTextElement e; e.op = SemanticTextOp::FarText;
+        e.addr16  = static_cast<uint16_t>(flat_addr & 0xFFFF);
+        e.param1  = static_cast<uint8_t>((flat_addr >> 16) & 0xFF);
+        return e;
+    }
+    // Recover the flat address stored in a FarText element
+    uint32_t far_text_flat_addr() const {
+        return (static_cast<uint32_t>(param1) << 16) | addr16;
+    }
+    // TX_DAY: no operands
+    static SemanticTextElement make_day() {
+        SemanticTextElement e; e.op = SemanticTextOp::Day; return e;
+    }
+    // Text sound effect: sound_opcode = Crystal TX_SOUND_* opcode byte
+    static SemanticTextElement make_sound(uint8_t sound_opcode) {
+        SemanticTextElement e; e.op = SemanticTextOp::Sound; e.param1 = sound_opcode; return e;
+    }
+    // Small opaque text command: tx_opcode = Crystal opcode, param = operand (0 if none)
+    static SemanticTextElement make_raw(uint8_t tx_opcode, uint8_t param = 0) {
+        SemanticTextElement e; e.op = SemanticTextOp::Raw;
+        e.param1 = tx_opcode; e.param2 = param; return e;
+    }
 };
 
 struct SemanticTextSequence {

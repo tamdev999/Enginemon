@@ -22,6 +22,9 @@ std::string SemanticTextSequence::debug_string() const {
             case SemanticTextOp::Text:
                 ss << "Text(\"" << elem.text << "\")";
                 break;
+            case SemanticTextOp::Arg:
+                ss << "Arg(" << (int)elem.arg_index << ")";
+                break;
             case SemanticTextOp::Line:
                 ss << "Line";
                 break;
@@ -42,6 +45,30 @@ std::string SemanticTextSequence::debug_string() const {
                 break;
             case SemanticTextOp::Prompt:
                 ss << "Prompt";
+                break;
+            case SemanticTextOp::Ram:
+                ss << "Ram(0x" << std::hex << elem.addr16 << ")";
+                break;
+            case SemanticTextOp::Bcd:
+                ss << "Bcd(0x" << std::hex << elem.addr16
+                   << ",flags=0x" << (int)elem.param1 << ")";
+                break;
+            case SemanticTextOp::Decimal:
+                ss << "Decimal(0x" << std::hex << elem.addr16
+                   << ",nd=0x" << (int)elem.param1 << ")";
+                break;
+            case SemanticTextOp::FarText:
+                ss << "FarText(0x" << std::hex << elem.far_text_flat_addr() << ")";
+                break;
+            case SemanticTextOp::Day:
+                ss << "Day";
+                break;
+            case SemanticTextOp::Sound:
+                ss << "Sound(0x" << std::hex << (int)elem.param1 << ")";
+                break;
+            case SemanticTextOp::Raw:
+                ss << "Raw(0x" << std::hex << (int)elem.param1
+                   << ",0x" << (int)elem.param2 << ")";
                 break;
         }
     }

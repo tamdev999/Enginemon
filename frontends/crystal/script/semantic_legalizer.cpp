@@ -952,9 +952,12 @@ RuleResult rule_write_text(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_ShowText op;
-        // Resolve bank-local text pointer to flat address using caller's bank
-        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
-        const uint32_t flat_addr = crystal_local_ptr_to_flat(entry, p->text_pointer);
+        // Resolve bank-local text pointer using the COMMAND's own ROM address, not
+        // the script entry address.  This is correct when the command lives in a
+        // farsjump target block (different bank from the script root).
+        // Source: Script_writetext uses wScriptBank which tracks the current
+        // executing bank — equivalent to the command's own bank.
+        const uint32_t flat_addr = crystal_local_ptr_to_flat(cmd->span.rom_address, p->text_pointer);
         if (ctx.text_registry && flat_addr != 0) {
             auto text_id = ctx.text_registry->extract(flat_addr);
             if (text_id != enginemon::TEXT_NONE) {
@@ -1004,8 +1007,8 @@ RuleResult rule_jump_text(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_ShowTextAndEnd op;
-        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
-        const uint32_t flat_addr = crystal_local_ptr_to_flat(entry, p->text_pointer);
+        // Use command's own ROM address for bank derivation — correct across farsjump targets.
+        const uint32_t flat_addr = crystal_local_ptr_to_flat(cmd->span.rom_address, p->text_pointer);
         if (ctx.text_registry && flat_addr != 0) {
             auto text_id = ctx.text_registry->extract(flat_addr);
             if (text_id != enginemon::TEXT_NONE) {
@@ -1051,8 +1054,8 @@ RuleResult rule_jump_text_face_player(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         enginemon::Sem_FacePlayerAndShowText op;
-        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
-        const uint32_t flat_addr = crystal_local_ptr_to_flat(entry, p->text_pointer);
+        // Use command's own ROM address for bank derivation — correct across farsjump targets.
+        const uint32_t flat_addr = crystal_local_ptr_to_flat(cmd->span.rom_address, p->text_pointer);
         if (ctx.text_registry && flat_addr != 0) {
             auto text_id = ctx.text_registry->extract(flat_addr);
             if (text_id != enginemon::TEXT_NONE) {
@@ -3383,11 +3386,11 @@ RuleResult rule_string_format(LoweringContext& ctx) {
         r.matched = true;
         r.consumed = 1;
         
-        // Resolve the text pointer to flat address using the calling script's bank.
+        // Resolve the text pointer to flat address using the COMMAND's own ROM address.
         // Source-proven: Script_getstring (pokecrystal scripting.asm:1688) reads
-        // wScriptBank (the currently executing script's bank) for the far call.
-        const uint32_t entry = ctx.source_ir ? ctx.source_ir->entry_address : 0;
-        const uint32_t flat_addr = crystal_local_ptr_to_flat(entry, p->text_pointer);
+        // wScriptBank (the currently executing script's bank) — equivalent to the
+        // command's own bank, which is correct across farsjump target blocks.
+        const uint32_t flat_addr = crystal_local_ptr_to_flat(cmd->span.rom_address, p->text_pointer);
         
         // Extract text content through registry if available
         std::string resolved_text;

@@ -13560,18 +13560,20 @@ TEST(bank_utils_sdefer_lowering_matches_canonical_helper) {
     std::cout << "  [sdefer lowering == canonical helper result 0x68500 ✓]\n";
 }
 
-// getstring lowering now uses crystal_local_ptr_to_flat — prove via canonical helper
+// getstring lowering now uses cmd->span.rom_address — prove via canonical helper
 TEST(bank_utils_getstring_lowering_matches_canonical_helper) {
     using namespace crystal;
     using namespace enginemon;
 
     // Script at bank 0x06 (entry=0x18080), getstring ptr=0x5100
+    // Command is also in bank 0x06 → cmd.span.rom_address must be in that bank.
     CrystalCommand cmd;
     Cmd_Getstring gs;
     gs.text_pointer = 0x5100;
     gs.strbuf = 0;
     cmd.data = gs;
-    cmd.span.rom_address = 0;
+    // Set command address to match the script's bank (bank 6 = flat 0x18080)
+    cmd.span.rom_address = 0x18080;
     cmd.span.raw_bytes = {0x45, 0, 0x00, 0x51};
 
     CrystalScriptIR ir;
@@ -13690,7 +13692,9 @@ TEST(semantic_fix_getstring_preserves_text_pointer) {
     gs.text_pointer = 0x4123;  // Bank-relative pointer
     gs.strbuf = 1;
     cmd.data = gs;
-    cmd.span.rom_address = 0;
+    // Command is in the same bank as the script entry (bank 7 = 0x1c000).
+    // Setting cmd.span.rom_address to the entry address places it in bank 7.
+    cmd.span.rom_address = 0x1c000;
     cmd.span.raw_bytes = {0x45, 1, 0x23, 0x41};
     
     CrystalScriptIR ir;
@@ -14097,110 +14101,246 @@ TEST(semantic_fix_text_identity_distinguishes_ram_addresses) {
 // =============================================================================
 // TEXT SEMANTIC TESTS — TextStringBuffer → SemanticTextOp::Arg
 // =============================================================================
-// Verifies that TX_STRINGBUFFER (wStringBuffer1-5) correctly maps to
-// SemanticTextElement::make_arg(slot) rather than make_text("").
-// Source: Crystal TX_STRINGBUFFER (opcode 0x14); slot = buffer_id - 1
+// Verifies that TX_STRINGBUFFER (0x14) correctly maps to
+// SemanticTextElement::make_arg(slot) using the SOURCE-PROVEN 0-indexed
+// StringBufferPointers table from pokecrystal/data/text_buffers.asm:
+//
+//   0: wStringBuffer3    1: wStringBuffer4    2: wStringBuffer5
+//   3: wStringBuffer2    4: wStringBuffer1
+//   5: wEnemyMonNickname  6: wBattleMonNickname
+//
+// The encoded byte IS the direct 0-indexed table slot (no subtraction).
+// Valid range: 0–6.  Index >= 7 → hard-fail (empty sequence).
 // =============================================================================
 
-TEST(text_string_buffer_slot1_maps_to_arg_slot0) {
+TEST(text_string_buffer_id4_maps_to_arg_slot4) {
+    // buffer_id=4 → wStringBuffer1 (most common slot, slot 4 in StringBufferPointers)
     using namespace crystal;
     using namespace enginemon;
-    
+
     TextDefinition def;
     def.source_rom_address = 0x1000;
-    // "Hi " + wStringBuffer1 (buffer_id=1) + "!"
+    // "Hi " + wStringBuffer1 (buffer_id=4) + "!"
     def.sequence.elements.push_back(TextElement::make_text("Hi "));
-    def.sequence.elements.push_back(TextElement::make_text_string_buffer(1));  // wStringBuffer1
+    def.sequence.elements.push_back(TextElement::make_text_string_buffer(4));  // wStringBuffer1
     def.sequence.elements.push_back(TextElement::make_text("!"));
-    
+
     auto sem = def.to_semantic_sequence();
-    
+
     ASSERT_EQ(sem.elements.size(), 3u);
     // First element: text
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Text);
     ASSERT_STR_EQ(sem.elements[0].text.c_str(), "Hi ");
-    // Second element: Arg at slot 0 (buffer_id 1 → slot 0)
+    // Second element: Arg at slot 4 (buffer_id 4 = wStringBuffer1 = index 4)
     ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Arg);
-    ASSERT_EQ(sem.elements[1].arg_index, 0u);
+    ASSERT_EQ(sem.elements[1].arg_index, 4u);
     // Third element: text
     ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
     ASSERT_STR_EQ(sem.elements[2].text.c_str(), "!");
-    
-    // MUTATION: must NOT be empty text placeholder
+
+    // Must NOT be empty text placeholder
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
-    
-    std::cout << "  [TX_STRINGBUFFER(1) → SemanticTextOp::Arg(slot=0) ✓]\n";
+
+    std::cout << "  [TX_STRINGBUFFER(4=wStringBuffer1) → SemanticTextOp::Arg(slot=4) ✓]\n";
 }
 
-TEST(text_string_buffer_slot5_maps_to_arg_slot4) {
+TEST(text_string_buffer_id0_maps_to_arg_slot0) {
+    // buffer_id=0 → wStringBuffer3 (first entry in StringBufferPointers)
     using namespace crystal;
     using namespace enginemon;
-    
+
     TextDefinition def;
     def.source_rom_address = 0x2000;
-    // wStringBuffer5 (buffer_id=5) → slot 4
-    def.sequence.elements.push_back(TextElement::make_text_string_buffer(5));  // wStringBuffer5
-    
+    // wStringBuffer3 (buffer_id=0) → slot 0
+    def.sequence.elements.push_back(TextElement::make_text_string_buffer(0));  // wStringBuffer3
+
     auto sem = def.to_semantic_sequence();
-    
+
     ASSERT_EQ(sem.elements.size(), 1u);
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
-    ASSERT_EQ(sem.elements[0].arg_index, 4u);  // slot = 5 - 1 = 4
-    
-    std::cout << "  [TX_STRINGBUFFER(5) → SemanticTextOp::Arg(slot=4) ✓]\n";
+    ASSERT_EQ(sem.elements[0].arg_index, 0u);  // direct: id=0 → slot=0
+
+    std::cout << "  [TX_STRINGBUFFER(0=wStringBuffer3) → SemanticTextOp::Arg(slot=0) ✓]\n";
 }
 
-TEST(text_string_buffer_invalid_id0_maps_to_arg_slot0) {
+TEST(text_string_buffer_id6_maps_to_arg_slot6) {
+    // buffer_id=6 → wBattleMonNickname (last valid entry)
     using namespace crystal;
     using namespace enginemon;
-    
-    // buffer_id=0 is invalid in Crystal (1-5 are valid), but must not crash or produce empty text.
-    // Current fix: (param1 > 0) ? param1-1 : 0 → slot 0 (safe fallback, not an empty string).
+
+    TextDefinition def;
+    def.source_rom_address = 0x2100;
+    def.sequence.elements.push_back(TextElement::make_text_string_buffer(6));  // wBattleMonNickname
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
+    ASSERT_EQ(sem.elements[0].arg_index, 6u);
+
+    std::cout << "  [TX_STRINGBUFFER(6=wBattleMonNickname) → SemanticTextOp::Arg(slot=6) ✓]\n";
+}
+
+TEST(text_string_buffer_invalid_id7_hard_fails) {
+    // buffer_id=7 is outside StringBufferPointers (only 7 entries: 0-6).
+    // to_semantic_sequence() must return empty sequence → legality gate rejects.
+    using namespace crystal;
+    using namespace enginemon;
+
     TextDefinition def;
     def.source_rom_address = 0x3000;
-    def.sequence.elements.push_back(TextElement::make_text_string_buffer(0));  // invalid
-    
+    def.sequence.elements.push_back(TextElement::make_text("before "));
+    def.sequence.elements.push_back(TextElement::make_text_string_buffer(7));  // INVALID
+    def.sequence.elements.push_back(TextElement::make_text(" after"));
+
     auto sem = def.to_semantic_sequence();
-    
-    ASSERT_EQ(sem.elements.size(), 1u);
-    // Must NOT be empty text — must be Arg at slot 0 (safe default)
-    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
-    ASSERT_EQ(sem.elements[0].arg_index, 0u);
-    // Critically: NOT a silent empty string
-    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
-    
-    std::cout << "  [TX_STRINGBUFFER(0/invalid) → SemanticTextOp::Arg(slot=0) not empty-text ✓]\n";
+
+    // Hard-fail: empty sequence
+    ASSERT_TRUE(sem.empty());
+
+    std::cout << "  [TX_STRINGBUFFER(7=INVALID) → empty SemanticTextSequence (hard-fail) ✓]\n";
 }
 
-TEST(text_tx_ram_does_not_silently_collapse_to_empty) {
+TEST(text_string_buffer_invalid_id255_hard_fails) {
+    // buffer_id=255 — far out of range, must also hard-fail.
     using namespace crystal;
     using namespace enginemon;
-    
-    // TX_RAM (wPlayerName etc.) cannot be typed as a string-buffer slot because
-    // the RAM address determines the runtime value. Currently falls to make_text("")
-    // per the default case — which is a known semantic loss documented in text_registry.cpp.
-    // This test DOCUMENTS the current behavior rather than asserting it's ideal:
-    // TX_RAM produces make_text("") (empty string placeholder) — the information is
-    // preserved structurally but the value is empty at semantic level.
-    //
-    // This test ensures the STRUCTURE is present (element count correct) even if
-    // the value is empty, so the text sequence is not incorrectly considered empty.
+
+    TextDefinition def;
+    def.source_rom_address = 0x3100;
+    def.sequence.elements.push_back(TextElement::make_text_string_buffer(255));  // INVALID
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_TRUE(sem.empty());
+
+    std::cout << "  [TX_STRINGBUFFER(255=INVALID) → empty SemanticTextSequence (hard-fail) ✓]\n";
+}
+
+TEST(text_tx_ram_produces_ram_op_not_empty_text) {
+    // TX_RAM (wPlayerName etc.) must produce SemanticTextOp::Ram, NOT make_text("").
+    // The RAM address is preserved as the semantic identity of the text source.
+    using namespace crystal;
+    using namespace enginemon;
+
     TextDefinition def;
     def.source_rom_address = 0x4000;
     def.sequence.elements.push_back(TextElement::make_text("Player: "));
     def.sequence.elements.push_back(TextElement::make_text_ram(0xD47D));  // wPlayerName
-    def.sequence.elements.push_back(TextElement::make_text("'s Pokémon"));
-    
+    def.sequence.elements.push_back(TextElement::make_text("'s Pokemon"));
+
     auto sem = def.to_semantic_sequence();
-    
-    // STRUCTURAL: sequence must have 3 elements (not empty = not zero elements)
+
     ASSERT_EQ(sem.elements.size(), 3u);
     ASSERT_FALSE(sem.empty());
-    // The RAM element currently becomes empty-string Text (documented loss)
-    ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Text);
-    // But it must at least be present in the sequence structure
-    
-    std::cout << "  [TX_RAM present in sequence (3 elements, not empty): documented ✓]\n";
+
+    // RAM element must be SemanticTextOp::Ram, NOT Text("")
+    ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Ram);
+    ASSERT_EQ(sem.elements[1].addr16, 0xD47Du);
+    // Must NOT be silent empty text
+    ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
+
+    std::cout << "  [TX_RAM(0xD47D) → SemanticTextOp::Ram(0xD47D), not empty-text ✓]\n";
+}
+
+TEST(text_tx_bcd_produces_bcd_op_not_empty_text) {
+    // TX_BCD must produce SemanticTextOp::Bcd with addr and flags preserved.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0x5000;
+    def.sequence.elements.push_back(TextElement::make_text_bcd(0xD84E, 0x13)); // 1 byte, 3 digits
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Bcd);
+    ASSERT_EQ(sem.elements[0].addr16, 0xD84Eu);
+    ASSERT_EQ(sem.elements[0].param1, 0x13u);
+    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
+
+    std::cout << "  [TX_BCD(0xD84E, flags=0x13) → SemanticTextOp::Bcd ✓]\n";
+}
+
+TEST(text_tx_decimal_produces_decimal_op_not_empty_text) {
+    // TX_DECIMAL must produce SemanticTextOp::Decimal with addr and bytes_digits preserved.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0x5100;
+    def.sequence.elements.push_back(TextElement::make_text_decimal(0xD84F, 0x21)); // 2 bytes, 1 digit
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Decimal);
+    ASSERT_EQ(sem.elements[0].addr16, 0xD84Fu);
+    ASSERT_EQ(sem.elements[0].param1, 0x21u);
+    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
+
+    std::cout << "  [TX_DECIMAL(0xD84F, nd=0x21) → SemanticTextOp::Decimal ✓]\n";
+}
+
+TEST(text_tx_far_produces_far_text_op_with_resolved_flat_address) {
+    // TX_FAR must produce SemanticTextOp::FarText with the RESOLVED flat address.
+    // No raw bank/pointer pair survives into the semantic element.
+    // bank=0x06, local_ptr=0x40C8 → flat = 0x06*0x4000 + (0x40C8-0x4000) = 0x180C8
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0x6000;
+    def.sequence.elements.push_back(TextElement::make_text_far(0x40C8, 0x06)); // bank=6, ptr=0x40C8
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::FarText);
+    // flat = 0x06 * 0x4000 + (0x40C8 - 0x4000) = 0x18000 + 0x00C8 = 0x180C8
+    ASSERT_EQ(sem.elements[0].far_text_flat_addr(), 0x180C8u);
+    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
+
+    std::cout << "  [TX_FAR(bank=6, ptr=0x40C8) → SemanticTextOp::FarText(flat=0x180C8) ✓]\n";
+}
+
+TEST(text_tx_far_bank0_rom0_region) {
+    // TX_FAR with ptr < 0x4000 addresses ROM0 directly (bank number irrelevant).
+    // bank=0x10, local_ptr=0x0050 → flat = 0x0050 (ROM0 region)
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0x6100;
+    def.sequence.elements.push_back(TextElement::make_text_far(0x0050, 0x10)); // ROM0
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::FarText);
+    ASSERT_EQ(sem.elements[0].far_text_flat_addr(), 0x0050u); // ROM0: flat = ptr
+
+    std::cout << "  [TX_FAR(ROM0 region, ptr=0x0050) → FarText(flat=0x0050) ✓]\n";
+}
+
+TEST(text_tx_day_produces_day_op) {
+    // TX_DAY must produce SemanticTextOp::Day (no operands), not empty text.
+    using namespace crystal;
+    using namespace enginemon;
+
+    TextDefinition def;
+    def.source_rom_address = 0x7000;
+    TextElement day_elem; day_elem.op = TextOp::TextDay;
+    def.sequence.elements.push_back(day_elem);
+
+    auto sem = def.to_semantic_sequence();
+
+    ASSERT_EQ(sem.elements.size(), 1u);
+    ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Day);
+    ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
+
+    std::cout << "  [TX_DAY → SemanticTextOp::Day ✓]\n";
 }
 
 // =============================================================================
@@ -17634,10 +17774,17 @@ int main(int argc, char* argv[]) {
     RUN_TEST(semantic_fix_sdefer_bank_resolution);
     RUN_TEST(semantic_fix_text_identity_distinguishes_controls);
     RUN_TEST(semantic_fix_text_identity_distinguishes_ram_addresses);
-    RUN_TEST(text_string_buffer_slot1_maps_to_arg_slot0);
-    RUN_TEST(text_string_buffer_slot5_maps_to_arg_slot4);
-    RUN_TEST(text_string_buffer_invalid_id0_maps_to_arg_slot0);
-    RUN_TEST(text_tx_ram_does_not_silently_collapse_to_empty);
+    RUN_TEST(text_string_buffer_id4_maps_to_arg_slot4);
+    RUN_TEST(text_string_buffer_id0_maps_to_arg_slot0);
+    RUN_TEST(text_string_buffer_id6_maps_to_arg_slot6);
+    RUN_TEST(text_string_buffer_invalid_id7_hard_fails);
+    RUN_TEST(text_string_buffer_invalid_id255_hard_fails);
+    RUN_TEST(text_tx_ram_produces_ram_op_not_empty_text);
+    RUN_TEST(text_tx_bcd_produces_bcd_op_not_empty_text);
+    RUN_TEST(text_tx_decimal_produces_decimal_op_not_empty_text);
+    RUN_TEST(text_tx_far_produces_far_text_op_with_resolved_flat_address);
+    RUN_TEST(text_tx_far_bank0_rom0_region);
+    RUN_TEST(text_tx_day_produces_day_op);
     RUN_TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation);
     RUN_TEST(sem_game_specific_event_no_write_preserves_context);
     RUN_TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id);

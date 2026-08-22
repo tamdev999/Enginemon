@@ -11,6 +11,9 @@ enginemon::SemanticTextSequence TextDefinition::to_semantic_sequence() const {
     enginemon::SemanticTextSequence sem;
     for (const auto& elem : sequence.elements) {
         switch (elem.op) {
+            // ---------------------------------------------------------------
+            // Flow control — 1:1 structural mapping, no information loss
+            // ---------------------------------------------------------------
             case TextOp::Text:
                 sem.elements.push_back(enginemon::SemanticTextElement::make_text(elem.text));
                 break;
@@ -35,39 +38,164 @@ enginemon::SemanticTextSequence TextDefinition::to_semantic_sequence() const {
             case TextOp::Prompt:
                 sem.elements.push_back(enginemon::SemanticTextElement::make_prompt());
                 break;
-            // Dynamic text commands: preserve as text with marker for now
-            // Runtime substitution is a future implementation concern.
-            case TextOp::TextRam:
-            case TextOp::TextBcd:
-            case TextOp::TextDecimal:
-            case TextOp::TextFar:
-            case TextOp::TextBox:
-            case TextOp::TextMove:
-            case TextOp::TextLow:
-            case TextOp::TextPause:
-            case TextOp::TextPromptButton:
-            case TextOp::TextDay:
-            case TextOp::TextAsm:
-            case TextOp::TextSoundItem:
-            case TextOp::TextSoundCaught:
-            case TextOp::TextSoundFanfare:
-            case TextOp::TextRaw:
-            default:
-                // Preserve dynamic/unknown elements as empty text placeholders
-                // so the sequence structure is not lost
-                sem.elements.push_back(enginemon::SemanticTextElement::make_text(""));
-                break;
-            case TextOp::TextStringBuffer:
-                // TX_STRINGBUFFER (0x14): elem.param1 = buffer_id (1-5 in Crystal)
-                // Maps to SemanticTextOp::Arg with 0-indexed slot (0-4).
-                // The corresponding wStringBuffer slot is populated by a preceding
-                // Sem_PrepareTextArg operation — see getmonname/getitemname/gettrainername etc.
-                // Slot 0 = wStringBuffer1, slot 1 = wStringBuffer2, ..., slot 4 = wStringBuffer5
-                {
-                    uint8_t slot = (elem.param1 > 0) ? static_cast<uint8_t>(elem.param1 - 1) : 0;
-                    sem.elements.push_back(enginemon::SemanticTextElement::make_arg(slot));
+
+            // ---------------------------------------------------------------
+            // TX_STRINGBUFFER (0x14)
+            // Source: home/text.asm TextCommand_STRINGBUFFER (line 993):
+            //   "0: wStringBuffer3, 1: wStringBuffer4, 2: wStringBuffer5,
+            //    3: wStringBuffer2, 4: wStringBuffer1, 5: wEnemyMonNickname,
+            //    6: wBattleMonNickname"
+            // data/text_buffers.asm StringBufferPointers: 7 entries, 0-indexed.
+            //
+            // Crystal encodes buffer_id as a 0-indexed byte (0..6).
+            // HARD-FAIL on id >= 7: no such entry in StringBufferPointers.
+            // The legality gate will reject any script whose text sequence
+            // contains an invalid TX_STRINGBUFFER id.
+            // ---------------------------------------------------------------
+            case TextOp::TextStringBuffer: {
+                const uint8_t id = elem.param1;
+                if (id > 6) {
+                    // Invalid StringBufferPointers index — hard-fail by returning
+                    // empty sequence.  The legality gate rejects empty sequences.
+                    return enginemon::SemanticTextSequence{};
                 }
+                // id is the direct 0-indexed slot into StringBufferPointers.
+                // The corresponding Sem_PrepareTextArg populated this slot before
+                // the text was displayed.
+                sem.elements.push_back(enginemon::SemanticTextElement::make_arg(id));
                 break;
+            }
+
+            // ---------------------------------------------------------------
+            // TX_RAM (0x01): display string from classified runtime text source.
+            // addr = 16-bit WRAM address.  We carry it as a semantic identity
+            // (classified RAM address) — not as a raw GB RAM pointer surviving
+            // into runtime.  The runtime maps known addresses to their semantic
+            // text source (player name, nickname, etc.).
+            // ---------------------------------------------------------------
+            case TextOp::TextRam:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_ram(elem.addr));
+                break;
+
+            // ---------------------------------------------------------------
+            // TX_BCD (0x02): display BCD number from WRAM.
+            // addr = WRAM address, param1 = flags (high nibble = byte width,
+            // low nibble = digit count).  Source: home/text.asm TextCommand_BCD.
+            // ---------------------------------------------------------------
+            case TextOp::TextBcd:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_bcd(elem.addr, elem.param1));
+                break;
+
+            // ---------------------------------------------------------------
+            // TX_DECIMAL (0x09): display decimal number from WRAM.
+            // Same operand layout as TX_BCD.
+            // Source: home/text.asm TextCommand_DECIMAL.
+            // ---------------------------------------------------------------
+            case TextOp::TextDecimal:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_decimal(elem.addr, elem.param1));
+                break;
+
+            // ---------------------------------------------------------------
+            // TX_FAR (0x16): inline far text reference.
+            // Crystal macro: db TX_FAR / dw \1 / db BANK(\1)
+            // elem.addr = local 16-bit pointer, elem.param2 = bank.
+            // Resolved to flat at frontend using crystal_bank_to_flat().
+            // The raw bank/pointer pair does NOT survive into semantic IR —
+            // only the resolved flat address is stored.
+            // ---------------------------------------------------------------
+            case TextOp::TextFar: {
+                // Convert bank:local to flat address (same formula as bank_utils.hpp)
+                const uint32_t bank      = elem.param2;
+                const uint16_t local_ptr = elem.addr;
+                uint32_t flat = (local_ptr < 0x4000u)
+                    ? local_ptr
+                    : bank * 0x4000u + (local_ptr - 0x4000u);
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_far_text(flat));
+                break;
+            }
+
+            // ---------------------------------------------------------------
+            // TX_DAY (0x15): display current day of week.
+            // No operands — runtime queries calendar.
+            // ---------------------------------------------------------------
+            case TextOp::TextDay:
+                sem.elements.push_back(enginemon::SemanticTextElement::make_day());
+                break;
+
+            // ---------------------------------------------------------------
+            // Text sound effects: preserve the opcode as a sound identity.
+            // These trigger audio cues mid-text (item jingle, fanfare, etc.).
+            // ---------------------------------------------------------------
+            case TextOp::TextSoundItem:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_sound(0x0f));
+                break;
+            case TextOp::TextSoundCaught:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_sound(0x10));
+                break;
+            case TextOp::TextSoundFanfare:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_sound(0x12));
+                break;
+
+            // ---------------------------------------------------------------
+            // Presentation-only TX commands with no semantic content:
+            // TX_MOVE (0x03), TX_BOX (0x04), TX_LOW (0x05),
+            // TX_PROMPT_BUTTON (0x06), TX_SCROLL (0x07), TX_PAUSE (0x0a),
+            // TX_START_ASM (0x08).
+            //
+            // These affect rendering/cursor position only and carry no
+            // data that the semantic model needs to preserve beyond the opcode.
+            // Stored as Raw so the element is not silently dropped.
+            // ---------------------------------------------------------------
+            case TextOp::TextMove:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_raw(0x03));
+                break;
+            case TextOp::TextBox:
+                // Box has height/width but these are presentation layout only.
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_raw(0x04));
+                break;
+            case TextOp::TextLow:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_raw(0x05));
+                break;
+            case TextOp::TextPromptButton:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_raw(0x06));
+                break;
+            case TextOp::TextScroll:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_raw(0x07));
+                break;
+            case TextOp::TextAsm:
+                // TX_START_ASM terminates text parsing; no runtime action needed.
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_raw(0x08));
+                break;
+            case TextOp::TextPause:
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_raw(0x0a));
+                break;
+
+            // ---------------------------------------------------------------
+            // TextRaw: lossless round-trip container for unrecognized opcodes.
+            // raw_bytes[0] = opcode, raw_bytes[1] = optional param.
+            // We store as Raw(opcode, param) — sufficient for known corpus.
+            // ---------------------------------------------------------------
+            case TextOp::TextRaw: {
+                uint8_t tx_op  = elem.raw_bytes.empty() ? 0 : elem.raw_bytes[0];
+                uint8_t tx_prm = (elem.raw_bytes.size() > 1) ? elem.raw_bytes[1] : 0;
+                sem.elements.push_back(
+                    enginemon::SemanticTextElement::make_raw(tx_op, tx_prm));
+                break;
+            }
         }
     }
     return sem;
