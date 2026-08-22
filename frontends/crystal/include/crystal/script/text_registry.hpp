@@ -27,6 +27,7 @@ namespace crystal {
 
 // Forward declaration
 class ScriptDecoder;
+class TextRegistry;  // Forward-declared for use in TextDefinition::to_semantic_sequence
 
 // Text content extracted from ROM
 struct TextDefinition {
@@ -39,9 +40,24 @@ struct TextDefinition {
     
     // Convert Crystal TextSequence to engine SemanticTextSequence for lowering
     // Maps all TextOp variants to their SemanticTextOp equivalents.
-    // Dynamic text commands (TextRam, TextDecimal, etc.) are preserved as Text
-    // with a placeholder until runtime text substitution is implemented.
-    enginemon::SemanticTextSequence to_semantic_sequence() const;
+    //
+    // registry: optional TextRegistry pointer for TX_FAR inline expansion.
+    //   When non-null, TX_FAR elements are resolved through the registry and
+    //   their referenced text is inlined at this position (matching Crystal
+    //   TextCommand_FAR semantics: recursive DoTextUntilTerminator in far bank).
+    //   Recursion depth is bounded to prevent cycles.
+    //   When null, TX_FAR elements hard-fail (return empty sequence).
+    //
+    // Returns empty SemanticTextSequence on any hard-fail condition:
+    //   - TX_STRINGBUFFER id >= 7 (invalid StringBufferPointers index)
+    //   - TX_RAM addr not a known string buffer slot
+    //   - TX_BCD (not used in script text corpus)
+    //   - TX_DECIMAL addr != wScriptVar
+    //   - TX_FAR with null registry or unresolvable target
+    //   - Unknown TextRaw opcode
+    enginemon::SemanticTextSequence to_semantic_sequence(
+        const TextRegistry* registry = nullptr,
+        int far_depth = 0) const;
     
     // Extract plain text content (for nickname/OT name resolution)
     // Concatenates all Text elements; ignores control codes.

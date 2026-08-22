@@ -46,30 +46,25 @@ std::string SemanticTextSequence::debug_string() const {
             case SemanticTextOp::Prompt:
                 ss << "Prompt";
                 break;
-            case SemanticTextOp::Ram:
-                ss << "Ram(0x" << std::hex << elem.addr16 << ")";
+            case SemanticTextOp::ScriptVarDecimal: {
+                const uint8_t bytes  = (elem.param1 >> 4) & 0xF;
+                const uint8_t digits =  elem.param1       & 0xF;
+                ss << "ScriptVarDecimal(" << (int)bytes << "bytes," << (int)digits << "digits)";
                 break;
-            case SemanticTextOp::Bcd:
-                ss << "Bcd(0x" << std::hex << elem.addr16
-                   << ",flags=0x" << (int)elem.param1 << ")";
-                break;
-            case SemanticTextOp::Decimal:
-                ss << "Decimal(0x" << std::hex << elem.addr16
-                   << ",nd=0x" << (int)elem.param1 << ")";
-                break;
-            case SemanticTextOp::FarText:
-                ss << "FarText(0x" << std::hex << elem.far_text_flat_addr() << ")";
-                break;
+            }
             case SemanticTextOp::Day:
                 ss << "Day";
                 break;
-            case SemanticTextOp::Sound:
-                ss << "Sound(0x" << std::hex << (int)elem.param1 << ")";
+            case SemanticTextOp::Sound: {
+                const char* kind_name = "?";
+                switch (elem.sound_kind()) {
+                    case TextSoundKind::ItemJingle:      kind_name = "ItemJingle";      break;
+                    case TextSoundKind::CaughtMonJingle: kind_name = "CaughtMonJingle"; break;
+                    case TextSoundKind::Fanfare:         kind_name = "Fanfare";         break;
+                }
+                ss << "Sound(" << kind_name << ")";
                 break;
-            case SemanticTextOp::Raw:
-                ss << "Raw(0x" << std::hex << (int)elem.param1
-                   << ",0x" << (int)elem.param2 << ")";
-                break;
+            }
         }
     }
     ss << "]";

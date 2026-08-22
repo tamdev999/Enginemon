@@ -65,14 +65,25 @@ struct SemanticTextArg {
 // Text control operations (semantic text flow, not Crystal-specific)
 //
 // DESIGN: SemanticTextElement must stay small — no std::vector fields.
-// Dynamic text ops (Ram, Bcd, Decimal, FarText, Sound, Raw) carry their
-// operands in the fixed-size fields below.  This avoids the MSVC C1060
-// "out of heap space" that occurs when SemanticOp variant alternatives
-// contain vector<uint8_t> directly.
+// This avoids the MSVC C1060 "out of heap space" that occurs when
+// SemanticOp variant alternatives contain vector<uint8_t> directly.
+//
+// All dynamic text ops carry only typed semantic operands — no raw GB RAM
+// addresses, no flat ROM addresses, no raw Crystal opcodes survive into
+// legal Semantic IR.
+//
+// TX_RAM wStringBuffer3/4/5 → Arg(0/1/2)  (source-proven via GetStringBuffer)
+// TX_DECIMAL wScriptVar     → ScriptVarDecimal(bytes_digits)
+// TX_FAR                    → inlined at to_semantic_sequence() time
+// TX_BCD                    → hard-fail (no uses in script text corpus)
+// TX_MOVE/BOX/LOW/etc.      → dropped (presentation-only, no semantic content)
 enum class SemanticTextOp : uint8_t {
-    // --- Printable / control flow ---
+    // --- Printable / control flow (no Crystal concepts) ---
     Text,       // Printable text run (text field)
     Arg,        // Text argument placeholder (arg_index into args vector)
+                //   slot 0 = wStringBuffer3  (TX_RAM 0xD099 / strbuf=0)
+                //   slot 1 = wStringBuffer4  (TX_RAM 0xD0AC / strbuf=1)
+                //   slot 2 = wStringBuffer5  (TX_RAM 0xD0BF / strbuf=2)
     Line,       // Move to line 2, no wait
     Next,       // Clear box, continue (no wait)
     Para,       // Wait → clear → continue
@@ -81,53 +92,57 @@ enum class SemanticTextOp : uint8_t {
     Done,       // End text processing
     Prompt,     // Show cursor, wait, end
 
-    // --- Dynamic text sources ---
-    // Each carries semantic operands in the fixed fields; no raw GB RAM address
-    // survives into the Semantic IR — all addresses are classified identities.
-    //
-    Ram,        // TX_RAM: display string from a classified runtime text source
-                //   addr16 = semantic RAM source address (classified identity, not raw GB addr)
-    Bcd,        // TX_BCD: display BCD-formatted number from runtime address
-                //   addr16 = RAM source address (classified identity)
-                //   param1 = flags byte (high nibble=byte_width, low nibble=digit_count)
-    Decimal,    // TX_DECIMAL: display decimal-formatted number from runtime address
-                //   addr16 = RAM source address (classified identity)
-                //   param1 = bytes_digits byte (high nibble=byte_width, low nibble=digit_count)
-    FarText,    // TX_FAR resolved: inline far text reference, fully resolved at frontend
-                //   addr16 = low 16 bits of resolved flat ROM address
-                //   param1 = high 8 bits of flat ROM address (addr = param1<<16 | addr16)
-    Day,        // TX_DAY: display current day of week (no operands)
-    Sound,      // Text sound effect (item jingle, fanfare, etc.)
-                //   param1 = Crystal TX_SOUND_* opcode (0x0f/0x10/0x12 etc.)
-    Raw,        // Small opaque text command with at most 1 parameter byte
-                //   param1 = Crystal TX command opcode
-                //   param2 = parameter byte (0 if none)
+    // --- Typed dynamic text sources (no raw addresses or opcodes) ---
+
+    // TX_DECIMAL on wScriptVar: display the current script result as decimal.
+    // Source: BattleTower1F.asm text_decimal wScriptVar, 1, 3 (only corpus use).
+    // bytes_digits: Crystal nibble-packed byte — high nibble = byte width,
+    //   low nibble = digit count. For wScriptVar the only stock value is 0x13
+    //   (1 byte, 3 digits) but any valid combination is preserved.
+    // No raw WRAM address survives — runtime always reads from ScriptVar context.
+    ScriptVarDecimal,   // param1 = bytes_digits (Crystal nibble-packed)
+
+    // TX_DAY: display current day of week. No operands — runtime queries calendar.
+    Day,
+
+    // Text audio events. Source-proven from Crystal TX_SOUND_* opcodes:
+    //   TX_SOUND_ITEM (0x0f)        → ItemJingle
+    //   TX_SOUND_CAUGHT_MON (0x10) → CaughtMonJingle
+    //   TX_SOUND_FANFARE (0x12)    → Fanfare
+    // No raw opcode survives. TextSoundKind is the typed semantic identity.
+    Sound,      // param1 = TextSoundKind (see enum below)
+};
+
+// Typed sound events that can appear inline in a text sequence.
+// Source-proven from Crystal TX_SOUND_* constants in text.asm.
+enum class TextSoundKind : uint8_t {
+    ItemJingle     = 0,  // TX_SOUND_ITEM (0x0f): plays item-acquired jingle
+    CaughtMonJingle = 1, // TX_SOUND_CAUGHT_MON (0x10): plays caught-Pokemon jingle
+    Fanfare        = 2,  // TX_SOUND_FANFARE (0x12): plays generic fanfare
 };
 
 // A single element in a SemanticTextSequence.
 //
-// INVARIANT: No std::vector field here — see SemanticTextOp comment above.
+// INVARIANT: No std::vector field — keeps variant size bounded.
+// INVARIANT: No raw GB RAM address, ROM address, or Crystal opcode.
+//
 // Fixed-size layout:
-//   op       : 1 byte
-//   arg_index: 1 byte  (Arg)
-//   param1   : 1 byte  (Bcd flags / Decimal bytes_digits / FarText high8 / Sound opcode / Raw opcode)
-//   param2   : 1 byte  (Raw param byte)
-//   text     : std::string (heap, but only used for Text op — others leave it empty)
-//   addr16   : 2 bytes (Ram/Bcd/Decimal classified addr; FarText low16 of flat addr)
+//   op        : 1 byte
+//   arg_index : 1 byte  (Arg)
+//   param1    : 1 byte  (ScriptVarDecimal bytes_digits / Sound TextSoundKind)
+//   text      : std::string (heap; only populated for Text op)
 struct SemanticTextElement {
     SemanticTextOp op = SemanticTextOp::Text;
-    std::string text;       // For SemanticTextOp::Text only
-    uint8_t  arg_index = 0; // For SemanticTextOp::Arg
-    uint8_t  param1    = 0; // Multi-use — see SemanticTextOp comment
-    uint8_t  param2    = 0; // Multi-use — see SemanticTextOp comment
-    uint16_t addr16    = 0; // Multi-use — see SemanticTextOp comment
+    std::string text;        // For SemanticTextOp::Text only
+    uint8_t  arg_index = 0;  // For SemanticTextOp::Arg (slot 0-2)
+    uint8_t  param1    = 0;  // ScriptVarDecimal: bytes_digits  |  Sound: TextSoundKind
 
-    // --- Flow control constructors (unchanged) ---
+    // --- Flow control constructors ---
     static SemanticTextElement make_text(const std::string& s) {
         SemanticTextElement e; e.op = SemanticTextOp::Text; e.text = s; return e;
     }
-    static SemanticTextElement make_arg(uint8_t idx) {
-        SemanticTextElement e; e.op = SemanticTextOp::Arg; e.arg_index = idx; return e;
+    static SemanticTextElement make_arg(uint8_t slot) {
+        SemanticTextElement e; e.op = SemanticTextOp::Arg; e.arg_index = slot; return e;
     }
     static SemanticTextElement make_line()   { SemanticTextElement e; e.op = SemanticTextOp::Line;   return e; }
     static SemanticTextElement make_next()   { SemanticTextElement e; e.op = SemanticTextOp::Next;   return e; }
@@ -137,45 +152,27 @@ struct SemanticTextElement {
     static SemanticTextElement make_done()   { SemanticTextElement e; e.op = SemanticTextOp::Done;   return e; }
     static SemanticTextElement make_prompt() { SemanticTextElement e; e.op = SemanticTextOp::Prompt; return e; }
 
-    // --- Dynamic text constructors ---
+    // --- Typed dynamic constructors ---
 
-    // TX_RAM: addr = classified RAM source address (16-bit, bank 0 or 1 WRAM)
-    static SemanticTextElement make_ram(uint16_t addr) {
-        SemanticTextElement e; e.op = SemanticTextOp::Ram; e.addr16 = addr; return e;
+    // TX_DECIMAL on wScriptVar: display script result value.
+    // bytes_digits = Crystal nibble-packed byte (high nibble = bytes, low nibble = digits).
+    static SemanticTextElement make_script_var_decimal(uint8_t bytes_digits) {
+        SemanticTextElement e; e.op = SemanticTextOp::ScriptVarDecimal;
+        e.param1 = bytes_digits; return e;
     }
-    // TX_BCD: addr = RAM source, flags = Crystal BCD flags byte
-    static SemanticTextElement make_bcd(uint16_t addr, uint8_t flags) {
-        SemanticTextElement e; e.op = SemanticTextOp::Bcd;
-        e.addr16 = addr; e.param1 = flags; return e;
-    }
-    // TX_DECIMAL: addr = RAM source, bytes_digits = Crystal nibble-packed byte
-    static SemanticTextElement make_decimal(uint16_t addr, uint8_t bytes_digits) {
-        SemanticTextElement e; e.op = SemanticTextOp::Decimal;
-        e.addr16 = addr; e.param1 = bytes_digits; return e;
-    }
-    // TX_FAR resolved: flat_addr = fully resolved ROM address of far text
-    static SemanticTextElement make_far_text(uint32_t flat_addr) {
-        SemanticTextElement e; e.op = SemanticTextOp::FarText;
-        e.addr16  = static_cast<uint16_t>(flat_addr & 0xFFFF);
-        e.param1  = static_cast<uint8_t>((flat_addr >> 16) & 0xFF);
-        return e;
-    }
-    // Recover the flat address stored in a FarText element
-    uint32_t far_text_flat_addr() const {
-        return (static_cast<uint32_t>(param1) << 16) | addr16;
-    }
-    // TX_DAY: no operands
+
+    // TX_DAY: current day of week.
     static SemanticTextElement make_day() {
         SemanticTextElement e; e.op = SemanticTextOp::Day; return e;
     }
-    // Text sound effect: sound_opcode = Crystal TX_SOUND_* opcode byte
-    static SemanticTextElement make_sound(uint8_t sound_opcode) {
-        SemanticTextElement e; e.op = SemanticTextOp::Sound; e.param1 = sound_opcode; return e;
+
+    // Text sound event.
+    static SemanticTextElement make_sound(TextSoundKind kind) {
+        SemanticTextElement e; e.op = SemanticTextOp::Sound;
+        e.param1 = static_cast<uint8_t>(kind); return e;
     }
-    // Small opaque text command: tx_opcode = Crystal opcode, param = operand (0 if none)
-    static SemanticTextElement make_raw(uint8_t tx_opcode, uint8_t param = 0) {
-        SemanticTextElement e; e.op = SemanticTextOp::Raw;
-        e.param1 = tx_opcode; e.param2 = param; return e;
+    TextSoundKind sound_kind() const {
+        return static_cast<TextSoundKind>(param1);
     }
 };
 

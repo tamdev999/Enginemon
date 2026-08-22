@@ -963,7 +963,7 @@ RuleResult rule_write_text(LoweringContext& ctx) {
             if (text_id != enginemon::TEXT_NONE) {
                 const auto* def = ctx.text_registry->get(text_id);
                 if (def) {
-                    op.sequence = def->to_semantic_sequence();
+                    op.sequence = def->to_semantic_sequence(ctx.text_registry);
                 }
             }
         }
@@ -983,7 +983,7 @@ RuleResult rule_write_text(LoweringContext& ctx) {
             if (text_id != enginemon::TEXT_NONE) {
                 const auto* def = ctx.text_registry->get(text_id);
                 if (def) {
-                    op.sequence = def->to_semantic_sequence();
+                    op.sequence = def->to_semantic_sequence(ctx.text_registry);
                 }
             }
         }
@@ -1014,7 +1014,7 @@ RuleResult rule_jump_text(LoweringContext& ctx) {
             if (text_id != enginemon::TEXT_NONE) {
                 const auto* def = ctx.text_registry->get(text_id);
                 if (def) {
-                    op.sequence = def->to_semantic_sequence();
+                    op.sequence = def->to_semantic_sequence(ctx.text_registry);
                 }
             }
         }
@@ -1033,7 +1033,7 @@ RuleResult rule_jump_text(LoweringContext& ctx) {
             if (text_id != enginemon::TEXT_NONE) {
                 const auto* def = ctx.text_registry->get(text_id);
                 if (def) {
-                    op.sequence = def->to_semantic_sequence();
+                    op.sequence = def->to_semantic_sequence(ctx.text_registry);
                 }
             }
         }
@@ -1061,7 +1061,7 @@ RuleResult rule_jump_text_face_player(LoweringContext& ctx) {
             if (text_id != enginemon::TEXT_NONE) {
                 const auto* def = ctx.text_registry->get(text_id);
                 if (def) {
-                    op.sequence = def->to_semantic_sequence();
+                    op.sequence = def->to_semantic_sequence(ctx.text_registry);
                 }
             }
         }
