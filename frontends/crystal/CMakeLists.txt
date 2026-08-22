@@ -19,13 +19,13 @@ add_library(enginemon_crystal STATIC
     output/native_package.cpp
     
     # Compiler (ROM → EMON package)
-    compile/crystal_compiler.cpp
     compile/full_compiler.cpp
     compile/corpus_discovery.cpp
     
     # Script compilation (always enabled - does not require engine)
     script/decoder.cpp
     script/lua_emitter.cpp
+    script/semantic_lua_emitter.cpp
     script/crystal_command.cpp
     script/typed_decoder.cpp
     script/crystal_cfg.cpp

@@ -8,12 +8,14 @@
 #include "crystal/script/decoder.hpp"  // For text decoding
 #include "crystal/script/crystal_cfg.hpp"
 #include "crystal/script/semantic_legalizer.hpp"
+#include "crystal/script/behavior_table.hpp"
 #include "crystal/script/legality_gate.hpp"
 #include "crystal/script/native_registry.hpp"
 #include "crystal/script/elevator_registry.hpp"
 #include "crystal/script/trainer_registry.hpp"
 #include "crystal/script/pokemail_registry.hpp"
 #include "crystal/script/text_registry.hpp"
+#include "crystal/script/semantic_lua_emitter.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
 #include <iomanip>
@@ -161,6 +163,14 @@ bool FullGameCompiler::compile(const std::filesystem::path& output_path,
     if (!init_typed_pipeline()) {
         std::cerr << "Failed to initialize typed script pipeline\n";
         return false;
+    }
+    
+    // Pre-populate behavior_names from canonical BEHAVIOR_TABLE so the
+    // Stage 5 legality gate can validate Sem_GameSpecificEvent names
+    // during process_map_root_scripts() / process_std_scripts().
+    compiled_game_data_.behavior_names.clear();
+    for (std::size_t i = 0; i < BEHAVIOR_TABLE_SIZE; ++i) {
+        compiled_game_data_.behavior_names.insert(BEHAVIOR_TABLE[i].behavior_name);
     }
     
     // Collect all script addresses
@@ -641,6 +651,7 @@ std::optional<enginemon::SemanticScriptIR> FullGameCompiler::process_script_type
         input.native_registry = native_registry_.get();
         input.ram_registry = ram_registry_.get();
         input.lowering = &lowering;
+        input.game_data = &compiled_game_data_;
         
         LegalityResult legality = legality_gate_->validate(input);
         if (!legality.is_legal) {
@@ -760,6 +771,15 @@ void FullGameCompiler::finalize_registries() {
         compiled_game_data_.elevators.insert(def.id);
     }
     std::cout << "  Compiled elevators: " << compiled_game_data_.elevators.size() << "\n";
+
+    // Populate behavior_names from the canonical BEHAVIOR_TABLE.
+    // Stage 5 legality gate validates every Sem_GameSpecificEvent::behavior_name
+    // is in this set; unknown names hard-fail compilation.
+    compiled_game_data_.behavior_names.clear();
+    for (std::size_t i = 0; i < BEHAVIOR_TABLE_SIZE; ++i) {
+        compiled_game_data_.behavior_names.insert(BEHAVIOR_TABLE[i].behavior_name);
+    }
+    std::cout << "  Compiled behaviors: " << compiled_game_data_.behavior_names.size() << "\n";
 }
 
 void FullGameCompiler::build_production_game_data() {
@@ -1103,13 +1123,8 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
     // Sort results by stable ID for deterministic output
     sort_by_stable_id();
     
-    // NOTE: Scripts are processed through the typed pipeline and not stored in 
-    // CompiledMapResult anymore. Lua emission will be added in a future milestone.
-    // For now, we don't add scripts to the package.
-    
-    // Add maps (without script data for now)
+    // Add maps
     for (auto& map_result : linker_input_.maps) {
-        // Add map
         writer.add_map(map_result.map);
     }
     
@@ -1159,6 +1174,52 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
     writer.add_font_atlas(get_asset(font_result));
     emitted_font_ = true;
     
+    // Stage 7: Emit all retained SemanticScriptIR bodies as package Script chunks.
+    // Hard-fail if any legal body cannot be emitted — no partial output.
+    {
+        SemanticLuaEmitter emitter;
+        uint32_t scripts_emitted = 0;
+
+        auto emit_one = [&](const enginemon::SemanticScriptIR& ir) -> bool {
+            std::string lua;
+            try {
+                lua = emitter.emit(ir);
+            } catch (const std::exception& ex) {
+                std::cerr << "FATAL: Stage 7 emission failed for script '"
+                          << ir.script_id << "': " << ex.what() << "\n";
+                return false;
+            }
+            // Wrap in the format HeadlessGameLoop::start_script expects:
+            //   script = (function() ... end)()
+            // The emitter already produces:
+            //   script = {}
+            //   function script.main(ctx) ... end
+            //   return script
+            // PackageWriter stores it verbatim; runtime loads with require-like load().
+            writer.add_script(ir.script_id, lua);
+            ++scripts_emitted;
+            stats_.total_lua_bytes += static_cast<uint32_t>(lua.size());
+            return true;
+        };
+
+        for (const auto& ir : map_root_irs_) {
+            if (!emit_one(ir)) return false;
+        }
+        for (const auto& ir : std_script_irs_) {
+            if (!emit_one(ir)) return false;
+        }
+
+        std::cout << "  Scripts emitted: " << scripts_emitted << "\n";
+
+        // Invariant: every retained body must have been emitted.
+        uint32_t expected = static_cast<uint32_t>(map_root_irs_.size() + std_script_irs_.size());
+        if (scripts_emitted != expected) {
+            std::cerr << "FATAL: Script emission count mismatch: emitted "
+                      << scripts_emitted << " expected " << expected << "\n";
+            return false;
+        }
+    }
+
     return true;
 }
 

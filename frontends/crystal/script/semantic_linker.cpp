@@ -907,7 +907,7 @@ void SemanticLinker::extract_and_validate_from_op(
         // Text arg ops have complete operand preservation (Finding 3 fix)
         // - id: ItemId, SpeciesId, LandmarkId depending on arg_type
         // - trainer_group + id2: for trainer_name
-        // - text_pointer: ROM provenance for getstring
+        // - str_value: resolved text content for getstring
         // - account: money source (player=0, mom=1, coins=2, var=3)
         else if constexpr (std::is_same_v<T, Sem_PrepareTextArg>) {
             if (sem_op.arg_type == TextArgType::ItemName) {

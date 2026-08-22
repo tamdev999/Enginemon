@@ -280,6 +280,32 @@ int show_map_name(lua_State* L) {
     return 0;
 }
 
+// ctx.ui:inline_prompt_button()
+// Non-terminating in-stream input gate (TX_PROMPT_BUTTON semantics).
+// Shows blinking cursor, waits for A/B, text continues after.
+// Yields "wait_button" so the game loop can handle input gating.
+int inline_prompt_button(lua_State* L) {
+    LuaRuntime* runtime = get_runtime(L);
+    if (runtime && runtime->get_presentation_hooks().open_text) {
+        // Notify presentation layer that an inline button wait is requested
+        // (presentation can show/hide blinking cursor)
+    }
+    // Yield like a dialog wait — caller resumes when player presses button
+    lua_pushstring(L, "wait_button");
+    return lua_yield(L, 1);
+}
+
+// ctx.ui:pause_text(frames)
+// Timed pause between text elements.
+// frames = 30 for all vanilla Crystal TX_PAUSE uses (~0.5s at 60fps).
+// Skippable if button held at entry time (handled by runtime on resume).
+int pause_text(lua_State* L) {
+    int frames = luaL_checkinteger(L, 2);
+    // Delegate to the existing wait_frames mechanism
+    script_wait_frames(L, frames);
+    return 0; // wait_frames already yielded
+}
+
 } // namespace ui_api
 
 // =============================================================================
@@ -1360,4 +1386,266 @@ std::string RuntimeTextSequence::debug_string() const {
     return result;
 }
 
+} // namespace enginemon
+
+// =============================================================================
+// Game API - ctx.game
+// Stub implementations for all game-level semantic operations.
+// These are called by generated Lua from SemanticLuaEmitter.
+// Production implementations will call the appropriate engine systems.
+// =============================================================================
+
+namespace enginemon {
+namespace game_api {
+
+static LuaRuntime* get_runtime(lua_State* L) {
+    lua_getfield(L, 1, "_runtime");
+    LuaRuntime* runtime = static_cast<LuaRuntime*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return runtime;
+}
+
+// ctx.game:behavior(name) - dispatch a named game-specific behavior
+int behavior(lua_State* L) {
+    const char* name = luaL_checkstring(L, 2);
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+    stubs.last_behavior_name = name;
+    return 0;
+}
+
+// ctx.game:set_scene(scene)
+int set_scene(lua_State* L) {
+    int scene = luaL_checkinteger(L, 2);
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+    stubs.current_scene = scene;
+    return 0;
+}
+
+// ctx.game:check_scene() -> scene_id
+int check_scene(lua_State* L) {
+    LuaRuntime* runtime = get_runtime(L);
+    lua_pushinteger(L, runtime->get_stub_services().current_scene);
+    return 1;
+}
+
+// ctx.game:set_map_scene(map_id, scene)
+int set_map_scene(lua_State* L) {
+    int map_id = luaL_checkinteger(L, 2);
+    int scene   = luaL_checkinteger(L, 3);
+    (void)map_id; (void)scene;
+    return 0;
+}
+
+// ctx.game:check_map_scene(map_id) -> scene_id
+int check_map_scene(lua_State* L) {
+    int map_id = luaL_checkinteger(L, 2);
+    (void)map_id;
+    lua_pushinteger(L, 0); // stub
+    return 1;
+}
+
+// ctx.game:check_link_mode() -> mode (0=not linked / Gen1, nonzero=Gen2)
+int check_link_mode(lua_State* L) {
+    lua_pushinteger(L, 0); // stub: not linked
+    return 1;
+}
+
+// ctx.game:check_save() -> result
+int check_save(lua_State* L) {
+    lua_pushinteger(L, 1); // stub: valid save exists
+    return 1;
+}
+
+int hall_of_fame(lua_State* L) { return 0; }
+int credits(lua_State* L) { return 0; }
+
+// ctx.game:register_dex_entry(species)
+int register_dex_entry(lua_State* L) {
+    int species = luaL_checkinteger(L, 2);
+    (void)species;
+    return 0;
+}
+
+// ctx.game:find_party_mon(species, require_ot) -> slot (1-6) or 0
+int find_party_mon(lua_State* L) {
+    int species    = luaL_checkinteger(L, 2);
+    int require_ot = luaL_optinteger(L, 3, 0);
+    (void)species; (void)require_ot;
+    lua_pushinteger(L, 0); // stub: not found
+    return 1;
+}
+
+// ctx.game:check_pokerus() -> bool
+int check_pokerus(lua_State* L) {
+    lua_pushboolean(L, false); // stub
+    return 1;
+}
+
+// ctx.game:call_std(std_id, name)
+int call_std(lua_State* L) {
+    int std_id      = luaL_checkinteger(L, 2);
+    const char* name = luaL_checkstring(L, 3);
+    (void)std_id; (void)name;
+    return 0;
+}
+
+// ctx.game:jump_std(std_id, name)
+int jump_std(lua_State* L) {
+    int std_id      = luaL_checkinteger(L, 2);
+    const char* name = luaL_checkstring(L, 3);
+    (void)std_id; (void)name;
+    return 0;
+}
+
+int wild_on(lua_State* L)  { return 0; }
+int wild_off(lua_State* L) { return 0; }
+int reload_map(lua_State* L) { return 0; }
+int refresh_map(lua_State* L) { return 0; }
+int reanchor_map(lua_State* L) { return 0; }
+
+// ctx.game:new_load_map(method_byte)
+int new_load_map(lua_State* L) {
+    int method = luaL_checkinteger(L, 2);
+    (void)method;
+    return 0;
+}
+
+// ctx.game:change_block(x, y, block)
+int change_block(lua_State* L) {
+    int x = luaL_checkinteger(L, 2);
+    int y = luaL_checkinteger(L, 3);
+    int block = luaL_checkinteger(L, 4);
+    (void)x; (void)y; (void)block;
+    return 0;
+}
+
+// ctx.game:set_blackout_point(map_id)
+int set_blackout_point(lua_State* L) {
+    int map_id = luaL_checkinteger(L, 2);
+    (void)map_id;
+    return 0;
+}
+
+// ctx.game:catch_tutorial(type)
+int catch_tutorial(lua_State* L) {
+    int type = luaL_checkinteger(L, 2);
+    (void)type;
+    return 0;
+}
+
+// ctx.game:deactivate_facing(frames)
+int deactivate_facing(lua_State* L) {
+    int frames = luaL_checkinteger(L, 2);
+    (void)frames;
+    return 0;
+}
+
+// ctx.game:sync_palettes(wait_frames)
+int sync_palettes(lua_State* L) {
+    int frames = luaL_optinteger(L, 2, 1);
+    (void)frames;
+    return 0;
+}
+
+// ctx.game:set_player_palette(selector)
+int set_player_palette(lua_State* L) {
+    int selector = luaL_checkinteger(L, 2);
+    (void)selector;
+    return 0;
+}
+
+// ctx.game:describe_decoration(id)
+int describe_decoration(lua_State* L) {
+    int id = luaL_checkinteger(L, 2);
+    (void)id;
+    return 0;
+}
+
+// ctx.game:set_daylight_saving(enabled)
+int set_daylight_saving(lua_State* L) {
+    int enabled = luaL_checkinteger(L, 2);
+    (void)enabled;
+    return 0;
+}
+
+// ctx.game:give_poke_mail(mail_id)
+int give_poke_mail(lua_State* L) {
+    int mail_id = luaL_checkinteger(L, 2);
+    (void)mail_id;
+    return 0;
+}
+
+// ctx.game:check_poke_mail(mail_id) -> result
+int check_poke_mail(lua_State* L) {
+    int mail_id = luaL_checkinteger(L, 2);
+    (void)mail_id;
+    lua_pushinteger(L, 0); // stub
+    return 1;
+}
+
+int check_warp(lua_State* L) { return 0; }
+int pocket_full_notify(lua_State* L) { return 0; }
+
+// ctx.game:show_balance_overlay(content)
+int show_balance_overlay(lua_State* L) {
+    int content = luaL_checkinteger(L, 2);
+    (void)content;
+    return 0;
+}
+
+// ctx.game:play_radio(channel)
+int play_radio(lua_State* L) {
+    int channel = luaL_checkinteger(L, 2);
+    (void)channel;
+    return 0;
+}
+
+// ctx.game:write_cmd_queue(addr)
+int write_cmd_queue(lua_State* L) {
+    int addr = luaL_checkinteger(L, 2);
+    (void)addr;
+    return 0;
+}
+
+// ctx.game:delete_cmd_queue(queue_type)
+int delete_cmd_queue(lua_State* L) {
+    int type = luaL_checkinteger(L, 2);
+    (void)type;
+    return 0;
+}
+
+// ctx.game:modify_warp(warp_id, map_id)
+int modify_warp(lua_State* L) {
+    int warp_id = luaL_checkinteger(L, 2);
+    int map_id  = luaL_checkinteger(L, 3);
+    (void)warp_id; (void)map_id;
+    return 0;
+}
+
+// ctx.game:read_state_var(id) -> value
+int read_state_var(lua_State* L) {
+    int id = luaL_checkinteger(L, 2);
+    (void)id;
+    lua_pushinteger(L, 0); // stub
+    return 1;
+}
+
+// ctx.game:write_state_var(id)
+int write_state_var(lua_State* L) {
+    int id = luaL_checkinteger(L, 2);
+    (void)id;
+    return 0;
+}
+
+// ctx.game:set_state_var(id, value)
+int set_state_var(lua_State* L) {
+    int id    = luaL_checkinteger(L, 2);
+    int value = luaL_checkinteger(L, 3);
+    (void)id; (void)value;
+    return 0;
+}
+
+} // namespace game_api
 } // namespace enginemon

@@ -144,6 +144,10 @@ struct StubServices {
     
     // Field API stub configuration
     StubFieldConfig field_config;
+
+    // Game API stub state
+    std::string last_behavior_name;
+    int current_scene = 0;
     
     // Reset all stub state
     void reset() {
@@ -350,6 +354,7 @@ private:
     void bind_time_api();
     void bind_util_api();
     void bind_field_api();
+    void bind_game_api();
     
     void resume_first(uint32_t coroutine_id);  // First resume with ctx argument
     void cleanup_coroutine(uint32_t coroutine_id);  // Release registry ref

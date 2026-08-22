@@ -16,6 +16,7 @@
 #include "crystal/script/crystal_command.hpp"
 #include "crystal/script/crystal_cfg.hpp"
 #include "crystal/script/native_registry.hpp"
+#include "crystal/script/semantic_linker.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <cstdint>
 #include <string>
@@ -160,6 +161,9 @@ struct LegalityInput {
     
     // Stage 4 output
     const enginemon::LoweringResult* lowering = nullptr;
+
+    // Stage 5 context: compiled game data for behavior_name validation
+    const CompiledGameData* game_data = nullptr;
 };
 
 class LegalityGate {

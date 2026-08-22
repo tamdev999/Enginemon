@@ -2,6 +2,7 @@
 // Stage 4: Block-local semantic legalization from Crystal CFG to SemanticScriptIR
 
 #include "crystal/script/semantic_legalizer.hpp"
+#include "crystal/script/behavior_table.hpp"
 #include "crystal/script/decoder.hpp"  // For text decoding
 #include "crystal/script/pokemail_registry.hpp"
 #include "crystal/script/text_registry.hpp"
@@ -2815,161 +2816,22 @@ RuleResult rule_special(LoweringContext& ctx) {
         // GAME-SPECIFIC BEHAVIORS — Sem_GameSpecificEvent
         // =================================================================
         // All remaining unhandled Crystal Specials are lowered to
-        // Sem_GameSpecificEvent with the behavior name from
-        // special_pointers.asm and the correct wScriptVar write flag.
-        //
-        // writes_script_var=true → invalidate block-local ScriptVar context
-        // to prevent stale constant propagation into subsequent ops.
+        // Sem_GameSpecificEvent using the canonical BEHAVIOR_TABLE from
+        // crystal/script/behavior_table.hpp.
         //
         // Source authority: pokecrystal/data/events/special_pointers.asm
+        // Table is shared with CompiledGameData::behavior_names (built at
+        // compile time) and the Stage 5 legality gate (validates names).
         // =================================================================
         {
-            struct SpecialEntry { uint16_t id; const char* name; bool writes_var; };
-            // All Crystal Specials not handled by explicit semantic rules above.
-            static const SpecialEntry entries[] = {
-                // Link/Trade/Communications
-                {  1, "SetBitsForLinkTradeRequest",       false },
-                {  2, "WaitForLinkedFriend",              false },
-                {  3, "CheckLinkTimeout_Receptionist",    true  },
-                {  4, "TryQuickSave",                     true  },
-                {  5, "CheckBothSelectedSameRoom",        true  },
-                {  6, "FailedLinkToPast",                 false },
-                {  7, "CloseLink",                        false },
-                {  8, "WaitForOtherPlayerToExit",         true  },
-                {  9, "SetBitsForBattleRequest",          false },
-                { 10, "SetBitsForTimeCapsuleRequest",     false },
-                { 11, "CheckTimeCapsuleCompatibility",    false },
-                { 12, "EnterTimeCapsule",                 false },
-                { 13, "TradeCenter",                      false },
-                { 14, "Colosseum",                        false },
-                { 15, "TimeCapsule",                      false },
-                { 16, "CableClubCheckWhichChris",         false },
-                { 17, "CheckMysteryGift",                 true  },
-                { 18, "GetMysteryGiftItem",               true  },
-                { 19, "UnlockMysteryGift",                false },
-                // Bug Contest
-                { 20, "BugContestJudging",                true  },
-                { 21, "CheckPartyFullAfterContest",       true  },
-                { 22, "ContestDropOffMons",               true  },
-                { 23, "ContestReturnMons",                false },
-                { 24, "GiveParkBalls",                    true  },
-                { 25, "CheckMagikarpLength",              true  },
-                { 26, "MagikarpHouseSign",                false },
-                // PC / Services
-                { 28, "PokemonCenterPC",                  false },
-                { 29, "PlayersHousePC",                   false },
-                // Day Care
-                { 30, "DayCareMan",                       false },
-                { 31, "DayCareLady",                      false },
-                { 32, "DayCareManOutside",                false },
-                { 33, "MoveDeletion",                     true  },
-                { 34, "BankOfMom",                        true  },
-                // Transport/Map
-                { 35, "MagnetTrain",                      false },
-                // Name/Story events
-                { 36, "NameRival",                        false },
-                { 37, "SetDayOfWeek",                     false },
-                { 38, "OverworldTownMap",                 false },
-                { 39, "UnownPrinter",                     true  },
-                // Game Corner
-                { 41, "UnownPuzzle",                      true  },
-                { 42, "SlotMachine",                      false },
-                { 43, "CardFlip",                         false },
-                // Battle Tower / Fade
-                { 47, "BattleTowerFade",                  false },
-                // Sprites (renderer - no semantic gameplay effect)
-                { 55, "UpdateSprites",                    false },
-                // Pokemon Center heal animation
-                { 62, "HealMachineAnim",                  false },
-                // Day Care
-                { 69, "DayCareMon1",                      true  },
-                { 70, "DayCareMon2",                      true  },
-                { 71, "SelectRandomBugContestContestants",false },
-                // Decorations / Map
-                { 73, "ToggleMaptileDecorations",         false },
-                { 74, "ToggleDecorationsVisibility",      false },
-                // Shuckle events
-                { 75, "GiveShuckle",                      false },
-                { 76, "ReturnShuckie",                    false },
-                { 77, "BillsGrandfather",                 false },
-                // Lucky Number / Apricorn
-                { 82, "CheckForLuckyNumberWinners",       true  },
-                { 83, "CheckLuckyNumberShowFlag",         true  },
-                { 84, "ResetLuckyNumberShowFlag",         false },
-                { 85, "PrintTodaysLuckyNumber",           false },
-                { 86, "SelectApricornForKurt",            true  },
-                { 87, "NameRater",                        false },
-                // Link record
-                { 88, "DisplayLinkRecord",                false },
-                // Party happiness/checks
-                { 89, "GetFirstPokemonHappiness",         true  },
-                { 90, "CheckFirstMonIsEgg",               true  },
-                { 93, "RandomPhoneMon",                   false },
-                // Snorlax / Grooming
-                { 96, "SnorlaxAwake",                     false },
-                { 97, "OlderHaircutBrother",              true  },
-                { 98, "YoungerHaircutBrother",            true  },
-                { 99, "DaisysGrooming",                   true  },
-                // Cries / PC
-                {100, "PlayCurMonCry",                    false },
-                {101, "ProfOaksPCBoot",                   false },
-                {103, "TrainerHouse",                     true  },
-                {104, "PhotoStudio",                      false },
-                {105, "InitRoamMons",                     false },
-                // Diploma
-                {107, "Diploma",                          false },
-                {108, "PrintDiploma",                     false },
-                // Battle Tower
-                {116, "BattleTowerRoomMenu",              true  },
-                {119, "BattleTowerBattle",                true  },
-                {122, "LoadOpponentTrainerAndPokemon",    false },
-                {124, "CheckForBattleTowerRules",         true  },
-                {125, "GiveOddEgg",                       true  },
-                {126, "Reset",                            false },
-                // Mobile / Function stubs
-                {127, "Function1011f1",                   false },
-                {128, "Function101220",                   false },
-                {129, "Function101225",                   false },
-                {130, "Function101231",                   false },
-                // Move Tutor / Chambers
-                {131, "MoveTutor",                        true  },
-                {132, "OmanyteChamber",                   false },
-                // Battle Tower action (highest occurrence count: 29)
-                {134, "BattleTowerAction",                true  },
-                // Unown display
-                {135, "DisplayUnownWords",                false },
-                // Challenge explanation
-                {136, "Menu_ChallengeExplanationCancel",  true  },
-                // Mobile errors
-                {139, "BattleTowerMobileError",           true  },
-                {140, "AskMobileOrCable",                 true  },
-                // Chambers
-                {141, "HoOhChamber",                      false },
-                {143, "CelebiShrineEvent",                false },
-                {144, "CheckCaughtCelebi",                true  },
-                // PokeSeer / Buena's
-                {145, "PokeSeer",                         false },
-                {146, "BuenasPassword",                   true  },
-                {147, "BuenaPrize",                       true  },
-                {148, "GiveDratini",                      false },
-                // Beasts / Party checks
-                {150, "BeastsCheck",                      true  },
-                {151, "MonCheck",                         true  },
-                // Mobile
-                {154, "Mobile_SelectThreeMons",           true  },
-                {155, "Function1037eb",                   true  },
-                {156, "Function10383c",                   true  },
-                {159, "Function1037c2",                   false },
-                {161, "Function103780",                   false },
-                {162, "Function10387b",                   false },
-            };
-            for (const auto& e : entries) {
-                if (p->special_id == e.id) {
+            for (std::size_t i = 0; i < BEHAVIOR_TABLE_SIZE; ++i) {
+                const auto& e = BEHAVIOR_TABLE[i];
+                if (p->special_id == e.special_id) {
                     enginemon::Sem_GameSpecificEvent op;
-                    op.behavior_name = e.name;
-                    op.writes_script_var = e.writes_var;
+                    op.behavior_name = e.behavior_name;
+                    op.writes_script_var = e.writes_script_var;
                     r.instructions.push_back(make_inst(std::move(op)));
-                    if (e.writes_var) {
+                    if (e.writes_script_var) {
                         ctx.block_ctx.invalidate();
                     }
                     return r;
@@ -3409,8 +3271,8 @@ RuleResult rule_string_format(LoweringContext& ctx) {
             }
         }
         
-        auto op = enginemon::Sem_PrepareTextArg::string_from_pointer(
-            flat_addr, resolved_text, p->strbuf);
+        auto op = enginemon::Sem_PrepareTextArg::string_from_resolved(
+            resolved_text, p->strbuf);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }

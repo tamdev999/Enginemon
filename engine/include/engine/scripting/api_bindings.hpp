@@ -279,6 +279,19 @@ namespace ui_api {
     
     // ctx.ui:show_map_name()
     int show_map_name(lua_State* L);
+
+    // ctx.ui:inline_prompt_button()
+    // Non-terminating in-stream input gate (TX_PROMPT_BUTTON semantics).
+    // Shows blinking cursor, waits for A/B, then text continues.
+    // DISTINCT from prompt() which terminates the text stream.
+    // Yields "wait_button" — caller must resume to continue.
+    int inline_prompt_button(lua_State* L);
+
+    // ctx.ui:pause_text(frames)
+    // Timed pause between text elements (TX_PAUSE semantics).
+    // Waits `frames` real-time frames, skippable if button held.
+    // frames = 30 for all vanilla Crystal uses (~0.5s at 60fps).
+    int pause_text(lua_State* L);
     
     // ctx.ui:fade_out(speed?)
     // Yields until fade complete
@@ -418,6 +431,53 @@ namespace field_api {
     int load_pending_encounter(lua_State* L);
     int play_actor_cry(lua_State* L);
     int clear_context(lua_State* L);
+}
+
+// ============================================================================
+// Game API - ctx.game
+// Miscellaneous game operations: behaviors, scenes, state, std scripts, etc.
+// ============================================================================
+namespace game_api {
+    int behavior(lua_State* L);           // Sem_GameSpecificEvent dispatch
+    int set_scene(lua_State* L);          // Sem_SetScene
+    int check_scene(lua_State* L);        // Sem_CheckScene → sets result
+    int set_map_scene(lua_State* L);      // Sem_SetMapScene(map, scene)
+    int check_map_scene(lua_State* L);    // Sem_CheckMapScene(map) → sets result
+    int check_link_mode(lua_State* L);    // Sem_CheckLinkMode → sets result
+    int check_save(lua_State* L);         // Sem_CheckSave → sets result
+    int hall_of_fame(lua_State* L);       // Sem_HallOfFame
+    int credits(lua_State* L);            // Sem_Credits
+    int register_dex_entry(lua_State* L); // Sem_RegisterNewDexEntry(species)
+    int find_party_mon(lua_State* L);     // Sem_FindPartyMon(species, require_ot) → result
+    int check_pokerus(lua_State* L);      // Sem_CheckPartyPokerus → result
+    int call_std(lua_State* L);           // Sem_CallStd(std_id, name)
+    int jump_std(lua_State* L);           // Sem_JumpStd(std_id, name)
+    int wild_on(lua_State* L);            // Sem_WildOn
+    int wild_off(lua_State* L);           // Sem_WildOff
+    int reload_map(lua_State* L);         // Sem_ReloadMap
+    int refresh_map(lua_State* L);        // Sem_RefreshMap
+    int reanchor_map(lua_State* L);       // Sem_ReanchorMap
+    int new_load_map(lua_State* L);       // Sem_NewLoadMap(method_byte)
+    int change_block(lua_State* L);       // Sem_ChangeBlock(x, y, block)
+    int set_blackout_point(lua_State* L); // Sem_SetBlackoutPoint(map)
+    int catch_tutorial(lua_State* L);     // Sem_CatchTutorial(type)
+    int deactivate_facing(lua_State* L);  // Sem_DeactivateFacing(frames)
+    int sync_palettes(lua_State* L);      // Sem_SyncPalettes
+    int set_player_palette(lua_State* L); // Sem_SetPlayerPalette(selector)
+    int describe_decoration(lua_State* L);// Sem_DescribeDecoration(id)
+    int set_daylight_saving(lua_State* L);// Sem_SetDaylightSaving(enabled)
+    int give_poke_mail(lua_State* L);     // Sem_GivePokeMail(mail_id)
+    int check_poke_mail(lua_State* L);    // Sem_CheckPokeMail(mail_id) → result
+    int check_warp(lua_State* L);         // Sem_CheckWarp
+    int pocket_full_notify(lua_State* L); // Sem_PocketFullNotify
+    int show_balance_overlay(lua_State* L);// Sem_ShowBalanceOverlay(content)
+    int play_radio(lua_State* L);         // Sem_PlayRadio(channel)
+    int write_cmd_queue(lua_State* L);    // Sem_WriteCmdQueue(addr)
+    int delete_cmd_queue(lua_State* L);   // Sem_DeleteCmdQueue(type)
+    int modify_warp(lua_State* L);        // Sem_ModifyWarp(warp_id, map)
+    int read_state_var(lua_State* L);     // Sem_ReadStateVar(id) → result
+    int write_state_var(lua_State* L);    // Sem_WriteStateVar(id)
+    int set_state_var(lua_State* L);      // Sem_SetStateVar(id, value)
 }
 
 } // namespace enginemon

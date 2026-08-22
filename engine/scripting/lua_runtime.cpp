@@ -71,6 +71,7 @@ void LuaRuntime::bind_api() {
     bind_time_api();
     bind_util_api();
     bind_field_api();
+    bind_game_api();
     
     // Store ctx as global
     lua_setglobal(L_, "ctx");
@@ -115,7 +116,15 @@ void LuaRuntime::bind_ui_api() {
     
     lua_pushcfunction(L_, ui_api::show_map_name);
     lua_setfield(L_, -2, "show_map_name");
-    
+
+    // In-stream input gate (TX_PROMPT_BUTTON — non-terminating, text continues after)
+    lua_pushcfunction(L_, ui_api::inline_prompt_button);
+    lua_setfield(L_, -2, "inline_prompt_button");
+
+    // Timed pause in text stream (TX_PAUSE — frames delay, button-skippable)
+    lua_pushcfunction(L_, ui_api::pause_text);
+    lua_setfield(L_, -2, "pause_text");
+
     lua_setfield(L_, -2, "ui");  // Set as ctx.ui
 }
 
@@ -415,6 +424,143 @@ void LuaRuntime::bind_field_api() {
     lua_setfield(L_, -2, "ROCK_SMASH_UNAVAILABLE");
     
     lua_setfield(L_, -2, "field");  // Set as ctx.field
+}
+
+void LuaRuntime::bind_game_api() {
+    lua_newtable(L_);  // ctx.game table
+
+    lua_pushlightuserdata(L_, this);
+    lua_setfield(L_, -2, "_runtime");
+
+    // Game behavior dispatch (Sem_GameSpecificEvent)
+    lua_pushcfunction(L_, game_api::behavior);
+    lua_setfield(L_, -2, "behavior");
+
+    // Scene management
+    lua_pushcfunction(L_, game_api::set_scene);
+    lua_setfield(L_, -2, "set_scene");
+
+    lua_pushcfunction(L_, game_api::check_scene);
+    lua_setfield(L_, -2, "check_scene");
+
+    lua_pushcfunction(L_, game_api::set_map_scene);
+    lua_setfield(L_, -2, "set_map_scene");
+
+    lua_pushcfunction(L_, game_api::check_map_scene);
+    lua_setfield(L_, -2, "check_map_scene");
+
+    // State queries
+    lua_pushcfunction(L_, game_api::check_link_mode);
+    lua_setfield(L_, -2, "check_link_mode");
+
+    lua_pushcfunction(L_, game_api::check_save);
+    lua_setfield(L_, -2, "check_save");
+
+    // End-game sequences
+    lua_pushcfunction(L_, game_api::hall_of_fame);
+    lua_setfield(L_, -2, "hall_of_fame");
+
+    lua_pushcfunction(L_, game_api::credits);
+    lua_setfield(L_, -2, "credits");
+
+    // Party/Dex
+    lua_pushcfunction(L_, game_api::register_dex_entry);
+    lua_setfield(L_, -2, "register_dex_entry");
+
+    lua_pushcfunction(L_, game_api::find_party_mon);
+    lua_setfield(L_, -2, "find_party_mon");
+
+    lua_pushcfunction(L_, game_api::check_pokerus);
+    lua_setfield(L_, -2, "check_pokerus");
+
+    // Standard scripts
+    lua_pushcfunction(L_, game_api::call_std);
+    lua_setfield(L_, -2, "call_std");
+
+    lua_pushcfunction(L_, game_api::jump_std);
+    lua_setfield(L_, -2, "jump_std");
+
+    // Wild encounters
+    lua_pushcfunction(L_, game_api::wild_on);
+    lua_setfield(L_, -2, "wild_on");
+
+    lua_pushcfunction(L_, game_api::wild_off);
+    lua_setfield(L_, -2, "wild_off");
+
+    // Misc map ops
+    lua_pushcfunction(L_, game_api::reload_map);
+    lua_setfield(L_, -2, "reload_map");
+
+    lua_pushcfunction(L_, game_api::refresh_map);
+    lua_setfield(L_, -2, "refresh_map");
+
+    lua_pushcfunction(L_, game_api::reanchor_map);
+    lua_setfield(L_, -2, "reanchor_map");
+
+    lua_pushcfunction(L_, game_api::new_load_map);
+    lua_setfield(L_, -2, "new_load_map");
+
+    lua_pushcfunction(L_, game_api::change_block);
+    lua_setfield(L_, -2, "change_block");
+
+    lua_pushcfunction(L_, game_api::set_blackout_point);
+    lua_setfield(L_, -2, "set_blackout_point");
+
+    lua_pushcfunction(L_, game_api::catch_tutorial);
+    lua_setfield(L_, -2, "catch_tutorial");
+
+    lua_pushcfunction(L_, game_api::deactivate_facing);
+    lua_setfield(L_, -2, "deactivate_facing");
+
+    lua_pushcfunction(L_, game_api::sync_palettes);
+    lua_setfield(L_, -2, "sync_palettes");
+
+    lua_pushcfunction(L_, game_api::set_player_palette);
+    lua_setfield(L_, -2, "set_player_palette");
+
+    lua_pushcfunction(L_, game_api::describe_decoration);
+    lua_setfield(L_, -2, "describe_decoration");
+
+    lua_pushcfunction(L_, game_api::set_daylight_saving);
+    lua_setfield(L_, -2, "set_daylight_saving");
+
+    lua_pushcfunction(L_, game_api::give_poke_mail);
+    lua_setfield(L_, -2, "give_poke_mail");
+
+    lua_pushcfunction(L_, game_api::check_poke_mail);
+    lua_setfield(L_, -2, "check_poke_mail");
+
+    lua_pushcfunction(L_, game_api::check_warp);
+    lua_setfield(L_, -2, "check_warp");
+
+    lua_pushcfunction(L_, game_api::pocket_full_notify);
+    lua_setfield(L_, -2, "pocket_full_notify");
+
+    lua_pushcfunction(L_, game_api::show_balance_overlay);
+    lua_setfield(L_, -2, "show_balance_overlay");
+
+    lua_pushcfunction(L_, game_api::play_radio);
+    lua_setfield(L_, -2, "play_radio");
+
+    lua_pushcfunction(L_, game_api::write_cmd_queue);
+    lua_setfield(L_, -2, "write_cmd_queue");
+
+    lua_pushcfunction(L_, game_api::delete_cmd_queue);
+    lua_setfield(L_, -2, "delete_cmd_queue");
+
+    lua_pushcfunction(L_, game_api::modify_warp);
+    lua_setfield(L_, -2, "modify_warp");
+
+    lua_pushcfunction(L_, game_api::read_state_var);
+    lua_setfield(L_, -2, "read_state_var");
+
+    lua_pushcfunction(L_, game_api::write_state_var);
+    lua_setfield(L_, -2, "write_state_var");
+
+    lua_pushcfunction(L_, game_api::set_state_var);
+    lua_setfield(L_, -2, "set_state_var");
+
+    lua_setfield(L_, -2, "game");  // Set as ctx.game
 }
 
 void LuaRuntime::load_script_file(const std::filesystem::path& path) {

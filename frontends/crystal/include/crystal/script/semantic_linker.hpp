@@ -328,6 +328,12 @@ struct CompiledGameData {
     
     // Text: exact compiled text IDs from Text registry (win/loss text, etc.)
     std::unordered_set<enginemon::TextId> text_ids;
+
+    // Behavior names: all valid Sem_GameSpecificEvent behavior_name values.
+    // Populated from the canonical special_pointers table in the legalizer.
+    // Stage 5 legality gate validates every Sem_GameSpecificEvent.behavior_name
+    // is present here. Unknown behavior names hard-fail.
+    std::unordered_set<std::string> behavior_names;
     
     // Helper to load StdScripts from table
     void load_std_scripts(const StdScriptsTable& table);

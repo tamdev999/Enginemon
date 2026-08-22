@@ -847,7 +847,9 @@ enum class NumberSource : uint8_t {
 
 struct Sem_PrepareTextArg {
     TextArgType arg_type;
-    uint8_t buffer_slot;        // Which text argument slot to populate (0-4)
+    uint8_t buffer_slot;        // Which text argument slot to populate (0-2 only)
+                                // Valid range: 0=wStringBuffer3, 1=wStringBuffer4, 2=wStringBuffer5
+                                // Source-proven: GetStringBuffer NUM_STRING_BUFFERS=3
     
     // Type-specific operands - only the relevant ones are used per arg_type
     uint16_t id = 0;            // ItemId, SpeciesId, LandmarkId, etc.
@@ -855,8 +857,7 @@ struct Sem_PrepareTextArg {
     uint8_t trainer_group = 0;  // Trainer group for trainer_name/trainer_class_name
     MoneyAccount account = MoneyAccount::Player;  // Money account: valid ONLY when number_source == Money
     NumberSource number_source = NumberSource::Money;  // How numeric value is obtained
-    uint32_t text_pointer = 0;  // ROM pointer for getstring (source provenance)
-    std::string str_value;      // Resolved string content (for getstring)
+    std::string str_value;      // Resolved string content (for getstring/landmark/getname)
     NameSourceType name_type = NameSourceType::Pokemon;  // For getname
     
     // Factory methods with complete operand preservation
@@ -923,14 +924,11 @@ struct Sem_PrepareTextArg {
         return p;
     }
     
-    // getstring: source text pointer preserved for provenance
-    // str_value contains resolved text content
-    static Sem_PrepareTextArg string_from_pointer(uint32_t rom_pointer, 
-                                                   const std::string& resolved, 
-                                                   uint8_t slot) {
+    // getstring: resolved text content stored in str_value
+    static Sem_PrepareTextArg string_from_resolved(const std::string& resolved, 
+                                                    uint8_t slot) {
         Sem_PrepareTextArg p; 
         p.arg_type = TextArgType::String; 
-        p.text_pointer = rom_pointer;
         p.str_value = resolved; 
         p.buffer_slot = slot; 
         return p;
@@ -976,24 +974,6 @@ struct Sem_PrepareTextArg {
         return p;
     }
     
-    // DEPRECATED: Old factories that lose operands - DO NOT USE
-    // Kept for temporary backward compatibility only — remove once all callers updated
-    static Sem_PrepareTextArg number(VarId /*var*/, uint8_t slot) {
-        // WARNING: This loses source identity — use money(), coins(), or number_from_var()
-        Sem_PrepareTextArg p; 
-        p.arg_type = TextArgType::Number;
-        p.number_source = NumberSource::ScriptVar;  // safest fallback
-        p.buffer_slot = slot; 
-        return p;
-    }
-    static Sem_PrepareTextArg string(const std::string& s, uint8_t slot) {
-        // WARNING: This loses source pointer — use string_from_pointer() instead
-        Sem_PrepareTextArg p; 
-        p.arg_type = TextArgType::String; 
-        p.str_value = s; 
-        p.buffer_slot = slot; 
-        return p;
-    }
 };
 
 // --- Inventory ---

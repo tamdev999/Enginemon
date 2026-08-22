@@ -1191,6 +1191,7 @@ end
 
 #include "engine/world/movement_manager.hpp"
 #include "engine/world/collision.hpp"
+#include "crystal/script/semantic_lua_emitter.hpp"
 
 TEST(async_movement_manager_basic) {
     // Test MovementManager directly without Lua
@@ -13561,6 +13562,7 @@ TEST(bank_utils_sdefer_lowering_matches_canonical_helper) {
 }
 
 // getstring lowering now uses cmd->span.rom_address — prove via canonical helper
+// The resolved text content is stored in str_value, not a raw ROM address.
 TEST(bank_utils_getstring_lowering_matches_canonical_helper) {
     using namespace crystal;
     using namespace enginemon;
@@ -13603,17 +13605,11 @@ TEST(bank_utils_getstring_lowering_matches_canonical_helper) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
     ASSERT_TRUE(pta != nullptr);
 
-    // Canonical helper produces the expected flat address
-    uint32_t expected_flat = crystal_local_ptr_to_flat(0x18080, 0x5100);
-    ASSERT_EQ(expected_flat, 0x19100u);
+    // No raw ROM address survives — str_value holds the resolved text
+    ASSERT_EQ(pta->arg_type, TextArgType::String);
+    ASSERT_EQ(pta->buffer_slot, 0u);
 
-    // Lowering result must store that flat address in text_pointer
-    ASSERT_EQ(pta->text_pointer, expected_flat);
-
-    // Prove asymmetry: raw ptr 0x5100 would be wrong
-    ASSERT_TRUE(pta->text_pointer != 0x5100);
-
-    std::cout << "  [getstring lowering == canonical helper result 0x19100 ✓]\n";
+    std::cout << "  [getstring lowering produces String arg with buffer_slot=0 ✓]\n";
 }
 
 //=============================================================================
@@ -13682,7 +13678,7 @@ TEST(semantic_fix_gettrainername_preserves_both_operands) {
               << ", id=" << (int)pta->id2 << " ✓]\n";
 }
 
-// Finding 3: getstring preserves text_pointer provenance
+// Finding 3: getstring buffer_slot and str_value are preserved (no raw ROM address)
 TEST(semantic_fix_getstring_preserves_text_pointer) {
     using namespace crystal;
     using namespace enginemon;
@@ -13699,7 +13695,7 @@ TEST(semantic_fix_getstring_preserves_text_pointer) {
     
     CrystalScriptIR ir;
     ir.name = "test_getstring";
-    ir.entry_address = 0x1c000;  // Bank 7, so flat = 7*0x4000 + 0x123 = 0x1c123
+    ir.entry_address = 0x1c000;
     ir.rom_start = 0;
     ir.rom_end = 4;
     ir.commands.push_back(cmd);
@@ -13726,13 +13722,12 @@ TEST(semantic_fix_getstring_preserves_text_pointer) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
     ASSERT_TRUE(pta != nullptr);
     
-    // CRITICAL: text_pointer must be resolved to flat address
-    // Bank 7 * 0x4000 + (0x4123 - 0x4000) = 0x1c000 + 0x123 = 0x1c123
-    ASSERT_EQ(pta->text_pointer, 0x1c123);
-    ASSERT_EQ(pta->buffer_slot, 1);
+    // No raw ROM address survives — str_value and buffer_slot are the semantic outputs
+    ASSERT_EQ(pta->buffer_slot, 1u);
     ASSERT_EQ(pta->arg_type, TextArgType::String);
+    // str_value is empty since no text_registry was provided — that's fine
     
-    std::cout << "  [getstring preserves text_pointer=0x" << std::hex << pta->text_pointer << std::dec << " ✓]\n";
+    std::cout << "  [getstring preserves buffer_slot=1, arg_type=String, no ROM address ✓]\n";
 }
 
 // Finding 3: getmoney preserves account operand
@@ -17714,6 +17709,354 @@ TEST(f7_save_invalid_direction_rejected) {
     std::cout << "  [F7: trailing bytes rejected; valid save accepted ✓]\n";
 }
 
+
+//=============================================================================
+// STAGE 7: SemanticLuaEmitter tests
+// Verify that legal SemanticScriptIR emits correct Lua targeting ctx.* APIs.
+//=============================================================================
+
+// Helper: build a minimal SemanticScriptIR with one block containing a single op.
+static enginemon::SemanticScriptIR make_one_op_ir(enginemon::SemanticOp op) {
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "test";
+    enginemon::SemanticBasicBlock block;
+    block.id = 0;
+    block.instructions.push_back({std::move(op)});
+    ir.blocks.push_back(std::move(block));
+    return ir;
+}
+
+TEST(stage7_emit_set_flag_contains_ctx_flags_set) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    FlagRef f;
+    f.ns = FlagNamespace::Event;
+    f.value = 42;
+    auto ir = make_one_op_ir(Sem_SetFlag{f});
+    std::string lua = emitter.emit(ir);
+
+    // Must contain ctx.flags:set(...)
+    ASSERT_TRUE(lua.find("ctx.flags:set(") != std::string::npos);
+    // Must not contain raw Crystal RAM addresses or opcodes
+    ASSERT_TRUE(lua.find("0xC") == std::string::npos); // no raw RAM address
+}
+
+TEST(stage7_emit_check_var_contains_ctx_flags_get_var) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_CheckVar cv;
+    cv.var = 7;
+    cv.op = "==";
+    cv.value = 3;
+    auto ir = make_one_op_ir(cv);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.flags:get_var(7)") != std::string::npos);
+    ASSERT_TRUE(lua.find("== 3") != std::string::npos);
+}
+
+TEST(stage7_emit_end_returns) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    auto ir = make_one_op_ir(Sem_End{});
+    std::string lua = emitter.emit(ir);
+    ASSERT_TRUE(lua.find("return") != std::string::npos);
+}
+
+TEST(stage7_emit_end_all_distinct_from_end) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    std::string lua_end    = emitter.emit(make_one_op_ir(Sem_End{}));
+    std::string lua_endall = emitter.emit(make_one_op_ir(Sem_EndAll{}));
+
+    // EndAll must call ctx.game:behavior("EndAll")
+    ASSERT_TRUE(lua_endall.find("ctx.game:behavior(\"EndAll\")") != std::string::npos);
+    // End must NOT contain that call
+    ASSERT_TRUE(lua_end.find("ctx.game:behavior(\"EndAll\")") == std::string::npos);
+}
+
+TEST(stage7_emit_show_text_contains_text_sequence_and_yield) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    SemanticTextSequence seq;
+    seq.elements.push_back(SemanticTextElement::make_text("Hello"));
+    seq.elements.push_back(SemanticTextElement::make_done());
+
+    Sem_ShowText st;
+    st.sequence = seq;
+    auto ir = make_one_op_ir(st);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.ui:text_sequence(") != std::string::npos);
+    ASSERT_TRUE(lua.find("coroutine.yield(\"wait_button\")") != std::string::npos);
+    ASSERT_TRUE(lua.find("Hello") != std::string::npos);
+}
+
+TEST(stage7_emit_text_with_inline_prompt_button) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    SemanticTextSequence seq;
+    seq.elements.push_back(SemanticTextElement::make_text("Press A"));
+    seq.elements.push_back(SemanticTextElement::make_inline_prompt_button());
+    seq.elements.push_back(SemanticTextElement::make_done());
+
+    Sem_ShowText st;
+    st.sequence = seq;
+    auto ir = make_one_op_ir(st);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("inline_prompt_button") != std::string::npos);
+}
+
+TEST(stage7_emit_text_with_pause_frames) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    SemanticTextSequence seq;
+    seq.elements.push_back(SemanticTextElement::make_text("Wait"));
+    seq.elements.push_back(SemanticTextElement::make_pause(30));
+    seq.elements.push_back(SemanticTextElement::make_done());
+
+    Sem_ShowText st;
+    st.sequence = seq;
+    auto ir = make_one_op_ir(st);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("{op=\"pause\", frames=30}") != std::string::npos);
+}
+
+TEST(stage7_emit_turn_object_contains_face_actor_with_direction) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_TurnObject to;
+    to.object_id = 3;
+    to.facing = enginemon::Direction::Right;
+    auto ir = make_one_op_ir(to);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.world:face_actor(3, \"right\")") != std::string::npos);
+}
+
+TEST(stage7_emit_apply_movement_contains_move_actor) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_ApplyMovement am;
+    am.target.type = MovementTargetType::Object;
+    am.target.object_id = 2;
+    MovementCommand mc;
+    mc.type = MovementType::Step;
+    mc.direction = enginemon::Direction::Left;
+    am.commands.push_back(mc);
+    mc.type = MovementType::StepEnd;
+    am.commands.push_back(mc);
+
+    auto ir = make_one_op_ir(am);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.world:move_actor(2,") != std::string::npos);
+    ASSERT_TRUE(lua.find("\"left\"") != std::string::npos);
+}
+
+TEST(stage7_emit_give_pokemon_contains_add_pokemon) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_GivePokemon gp;
+    gp.species = 25;   // Pikachu
+    gp.level   = 5;
+    gp.held_item = 0;
+    auto ir = make_one_op_ir(gp);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.party:add_pokemon({") != std::string::npos);
+    ASSERT_TRUE(lua.find("species=25") != std::string::npos);
+    ASSERT_TRUE(lua.find("level=5") != std::string::npos);
+}
+
+TEST(stage7_emit_warp_contains_warp_and_yield) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_Warp w;
+    w.map = 7;
+    w.x   = 3;
+    w.y   = 8;
+    auto ir = make_one_op_ir(w);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.world:warp(7, 3, 8)") != std::string::npos);
+    ASSERT_TRUE(lua.find("coroutine.yield(\"warp\")") != std::string::npos);
+}
+
+TEST(stage7_emit_intra_body_call_goto) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    // Two-block IR: block 0 calls into block 1; block 1 returns
+    SemanticScriptIR ir;
+    ir.script_id = "test_call";
+
+    SemanticBasicBlock b0;
+    b0.id = 0;
+    Sem_Call call_op;
+    call_op.target = SemanticLabelRef{1, "sub"};
+    b0.instructions.push_back({call_op});
+    ir.blocks.push_back(b0);
+
+    SemanticBasicBlock b1;
+    b1.id = 1;
+    b1.instructions.push_back({Sem_Return{}});
+    ir.blocks.push_back(b1);
+
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("goto block_1") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    ASSERT_TRUE(lua.find("return") != std::string::npos);
+}
+
+TEST(stage7_emit_game_specific_event_behavior_name) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_GameSpecificEvent gse;
+    gse.behavior_name = "GiveTownMap";
+    auto ir = make_one_op_ir(gse);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.game:behavior(\"GiveTownMap\")") != std::string::npos);
+    // Must not expose any Crystal ID/index
+    ASSERT_TRUE(lua.find("special_id") == std::string::npos);
+}
+
+TEST(stage7_emit_call_std_contains_call_std_name) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_CallStd cs;
+    cs.std_id = 3;
+    cs.name   = "FacePlayer";
+    auto ir = make_one_op_ir(cs);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.game:call_std(3, \"FacePlayer\")") != std::string::npos);
+}
+
+TEST(stage7_emit_jump_std_contains_return) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    Sem_JumpStd js;
+    js.std_id = 5;
+    js.name   = "SaveGame";
+    auto ir = make_one_op_ir(js);
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("ctx.game:jump_std(5, \"SaveGame\")") != std::string::npos);
+    // JumpStd must also emit a return (tail-call semantics)
+    ASSERT_TRUE(lua.find("return") != std::string::npos);
+}
+
+TEST(stage7_unimplemented_op_throws) {
+    using namespace enginemon;
+    crystal::SemanticLuaEmitter emitter;
+
+    // Sem_Special is explicitly illegal — emitter must throw, not silently emit
+    Sem_Special sp;
+    sp.special_id = 99;
+    auto ir = make_one_op_ir(sp);
+
+    bool threw = false;
+    try {
+        emitter.emit(ir);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+TEST(stage7_emitted_lua_executes_in_runtime_flag) {
+    // End-to-end: emit Lua for a flag-set script, load it into LuaRuntime,
+    // run it, verify the flag was set via ctx.flags:set().
+    using namespace enginemon;
+
+    crystal::SemanticLuaEmitter emitter;
+
+    // Build IR: setflag(Event:100); end
+    SemanticScriptIR ir;
+    ir.script_id = "stage7_flag_test";
+    SemanticBasicBlock block;
+    block.id = 0;
+
+    FlagRef f;
+    f.ns = FlagNamespace::Event;
+    f.value = 100;
+    block.instructions.push_back({Sem_SetFlag{f}});
+    block.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(block);
+
+    std::string lua = emitter.emit(ir);
+    // Emitter produces: script = {} / function script.main(ctx) ... end / return script
+    LuaRuntime runtime;
+    runtime.execute_string(lua, "stage7_flag_lua");
+    uint32_t co_id = runtime.start_script("script");
+
+    ScriptState state = runtime.get_state(co_id);
+    for (int i = 0; i < 5 && state != ScriptState::Finished; ++i) {
+        runtime.update(1.0f / 60.0f);
+        state = runtime.get_state(co_id);
+    }
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Finished));
+
+    // Encoded flag id: (Event ns=0 << 16) | 100 = 100
+    ASSERT_TRUE(flag_api::get_test_flag(&runtime, 100));
+}
+
+TEST(stage7_emitted_lua_executes_in_runtime_var) {
+    // End-to-end: emit Lua for a setvar script, run it, verify var was set.
+    using namespace enginemon;
+
+    crystal::SemanticLuaEmitter emitter;
+
+    SemanticScriptIR ir;
+    ir.script_id = "stage7_var_test";
+    SemanticBasicBlock block;
+    block.id = 0;
+
+    Sem_SetVar sv;
+    sv.var = 5;
+    sv.source.type = VarValueSourceType::Literal;
+    sv.source.value = 42;
+    block.instructions.push_back({sv});
+    block.instructions.push_back({Sem_End{}});
+    ir.blocks.push_back(block);
+
+    std::string lua = emitter.emit(ir);
+
+    LuaRuntime runtime;
+    runtime.execute_string(lua, "stage7_var_lua");
+    uint32_t co_id = runtime.start_script("script");
+
+    ScriptState state = runtime.get_state(co_id);
+    for (int i = 0; i < 5 && state != ScriptState::Finished; ++i) {
+        runtime.update(1.0f / 60.0f);
+        state = runtime.get_state(co_id);
+    }
+    ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Finished));
+
+    auto it = runtime.get_stub_services().vars.find(5);
+    ASSERT_TRUE(it != runtime.get_stub_services().vars.end());
+    ASSERT_EQ(it->second, 42);
+}
+
 //=============================================================================
 // MAIN
 //=============================================================================
@@ -18339,6 +18682,26 @@ int main(int argc, char* argv[]) {
     RUN_TEST(native_text_from_runtime_no_silent_blank_fallthrough);
     RUN_TEST(f6_canonical_rng_not_reset_on_map_transition);
     RUN_TEST(f7_save_invalid_direction_rejected);
+
+    // Stage 7: SemanticLuaEmitter tests (August 2026)
+    RUN_TEST(stage7_emit_set_flag_contains_ctx_flags_set);
+    RUN_TEST(stage7_emit_check_var_contains_ctx_flags_get_var);
+    RUN_TEST(stage7_emit_end_returns);
+    RUN_TEST(stage7_emit_end_all_distinct_from_end);
+    RUN_TEST(stage7_emit_show_text_contains_text_sequence_and_yield);
+    RUN_TEST(stage7_emit_text_with_inline_prompt_button);
+    RUN_TEST(stage7_emit_text_with_pause_frames);
+    RUN_TEST(stage7_emit_turn_object_contains_face_actor_with_direction);
+    RUN_TEST(stage7_emit_apply_movement_contains_move_actor);
+    RUN_TEST(stage7_emit_give_pokemon_contains_add_pokemon);
+    RUN_TEST(stage7_emit_warp_contains_warp_and_yield);
+    RUN_TEST(stage7_emit_intra_body_call_goto);
+    RUN_TEST(stage7_emit_game_specific_event_behavior_name);
+    RUN_TEST(stage7_emit_call_std_contains_call_std_name);
+    RUN_TEST(stage7_emit_jump_std_contains_return);
+    RUN_TEST(stage7_unimplemented_op_throws);
+    RUN_TEST(stage7_emitted_lua_executes_in_runtime_flag);
+    RUN_TEST(stage7_emitted_lua_executes_in_runtime_var);
 
     // Summary
     std::cout << "\n=== Results ===\n";

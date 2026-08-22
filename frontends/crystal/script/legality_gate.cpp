@@ -537,6 +537,49 @@ std::vector<LegalityDiagnostic> LegalityGate::check_stage5_ir(const LegalityInpu
                 }
                 
                 // =================================================================
+                // Sem_PrepareTextArg: buffer_slot must be in valid range 0-2
+                // =================================================================
+                // Source: GetStringBuffer NUM_STRING_BUFFERS = 3
+                // strbuf=0 → wStringBuffer3, strbuf=1 → wStringBuffer4, strbuf=2 → wStringBuffer5
+                // No vanilla script command produces strbuf > 2 via GetStringBuffer.
+                if constexpr (std::is_same_v<T, enginemon::Sem_PrepareTextArg>) {
+                    if (op.buffer_slot > 2) {
+                        auto d = make_diagnostic(
+                            LegalityFailureKind::InvalidSemanticReference,
+                            script_id, "Stage5",
+                            "Sem_PrepareTextArg{buffer_slot=" + std::to_string(op.buffer_slot) + "}",
+                            "buffer_slot exceeds valid range 0-2 (GetStringBuffer wStringBuffer3/4/5 only)");
+                        diagnostics.push_back(std::move(d));
+                    }
+                }
+
+                // =================================================================
+                // Sem_GameSpecificEvent: behavior_name must be non-empty
+                // and present in the compiled behavior registry
+                // =================================================================
+                // Stage 4 lowers Crystal Specials to named GameSpecificEvent ops
+                // using BEHAVIOR_TABLE. Stage 5 validates that the name survived
+                // correctly and is in the compiled game data registry.
+                if constexpr (std::is_same_v<T, enginemon::Sem_GameSpecificEvent>) {
+                    if (op.behavior_name.empty()) {
+                        auto d = make_diagnostic(
+                            LegalityFailureKind::InvalidSemanticReference,
+                            script_id, "Stage5",
+                            "Sem_GameSpecificEvent{empty behavior_name}",
+                            "Sem_GameSpecificEvent must have a non-empty behavior_name");
+                        diagnostics.push_back(std::move(d));
+                    } else if (input.game_data &&
+                               !input.game_data->behavior_names.contains(op.behavior_name)) {
+                        auto d = make_diagnostic(
+                            LegalityFailureKind::InvalidSemanticReference,
+                            script_id, "Stage5",
+                            "Sem_GameSpecificEvent{behavior_name=" + op.behavior_name + "}",
+                            "behavior_name not in compiled behavior registry (BEHAVIOR_TABLE): " + op.behavior_name);
+                        diagnostics.push_back(std::move(d));
+                    }
+                }
+
+                // =================================================================
                 // Sem_Special: raw Crystal Special ID — never legal in package
                 // =================================================================
                 // Sem_Special must never survive legality. It carries a raw

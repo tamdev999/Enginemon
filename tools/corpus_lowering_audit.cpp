@@ -6,9 +6,11 @@
 #include "crystal/script/typed_decoder.hpp"
 #include "crystal/script/crystal_cfg.hpp"
 #include "crystal/script/semantic_legalizer.hpp"
+#include "crystal/script/behavior_table.hpp"
 #include "crystal/script/legality_gate.hpp"
 #include "crystal/script/native_registry.hpp"
 #include "crystal/script/elevator_registry.hpp"
+#include "crystal/script/semantic_linker.hpp"
 #include "crystal/script/text_registry.hpp"
 #include "crystal/script/decoder.hpp"
 #include "crystal/extract/map_extractor.hpp"
@@ -268,6 +270,12 @@ int main(int argc, char* argv[]) {
         [&script_decoder](uint32_t addr) { return script_decoder.decode_text_sequence(addr); });
     legalizer.set_text_registry(&text_registry);
     
+    // Build CompiledGameData with behavior_names for Sem_GameSpecificEvent validation
+    CompiledGameData audit_game_data;
+    for (std::size_t i = 0; i < BEHAVIOR_TABLE_SIZE; ++i) {
+        audit_game_data.behavior_names.insert(BEHAVIOR_TABLE[i].behavior_name);
+    }
+    
     LegalityGate legality_gate;
     
     // Discover corpus
@@ -354,6 +362,7 @@ int main(int argc, char* argv[]) {
         input.native_registry = &native_registry;
         input.ram_registry = &ram_registry;
         input.lowering = &lowering;
+        input.game_data = &audit_game_data;
         
         LegalityResult legality = legality_gate.validate(input);
         if (!legality.is_legal) {
