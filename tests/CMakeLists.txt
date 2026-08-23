@@ -22,7 +22,9 @@ if(ENGINEMON_ENABLE_ENGINE)
     )
     target_include_directories(runtime_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     if(MSVC)
-        target_compile_options(runtime_test PRIVATE /bigobj /Zm1000)
+        # /Od disables optimizations — reduces code-gen heap usage on this large file
+        # containing many std::variant<> instantiations.
+        target_compile_options(runtime_test PRIVATE /bigobj /Zm2000 /Od)
     endif()
     # Not added to ctest - requires ROM path argument
 
@@ -38,6 +40,21 @@ if(ENGINEMON_ENABLE_ENGINE)
     target_include_directories(sprite_money_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     if(MSVC)
         target_compile_options(sprite_money_test PRIVATE /bigobj)
+    endif()
+
+    # Stage 7 SemanticLuaEmitter tests + sprite/money emitter tests.
+    # Separated to avoid MSVC heap OOM on the large SemanticOp variant.
+    # Does NOT require a ROM path argument — runs standalone.
+    add_executable(emitter_test
+        scripting/emitter_test.cpp
+    )
+    target_link_libraries(emitter_test PRIVATE
+        enginemon_crystal
+        enginemon_engine
+    )
+    target_include_directories(emitter_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    if(MSVC)
+        target_compile_options(emitter_test PRIVATE /bigobj /Zm500)
     endif()
 endif()
 

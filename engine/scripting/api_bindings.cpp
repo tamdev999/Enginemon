@@ -645,6 +645,34 @@ int set_variable_sprite(lua_State* L) {
     return 0;
 }
 
+// ctx.world:set_daycare_species(slot, species_id)
+// Sets which Pokémon species occupies a Day Care slot.
+// slot: 1 or 2 (matching "daycare:1" / "daycare:2" sprite namespaces)
+// species_id: 1-251, or 0 to clear the slot
+// Stores in GameState::daycare_slot[slot-1].
+int set_daycare_species(lua_State* L) {
+    int slot       = static_cast<int>(luaL_checkinteger(L, 2));
+    int species_id = static_cast<int>(luaL_checkinteger(L, 3));
+    LuaRuntime* runtime = get_runtime(L);
+
+    if (slot < 1 || slot > 2) {
+        return luaL_error(L, "set_daycare_species: slot must be 1 or 2, got %d", slot);
+    }
+    if (species_id < 0 || species_id > 251) {
+        return luaL_error(L,
+            "set_daycare_species: species_id must be 0-251, got %d", species_id);
+    }
+
+    if (GameState* gs = runtime->get_game_state()) {
+        gs->daycare_slot[slot - 1] = static_cast<SpeciesId>(species_id);
+    } else {
+        auto& stubs = runtime->get_stub_services();
+        // Store for test inspection using reserved stub vars
+        stubs.vars[slot == 1 ? -10 : -11] = species_id;
+    }
+    return 0;
+}
+
 } // namespace world_api
 
 // =============================================================================

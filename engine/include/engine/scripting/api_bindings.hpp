@@ -93,6 +93,13 @@ namespace world_api {
     // No Crystal numeric index mapping in the engine layer.
     // Source: Crystal variablesprite opcode 0x6D + wVariableSprites semantic.
     int set_variable_sprite(lua_State* L);
+
+    // ctx.world:set_daycare_species(slot, species_id)
+    // Sets the species occupying a Day Care slot (1 or 2).
+    // species_id: 1-251 (valid Crystal species), or 0 to clear the slot.
+    // Stores in GameState::daycare_slot[slot-1].
+    // Source: Crystal wBreedMon1Species / wBreedMon2Species semantics.
+    int set_daycare_species(lua_State* L);
     
     // Test helpers - operate on specific runtime's stub state
     void reset_world_state(LuaRuntime* runtime);

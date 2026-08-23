@@ -219,10 +219,53 @@ inline std::string crystal_sprite_byte_to_id(uint8_t byte) {
     }
 
     // Namespace 1: Pokémon icon sprites (0x80–0xA2)
-    // Source: SpriteMons table; index = byte - SPRITE_POKEMON (0x80)
+    // Source: SpriteMons table → MonMenuIcons → ICON_* type
+    // SpriteMons[byte - 0x80] gives a species; MonMenuIcons[species-1] gives the icon type.
+    // Both tables are baked here from pokecrystal source so no ROM access is needed at
+    // extraction time. The result is the stable icon type name (e.g., "pikachu").
     if (byte >= CRYSTAL_SPRITE_POKEMON_MIN && byte <= CRYSTAL_SPRITE_POKEMON_MAX) {
-        uint8_t icon_index = byte - CRYSTAL_SPRITE_POKEMON_MIN;
-        return std::string(SPRITE_TAG_POKEMON_ICON) + std::to_string(icon_index);
+        // SpriteMons table (0x80-0xA2, 35 entries):
+        // Source: pokecrystal/data/sprites/sprite_mons.asm + data/pokemon/menu_icons.asm
+        // Direct mapping: sprite byte → icon type name (combining both lookups).
+        static const char* SPRITEMONS_ICON_NAMES[35] = {
+            "unown",        // 0x80 SPRITE_UNOWN   → UNOWN(201) → ICON_UNOWN
+            "geodude",      // 0x81 SPRITE_GEODUDE  → GEODUDE(74) → ICON_GEODUDE
+            "fox",          // 0x82 SPRITE_GROWLITHE → GROWLITHE(58) → ICON_FOX
+            "caterpillar",  // 0x83 SPRITE_WEEDLE   → WEEDLE(13) → ICON_CATERPILLAR
+            "shell",        // 0x84 SPRITE_SHELLDER → SHELLDER(90) → ICON_SHELL
+            "oddish",       // 0x85 SPRITE_ODDISH   → ODDISH(43) → ICON_ODDISH
+            "ghost",        // 0x86 SPRITE_GENGAR   → GENGAR(94) → ICON_GHOST
+            "bat",          // 0x87 SPRITE_ZUBAT    → ZUBAT(41) → ICON_BAT
+            "fish",         // 0x88 SPRITE_MAGIKARP → MAGIKARP(129) → ICON_FISH
+            "squirtle",     // 0x89 SPRITE_SQUIRTLE → SQUIRTLE(7) → ICON_SQUIRTLE
+            "clefairy",     // 0x8A SPRITE_TOGEPI   → TOGEPI(175) → ICON_CLEFAIRY
+            "moth",         // 0x8B SPRITE_BUTTERFREE → BUTTERFREE(12) → ICON_MOTH
+            "diglett",      // 0x8C SPRITE_DIGLETT  → DIGLETT(50) → ICON_DIGLETT
+            "poliwag",      // 0x8D SPRITE_POLIWAG  → POLIWAG(60) → ICON_POLIWAG
+            "pikachu",      // 0x8E SPRITE_PIKACHU  → PIKACHU(25) → ICON_PIKACHU
+            "clefairy",     // 0x8F SPRITE_CLEFAIRY → CLEFAIRY(35) → ICON_CLEFAIRY
+            "charmander",   // 0x90 SPRITE_CHARMANDER → CHARMANDER(4) → ICON_CHARMANDER
+            "humanshape",   // 0x91 SPRITE_JYNX     → JYNX(124) → ICON_HUMANSHAPE
+            "staryu",       // 0x92 SPRITE_STARMIE  → STARMIE(121) → ICON_STARYU
+            "bulbasaur",    // 0x93 SPRITE_BULBASAUR → BULBASAUR(1) → ICON_BULBASAUR
+            "jigglypuff",   // 0x94 SPRITE_JIGGLYPUFF → JIGGLYPUFF(39) → ICON_JIGGLYPUFF
+            "blob",         // 0x95 SPRITE_GRIMER   → GRIMER(88) → ICON_BLOB
+            "serpent",      // 0x96 SPRITE_EKANS    → EKANS(23) → ICON_SERPENT
+            "bug",          // 0x97 SPRITE_PARAS    → PARAS(46) → ICON_BUG
+            "jellyfish",    // 0x98 SPRITE_TENTACOOL → TENTACOOL(72) → ICON_JELLYFISH
+            "equine",       // 0x99 SPRITE_TAUROS   → TAUROS(128) → ICON_EQUINE
+            "fighter",      // 0x9A SPRITE_MACHOP   → MACHOP(66) → ICON_FIGHTER
+            "voltorb",      // 0x9B SPRITE_VOLTORB  → VOLTORB(100) → ICON_VOLTORB
+            "lapras",       // 0x9C SPRITE_LAPRAS   → LAPRAS(131) → ICON_LAPRAS
+            "monster",      // 0x9D SPRITE_RHYDON   → RHYDON(112) → ICON_MONSTER
+            "bird",         // 0x9E SPRITE_MOLTRES  → MOLTRES(146) → ICON_BIRD
+            "snorlax",      // 0x9F SPRITE_SNORLAX  → SNORLAX(143) → ICON_SNORLAX
+            "gyarados",     // 0xA0 SPRITE_GYARADOS → GYARADOS(130) → ICON_GYARADOS
+            "lugia",        // 0xA1 SPRITE_LUGIA    → LUGIA(249) → ICON_LUGIA
+            "ho_oh",        // 0xA2 SPRITE_HO_OH    → HO_OH(250) → ICON_HO_OH
+        };
+        uint8_t idx = byte - CRYSTAL_SPRITE_POKEMON_MIN;
+        return std::string(SPRITE_TAG_POKEMON_ICON) + SPRITEMONS_ICON_NAMES[idx];
     }
 
     // Namespace 2: Day Care Pokémon sentinels (0xE0, 0xE1)
@@ -304,11 +347,15 @@ inline std::string sprite_id_fixed_name(const std::string& id) {
     return id.substr(SPRITE_TAG_FIXED.size());
 }
 
-// Extract icon index from pokemon_icon id ("pokemon_icon:8" → 8)
-inline int sprite_id_pokemon_icon_index(const std::string& id) {
-    if (!sprite_id_is_pokemon_icon(id)) return -1;
-    try { return std::stoi(id.substr(SPRITE_TAG_POKEMON_ICON.size())); }
-    catch (...) { return -1; }
+// Extract icon type name from pokemon_icon id ("pokemon_icon:pikachu" → "pikachu")
+inline std::string sprite_id_pokemon_icon_name(const std::string& id) {
+    if (!sprite_id_is_pokemon_icon(id)) return "";
+    return id.substr(SPRITE_TAG_POKEMON_ICON.size());
+}
+
+// Legacy: sprite_id_pokemon_icon_index now returns -1 always (numeric index no longer used)
+inline int sprite_id_pokemon_icon_index(const std::string& /*id*/) {
+    return -1;  // Use sprite_id_pokemon_icon_name() instead
 }
 
 // Extract daycare slot (1 or 2) from daycare id ("daycare:1" → 1)

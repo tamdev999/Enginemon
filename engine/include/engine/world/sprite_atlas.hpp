@@ -19,7 +19,10 @@ namespace enginemon {
 enum class SpriteType : uint8_t {
     Walking = 1,    // 6 semantic frames: stand D/U/L, walk D/U/L; right uses flip
     Standing = 2,   // 6 semantic frames: can turn but doesn't walk
-    Still = 3       // 1 semantic frame: static object (items, etc.)
+    Still = 3,      // 1 semantic frame: static object (items, etc.)
+    Icon = 4        // 2 animation frames, 32×32 pixels each (Pokémon overworld icons)
+                    // Source: Crystal party-menu icon GFX (bank 23, IconPointers table)
+                    // Frame 0 = icon animation frame A, Frame 1 = icon animation frame B
 };
 
 // OBJ palette indices from Crystal (semantic, not hardware)
@@ -62,18 +65,40 @@ struct SpriteFrame {
     }
 };
 
+// 32×32 icon frame for SpriteType::Icon.
+// Source: Crystal party-menu icon GFX — 16 tiles (4×4) × 16 bytes = 256 bytes raw,
+// decoded to 32×32 = 1024 indexed pixels.
+// Tile layout (Crystal): 4 columns, 4 rows of 8×8 tiles assembled row-major.
+struct IconFrame {
+    std::array<uint8_t, 1024> pixels;  // 32x32, row-major, values 0-3
+
+    uint8_t get_pixel(int x, int y) const {
+        if (x < 0 || x >= 32 || y < 0 || y >= 32) return 0;
+        return pixels[y * 32 + x];
+    }
+};
+
 // Compiled semantic sprite definition
 // Walking/Standing: 6 frames (stand D/U/L, walk D/U/L)
 // Still: 1 frame
+// Icon: 2 icon_frames (animation frames A and B, 32×32 each)
 struct RuntimeSprite {
     std::string sprite_id;          // e.g., "chris", "teacher", "fisher"
+                                    // or "pokemon_icon:pikachu"
     SpriteType type;
     SpritePalette default_palette;
     
     // Semantic frames (compiled from ROM)
     // Walking/Standing: frames[0-5] = stand_down, stand_up, stand_left, walk_down, walk_up, walk_left
     // Still: frames[0] only
+    // Icon: empty (use icon_frames instead)
     std::vector<SpriteFrame> frames;
+
+    // 32×32 icon animation frames (SpriteType::Icon only).
+    // icon_frames[0] = animation frame A
+    // icon_frames[1] = animation frame B
+    // Empty for all non-Icon sprite types.
+    std::vector<IconFrame> icon_frames;
     
     // Accessors
     bool is_walking() const { return type == SpriteType::Walking; }

@@ -97,7 +97,7 @@ bool read_uint8(const uint8_t*& ptr, const uint8_t* end, uint8_t& out) {
 
 // Magic number for save format
 constexpr uint32_t SAVE_MAGIC = 0x454E474D;  // "ENGM"
-constexpr uint32_t SAVE_VERSION = 3;  // Bumped for variable_sprites addition
+constexpr uint32_t SAVE_VERSION = 4;  // Bumped for daycare_slot addition
 
 // Write uint16
 void write_uint16(std::vector<uint8_t>& out, uint16_t val) {
@@ -191,6 +191,11 @@ std::vector<uint8_t> GameState::serialize() const {
     // RNG state
     write_uint64(out, rng.seed);
     write_uint64(out, rng.state);
+
+    // Day Care occupancy (slot 1 and slot 2 species IDs; 0 = empty)
+    // Source: Crystal wBreedMon1Species / wBreedMon2Species
+    write_int32(out, static_cast<int32_t>(daycare_slot[0]));
+    write_int32(out, static_cast<int32_t>(daycare_slot[1]));
     
     // Playtime
     write_uint64(out, playtime_frames);
@@ -395,6 +400,23 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
     if (!read_uint64(ptr, end, state.rng.state)) {
         result.error = DeserializeError::CorruptedPayload;
         return result;
+    }
+
+    // Day Care occupancy
+    {
+        int32_t s1 = 0, s2 = 0;
+        if (!read_int32(ptr, end, s1) || !read_int32(ptr, end, s2)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        // Validate: SpeciesId must be 0 (empty) or 1-251 (valid Crystal species)
+        if ((s1 != 0 && (s1 < 1 || s1 > 251)) ||
+            (s2 != 0 && (s2 < 1 || s2 > 251))) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        state.daycare_slot[0] = static_cast<SpeciesId>(s1);
+        state.daycare_slot[1] = static_cast<SpeciesId>(s2);
     }
     
     // Playtime

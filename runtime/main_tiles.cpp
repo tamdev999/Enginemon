@@ -24,6 +24,7 @@
 #include "engine/world/sprite_atlas.hpp"
 #include "engine/world/johto_collision.hpp"
 #include "engine/world/world_manager.hpp"
+#include "engine/world/pokemon_icons.hpp"
 #include "engine/core/game_loop.hpp"
 #include "engine/core/game_state.hpp"
 #include "engine/core/timing.hpp"
@@ -351,27 +352,57 @@ static bool load_world_state(
             }
 
         } else if (obj.sprite_id.starts_with("pokemon_icon:")) {
-            // Pokémon icon namespace — capability not yet implemented.
-            // Pokémon icon sprites require a separate extraction path from the ROM
-            // (MonMenuIcons → IconPointers → 32×32 2bpp icon GFX, bank 0x23).
-            // This is a future milestone. Fail hard — do not silently render nothing.
-            throw std::runtime_error(
-                "Map '" + state.map_id + "' object has sprite_id '" + obj.sprite_id +
-                "': pokemon_icon namespace is a valid semantic identity but the "
-                "pokemon icon extraction milestone has not been implemented yet. "
-                "Implement SpriteExtractor::extract_pokemon_icon() and compile "
-                "icon sprites into the package under pokemon_icon:N keys.");
+            // Pokémon icon namespace: package sprite keyed by sprite_id directly.
+            // e.g., "pokemon_icon:pikachu" → package key "pokemon_icon:pikachu"
+            const std::string& pkg_key = obj.sprite_id;
+
+            auto cache_it = pkg_ctx.sprite_cache.find(pkg_key);
+            if (cache_it != pkg_ctx.sprite_cache.end()) {
+                state.sprites.push_back(cache_it->second);
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+                continue;
+            }
+            auto sprite_opt = pkg_ctx.package->load_sprite(pkg_key);
+            if (sprite_opt) {
+                pkg_ctx.sprite_cache[pkg_key] = *sprite_opt;
+                state.sprites.push_back(std::move(*sprite_opt));
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+            } else {
+                std::cerr << "[SPRITE] Package missing pokemon_icon sprite '"
+                          << pkg_key << "'\n";
+            }
 
         } else if (obj.sprite_id.starts_with("daycare:")) {
-            // Day Care namespace — capability not yet implemented.
-            // Day Care sprite resolution requires GameState::daycare_slot[1/2] species
-            // fields, which are not yet defined. This is a future milestone.
-            throw std::runtime_error(
-                "Map '" + state.map_id + "' object has sprite_id '" + obj.sprite_id +
-                "': daycare namespace is a valid semantic identity but the "
-                "Day Care species runtime state (GameState::daycare_slot) has not "
-                "been implemented yet. Add daycare_slot fields to GameState and wire "
-                "ctx.world:set_daycare_species(slot, species_id).");
+            // Day Care namespace: resolve species from GameState, then find icon.
+            // If the slot is empty (species=0), the object should be hidden by the
+            // event flag mechanism — but if it somehow reaches here, skip silently.
+            std::string icon_id;
+            if (pkg_ctx.game_state) {
+                icon_id = daycare_sprite_id_to_icon(
+                    obj.sprite_id, pkg_ctx.game_state->daycare_slot);
+            }
+            if (icon_id.empty()) {
+                // Slot is empty or GameState not bound — no sprite needed.
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+                continue;
+            }
+            // icon_id is e.g., "pokemon_icon:pikachu" — load from package.
+            auto cache_it = pkg_ctx.sprite_cache.find(icon_id);
+            if (cache_it != pkg_ctx.sprite_cache.end()) {
+                state.sprites.push_back(cache_it->second);
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+                continue;
+            }
+            auto sprite_opt = pkg_ctx.package->load_sprite(icon_id);
+            if (sprite_opt) {
+                pkg_ctx.sprite_cache[icon_id] = *sprite_opt;
+                state.sprites.push_back(std::move(*sprite_opt));
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+            } else {
+                std::cerr << "[SPRITE] Day Care '" << obj.sprite_id
+                          << "' resolved to '" << icon_id
+                          << "' but that icon is not in the package\n";
+            }
 
         } else {
             // Any other prefix is a programming error — should never reach here since
@@ -1576,7 +1607,18 @@ int main(int argc, char* argv[]) {
                 // resolved is a full sprite_id like "fixed:lass" — strip prefix.
                 npc_inst.sprite_id = sprite_id_fixed_package_key(resolved);
             }
-            // pokemon_icon / daycare render as nothing until those capabilities land.
+            // For pokemon_icon sprites: use the sprite_id directly as package key.
+            if (npc_inst.sprite_id.empty() && obj.sprite_id.starts_with("pokemon_icon:")) {
+                npc_inst.sprite_id = obj.sprite_id;
+            }
+            // For daycare sprites: resolve to the icon sprite_id from GameState.
+            if (npc_inst.sprite_id.empty() && obj.sprite_id.starts_with("daycare:")) {
+                if (pkg_ctx.game_state) {
+                    std::string icon_id = daycare_sprite_id_to_icon(
+                        obj.sprite_id, pkg_ctx.game_state->daycare_slot);
+                    npc_inst.sprite_id = icon_id;  // e.g., "pokemon_icon:pikachu"
+                }
+            }
             npc_inst.facing = static_cast<SpriteFacing>(npc.facing);
             
             // Calculate walk animation state for moving NPCs

@@ -128,16 +128,24 @@ struct GameState {
     std::unordered_map<std::string, int32_t> variables;
     
     // Variable sprite assignments (slot_name → assigned sprite_id string).
-    // Stores the stable Enginemon SpriteId (e.g., "fixed:lass") assigned to
-    // each named variable slot via the variablesprite script command.
-    // This is authoritative gameplay state: which sprite a named slot shows.
-    // Source: Crystal wVariableSprites semantic — each named slot tracks the
-    // current sprite identity assigned by variablesprite script commands.
-    //
-    // Key: semantic slot name (e.g., "copycat", "fuchsia_gym_1")
-    // Value: assigned sprite_id string (e.g., "fixed:lass", "fixed:janine")
-    //        or "" if slot has been explicitly cleared
+    // ...existing doc...
     std::unordered_map<std::string, std::string> variable_sprites;
+
+    // Day Care species occupancy.
+    // Source: Crystal wBreedMon1Species / wBreedMon2Species (WRAM bank 1).
+    // SpeciesId 0 = slot is empty (no Pokémon deposited).
+    // SpeciesId 1-251 = Pokémon species currently in the Day Care slot.
+    // This state drives the overworld sprite for "daycare:1" / "daycare:2" objects
+    // (Route 34, outdoor_sprites.asm).
+    //
+    // Visibility of the Day Care Pokémon objects is separately controlled by the
+    // event flags EVENT_DAY_CARE_MON_1 / EVENT_DAY_CARE_MON_2 (in the flags set).
+    // When the flag is SET the object is hidden; when CLEARED it is visible.
+    // The Route34EggCheckCallback synchronizes flags with the actual occupancy.
+    //
+    // daycare_slot[0] = slot 1 (wBreedMon1Species equivalent)
+    // daycare_slot[1] = slot 2 (wBreedMon2Species equivalent)
+    std::array<SpeciesId, 2> daycare_slot = {0, 0};
     
     // RNG
     RngState rng;

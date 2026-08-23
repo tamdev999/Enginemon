@@ -56,6 +56,13 @@ public:
     
     // Extract player sprite
     SpriteExtractionResult extract_player_sprite(bool is_female = false) const;
+
+    // Extract a Pokémon overworld icon sprite.
+    // icon_type_name: semantic icon name (e.g., "pikachu", "clefairy", "snorlax")
+    //   matching the ICON_* constants from icon_constants.asm.
+    // Returns a RuntimeSprite with SpriteType::Icon and 2 IconFrames (32×32 each).
+    // Source: Crystal MonMenuIcons / IconPointers / Icons GFX (bank 23)
+    SpriteExtractionResult extract_pokemon_icon(const std::string& icon_type_name) const;
     
     // Extract OBJ palettes
     SpritePaletteExtractionResult extract_obj_palettes() const;

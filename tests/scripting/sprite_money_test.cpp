@@ -14,9 +14,13 @@
 #include "engine/scripting/api_bindings.hpp"
 #include "engine/core/game_state.hpp"
 #include "engine/core/types.hpp"
+#include "engine/world/pokemon_icons.hpp"
+#include "crystal/extract/sprite_ids.hpp"
 #include <iostream>
 #include <cassert>
 #include <string>
+#include <algorithm>
+#include <cctype>
 
 using namespace enginemon;
 
@@ -182,6 +186,82 @@ return script
     ASSERT_TRUE(bufs.at("strbuf0_money") != bufs.at("strbuf1_money"));
 }
 
+
+//=============================================================================
+// POKÉMON ICON + DAY CARE SPRITE TESTS
+//=============================================================================
+
+TEST(pokemon_icon_sprite_id_from_clefairy_byte) {
+    using namespace crystal;
+    // SPRITE_CLEFAIRY = 0x8F used directly in CopycatsHouse1F.asm object_event.
+    // 0x8F - 0x80 = 15 → SpriteMons[15] = CLEFAIRY → MonMenuIcons[35-1] = ICON_CLEFAIRY → "clefairy"
+    std::string id = crystal_sprite_byte_to_id(0x8F);
+    ASSERT_STR_EQ(id, "pokemon_icon:clefairy");
+    ASSERT_TRUE(sprite_id_is_pokemon_icon(id));
+}
+
+TEST(pokemon_icon_sprite_id_is_stable_across_bytes) {
+    using namespace crystal;
+    // Multiple sprite bytes may map to the same icon type (shared icons).
+    // But each byte in range 0x80-0xA2 must produce a valid pokemon_icon id.
+    for (int b = 0x80; b <= 0xA2; ++b) {
+        std::string id = crystal_sprite_byte_to_id(static_cast<uint8_t>(b));
+        ASSERT_TRUE(!id.empty());
+        ASSERT_TRUE(id.starts_with("pokemon_icon:"));
+        // Must not contain numeric index from old system
+        std::string suffix = id.substr(13);
+        bool is_numeric = !suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit);
+        ASSERT_FALSE(is_numeric);
+    }
+}
+
+TEST(daycare_empty_slot_returns_no_icon) {
+    using namespace enginemon;
+    // When daycare_slot[0] = 0 (empty), daycare_sprite_id_to_icon must return "".
+    std::array<SpeciesId, 2> slots = {0, 0};
+    std::string icon = daycare_sprite_id_to_icon("daycare:1", slots);
+    ASSERT_TRUE(icon.empty());
+    icon = daycare_sprite_id_to_icon("daycare:2", slots);
+    ASSERT_TRUE(icon.empty());
+}
+
+TEST(daycare_occupied_resolves_to_icon) {
+    using namespace enginemon;
+    // Species 25 = PIKACHU → ICON_PIKACHU → "pokemon_icon:pikachu"
+    std::array<SpeciesId, 2> slots = {25, 0};
+    std::string icon = daycare_sprite_id_to_icon("daycare:1", slots);
+    ASSERT_STR_EQ(icon, "pokemon_icon:pikachu");
+
+    // Species 131 = LAPRAS → ICON_LAPRAS → "pokemon_icon:lapras"
+    slots[1] = 131;
+    icon = daycare_sprite_id_to_icon("daycare:2", slots);
+    ASSERT_STR_EQ(icon, "pokemon_icon:lapras");
+}
+
+TEST(daycare_save_load_species_survives) {
+    using namespace enginemon;
+    // Day Care species occupancy must survive serialize/try_deserialize.
+    GameState original;
+    original.daycare_slot[0] = 25;   // PIKACHU in slot 1
+    original.daycare_slot[1] = 131;  // LAPRAS in slot 2
+
+    auto bytes = original.serialize();
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.state.daycare_slot[0], static_cast<SpeciesId>(25));
+    ASSERT_EQ(result.state.daycare_slot[1], static_cast<SpeciesId>(131));
+}
+
+TEST(daycare_invalid_species_fails_closed) {
+    using namespace enginemon;
+    // A save file with daycare species 252 (above valid range) must fail deserialization.
+    GameState gs;
+    gs.daycare_slot[0] = 252;  // Invalid
+    auto bytes = gs.serialize();
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_FALSE(result.ok());
+}
+
 //=============================================================================
 // MAIN
 //=============================================================================
@@ -195,6 +275,14 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN(money_transient_text_buffer_not_in_gamestate);
     RUN(money_prepare_text_reflects_current_balance);
     RUN(money_mom_account_prepare_text_distinct);
+
+    // Pokémon icon and Day Care tests
+    RUN(pokemon_icon_sprite_id_from_clefairy_byte);
+    RUN(pokemon_icon_sprite_id_is_stable_across_bytes);
+    RUN(daycare_empty_slot_returns_no_icon);
+    RUN(daycare_occupied_resolves_to_icon);
+    RUN(daycare_save_load_species_survives);
+    RUN(daycare_invalid_species_fails_closed);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

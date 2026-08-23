@@ -442,14 +442,15 @@ void FullGameCompiler::discover_sprites() {
                 seen.insert(obj.sprite_id);
 
                 // Resolve the tagged sprite_id to a package/extractor key.
-                // Only fixed-namespace sprites (prefix "fixed:") have compiled
-                // package assets; all other namespaces are runtime-resolved.
                 std::string pkg_name;
                 if (sprite_id_is_fixed(obj.sprite_id)) {
                     pkg_name = sprite_id_fixed_name(obj.sprite_id);
+                } else if (sprite_id_is_pokemon_icon(obj.sprite_id)) {
+                    // Pokemon icon: package key is "pokemon_icon:<icon_type_name>"
+                    // The sprite_id IS the package key already.
+                    pkg_name = obj.sprite_id;  // e.g., "pokemon_icon:pikachu"
                 } else {
-                    // pokemon_icon / daycare / variable — no compiled asset yet.
-                    // Do not add to content_.sprites; no extraction needed.
+                    // daycare / variable — runtime state required, no static asset.
                     continue;
                 }
 
@@ -1087,7 +1088,21 @@ AssetResult<RuntimeSprite> FullGameCompiler::get_sprite(const std::string& sprit
             };
         }
         
-        // Regular NPC sprite
+        // Regular NPC sprite — or Pokémon icon sprite
+        if (sprite_id_is_pokemon_icon(sprite_id)) {
+            // Pokemon icon: extract from MonMenuIcons/IconPointers/Icons GFX (bank 23)
+            std::string icon_name = sprite_id_pokemon_icon_name(sprite_id);
+            auto result = sprite_extractor_->extract_pokemon_icon(icon_name);
+            if (result.success) {
+                ++stats_.sprites_compiled;
+                return AssetResult<RuntimeSprite>{std::move(result.sprite)};
+            }
+            return AssetResult<RuntimeSprite>{
+                AssetError{"Failed to extract pokemon icon: " + sprite_id, sprite_id}
+            };
+        }
+
+        // Fixed overworld NPC sprite (bare name, e.g., "teacher")
         auto result = sprite_extractor_->extract_sprite(sprite_id);
         if (result.success) {
             ++stats_.sprites_compiled;
@@ -1344,20 +1359,33 @@ CompilerValidationResult FullGameCompiler::validate_references() {
         // Validate object sprites against EMITTED inventory (hard error, not warning)
         for (const auto& obj : map.objects) {
             if (obj.sprite_id.empty()) continue;
-            // Non-fixed sprite namespaces have no compiled package asset — skip validation.
-            if (!sprite_id_is_fixed(obj.sprite_id)) continue;
-            // Resolve tagged id → bare name to match emitted_sprite_ids_ keys.
-            std::string pkg_name = sprite_id_fixed_name(obj.sprite_id);
-            if (!pkg_name.empty() && !emitted_sprite_ids_.contains(pkg_name)) {
-                result.errors.push_back({
-                    CompilerValidationError::Type::MissingSprite,
-                    map.map_id,
-                    obj.sprite_id,
-                    std::format("Object in {} references sprite '{}' (key '{}') not in emitted package",
-                               map.map_id, obj.sprite_id, pkg_name)
-                });
-                result.success = false;
+
+            if (sprite_id_is_fixed(obj.sprite_id)) {
+                std::string pkg_name = sprite_id_fixed_name(obj.sprite_id);
+                if (!pkg_name.empty() && !emitted_sprite_ids_.contains(pkg_name)) {
+                    result.errors.push_back({
+                        CompilerValidationError::Type::MissingSprite,
+                        map.map_id,
+                        obj.sprite_id,
+                        std::format("Object in {} references fixed sprite '{}' (key '{}') not in emitted package",
+                                   map.map_id, obj.sprite_id, pkg_name)
+                    });
+                    result.success = false;
+                }
+            } else if (sprite_id_is_pokemon_icon(obj.sprite_id)) {
+                // Pokemon icon sprites are now compiled — validate their presence.
+                if (!emitted_sprite_ids_.contains(obj.sprite_id)) {
+                    result.errors.push_back({
+                        CompilerValidationError::Type::MissingSprite,
+                        map.map_id,
+                        obj.sprite_id,
+                        std::format("Object in {} references pokemon_icon sprite '{}' not in emitted package",
+                                   map.map_id, obj.sprite_id)
+                    });
+                    result.success = false;
+                }
             }
+            // daycare / variable — runtime state, no static package asset required.
         }
         
         // Validate tileset against EMITTED inventory

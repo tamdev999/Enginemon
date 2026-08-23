@@ -644,6 +644,13 @@ void PackageWriter::add_sprite(const RuntimeSprite& sprite) {
         // Each frame is 256 bytes (16x16 pixels, values 0-3)
         out.write(reinterpret_cast<const char*>(frame.pixels.data()), 256);
     }
+
+    // Icon frames (SpriteType::Icon only — 32×32 animation frames)
+    write_le(out, static_cast<uint32_t>(sprite.icon_frames.size()));
+    for (const auto& iframe : sprite.icon_frames) {
+        // Each icon frame is 1024 bytes (32×32 pixels, values 0-3)
+        out.write(reinterpret_cast<const char*>(iframe.pixels.data()), 1024);
+    }
     
     std::string data = out.str();
     sprite_data_.push_back({sprite.sprite_id, std::vector<uint8_t>(data.begin(), data.end())});
@@ -1513,6 +1520,14 @@ std::optional<enginemon::RuntimeSprite> PackageReader::load_sprite(const std::st
     sprite.frames.resize(frame_count);
     for (uint32_t i = 0; i < frame_count; ++i) {
         sin.read(reinterpret_cast<char*>(sprite.frames[i].pixels.data()), 256);
+    }
+
+    // Read icon frames (SpriteType::Icon only)
+    uint32_t icon_frame_count = read_le<uint32_t>(sin);
+    if (icon_frame_count > 16) return std::nullopt;  // sanity bound
+    sprite.icon_frames.resize(icon_frame_count);
+    for (uint32_t i = 0; i < icon_frame_count; ++i) {
+        sin.read(reinterpret_cast<char*>(sprite.icon_frames[i].pixels.data()), 1024);
     }
     
     return sprite;

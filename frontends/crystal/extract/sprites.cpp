@@ -221,6 +221,179 @@ SpriteExtractionResult SpriteExtractor::extract_player_sprite(bool is_female) co
     return extract_sprite(is_female ? 96 : 1);
 }
 
+//=============================================================================
+// POKÉMON ICON EXTRACTION
+// Source: pokecrystal/engine/gfx/mon_icons.asm, data/icon_pointers.asm,
+//         gfx/icons.asm, constants/icon_constants.asm
+//
+// Crystal icon rendering path:
+//   species → MonMenuIcons[species-1] → ICON_* type → IconPointers[type] →
+//   GFX address in bank 0x17 (23) → raw 2bpp data
+//
+// In Enginemon, the icon_type_name is the stable semantic identity
+// (e.g., "pikachu" for ICON_PIKACHU = 4).
+// The package key is "pokemon_icon:<icon_type_name>".
+//
+// Icon format: 32×32 pixels = 16 tiles (4×4 grid), 2 animation frames.
+//   Total GFX: 2 frames × 16 tiles × 16 bytes = 512 bytes per icon.
+//   Tile assembly: row-major 4×4 grid of 8×8 tiles.
+//     Frame 0: tiles 0–15, frame 1: tiles 16–31.
+//=============================================================================
+
+// Icon type name → index mapping (ICON_* constants 0-38).
+// Source: pokecrystal/constants/icon_constants.asm
+static const char* ICON_TYPE_NAMES[] = {
+    "null",         // 0  ICON_NULL
+    "poliwag",      // 1  ICON_POLIWAG
+    "jigglypuff",   // 2  ICON_JIGGLYPUFF
+    "diglett",      // 3  ICON_DIGLETT
+    "pikachu",      // 4  ICON_PIKACHU
+    "staryu",       // 5  ICON_STARYU
+    "fish",         // 6  ICON_FISH
+    "bird",         // 7  ICON_BIRD
+    "monster",      // 8  ICON_MONSTER
+    "clefairy",     // 9  ICON_CLEFAIRY
+    "oddish",       // 10 ICON_ODDISH
+    "bug",          // 11 ICON_BUG
+    "ghost",        // 12 ICON_GHOST
+    "lapras",       // 13 ICON_LAPRAS
+    "humanshape",   // 14 ICON_HUMANSHAPE
+    "fox",          // 15 ICON_FOX
+    "equine",       // 16 ICON_EQUINE
+    "shell",        // 17 ICON_SHELL
+    "blob",         // 18 ICON_BLOB
+    "serpent",      // 19 ICON_SERPENT
+    "voltorb",      // 20 ICON_VOLTORB
+    "squirtle",     // 21 ICON_SQUIRTLE
+    "bulbasaur",    // 22 ICON_BULBASAUR
+    "charmander",   // 23 ICON_CHARMANDER
+    "caterpillar",  // 24 ICON_CATERPILLAR
+    "unown",        // 25 ICON_UNOWN
+    "geodude",      // 26 ICON_GEODUDE
+    "fighter",      // 27 ICON_FIGHTER
+    "egg",          // 28 ICON_EGG
+    "jellyfish",    // 29 ICON_JELLYFISH
+    "moth",         // 30 ICON_MOTH
+    "bat",          // 31 ICON_BAT
+    "snorlax",      // 32 ICON_SNORLAX
+    "ho_oh",        // 33 ICON_HO_OH
+    "lugia",        // 34 ICON_LUGIA
+    "gyarados",     // 35 ICON_GYARADOS
+    "slowpoke",     // 36 ICON_SLOWPOKE
+    "sudowoodo",    // 37 ICON_SUDOWOODO
+    "bigmon",       // 38 ICON_BIGMON
+};
+constexpr uint8_t NUM_ICON_TYPES = 39;  // 0 through 38
+
+// Decode a single 8×8 2bpp tile to 64 indexed pixels.
+// Reuses the existing decode_tile logic but as a standalone function for icons.
+static void decode_icon_tile(const uint8_t* data, uint8_t* pixels) {
+    for (int row = 0; row < 8; ++row) {
+        uint8_t low  = data[row * 2];
+        uint8_t high = data[row * 2 + 1];
+        for (int col = 0; col < 8; ++col) {
+            int bit = 7 - col;
+            pixels[row * 8 + col] =
+                static_cast<uint8_t>(((low >> bit) & 1) | (((high >> bit) & 1) << 1));
+        }
+    }
+}
+
+// Assemble 16 tiles (4 columns × 4 rows of 8×8) into a 32×32 IconFrame.
+// Tile order: row 0 = tiles 0,1,2,3; row 1 = tiles 4,5,6,7; etc.
+static enginemon::IconFrame compile_icon_frame(const uint8_t* tile_data) {
+    enginemon::IconFrame frame;
+    uint8_t tile_pixels[16][64];  // 16 tiles × 64 pixels each
+
+    for (int t = 0; t < 16; ++t) {
+        decode_icon_tile(&tile_data[t * 16], tile_pixels[t]);
+    }
+
+    for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            int tile_col = x / 8;   // 0-3
+            int tile_row = y / 8;   // 0-3
+            int tile_idx = tile_row * 4 + tile_col;
+            int local_x  = x % 8;
+            int local_y  = y % 8;
+            frame.pixels[y * 32 + x] = tile_pixels[tile_idx][local_y * 8 + local_x];
+        }
+    }
+    return frame;
+}
+
+SpriteExtractionResult SpriteExtractor::extract_pokemon_icon(
+    const std::string& icon_type_name) const
+{
+    SpriteExtractionResult result;
+
+    // Resolve icon_type_name → icon_type index (0-38)
+    uint8_t icon_type = 0;
+    bool found = false;
+    for (uint8_t i = 0; i < NUM_ICON_TYPES; ++i) {
+        if (icon_type_name == ICON_TYPE_NAMES[i]) {
+            icon_type = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found || icon_type == 0 /* ICON_NULL */) {
+        result.error = "Unknown icon type name: " + icon_type_name;
+        return result;
+    }
+
+    // IconPointers table: bank 23 (0x17), address 0x6bbf
+    // Format: 39 × dw (2 bytes little-endian), 0-indexed by icon_type
+    // Source: pokecrystal/data/icon_pointers.asm, sym: 23:6bbf
+    constexpr uint8_t  ICON_BANK        = 0x17;   // bank 23
+    constexpr uint16_t ICON_PTRS_ADDR   = 0x6bbf; // IconPointers
+    constexpr size_t   ICON_PTR_ENTRY   = 2;       // 2 bytes per dw entry
+
+    uint32_t ptrs_addr = rom_.bank_to_flat(ICON_BANK, ICON_PTRS_ADDR);
+    uint32_t entry_off = ptrs_addr + icon_type * ICON_PTR_ENTRY;
+
+    if (entry_off + ICON_PTR_ENTRY > rom_.size()) {
+        result.error = std::format("IconPointers entry out of bounds (icon_type={})", icon_type);
+        stats_.bounds_check_failures++;
+        return result;
+    }
+
+    auto ptr_bytes = rom_.read_bytes(entry_off, ICON_PTR_ENTRY);
+    uint16_t gfx_ptr = ptr_bytes[0] | (ptr_bytes[1] << 8);
+
+    // GFX data is in bank 23 at the address given by IconPointers.
+    // Each icon: 2 frames × 16 tiles × 16 bytes/tile = 512 bytes raw.
+    // Source: gfx/icons.asm — all files are raw uncompressed .2bpp
+    uint32_t gfx_addr = rom_.bank_to_flat(ICON_BANK, gfx_ptr);
+    constexpr size_t ICON_GFX_SIZE = 512;  // 2 frames × 16 tiles × 16 bytes
+
+    if (gfx_addr + ICON_GFX_SIZE > rom_.size()) {
+        result.error = std::format(
+            "Icon GFX out of bounds (icon_type={}, gfx_addr=0x{:06X})",
+            icon_type, gfx_addr);
+        stats_.bounds_check_failures++;
+        return result;
+    }
+
+    auto gfx_data = rom_.read_bytes(gfx_addr, ICON_GFX_SIZE);
+
+    RuntimeSprite& sprite = result.sprite;
+    sprite.sprite_id       = std::string("pokemon_icon:") + icon_type_name;
+    sprite.type            = SpriteType::Icon;
+    sprite.default_palette = SpritePalette::Red;  // OBJ palette 0 (icons use first OBJ pal)
+
+    // Assemble 2 animation frames, each 16 tiles (32×32 pixels)
+    constexpr size_t TILES_PER_FRAME = 16;
+    constexpr size_t BYTES_PER_FRAME = TILES_PER_FRAME * 16;  // 256 bytes of raw tile data
+    sprite.icon_frames.resize(2);
+    sprite.icon_frames[0] = compile_icon_frame(gfx_data.data());
+    sprite.icon_frames[1] = compile_icon_frame(gfx_data.data() + BYTES_PER_FRAME);
+
+    stats_.sprites_extracted++;
+    result.success = true;
+    return result;
+}
+
 std::vector<RuntimeSprite> SpriteExtractor::extract_sprites_for_map(
     const std::vector<std::string>& sprite_ids) const 
 {

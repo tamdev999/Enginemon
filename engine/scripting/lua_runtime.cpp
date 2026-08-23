@@ -182,6 +182,9 @@ void LuaRuntime::bind_world_api() {
 
     lua_pushcfunction(L_, world_api::set_variable_sprite);
     lua_setfield(L_, -2, "set_variable_sprite");
+
+    lua_pushcfunction(L_, world_api::set_daycare_species);
+    lua_setfield(L_, -2, "set_daycare_species");
     
     lua_setfield(L_, -2, "world");  // Set as ctx.world
 }
