@@ -314,7 +314,7 @@ auto SpriteExtractor::build_species_icon_map() const
     // Source: pokecrystal/data/pokemon/menu_icons.asm, sym: 23:6ac4
     // NOTE: RGBDS sym files use hexadecimal bank numbers.
     //       "23:6ac4" means bank=0x23 (=35 decimal), addr=0x6ac4.
-    constexpr uint8_t  MON_ICONS_BANK = 0x23;  // bank 0x23 = 35 decimal (sym: "23:6ac4")
+    constexpr uint8_t  MON_ICONS_BANK = rgbds_bank(0x23); // sym: "23:6ac4" MonMenuIcons
     constexpr uint16_t MON_ICONS_ADDR = 0x6ac4;
     constexpr uint16_t NUM_SPECIES = 251;
 
@@ -406,7 +406,7 @@ SpriteExtractionResult SpriteExtractor::extract_pokemon_icon(
     // Format: 39 × dw (2 bytes little-endian), 0-indexed by icon_type
     // Source: pokecrystal/data/icon_pointers.asm, sym: 23:6bbf
     // NOTE: "23:6bbf" in RGBDS sym = bank 0x23 (hex), not 0x17 (decimal 23).
-    constexpr uint8_t  ICON_BANK        = 0x23;   // bank 0x23 = 35 decimal
+    constexpr uint8_t  ICON_BANK        = rgbds_bank(0x23); // sym: "23:6bbf" IconPointers
     constexpr uint16_t ICON_PTRS_ADDR   = 0x6bbf; // IconPointers
     constexpr size_t   ICON_PTR_ENTRY   = 2;       // 2 bytes per dw entry
 

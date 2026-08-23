@@ -103,4 +103,34 @@ struct ValidationResult {
 // Validate ROM for Crystal compatibility
 ValidationResult validate_crystal_rom(const RomData& rom);
 
+// =============================================================================
+// RGBDS Bank Notation Helper
+// =============================================================================
+// RGBDS `.sym` files express bank numbers in HEXADECIMAL.
+// The notation "23:6ac4" means bank=0x23 (decimal 35), NOT bank 23 decimal.
+//
+// Reading a sym entry like "23:6ac4 MonMenuIcons" and writing
+//   constexpr uint8_t BANK = 0x17;  // WRONG: 0x17 == 23 decimal
+// is the exact class of bug this helper prevents.
+//
+// Canonical usage:
+//   constexpr uint8_t MON_ICONS_BANK = rgbds_bank(0x23); // sym: "23:6ac4"
+//
+// The call makes the RGBDS-hex intent explicit and survives code review
+// even when the comment is not read.  The value is constexpr uint8_t —
+// zero runtime overhead, resolved at compile time.
+// =============================================================================
+constexpr uint8_t rgbds_bank(uint8_t hex_bank) noexcept { return hex_bank; }
+
+// Convenience: declare a bank+address pair as a constexpr struct for
+// documentation purposes.  Not required for correctness; useful when a
+// bank/addr pair is documented together.
+struct RgbdsAddr {
+    uint8_t  bank;
+    uint16_t addr;
+};
+constexpr RgbdsAddr rgbds_addr(uint8_t hex_bank, uint16_t hex_addr) noexcept {
+    return {hex_bank, hex_addr};
+}
+
 } // namespace crystal

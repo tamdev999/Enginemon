@@ -4631,6 +4631,197 @@ TEST(p4_8_fullcompiler_package_seam) {
 }
 
 // =============================================================================
+// RGBDS BANK NOTATION ADVERSARIAL TESTS
+// =============================================================================
+// These tests prove the decimal-vs-hex RGBDS bank notation hazard is caught.
+//
+// Hazard: RGBDS sym files use hexadecimal bank numbers.
+//   "23:6ac4 MonMenuIcons" means bank=0x23 (decimal 35), NOT bank=23 decimal (=0x17).
+//
+// The bug fixed in commit 73411bb was exactly this: MON_ICONS_BANK was 0x17
+// (decimal 23) when the correct value from the sym is 0x23 (hex 23 = decimal 35).
+//
+// Test P4-RBN-1 (rgbds_bank_correct):
+//   Prove that bank=0x23 produces the correct MonMenuIcons bytes from the real ROM.
+//   Expected: byte 0 = ICON_BULBASAUR(22), byte 1 = 22, byte 2 = 22 (Bulbasaur family)
+//   Source: pokecrystal/data/pokemon/menu_icons.asm — first three entries are
+//           BULBASAUR/IVYSAUR/VENUSAUR all mapped to ICON_BULBASAUR(22)
+//
+// Test P4-RBN-2 (rgbds_bank_wrong_decimal_gives_wrong_bytes):
+//   Prove that bank=0x17 (the decimal-23 mistake) produces different, wrong bytes.
+//   This is the mutation check: if bank=0x17 gives the same result, the guard fails.
+//
+// Test P4-RBN-3 (symbol_map_parses_bank_as_hex):
+//   Prove the .sym parser produces bank=0x23 from "23:6ac4", not 23 decimal.
+//   Also prove "17:6ac4" (bank 0x17) produces a different flat address.
+//   Malformed notation ("GG:6ac4") must produce a non-match (no symbol found).
+// =============================================================================
+
+TEST(p4_rgbds_bank_correct) {
+    // Requires real ROM to verify actual bytes.
+    if (!g_rom || !g_profile) {
+        std::cout << "  [P4-RBN-1: ROM not loaded — skipping]\n";
+        return;
+    }
+
+    using namespace crystal;
+
+    // MonMenuIcons: sym "23:6ac4" → bank=0x23, addr=0x6ac4
+    // Source: pokecrystal/data/pokemon/menu_icons.asm
+    //   MonMenuIcons:
+    //     db ICON_BULBASAUR   ; BULBASAUR  → 22
+    //     db ICON_BULBASAUR   ; IVYSAUR    → 22
+    //     db ICON_BULBASAUR   ; VENUSAUR   → 22
+    //     db ICON_CHARMANDER  ; CHARMANDER → 23
+    //     db ICON_CHARMANDER  ; CHARMELEON → 23
+    //     db ICON_BIGMON      ; CHARIZARD  → 38
+
+    constexpr uint8_t  CORRECT_BANK = rgbds_bank(0x23); // sym: "23:6ac4"
+    constexpr uint16_t MON_ICONS_ADDR = 0x6ac4;
+
+    uint32_t flat = g_rom->bank_to_flat(CORRECT_BANK, MON_ICONS_ADDR);
+    ASSERT_TRUE(flat + 6 <= g_rom->size());
+
+    auto first6 = g_rom->read_bytes(flat, 6);
+
+    // ORACLE: first three bytes are ICON_BULBASAUR=22 (Bulbasaur/Ivysaur/Venusaur)
+    ASSERT_EQ(first6[0], 22u); // BULBASAUR → ICON_BULBASAUR
+    ASSERT_EQ(first6[1], 22u); // IVYSAUR   → ICON_BULBASAUR
+    ASSERT_EQ(first6[2], 22u); // VENUSAUR  → ICON_BULBASAUR
+    ASSERT_EQ(first6[3], 23u); // CHARMANDER → ICON_CHARMANDER
+    ASSERT_EQ(first6[4], 23u); // CHARMELEON → ICON_CHARMANDER
+    ASSERT_EQ(first6[5], 38u); // CHARIZARD  → ICON_BIGMON
+
+    // ORACLE: all six values are valid icon type indices (0-38)
+    for (int i = 0; i < 6; ++i) {
+        ASSERT_TRUE(first6[i] <= 38u);
+    }
+
+    std::cout << "  [P4-RBN-1: bank=0x23 → MonMenuIcons[0..5] = {22,22,22,23,23,38} ✓]\n";
+}
+
+TEST(p4_rgbds_bank_wrong_decimal_gives_wrong_bytes) {
+    // Proves bank=0x17 (decimal 23 — the pre-fix wrong value) reads different, wrong bytes.
+    // This is the mutation check: the correct and wrong banks must produce different data.
+    if (!g_rom || !g_profile) {
+        std::cout << "  [P4-RBN-2: ROM not loaded — skipping]\n";
+        return;
+    }
+
+    using namespace crystal;
+
+    constexpr uint8_t  CORRECT_BANK = rgbds_bank(0x23); // sym: "23:6ac4"
+    constexpr uint8_t  WRONG_BANK   = 0x17;             // decimal 23 — pre-fix mistake
+    constexpr uint16_t MON_ICONS_ADDR = 0x6ac4;
+
+    uint32_t flat_correct = g_rom->bank_to_flat(CORRECT_BANK, MON_ICONS_ADDR);
+    uint32_t flat_wrong   = g_rom->bank_to_flat(WRONG_BANK,   MON_ICONS_ADDR);
+
+    // The two flat addresses must differ (basic sanity)
+    ASSERT_TRUE(flat_correct != flat_wrong);
+
+    auto bytes_correct = g_rom->read_bytes(flat_correct, 6);
+    auto bytes_wrong   = g_rom->read_bytes(flat_wrong,   6);
+
+    // ORACLE: correct bank gives the expected MonMenuIcons pattern
+    ASSERT_EQ(bytes_correct[0], 22u); // ICON_BULBASAUR
+    ASSERT_EQ(bytes_correct[5], 38u); // ICON_BIGMON (Charizard)
+
+    // MUTATION CHECK: wrong bank (0x17) must NOT give the same pattern
+    // If this assertion fails, the two banks happen to point to identical data —
+    // which would indicate the test itself is not meaningful.
+    // In practice, bank 0x17 at 0x6ac4 contains tileset animation data, not icon types.
+    bool same = true;
+    for (int i = 0; i < 6; ++i) {
+        if (bytes_correct[i] != bytes_wrong[i]) { same = false; break; }
+    }
+    ASSERT_FALSE(same); // wrong bank must give different bytes
+
+    // MUTATION CHECK: wrong bank does NOT give all values in [1,38] (valid icon types)
+    // At least one byte from the wrong bank must be outside the valid icon type range
+    bool all_valid_icon_type = true;
+    for (int i = 0; i < 6; ++i) {
+        if (bytes_wrong[i] == 0 || bytes_wrong[i] > 38u) {
+            all_valid_icon_type = false;
+            break;
+        }
+    }
+    ASSERT_FALSE(all_valid_icon_type); // wrong bank produces non-icon-type bytes
+
+    std::cout << "  [P4-RBN-2: bank=0x17 (wrong decimal-23) gives different, non-icon bytes ✓]\n";
+}
+
+TEST(p4_symbol_map_parses_bank_as_hex) {
+    // Proves the .sym parser correctly reads bank as hexadecimal.
+    // Source: crystal/rom/symbol_map.cpp — std::stoul(match[1], nullptr, 16)
+    //
+    // "23:6ac4 MonMenuIcons" must parse as bank=0x23 (decimal 35), not 23 decimal.
+    // "17:6ac4 FakeSym" must parse as bank=0x17 (decimal 23) — distinct from 0x23.
+    //
+    // Flat addresses (formula: bank * 0x4000 + (addr - 0x4000)):
+    //   bank=0x23, addr=0x6ac4 → 0x23 * 0x4000 + 0x2ac4 = 0x8C000 + 0x2ac4 = 0x8EAC4
+    //   bank=0x17, addr=0x6ac4 → 0x17 * 0x4000 + 0x2ac4 = 0x5C000 + 0x2ac4 = 0x5EAC4
+    //
+    // These flat addresses are DIFFERENT — proves the parser distinguishes them.
+
+    using namespace crystal;
+
+    // Build a synthetic .sym file content with two entries at the same addr, different banks
+    std::string sym_content =
+        "23:6ac4 MonMenuIcons\n"  // bank 0x23 = 35 decimal
+        "17:6ac4 FakeSymDecimal23\n"  // bank 0x17 = 23 decimal — the wrong value
+        "GG:6ac4 MalformedEntry\n";   // malformed — non-hex digit
+
+    auto tmp = std::filesystem::temp_directory_path() / "oracle_rgbds_bank_test.sym";
+    {
+        std::ofstream f(tmp);
+        f << sym_content;
+    }
+
+    auto sym_map = SymbolMap::load(tmp);
+    ASSERT_TRUE(sym_map != nullptr);
+    std::filesystem::remove(tmp);
+
+    // ORACLE: "MonMenuIcons" at bank 0x23 → flat = 0x23*0x4000 + (0x6ac4-0x4000) = 0x8EAC4
+    constexpr uint32_t EXPECTED_FLAT_CORRECT = 0x23u * 0x4000u + (0x6ac4u - 0x4000u); // 0x8EAC4
+    constexpr uint32_t EXPECTED_FLAT_WRONG   = 0x17u * 0x4000u + (0x6ac4u - 0x4000u); // 0x5EAC4
+
+    auto* mon_menu_icons = sym_map->find("MonMenuIcons");
+    ASSERT_TRUE(mon_menu_icons != nullptr);
+    ASSERT_EQ(mon_menu_icons->bank,         0x23u);
+    ASSERT_EQ(mon_menu_icons->address,      0x6ac4u);
+    ASSERT_EQ(mon_menu_icons->flat_address, EXPECTED_FLAT_CORRECT);
+
+    // MUTATION CHECK: flat must NOT be the decimal-23 (wrong) interpretation
+    ASSERT_TRUE(mon_menu_icons->flat_address != EXPECTED_FLAT_WRONG);
+
+    // ORACLE: "FakeSymDecimal23" at bank 0x17 produces a DIFFERENT flat address
+    auto* fake_sym = sym_map->find("FakeSymDecimal23");
+    ASSERT_TRUE(fake_sym != nullptr);
+    ASSERT_EQ(fake_sym->bank,         0x17u);
+    ASSERT_EQ(fake_sym->flat_address, EXPECTED_FLAT_WRONG);
+
+    // MUTATION CHECK: the two symbols' flat addresses are distinct
+    ASSERT_TRUE(mon_menu_icons->flat_address != fake_sym->flat_address);
+
+    // ORACLE: "MalformedEntry" with "GG:" (non-hex) must NOT be parsed as a valid symbol
+    auto* malformed = sym_map->find("MalformedEntry");
+    ASSERT_TRUE(malformed == nullptr); // regex fails to match → not added to symbol map
+
+    // Explicit flat arithmetic verification
+    // "23:6ac4" → bank=0x23=35, addr=0x6ac4
+    // flat = 35 * 16384 + (27332 - 16384) = 573440 + 10948 = 584388 = 0x8EAC4
+    ASSERT_EQ(EXPECTED_FLAT_CORRECT, 0x8EAC4u);
+    // "17:6ac4" → bank=0x17=23, addr=0x6ac4
+    // flat = 23 * 16384 + 10948 = 376832 + 10948 = 387780 = 0x5EAC4
+    ASSERT_EQ(EXPECTED_FLAT_WRONG, 0x5EAC4u);
+    // These must differ — the whole point
+    ASSERT_TRUE(EXPECTED_FLAT_CORRECT != EXPECTED_FLAT_WRONG);
+
+    std::cout << "  [P4-RBN-3: sym '23:6ac4'→bank=0x23→flat=0x8EAC4, '17:6ac4'→0x5EAC4, 'GG:'→rejected ✓]\n";
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -4794,6 +4985,11 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p4_6_variablesprite_copycat_lass);
     RUN_TEST(p4_7_icon_format_source_fidelity);
     RUN_TEST(p4_8_fullcompiler_package_seam);
+
+    // RGBDS bank notation adversarial tests
+    RUN_TEST(p4_rgbds_bank_correct);
+    RUN_TEST(p4_rgbds_bank_wrong_decimal_gives_wrong_bytes);
+    RUN_TEST(p4_symbol_map_parses_bank_as_hex);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";
