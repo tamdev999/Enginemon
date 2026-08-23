@@ -748,4 +748,39 @@ std::optional<SpriteObjPalettes> PackageReader::load_obj_palettes() const {
     return palettes;
 }
 
+std::unordered_map<SpeciesId, std::string>
+PackageReader::load_species_icon_map() const {
+    std::unordered_map<SpeciesId, std::string> result;
+
+    // Find the SpeciesIconMap chunk
+    const TocEntry* chunk = nullptr;
+    for (const auto& entry : toc_) {
+        if (entry.type == ChunkType::SpeciesIconMap) {
+            chunk = &entry;
+            break;
+        }
+    }
+    if (!chunk || chunk->size == 0) return result;  // absent = empty map (old package)
+
+    std::ifstream in(path_, std::ios::binary);
+    if (!in) return result;
+    in.seekg(chunk->offset);
+
+    // Format: uint32_t count, then [uint16_t species, uint16_t name_len, name_bytes]
+    uint32_t count = read_le<uint32_t>(in);
+    if (!in.good() || count > 512) return result;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        uint16_t species = read_le<uint16_t>(in);
+        uint16_t name_len = read_le<uint16_t>(in);
+        if (!in.good() || name_len > 256) break;
+        std::string icon_id(name_len, '\0');
+        in.read(icon_id.data(), name_len);
+        if (!in.good() && !in.eof()) break;
+        result[static_cast<SpeciesId>(species)] = std::move(icon_id);
+    }
+
+    return result;
+}
+
 } // namespace enginemon

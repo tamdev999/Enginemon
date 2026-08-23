@@ -1197,6 +1197,20 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
     }
     writer.add_obj_palettes(get_asset(palettes_result));
     emitted_obj_palettes_ = true;
+
+    // Compile and emit the species→icon map from Crystal MonMenuIcons ROM table.
+    // Source: MonMenuIcons at bank 23:6ac4 (251 entries, species → ICON_* type)
+    // This mapping is Crystal-frontend knowledge compiled into the package once,
+    // so the runtime never needs hardcoded Crystal game tables.
+    {
+        auto icon_map = sprite_extractor_->build_species_icon_map();
+        if (icon_map.empty()) {
+            std::cerr << "FATAL: Failed to read MonMenuIcons table from ROM\n";
+            return false;
+        }
+        writer.add_species_icon_map(icon_map);
+        std::cout << "  Species→icon entries: " << icon_map.size() << "\n";
+    }
     
     // Add font
     auto font_result = get_font();

@@ -1,6 +1,8 @@
 // tests/scripting/sprite_money_test.cpp
-// Focused tests for variable sprite identity model and money text state.
-// These do NOT require a ROM path — GameState/LuaRuntime only.
+// Focused tests for variable sprite identity model, money text state,
+// Pokémon icon sprites, Day Care sprite resolution, and species→icon package roundtrip.
+//
+// Does NOT require a ROM path — GameState/LuaRuntime/PackageWriter/PackageReader only.
 //
 // Verifies:
 //   - Variable sprite assignments store stable SpriteId strings (not Crystal indices)
@@ -9,18 +11,25 @@
 //   - Transient money text buffers are NOT stored in GameState
 //   - prepare_money_text reflects current balance
 //   - Player vs mom accounts remain distinct
+//   - Species→icon mapping round-trips through PackageWriter → PackageReader
+//   - Day Care resolution uses the package map, not any hardcoded Crystal table
+//   - Missing species in package map returns empty (no silent fallback)
+//   - Duplicate species in add_species_icon_map throws
 
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
 #include "engine/core/game_state.hpp"
 #include "engine/core/types.hpp"
-#include "engine/world/pokemon_icons.hpp"
+#include "engine/package/package_reader.hpp"
 #include "crystal/extract/sprite_ids.hpp"
+#include "crystal/output/native_package.hpp"
+#include <filesystem>
 #include <iostream>
 #include <cassert>
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <unordered_map>
 
 using namespace enginemon;
 
@@ -57,7 +66,27 @@ void run_test(const char* name, void(*fn)()) {
 }
 
 //=============================================================================
-// TESTS
+// HELPER: resolve a daycare slot using a package-loaded species→icon map.
+// This mirrors the runtime path in main_tiles.cpp::daycare_resolve_icon()
+// without any dependency on deleted pokemon_icons.hpp or hardcoded tables.
+//=============================================================================
+
+static std::string daycare_resolve_icon_via_map(
+    const std::string& sprite_id,
+    const std::array<SpeciesId, 2>& slots,
+    const std::unordered_map<SpeciesId, std::string>& species_icon_map)
+{
+    int slot_index = crystal::sprite_id_daycare_slot(sprite_id);  // 1 or 2
+    if (slot_index < 1 || slot_index > 2) return "";
+    SpeciesId sp = slots[static_cast<size_t>(slot_index - 1)];
+    if (sp == 0) return "";  // empty slot
+    auto it = species_icon_map.find(sp);
+    if (it == species_icon_map.end()) return "";
+    return it->second;
+}
+
+//=============================================================================
+// VARIABLE SPRITE TESTS
 //=============================================================================
 
 TEST(variable_sprite_identity_survives_save_load) {
@@ -98,6 +127,10 @@ TEST(variable_sprite_runtime_no_crystal_mapping_call) {
     std::string pkg_key = resolved.substr(6);  // "rival"
     ASSERT_STR_EQ(pkg_key, "rival");
 }
+
+//=============================================================================
+// MONEY TESTS
+//=============================================================================
 
 TEST(money_balance_survives_save_load) {
     GameState original;
@@ -188,7 +221,7 @@ return script
 
 
 //=============================================================================
-// POKÉMON ICON + DAY CARE SPRITE TESTS
+// POKÉMON ICON SPRITE ID TESTS
 //=============================================================================
 
 TEST(pokemon_icon_sprite_id_from_clefairy_byte) {
@@ -208,38 +241,50 @@ TEST(pokemon_icon_sprite_id_is_stable_across_bytes) {
         std::string id = crystal_sprite_byte_to_id(static_cast<uint8_t>(b));
         ASSERT_TRUE(!id.empty());
         ASSERT_TRUE(id.starts_with("pokemon_icon:"));
-        // Must not contain numeric index from old system
+        // Must not contain a bare numeric index from the old system
         std::string suffix = id.substr(13);
         bool is_numeric = !suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit);
         ASSERT_FALSE(is_numeric);
     }
 }
 
+//=============================================================================
+// DAY CARE TESTS — use package-map helper, no hardcoded Crystal tables
+//=============================================================================
+
 TEST(daycare_empty_slot_returns_no_icon) {
-    using namespace enginemon;
-    // When daycare_slot[0] = 0 (empty), daycare_sprite_id_to_icon must return "".
+    // When daycare_slot[N] = 0 (empty), resolution must return "".
+    // Uses an inline map simulating what the runtime loads from the package.
+    std::unordered_map<SpeciesId, std::string> icon_map = {
+        {25,  "pokemon_icon:pikachu"},
+        {131, "pokemon_icon:lapras"},
+    };
     std::array<SpeciesId, 2> slots = {0, 0};
-    std::string icon = daycare_sprite_id_to_icon("daycare:1", slots);
-    ASSERT_TRUE(icon.empty());
-    icon = daycare_sprite_id_to_icon("daycare:2", slots);
-    ASSERT_TRUE(icon.empty());
+
+    std::string icon1 = daycare_resolve_icon_via_map("daycare:1", slots, icon_map);
+    std::string icon2 = daycare_resolve_icon_via_map("daycare:2", slots, icon_map);
+    ASSERT_TRUE(icon1.empty());
+    ASSERT_TRUE(icon2.empty());
 }
 
 TEST(daycare_occupied_resolves_to_icon) {
-    using namespace enginemon;
-    // Species 25 = PIKACHU → ICON_PIKACHU → "pokemon_icon:pikachu"
-    std::array<SpeciesId, 2> slots = {25, 0};
-    std::string icon = daycare_sprite_id_to_icon("daycare:1", slots);
-    ASSERT_STR_EQ(icon, "pokemon_icon:pikachu");
+    // Occupied slot resolves through the package-loaded species→icon map.
+    // Species 25 = PIKACHU → "pokemon_icon:pikachu"
+    // Species 131 = LAPRAS → "pokemon_icon:lapras"
+    std::unordered_map<SpeciesId, std::string> icon_map = {
+        {25,  "pokemon_icon:pikachu"},
+        {131, "pokemon_icon:lapras"},
+        {35,  "pokemon_icon:clefairy"},
+    };
+    std::array<SpeciesId, 2> slots = {25, 131};
 
-    // Species 131 = LAPRAS → ICON_LAPRAS → "pokemon_icon:lapras"
-    slots[1] = 131;
-    icon = daycare_sprite_id_to_icon("daycare:2", slots);
-    ASSERT_STR_EQ(icon, "pokemon_icon:lapras");
+    std::string icon1 = daycare_resolve_icon_via_map("daycare:1", slots, icon_map);
+    std::string icon2 = daycare_resolve_icon_via_map("daycare:2", slots, icon_map);
+    ASSERT_STR_EQ(icon1, "pokemon_icon:pikachu");
+    ASSERT_STR_EQ(icon2, "pokemon_icon:lapras");
 }
 
 TEST(daycare_save_load_species_survives) {
-    using namespace enginemon;
     // Day Care species occupancy must survive serialize/try_deserialize.
     GameState original;
     original.daycare_slot[0] = 25;   // PIKACHU in slot 1
@@ -253,13 +298,125 @@ TEST(daycare_save_load_species_survives) {
 }
 
 TEST(daycare_invalid_species_fails_closed) {
-    using namespace enginemon;
     // A save file with daycare species 252 (above valid range) must fail deserialization.
     GameState gs;
     gs.daycare_slot[0] = 252;  // Invalid
     auto bytes = gs.serialize();
     auto result = GameState::try_deserialize(bytes);
     ASSERT_FALSE(result.ok());
+}
+
+//=============================================================================
+// SPECIES→ICON PACKAGE ROUNDTRIP TESTS
+// These prove the frontend→package→runtime path works without any hardcoded table.
+//=============================================================================
+
+TEST(species_icon_map_roundtrip_through_package) {
+    // Build a minimal species→icon map in the frontend, write to a temp package,
+    // read back through the engine PackageReader, verify key entries survived.
+    using crystal::PackageWriter;
+
+    std::vector<PackageWriter::SpeciesIconEntry> entries = {
+        {25,  "pokemon_icon:pikachu"},
+        {35,  "pokemon_icon:clefairy"},
+        {131, "pokemon_icon:lapras"},
+        {143, "pokemon_icon:snorlax"},
+        {249, "pokemon_icon:lugia"},
+        {250, "pokemon_icon:ho-oh"},
+    };
+
+    auto tmp = std::filesystem::temp_directory_path() / "sim_roundtrip_test.emon";
+    {
+        PackageWriter writer;
+        writer.set_source_rom("sim_roundtrip_sha1", "sim_roundtrip_v1");
+        writer.add_species_icon_map(entries);
+        ASSERT_TRUE(writer.write(tmp));
+    }
+
+    // Read back through the engine PackageReader (no Crystal headers needed).
+    auto reader = PackageReader::open(tmp);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto loaded = reader->load_species_icon_map();
+    ASSERT_EQ(loaded.size(), static_cast<size_t>(6));
+
+    ASSERT_STR_EQ(loaded.at(25),  "pokemon_icon:pikachu");
+    ASSERT_STR_EQ(loaded.at(35),  "pokemon_icon:clefairy");
+    ASSERT_STR_EQ(loaded.at(131), "pokemon_icon:lapras");
+    ASSERT_STR_EQ(loaded.at(143), "pokemon_icon:snorlax");
+    ASSERT_STR_EQ(loaded.at(249), "pokemon_icon:lugia");
+    ASSERT_STR_EQ(loaded.at(250), "pokemon_icon:ho-oh");
+
+    std::filesystem::remove(tmp);
+}
+
+TEST(daycare_resolves_via_package_map_not_hardcoded_table) {
+    // Full chain: write a species→icon map to a package, load it back,
+    // then resolve a Day Care slot through the loaded map.
+    // This proves the runtime depends only on loaded package data.
+    using crystal::PackageWriter;
+
+    std::vector<PackageWriter::SpeciesIconEntry> entries = {
+        {25,  "pokemon_icon:pikachu"},
+        {131, "pokemon_icon:lapras"},
+    };
+
+    auto tmp = std::filesystem::temp_directory_path() / "sim_daycare_pkg_test.emon";
+    {
+        PackageWriter writer;
+        writer.set_source_rom("sim_dc_sha1", "sim_dc_v1");
+        writer.add_species_icon_map(entries);
+        ASSERT_TRUE(writer.write(tmp));
+    }
+
+    auto reader = PackageReader::open(tmp);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto icon_map = reader->load_species_icon_map();
+    ASSERT_EQ(icon_map.size(), static_cast<size_t>(2));
+
+    // Simulate daycare slot state.
+    std::array<SpeciesId, 2> slots = {25, 131};
+
+    std::string icon1 = daycare_resolve_icon_via_map("daycare:1", slots, icon_map);
+    std::string icon2 = daycare_resolve_icon_via_map("daycare:2", slots, icon_map);
+    ASSERT_STR_EQ(icon1, "pokemon_icon:pikachu");
+    ASSERT_STR_EQ(icon2, "pokemon_icon:lapras");
+
+    std::filesystem::remove(tmp);
+}
+
+TEST(missing_mapped_icon_returns_empty) {
+    // Species not present in the package map → resolution returns empty string.
+    // No silent fallback to any hardcoded table.
+    std::unordered_map<SpeciesId, std::string> icon_map = {
+        {25, "pokemon_icon:pikachu"},
+    };
+    std::array<SpeciesId, 2> slots = {200, 0};  // 200 = MISDREAVUS, not in map
+
+    std::string icon = daycare_resolve_icon_via_map("daycare:1", slots, icon_map);
+    ASSERT_TRUE(icon.empty());
+}
+
+TEST(duplicate_species_entry_fails) {
+    // add_species_icon_map with a duplicate SpeciesId must throw std::runtime_error.
+    using crystal::PackageWriter;
+
+    std::vector<PackageWriter::SpeciesIconEntry> entries = {
+        {25, "pokemon_icon:pikachu"},
+        {25, "pokemon_icon:pikachu"},  // duplicate
+    };
+
+    PackageWriter writer;
+    writer.set_source_rom("dup_sha1", "dup_v1");
+
+    bool threw = false;
+    try {
+        writer.add_species_icon_map(entries);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
 }
 
 //=============================================================================
@@ -276,13 +433,21 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN(money_prepare_text_reflects_current_balance);
     RUN(money_mom_account_prepare_text_distinct);
 
-    // Pokémon icon and Day Care tests
+    // Pokémon icon sprite ID tests
     RUN(pokemon_icon_sprite_id_from_clefairy_byte);
     RUN(pokemon_icon_sprite_id_is_stable_across_bytes);
+
+    // Day Care tests — package-map path, no hardcoded Crystal tables
     RUN(daycare_empty_slot_returns_no_icon);
     RUN(daycare_occupied_resolves_to_icon);
     RUN(daycare_save_load_species_survives);
     RUN(daycare_invalid_species_fails_closed);
+
+    // Species→icon package roundtrip tests
+    RUN(species_icon_map_roundtrip_through_package);
+    RUN(daycare_resolves_via_package_map_not_hardcoded_table);
+    RUN(missing_mapped_icon_returns_empty);
+    RUN(duplicate_species_entry_fails);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

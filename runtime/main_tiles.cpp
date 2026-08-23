@@ -24,7 +24,6 @@
 #include "engine/world/sprite_atlas.hpp"
 #include "engine/world/johto_collision.hpp"
 #include "engine/world/world_manager.hpp"
-#include "engine/world/pokemon_icons.hpp"
 #include "engine/core/game_loop.hpp"
 #include "engine/core/game_state.hpp"
 #include "engine/core/timing.hpp"
@@ -47,11 +46,11 @@ using namespace enginemon;
 //
 // Tag format (from crystal/extract/sprite_ids.hpp):
 //   "fixed:<name>"          → package key = <name>
-//   "variable:<slot>"       → resolved from GameState::variables at map-load time
-//   "pokemon_icon:<index>"  → capability not yet implemented → hard failure
-//   "daycare:<1|2>"         → capability not yet implemented → hard failure
+//   "variable:<slot>"       → resolved from GameState::variable_sprites
+//   "pokemon_icon:<name>"   → package key = sprite_id directly
+//   "daycare:<1|2>"         → resolved from GameState::daycare_slot + species_icon_map
 //
-// Invalid bytes can no longer produce any sprite_id string — crystal_sprite_byte_to_id()
+// Invalid bytes cannot produce any sprite_id — crystal_sprite_byte_to_id()
 // throws at extraction/compile time, so no invalid tags reach here.
 //=============================================================================
 
@@ -64,7 +63,26 @@ static std::string sprite_id_fixed_package_key(const std::string& sprite_id) {
     return "";
 }
 
-// Resolve a variable sprite slot to the sprite_id it currently maps to,
+// Resolve a "daycare:N" sprite_id to the "pokemon_icon:<name>" sprite_id
+// using the current Day Care species from GameState and the species→icon map
+// loaded from the package.
+// Returns "" if the slot is empty (species=0) or the map is missing.
+static std::string daycare_resolve_icon(const std::string& sprite_id,
+                                        const GameState* gs,
+                                        const std::unordered_map<SpeciesId, std::string>& icon_map) {
+    if (!gs) return "";
+    int slot_idx = -1;
+    if (sprite_id == "daycare:1") slot_idx = 0;
+    else if (sprite_id == "daycare:2") slot_idx = 1;
+    else return "";
+
+    SpeciesId species = gs->daycare_slot[slot_idx];
+    if (species == 0) return "";  // Empty slot
+
+    auto it = icon_map.find(species);
+    if (it == icon_map.end()) return "";  // Species not in map (shouldn't happen)
+    return it->second;  // e.g., "pokemon_icon:pikachu"
+}
 // using GameState::variable_sprites[slot_name].
 // Returns "" if no assignment is stored (object has no sprite yet — not a
 // capability error; the slot hasn't been set by a variablesprite command yet).
@@ -217,6 +235,12 @@ struct PackageContext {
     // GameState pointer for variable sprite resolution.
     // NOT owned by PackageContext — caller maintains lifetime.
     const GameState* game_state = nullptr;
+
+    // Species→icon map loaded from package (compiled from Crystal MonMenuIcons).
+    // Maps SpeciesId (1-251) to "pokemon_icon:<icon_type_name>" package asset key.
+    // Populated once at package open time; used by Day Care sprite resolution.
+    // Empty if the package pre-dates this section (handled gracefully).
+    std::unordered_map<SpeciesId, std::string> species_icon_map;
 
     // Sprite data loaded from package
     SpriteObjPalettes obj_palettes;
@@ -373,14 +397,11 @@ static bool load_world_state(
             }
 
         } else if (obj.sprite_id.starts_with("daycare:")) {
-            // Day Care namespace: resolve species from GameState, then find icon.
-            // If the slot is empty (species=0), the object should be hidden by the
-            // event flag mechanism — but if it somehow reaches here, skip silently.
-            std::string icon_id;
-            if (pkg_ctx.game_state) {
-                icon_id = daycare_sprite_id_to_icon(
-                    obj.sprite_id, pkg_ctx.game_state->daycare_slot);
-            }
+            // Day Care namespace: resolve species from GameState, then find icon
+            // via the species→icon map loaded from the package.
+            // This path uses only package data — no hardcoded Crystal tables.
+            std::string icon_id = daycare_resolve_icon(
+                obj.sprite_id, pkg_ctx.game_state, pkg_ctx.species_icon_map);
             if (icon_id.empty()) {
                 // Slot is empty or GameState not bound — no sprite needed.
                 state.extracted_sprite_ids.insert(obj.sprite_id);
@@ -746,6 +767,9 @@ int main(int argc, char* argv[]) {
     pkg_ctx.package = package.get();
     pkg_ctx.initialized = true;
     pkg_ctx.game_state = &game_state;
+    // Load species→icon map from package (compiled from Crystal MonMenuIcons).
+    // This replaces the hardcoded pokemon_icons.hpp table with package-sourced data.
+    pkg_ctx.species_icon_map = package->load_species_icon_map();
     
     //=========================================================================
     // STEP 3: Load initial map from package
@@ -1611,13 +1635,10 @@ int main(int argc, char* argv[]) {
             if (npc_inst.sprite_id.empty() && obj.sprite_id.starts_with("pokemon_icon:")) {
                 npc_inst.sprite_id = obj.sprite_id;
             }
-            // For daycare sprites: resolve to the icon sprite_id from GameState.
+            // For daycare sprites: resolve to the icon sprite_id via package map.
             if (npc_inst.sprite_id.empty() && obj.sprite_id.starts_with("daycare:")) {
-                if (pkg_ctx.game_state) {
-                    std::string icon_id = daycare_sprite_id_to_icon(
-                        obj.sprite_id, pkg_ctx.game_state->daycare_slot);
-                    npc_inst.sprite_id = icon_id;  // e.g., "pokemon_icon:pikachu"
-                }
+                npc_inst.sprite_id = daycare_resolve_icon(
+                    obj.sprite_id, pkg_ctx.game_state, pkg_ctx.species_icon_map);
             }
             npc_inst.facing = static_cast<SpriteFacing>(npc.facing);
             

@@ -12,6 +12,7 @@
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/runtime_tileset.hpp"
 #include "engine/world/sprite_atlas.hpp"
+#include "engine/core/types.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -65,6 +66,11 @@ public:
     
     // Load OBJ palettes (shared across all sprites)
     std::optional<SpriteObjPalettes> load_obj_palettes() const;
+
+    // Load species→icon mapping.
+    // Returns a map from SpeciesId (1-251) to "pokemon_icon:<icon_type_name>" string.
+    // Empty map if chunk absent (old packages without the section).
+    std::unordered_map<SpeciesId, std::string> load_species_icon_map() const;
 
 private:
     PackageReader() = default;

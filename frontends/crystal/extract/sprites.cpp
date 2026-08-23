@@ -1,4 +1,4 @@
-// crystal/extract/sprites.cpp
+﻿// crystal/extract/sprites.cpp
 // Sprite extraction from Crystal ROM - compiles to semantic format
 //
 // Traced from pokecrystal:
@@ -283,7 +283,55 @@ static const char* ICON_TYPE_NAMES[] = {
     "sudowoodo",    // 37 ICON_SUDOWOODO
     "bigmon",       // 38 ICON_BIGMON
 };
-constexpr uint8_t NUM_ICON_TYPES = 39;  // 0 through 38
+static constexpr uint8_t NUM_ICON_TYPES = 39;  // 0 through 38
+
+
+//=============================================================================
+// SPECIES→ICON MAP EXTRACTION
+// Source: Crystal MonMenuIcons table at bank 23:6ac4 (pokecrystal symbols)
+//   251 entries, 1 byte each, mapping species S (1-indexed) → ICON_* type (0-38)
+//   Entry index = S - 1  (0-based)
+//
+// This builds the authoritative mapping used by the EMON package to resolve
+// Day Care Pokémon sprites at runtime without any hardcoded Crystal tables.
+//=============================================================================
+
+auto SpriteExtractor::build_species_icon_map() const
+    -> std::vector<std::pair<enginemon::SpeciesId, std::string>>
+{
+    std::vector<std::pair<enginemon::SpeciesId, std::string>> result;
+    result.reserve(251);
+
+    // MonMenuIcons table: bank 23 (0x17), address 0x6ac4
+    // Source: pokecrystal/data/pokemon/menu_icons.asm, sym: 23:6ac4
+    constexpr uint8_t  MON_ICONS_BANK = 0x17;
+    constexpr uint16_t MON_ICONS_ADDR = 0x6ac4;
+    constexpr uint16_t NUM_SPECIES = 251;
+
+    uint32_t table_addr = rom_.bank_to_flat(MON_ICONS_BANK, MON_ICONS_ADDR);
+
+    if (table_addr + NUM_SPECIES > rom_.size()) {
+        // ROM too small — return empty map to signal failure
+        return result;
+    }
+
+    auto table = rom_.read_bytes(table_addr, NUM_SPECIES);
+
+    for (uint16_t s = 1; s <= NUM_SPECIES; ++s) {
+        uint8_t icon_type = table[s - 1];
+        if (icon_type >= NUM_ICON_TYPES) continue;  // Invalid type — skip
+
+        const char* icon_name = ICON_TYPE_NAMES[icon_type];
+        if (!icon_name || icon_type == 0 /* ICON_NULL */) continue;
+
+        result.emplace_back(
+            static_cast<enginemon::SpeciesId>(s),
+            std::string("pokemon_icon:") + icon_name
+        );
+    }
+
+    return result;
+}
 
 // Decode a single 8×8 2bpp tile to 64 indexed pixels.
 // Reuses the existing decode_tile logic but as a standalone function for icons.

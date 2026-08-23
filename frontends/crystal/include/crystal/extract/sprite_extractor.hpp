@@ -13,8 +13,10 @@
 #include "crystal/rom/loader.hpp"
 #include "crystal/rom/profile.hpp"
 #include "engine/world/sprite_atlas.hpp"
+#include "engine/core/types.hpp"
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace crystal {
@@ -63,7 +65,13 @@ public:
     // Returns a RuntimeSprite with SpriteType::Icon and 2 IconFrames (32×32 each).
     // Source: Crystal MonMenuIcons / IconPointers / Icons GFX (bank 23)
     SpriteExtractionResult extract_pokemon_icon(const std::string& icon_type_name) const;
-    
+
+    // Build the complete species→icon mapping from the Crystal MonMenuIcons ROM table.
+    // Source: MonMenuIcons at bank 23:6ac4 (251 entries, 1 byte each)
+    //   entry[S-1] = ICON_* type for species S (1-251)
+    // Returns a vector of (SpeciesId, "pokemon_icon:<icon_type_name>") pairs
+    // covering all valid species, suitable for PackageWriter::add_species_icon_map().
+    std::vector<std::pair<enginemon::SpeciesId, std::string>> build_species_icon_map() const;    
     // Extract OBJ palettes
     SpritePaletteExtractionResult extract_obj_palettes() const;
     

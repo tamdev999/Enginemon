@@ -18,11 +18,13 @@
 #include "crystal/extract/tileset_extractor.hpp"
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/sprite_atlas.hpp"
+#include "engine/core/types.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
 #include <filesystem>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace crystal {
 
@@ -35,6 +37,7 @@ struct FontAtlas;     // Defined in font_extractor.hpp
 // Use RuntimeSprite and SpriteObjPalettes from engine
 using enginemon::RuntimeSprite;
 using enginemon::SpriteObjPalettes;
+using enginemon::SpeciesId;
 
 //=============================================================================
 // PACKAGE HEADER
@@ -73,6 +76,10 @@ enum class ChunkType : uint32_t {
     Audio = 0x41554449,          // "AUDI"
     Strings = 0x53545247,        // "STRG"
     Fonts = 0x464F4E54,          // "FONT"
+    SpeciesIconMap = 0x53494D50, // "SIMP" — SpeciesId → pokemon_icon asset ID mapping
+                                 // Compiled from Crystal MonMenuIcons (bank 23) by the
+                                 // Crystal frontend. Runtime uses this for Day Care sprite
+                                 // resolution without any hardcoded Crystal tables.
 };
 
 struct TocEntry {
@@ -134,6 +141,14 @@ public:
     
     // Add OBJ palettes (shared across all sprites)
     void add_obj_palettes(const SpriteObjPalettes& palettes);
+
+    // Add species→icon mapping (SpeciesId → pokemon_icon asset ID string).
+    // Compiled from Crystal MonMenuIcons table by the Crystal frontend.
+    // Maps all valid species (1-251) to their "pokemon_icon:<icon_type_name>" package key.
+    // Duplicate species entries → throws.
+    // Empty icon_id → throws.
+    using SpeciesIconEntry = std::pair<enginemon::SpeciesId, std::string>;
+    void add_species_icon_map(const std::vector<SpeciesIconEntry>& entries);
     
     // Set metadata
     void set_source_rom(const std::string& sha1, const std::string& version);
@@ -162,6 +177,7 @@ private:
     std::vector<std::pair<std::string, std::string>> script_data_;  // ScriptId → Lua code
     std::vector<std::pair<std::string, std::vector<uint8_t>>> sprite_data_;  // sprite_id → serialized sprite
     std::vector<uint8_t> obj_palettes_data_;  // Serialized OBJ palettes (single chunk)
+    std::vector<uint8_t> species_icon_map_data_;  // Serialized species→icon map (single chunk)
     
     Stats stats_;
     

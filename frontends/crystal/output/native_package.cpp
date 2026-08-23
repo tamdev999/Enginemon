@@ -20,6 +20,7 @@
 #include <array>
 #include <iostream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace crystal {
 
@@ -673,6 +674,39 @@ void PackageWriter::add_obj_palettes(const SpriteObjPalettes& palettes) {
     obj_palettes_data_ = std::vector<uint8_t>(data.begin(), data.end());
 }
 
+void PackageWriter::add_species_icon_map(
+    const std::vector<SpeciesIconEntry>& entries)
+{
+    // Validate: no duplicates, no empty icon IDs.
+    std::unordered_set<enginemon::SpeciesId> seen_species;
+    for (const auto& [species, icon_id] : entries) {
+        if (icon_id.empty()) {
+            throw std::runtime_error(std::format(
+                "add_species_icon_map: species {} has empty icon_id", species));
+        }
+        if (!seen_species.insert(species).second) {
+            throw std::runtime_error(std::format(
+                "add_species_icon_map: duplicate species entry {}", species));
+        }
+        if (!icon_id.starts_with("pokemon_icon:")) {
+            throw std::runtime_error(std::format(
+                "add_species_icon_map: icon_id '{}' for species {} must start with "
+                "'pokemon_icon:'", icon_id, species));
+        }
+    }
+
+    // Serialize: uint32_t count, then [uint16_t species, uint16_t name_len, name_bytes]
+    std::ostringstream out(std::ios::binary);
+    write_le(out, static_cast<uint32_t>(entries.size()));
+    for (const auto& [species, icon_id] : entries) {
+        write_le(out, static_cast<uint16_t>(species));
+        write_chunk_id(out, icon_id);  // uint16_t len + bytes
+    }
+
+    std::string data = out.str();
+    species_icon_map_data_ = std::vector<uint8_t>(data.begin(), data.end());
+}
+
 void PackageWriter::set_source_rom(const std::string& sha1, const std::string& version) {
     std::strncpy(header_.source_sha1, sha1.c_str(), sizeof(header_.source_sha1) - 1);
     std::strncpy(header_.source_version, version.c_str(), sizeof(header_.source_version) - 1);
@@ -840,6 +874,20 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         
         toc.push_back(entry);
         all_data.insert(all_data.end(), obj_palettes_data_.begin(), obj_palettes_data_.end());
+    }
+
+    // SpeciesIconMap chunk — species→icon mapping compiled from Crystal MonMenuIcons
+    if (!species_icon_map_data_.empty()) {
+        TocEntry entry;
+        entry.type = ChunkType::SpeciesIconMap;
+        entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
+        entry.count = 1;
+        entry.size = static_cast<uint32_t>(species_icon_map_data_.size());
+        entry.crc32 = calculate_crc32(species_icon_map_data_.data(),
+                                      species_icon_map_data_.size());
+        toc.push_back(entry);
+        all_data.insert(all_data.end(),
+                        species_icon_map_data_.begin(), species_icon_map_data_.end());
     }
     
     // Write data

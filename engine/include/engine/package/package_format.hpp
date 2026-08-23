@@ -112,6 +112,10 @@ enum class ChunkType : uint32_t {
     Audio = 0x41554449,          // "AUDI"
     Strings = 0x53545247,        // "STRG"
     Fonts = 0x464F4E54,          // "FONT"
+    SpeciesIconMap = 0x53494D50, // "SIMP" — SpeciesId → pokemon_icon asset ID
+                                 // Compiled from Crystal MonMenuIcons by the
+                                 // Crystal frontend. Runtime uses for Day Care
+                                 // sprite resolution without Crystal tables.
 };
 
 struct TocEntry {
