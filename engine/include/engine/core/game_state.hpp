@@ -12,6 +12,7 @@
 
 #include "engine/core/types.hpp"
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -49,26 +50,114 @@ struct WarpMemory {
 };
 
 //=============================================================================
-// RNG STATE
-// Determinism requires capturing RNG state
+// RNG STATE (MAP-LOCAL, NON-AUTHORITATIVE)
+// Used only by HeadlessGameLoop::map_rng_ for NPC movement.
+// NOT saved to GameState — seeded from map identity on each load.
 //=============================================================================
 
 struct RngState {
     uint64_t seed = 0;
-    uint64_t state = 0;             // Current generator state
-    
-    // Initialize with seed
+    uint64_t state = 0;
+
     void set_seed(uint64_t s) {
         seed = s;
         state = s;
     }
-    
-    // Generate next random value (LCG)
-    // Uses same parameters as pokecrystal for compatibility
+
+    // LCG — fast, low-quality, acceptable for non-authoritative NPC movement
     uint32_t next() {
-        // LCG parameters from Numerical Recipes (same as original HeadlessGameLoop)
         state = state * 1664525 + 1013904223;
         return static_cast<uint32_t>(state);
+    }
+};
+
+//=============================================================================
+// GAMEPLAY RNG — CANONICAL AUTHORITATIVE STREAM
+//
+// PCG-XSH-RR (64-bit state, 32-bit output)
+// O'Neill reference implementation, Jan 2014
+//
+// OWNERSHIP: GameState owns exactly one instance. All gameplay-affecting
+// randomness must draw from this stream. Presentation RNG uses RngState
+// (map_rng_) which is never serialized.
+//
+// SEEDING:
+//   seed(value)         — O'Neill canonical init (new game / deterministic test)
+//   restore_state(s)    — direct state restore for save/load (NOT re-seeding)
+//
+// DRAW COUNTS (contractual):
+//   next_u32()          — exactly 1 draw
+//   next_u8()           — exactly 1 draw
+//   next_u64()          — exactly 2 draws (high=first, low=second)
+//   bounded(n)          — 1+ draws (Lemire unbiased); n==0 is programmer error
+//
+// Source: docs/NATIVE_RNG_ARCHITECTURE.md
+//=============================================================================
+
+class GameplayRng {
+public:
+    static constexpr uint64_t MULTIPLIER = 6364136223846793005ULL;
+    static constexpr uint64_t INCREMENT  = 1442695040888963407ULL;
+
+    // O'Neill canonical seeding (new game / deterministic tests)
+    void seed(uint64_t seed_value) noexcept {
+        state_ = 0;
+        step();
+        state_ += seed_value;
+        step();
+    }
+
+    // Direct state restoration — save/load ONLY, NOT re-seeding
+    void restore_state(uint64_t s) noexcept { state_ = s; }
+
+    // Core PCG-XSH-RR advance — 1 draw
+    uint32_t next_u32() noexcept {
+        uint64_t old = state_;
+        state_ = old * MULTIPLIER + INCREMENT;
+        uint32_t xorshifted = static_cast<uint32_t>(((old >> 18u) ^ old) >> 27u);
+        uint32_t rot = static_cast<uint32_t>(old >> 59u);
+        return (xorshifted >> rot) | (xorshifted << ((~rot + 1u) & 31u));
+    }
+
+    // 8-bit draw for Crystal-derived mechanics — 1 draw
+    uint8_t next_u8() noexcept { return static_cast<uint8_t>(next_u32()); }
+
+    // 64-bit draw with defined sequencing — 2 draws
+    // First draw → high 32 bits; second draw → low 32 bits
+    uint64_t next_u64() noexcept {
+        uint64_t hi = next_u32();   // Draw 1 → high
+        uint64_t lo = next_u32();   // Draw 2 → low
+        return (hi << 32u) | lo;
+    }
+
+    // Unbiased bounded sample via Lemire's method — 1+ draws
+    // PRECONDITION: range > 0 (programmer error if zero)
+    uint32_t bounded(uint32_t range) {
+        if (range == 0) {
+            // Programmer error — 0 draws consumed, explicit failure
+            throw std::invalid_argument("GameplayRng::bounded(0): range must be > 0");
+        }
+        uint64_t r = next_u32();
+        uint64_t product = r * static_cast<uint64_t>(range);
+        uint32_t low = static_cast<uint32_t>(product);
+        if (low < range) {
+            uint32_t threshold = static_cast<uint32_t>(-static_cast<int32_t>(range) % static_cast<int32_t>(range));
+            while (low < threshold) {
+                r = next_u32();
+                product = r * static_cast<uint64_t>(range);
+                low = static_cast<uint32_t>(product);
+            }
+        }
+        return static_cast<uint32_t>(product >> 32u);
+    }
+
+    uint64_t state() const noexcept { return state_; }
+
+private:
+    uint64_t state_ = 0;
+
+    void step() noexcept {
+        state_ = state_ * MULTIPLIER + INCREMENT;
     }
 };
 
@@ -147,8 +236,8 @@ struct GameState {
     // daycare_slot[1] = slot 2 (wBreedMon2Species equivalent)
     std::array<SpeciesId, 2> daycare_slot = {0, 0};
     
-    // RNG
-    RngState rng;
+    // RNG — canonical authoritative gameplay stream (PCG-XSH-RR)
+    GameplayRng rng;
     
     // NPC states per map (map_id -> NPC states)
     // This captures all gameplay-relevant NPC runtime state for deterministic resume

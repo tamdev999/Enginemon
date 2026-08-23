@@ -1184,18 +1184,52 @@ int wait_seconds(lua_State* L) {
     return 0;
 }
 
-// ctx.util:random(min, max) -> number
+// ctx.util:random(min, max) -> integer in [min, max] inclusive
+// Consumes 1+ draws from the canonical GameplayRng (Lemire bounded).
+// PRECONDITION: max >= min.
 int random(lua_State* L) {
     int min = luaL_checkinteger(L, 2);
     int max = luaL_checkinteger(L, 3);
-    // Stub: return min
+    LuaRuntime* runtime = get_runtime(L);
+    if (runtime) {
+        if (GameState* gs = runtime->get_game_state()) {
+            if (max > min) {
+                uint32_t range = static_cast<uint32_t>(max - min) + 1u;
+                int result = min + static_cast<int>(gs->rng.bounded(range));
+                lua_pushinteger(L, result);
+            } else {
+                // max == min: no draws consumed, result is deterministic
+                lua_pushinteger(L, min);
+            }
+            return 1;
+        }
+    }
+    // Fallback when no GameState bound (test stubs without game state):
+    // Return min — 0 draws, deterministic, explicit non-random marker.
     lua_pushinteger(L, min);
     return 1;
 }
 
 // ctx.util:random_chance(percent) -> bool
+// percent is 0-100. Consumes 1 draw from canonical GameplayRng.
 int random_chance(lua_State* L) {
     int percent = luaL_checkinteger(L, 2);
+    LuaRuntime* runtime = get_runtime(L);
+    if (runtime) {
+        if (GameState* gs = runtime->get_game_state()) {
+            if (percent <= 0) {
+                lua_pushboolean(L, false);
+            } else if (percent >= 100) {
+                lua_pushboolean(L, true);
+            } else {
+                // 1 draw: hit if roll < percent (out of 100)
+                uint8_t roll = gs->rng.next_u8();
+                lua_pushboolean(L, roll < static_cast<uint8_t>(percent));
+            }
+            return 1;
+        }
+    }
+    // Fallback: no GameState — deterministic stub (percent >= 50 → true)
     lua_pushboolean(L, percent >= 50);
     return 1;
 }

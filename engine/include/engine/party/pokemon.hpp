@@ -3,6 +3,7 @@
 // Individual Pokemon instance (in party or PC)
 
 #include "engine/core/types.hpp"
+#include "engine/core/game_state.hpp"  // For GameplayRng
 #include <array>
 #include <string>
 #include <cstdint>
@@ -101,9 +102,11 @@ struct Pokemon {
 };
 
 // Create a new Pokemon with random DVs drawn from canonical RNG
-// REQUIRES: Reference to GameState::rng (advances authoritative state)
+// REQUIRES: Reference to GameplayRng (canonical authoritative stream)
+// Source-proven: Crystal uses 2 draws for DVs (Draw 1 = Atk/Def byte, Draw 2 = Spd/Spc byte)
+// Reference: pokecrystal/engine/battle/core.asm GenerateDVs — 2× BattleRandom calls
 Pokemon create_pokemon(SpeciesId species, uint8_t level,
-                       struct RngState& rng, const struct Registries& reg);
+                       GameplayRng& rng, const struct Registries& reg);
 
 // Create with specific DVs (for starters, gifts, fixed encounters)
 Pokemon create_pokemon(SpeciesId species, uint8_t level,
@@ -111,6 +114,6 @@ Pokemon create_pokemon(SpeciesId species, uint8_t level,
 
 // Create wild Pokemon with random DVs from canonical RNG
 Pokemon create_wild_pokemon(SpeciesId species, uint8_t level,
-                           const struct Registries& reg, struct RngState& rng);
+                            const struct Registries& reg, GameplayRng& rng);
 
 } // namespace enginemon

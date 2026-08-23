@@ -97,7 +97,11 @@ bool read_uint8(const uint8_t*& ptr, const uint8_t* end, uint8_t& out) {
 
 // Magic number for save format
 constexpr uint32_t SAVE_MAGIC = 0x454E474D;  // "ENGM"
-constexpr uint32_t SAVE_VERSION = 4;  // Bumped for daycare_slot addition
+// Version history:
+//   v4 — added daycare_slot; RNG stored as two uint64_t (LCG seed + state)
+//   v5 — PCG-XSH-RR replaces LCG; RNG stored as single uint64_t (PCG state)
+constexpr uint32_t SAVE_VERSION   = 5;   // Current version
+constexpr uint32_t SAVE_VERSION_4 = 4;   // Legacy LCG version (migrate on load)
 
 // Write uint16
 void write_uint16(std::vector<uint8_t>& out, uint16_t val) {
@@ -188,9 +192,8 @@ std::vector<uint8_t> GameState::serialize() const {
         write_string(out, sprite_id);
     }
     
-    // RNG state
-    write_uint64(out, rng.seed);
-    write_uint64(out, rng.state);
+    // RNG state — v5: single uint64_t PCG internal state
+    write_uint64(out, rng.state());
 
     // Day Care occupancy (slot 1 and slot 2 species IDs; 0 = empty)
     // Source: Crystal wBreedMon1Species / wBreedMon2Species
@@ -253,7 +256,10 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
         result.error = DeserializeError::InvalidMagic;
         return result;
     }
-    if (static_cast<uint32_t>(version) != SAVE_VERSION) {
+    // Accept current version (v5, PCG) and legacy version (v4, LCG)
+    const bool is_v4 = (static_cast<uint32_t>(version) == SAVE_VERSION_4);
+    const bool is_v5 = (static_cast<uint32_t>(version) == SAVE_VERSION);
+    if (!is_v4 && !is_v5) {
         result.error = DeserializeError::UnsupportedVersion;
         return result;
     }
@@ -392,14 +398,29 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
         state.variable_sprites[slot] = sprite_id;
     }
     
-    // RNG state
-    if (!read_uint64(ptr, end, state.rng.seed)) {
-        result.error = DeserializeError::CorruptedPayload;
-        return result;
-    }
-    if (!read_uint64(ptr, end, state.rng.state)) {
-        result.error = DeserializeError::CorruptedPayload;
-        return result;
+    // RNG state — version-dependent deserialization
+    if (is_v4) {
+        // v4 stored two uint64_t: legacy LCG seed + state.
+        // Migrate: use old state value as seed input into O'Neill canonical init.
+        uint64_t legacy_seed = 0, legacy_state = 0;
+        if (!read_uint64(ptr, end, legacy_seed)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        if (!read_uint64(ptr, end, legacy_state)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        // Deterministic migration: seed PCG from legacy state value
+        state.rng.seed(legacy_state);
+    } else {
+        // v5: single uint64_t PCG internal state — restore directly
+        uint64_t pcg_state = 0;
+        if (!read_uint64(ptr, end, pcg_state)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        state.rng.restore_state(pcg_state);
     }
 
     // Day Care occupancy

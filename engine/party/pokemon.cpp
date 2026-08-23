@@ -3,7 +3,7 @@
 
 #include "engine/party/pokemon.hpp"
 #include "engine/core/registry.hpp"
-#include "engine/core/game_state.hpp"  // For RngState
+#include "engine/core/game_state.hpp"  // For GameplayRng
 #include <stdexcept>
 
 namespace enginemon {
@@ -146,22 +146,28 @@ void Pokemon::recalculate_stats(const SpeciesData& species_data) {
 // POKEMON CREATION
 // =============================================================================
 
-Pokemon create_pokemon(SpeciesId species, uint8_t level, RngState& rng, const Registries& reg) {
-    // Draw DVs directly from the canonical GameState RNG.
-    // Each call to rng.next() advances the authoritative RNG state.
-    // This ensures:
-    //   - Deterministic simulation (same sequence → same Pokemon)
-    //   - Proper save/load (RNG state is part of GameState)
-    //   - Multiplayer compatibility (synchronized RNG)
+Pokemon create_pokemon(SpeciesId species, uint8_t level, GameplayRng& rng, const Registries& reg) {
+    // Source-proven DV generation from pokecrystal/engine/battle/core.asm GenerateDVs:
+    //   call BattleRandom  ; Draw 1 → Atk nibble (high) / Def nibble (low)
+    //   call BattleRandom  ; Draw 2 → Spd nibble (high) / Spc nibble (low)
     //
-    // NO private RNG streams. NO std::mt19937. All randomness from GameState.
-    
+    // Exactly 2 draws, always. Each byte packs two 4-bit DVs.
+    // Reference: docs/NATIVE_RNG_ARCHITECTURE.md §13 Wild DVs — VERIFIED: 2 draws
+    //
+    // All randomness from the canonical GameplayRng — no private streams.
+
     Pokemon::DVs dvs;
-    dvs.attack = static_cast<uint8_t>(rng.next() & 0x0F);   // 0-15
-    dvs.defense = static_cast<uint8_t>(rng.next() & 0x0F);
-    dvs.speed = static_cast<uint8_t>(rng.next() & 0x0F);
-    dvs.special = static_cast<uint8_t>(rng.next() & 0x0F);
-    
+
+    // Draw 1: Atk (high nibble) and Def (low nibble)
+    uint8_t byte1 = rng.next_u8();
+    dvs.attack  = (byte1 >> 4) & 0x0F;
+    dvs.defense =  byte1       & 0x0F;
+
+    // Draw 2: Spd (high nibble) and Spc (low nibble)
+    uint8_t byte2 = rng.next_u8();
+    dvs.speed   = (byte2 >> 4) & 0x0F;
+    dvs.special =  byte2       & 0x0F;
+
     return create_pokemon(species, level, dvs, reg);
 }
 
@@ -200,15 +206,9 @@ Pokemon create_pokemon(SpeciesId species, uint8_t level, Pokemon::DVs dvs, const
     return mon;
 }
 
-Pokemon create_wild_pokemon(SpeciesId species, uint8_t level, const Registries& reg, RngState& rng) {
-    // Draw DVs directly from canonical RNG - no private substreams
-    Pokemon::DVs dvs;
-    dvs.attack = static_cast<uint8_t>(rng.next() & 0x0F);
-    dvs.defense = static_cast<uint8_t>(rng.next() & 0x0F);
-    dvs.speed = static_cast<uint8_t>(rng.next() & 0x0F);
-    dvs.special = static_cast<uint8_t>(rng.next() & 0x0F);
-    
-    return create_pokemon(species, level, dvs, reg);
+Pokemon create_wild_pokemon(SpeciesId species, uint8_t level, const Registries& reg, GameplayRng& rng) {
+    // 2 draws — same layout as create_pokemon(RNG overload)
+    return create_pokemon(species, level, rng, reg);
 }
 
 } // namespace enginemon
