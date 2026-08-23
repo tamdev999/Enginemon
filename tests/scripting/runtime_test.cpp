@@ -1,4 +1,4 @@
-// tests/scripting/runtime_test.cpp
+﻿// tests/scripting/runtime_test.cpp
 // End-to-end Lua runtime test
 // Verifies: ROM script → decoder → IR → Lua emitter → Lua VM → ctx.* → yield/resume
 //
@@ -747,7 +747,18 @@ TEST(charmap_pokemon_text) {
     
     // Should contain properly decoded "POKéMON" (via 0x54 = "POKé")
     // The text uses "#MON" which expands 0x54 to "POKé" and MON is regular letters
-    ASSERT_STR_CONTAINS(all_text, "POKé");
+    // Note: "POKé" contains U+00E9 (é); use the UTF-8 bytes directly to avoid
+    // Windows console encoding issues in the test assertion string.
+    // The decoded text contains "POK" followed by é (U+00E9 = 0xC3 0xA9 in UTF-8).
+    ASSERT_TRUE(all_text.find("POK") != std::string::npos);
+    // Verify the é character appears (charmap 0x54 → "POKé", rest is MON)
+    bool has_e_accent = false;
+    for (size_t i = 0; i + 1 < all_text.size(); ++i) {
+        if ((uint8_t)all_text[i] == 0xC3 && (uint8_t)all_text[i+1] == 0xA9) {
+            has_e_accent = true; break;
+        }
+    }
+    ASSERT_TRUE(has_e_accent);
     
     std::cout << "  [Charmap correctly decodes POKé]\n";
 }
@@ -18513,13 +18524,14 @@ TEST(variable_sprite_emitter_produces_set_variable_sprite_call) {
     ASSERT_TRUE(lua.find("-- variable_sprite") == std::string::npos);
 }
 
-TEST(variable_sprite_emitter_passes_integer_index) {
+TEST(variable_sprite_emitter_passes_stable_sprite_id_string) {
     using namespace enginemon;
     crystal::SemanticLuaEmitter emitter;
 
+    // Emitter must pass the full stable SpriteId string, not a Crystal numeric index.
     Sem_VariableSprite vs;
     vs.slot_name = "fuchsia_gym_1";
-    vs.assigned_sprite_id = "fixed:janine";  // janine is index 10
+    vs.assigned_sprite_id = "fixed:janine";
 
     SemanticScriptIR ir;
     ir.script_id = "t";
@@ -18531,18 +18543,21 @@ TEST(variable_sprite_emitter_passes_integer_index) {
 
     std::string lua = emitter.emit(ir);
 
-    // Must contain the integer index for "janine" (index 10 in fixed sprite table)
-    ASSERT_TRUE(lua.find("fuchsia_gym_1") != std::string::npos);
-    ASSERT_TRUE(lua.find(", 10)") != std::string::npos);  // janine = index 10 = 0x0A
+    // Must pass the sprite_id string "fixed:janine" — no raw Crystal index.
+    ASSERT_TRUE(lua.find("\"fuchsia_gym_1\"") != std::string::npos);
+    ASSERT_TRUE(lua.find("\"fixed:janine\"") != std::string::npos);
+    // Must NOT contain a raw numeric Crystal sprite index
+    ASSERT_TRUE(lua.find(", 10)") == std::string::npos);  // 10 was the old janine index
 }
 
 TEST(variable_sprite_gamestate_roundtrip) {
     using namespace enginemon;
-    // Execute a variablesprite script and verify GameState stores the assignment.
+    // Execute a variablesprite script and verify GameState::variable_sprites
+    // stores the stable SpriteId string (not a Crystal numeric index).
     std::string script_lua = R"(
 script = {}
 function script.main(ctx)
-    ctx.world:set_variable_sprite("copycat", 28)  -- 28=lass
+    ctx.world:set_variable_sprite("copycat", "fixed:lass")
     return
 end
 return script
@@ -18555,20 +18570,21 @@ return script
     uint32_t co = runtime.start_script("script");
     ASSERT_EQ(static_cast<int>(runtime.get_state(co)), static_cast<int>(ScriptState::Finished));
 
-    // GameState::variables["var_sprite_copycat"] must be 28 (lass index)
-    auto it = gs.variables.find("var_sprite_copycat");
-    ASSERT_TRUE(it != gs.variables.end());
-    ASSERT_EQ(it->second, 28);
+    // GameState::variable_sprites["copycat"] must hold the stable SpriteId string.
+    // No Crystal numeric index, no crystal_fixed_sprite_name() lookup.
+    auto it = gs.variable_sprites.find("copycat");
+    ASSERT_TRUE(it != gs.variable_sprites.end());
+    ASSERT_STR_EQ(it->second, "fixed:lass");
 }
 
 TEST(variable_sprite_distinct_slots_independent) {
     using namespace enginemon;
-    // Two different slots must be stored independently.
+    // Two different slots must be stored independently in GameState::variable_sprites.
     std::string script_lua = R"(
 script = {}
 function script.main(ctx)
-    ctx.world:set_variable_sprite("copycat", 96)     -- 96=kris
-    ctx.world:set_variable_sprite("fuchsia_gym_1", 10)  -- 10=janine
+    ctx.world:set_variable_sprite("copycat", "fixed:kris")
+    ctx.world:set_variable_sprite("fuchsia_gym_1", "fixed:janine")
     return
 end
 return script
@@ -18580,8 +18596,14 @@ return script
     runtime.execute_string(script_lua, "var_sprite_two");
     runtime.start_script("script");
 
-    ASSERT_EQ(gs.variables["var_sprite_copycat"], 96);
-    ASSERT_EQ(gs.variables["var_sprite_fuchsia_gym_1"], 10);
+    // Both stored as stable SpriteId strings — independent, no index conversion.
+    auto it_copycat = gs.variable_sprites.find("copycat");
+    auto it_gym1    = gs.variable_sprites.find("fuchsia_gym_1");
+    ASSERT_TRUE(it_copycat != gs.variable_sprites.end());
+    ASSERT_TRUE(it_gym1    != gs.variable_sprites.end());
+    ASSERT_STR_EQ(it_copycat->second, "fixed:kris");
+    ASSERT_STR_EQ(it_gym1->second,    "fixed:janine");
+    ASSERT_TRUE(it_copycat->second != it_gym1->second);
 }
 
 TEST(money_give_writes_to_gamestate_player) {
@@ -18666,10 +18688,11 @@ return script
     ASSERT_EQ(static_cast<int>(runtime.get_state(co2)), static_cast<int>(ScriptState::Finished));
 }
 
-TEST(money_prepare_money_text_stores_balance) {
+TEST(money_prepare_money_text_stores_in_transient_buffer_not_gamestate) {
     using namespace enginemon;
-    // ctx.inventory:prepare_money_text(account, slot) copies the current balance
-    // into GameState::variables["strbuf<N>_money"].
+    // ctx.inventory:prepare_money_text must store the balance in the transient
+    // text buffer (StubServices::text_buffers), NOT in GameState::variables.
+    // Transient buffers are not serialized to save state.
     std::string script_lua = R"(
 script = {}
 function script.main(ctx)
@@ -18686,10 +18709,17 @@ return script
     runtime.execute_string(script_lua, "prep_money");
     runtime.start_script("script");
 
-    // strbuf1_money must be 750 (same as money_player after give)
-    auto it = gs.variables.find("strbuf1_money");
-    ASSERT_TRUE(it != gs.variables.end());
+    // Balance must be in GameState (authoritative, serialized).
+    ASSERT_EQ(gs.variables["money_player"], 750);
+
+    // Transient buffer must be in StubServices::text_buffers (not serialized).
+    auto& text_bufs = runtime.get_stub_services().text_buffers;
+    auto it = text_bufs.find("strbuf1_money");
+    ASSERT_TRUE(it != text_bufs.end());
     ASSERT_EQ(it->second, 750);
+
+    // text buffer must NOT be in GameState::variables (would pollute save state).
+    ASSERT_TRUE(gs.variables.find("strbuf1_money") == gs.variables.end());
 }
 
 TEST(money_emitter_produces_prepare_money_text) {
@@ -19431,13 +19461,13 @@ int main(int argc, char* argv[]) {
     // Post-Stage-7 sprite completion + contract fixes (August 2026)
     RUN_TEST(unknown_sprite_byte_throws);
     RUN_TEST(variable_sprite_emitter_produces_set_variable_sprite_call);
-    RUN_TEST(variable_sprite_emitter_passes_integer_index);
+    RUN_TEST(variable_sprite_emitter_passes_stable_sprite_id_string);
     RUN_TEST(variable_sprite_gamestate_roundtrip);
     RUN_TEST(variable_sprite_distinct_slots_independent);
     RUN_TEST(money_give_writes_to_gamestate_player);
     RUN_TEST(money_player_vs_mom_account_distinct);
     RUN_TEST(money_has_money_reads_gamestate);
-    RUN_TEST(money_prepare_money_text_stores_balance);
+    RUN_TEST(money_prepare_money_text_stores_in_transient_buffer_not_gamestate);
     RUN_TEST(money_emitter_produces_prepare_money_text);
     RUN_TEST(pokemon_icon_and_daycare_sprites_are_valid_semantic_ids);
     RUN_TEST(variable_sprite_legalizer_slot_offset_encoding);

@@ -29,7 +29,6 @@
 #include "engine/core/timing.hpp"
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
-#include "crystal/extract/sprite_ids.hpp"
 
 #include <iostream>
 #include <cmath>
@@ -64,27 +63,21 @@ static std::string sprite_id_fixed_package_key(const std::string& sprite_id) {
     return "";
 }
 
-// Resolve a variable sprite slot to the fixed sprite it currently maps to,
-// using GameState::variables["var_sprite_<slot_name>"].
-// Returns "" if no assignment is stored (object renders as nothing — not a
-// capability error; the slot just hasn't been set by a variablesprite command yet).
+// Resolve a variable sprite slot to the sprite_id it currently maps to,
+// using GameState::variable_sprites[slot_name].
+// Returns "" if no assignment is stored (object has no sprite yet — not a
+// capability error; the slot hasn't been set by a variablesprite command yet).
+// Returns the stored sprite_id string (e.g., "fixed:lass") directly — no
+// Crystal numeric index mapping is performed in the runtime.
 static std::string sprite_id_variable_resolve(const std::string& sprite_id,
                                               const GameState* gs) {
     if (!sprite_id.starts_with("variable:")) return "";
     std::string slot_name = sprite_id.substr(9);  // "variable:copycat" → "copycat"
     if (!gs) return "";
-    // Variable sprite assignments are stored under "var_sprite_<slot_name>"
-    auto it = gs->variables.find("var_sprite_" + slot_name);
-    if (it == gs->variables.end()) return "";
-    // The value is a packed fixed sprite identifier stored as an integer index
-    // matching the crystal_fixed_sprite_name() table (1-102 → name).
-    // This is set by ctx.world:set_variable_sprite(slot, fixed_sprite_name).
-    // A value of 0 means unset.
-    if (it->second <= 0) return "";
-    // Look up fixed sprite name by index
-    const char* name = crystal::crystal_fixed_sprite_name(
-        static_cast<uint8_t>(it->second));
-    return name ? name : "";
+    auto it = gs->variable_sprites.find(slot_name);
+    if (it == gs->variable_sprites.end()) return "";
+    // Return the stored sprite_id string (e.g., "fixed:lass") — no index lookup.
+    return it->second;
 }
 
 //=============================================================================
@@ -324,10 +317,19 @@ static bool load_world_state(
         } else if (obj.sprite_id.starts_with("variable:")) {
             // Variable namespace: resolved from GameState at map-load time.
             // If no assignment is stored, the object has no sprite yet — not an error.
-            std::string pkg_key = sprite_id_variable_resolve(
+            std::string resolved = sprite_id_variable_resolve(
                 obj.sprite_id, pkg_ctx.game_state);
-            if (pkg_key.empty()) {
+            if (resolved.empty()) {
                 // Slot not yet assigned via variablesprite — silently no sprite.
+                state.extracted_sprite_ids.insert(obj.sprite_id);
+                continue;
+            }
+            // resolved is a full sprite_id like "fixed:lass" — strip to bare name.
+            std::string pkg_key = sprite_id_fixed_package_key(resolved);
+            if (pkg_key.empty()) {
+                std::cerr << "[SPRITE] Variable sprite '" << obj.sprite_id
+                          << "' resolved to '" << resolved
+                          << "' which is not a fixed sprite — not yet supported\n";
                 state.extracted_sprite_ids.insert(obj.sprite_id);
                 continue;
             }
@@ -1567,10 +1569,12 @@ int main(int argc, char* argv[]) {
             
             SpriteInstance npc_inst;
             npc_inst.sprite_id = sprite_id_fixed_package_key(obj.sprite_id);
-            // For variable sprites: resolve to the currently assigned fixed sprite.
+            // For variable sprites: resolve to the currently assigned sprite.
             if (npc_inst.sprite_id.empty() && obj.sprite_id.starts_with("variable:")) {
-                npc_inst.sprite_id = sprite_id_variable_resolve(
+                std::string resolved = sprite_id_variable_resolve(
                     obj.sprite_id, pkg_ctx.game_state);
+                // resolved is a full sprite_id like "fixed:lass" — strip prefix.
+                npc_inst.sprite_id = sprite_id_fixed_package_key(resolved);
             }
             // pokemon_icon / daycare render as nothing until those capabilities land.
             npc_inst.facing = static_cast<SpriteFacing>(npc.facing);

@@ -22,9 +22,23 @@ if(ENGINEMON_ENABLE_ENGINE)
     )
     target_include_directories(runtime_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     if(MSVC)
-        target_compile_options(runtime_test PRIVATE /bigobj /Zm300)
+        target_compile_options(runtime_test PRIVATE /bigobj /Zm1000)
     endif()
     # Not added to ctest - requires ROM path argument
+
+    # Focused tests for variable sprite identity model + money text state.
+    # Does NOT require a ROM path argument — runs standalone.
+    add_executable(sprite_money_test
+        scripting/sprite_money_test.cpp
+    )
+    target_link_libraries(sprite_money_test PRIVATE
+        enginemon_crystal
+        enginemon_engine
+    )
+    target_include_directories(sprite_money_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    if(MSVC)
+        target_compile_options(sprite_money_test PRIVATE /bigobj)
+    endif()
 endif()
 
 # Lua demo (show generated Lua output for a script)

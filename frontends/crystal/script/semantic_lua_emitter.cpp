@@ -5,7 +5,6 @@
 // See semantic_lua_emitter.hpp for contract.
 
 #include "crystal/script/semantic_lua_emitter.hpp"
-#include "crystal/extract/sprite_ids.hpp"
 #include <sstream>
 #include <stdexcept>
 #include <iomanip>
@@ -459,24 +458,15 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "-- set_last_talked " << (int)o->object_id << "\n"; return true;
     }
     if (auto* o = std::get_if<Sem_VariableSprite>(&op)) {
-        // Assign a fixed sprite to a named variable slot at runtime.
+        // Assign a stable SpriteId to a named variable slot at runtime.
         // slot_name: semantic slot identity (e.g., "copycat")
-        // assigned_sprite_id: typed sprite_ref (e.g., "fixed:lass")
-        // The binding takes (slot_name, sprite_index) where sprite_index is
-        // the 1-102 fixed sprite table index. Non-fixed namespaces pass 0 (unset).
+        // assigned_sprite_id: stable SpriteId string (e.g., "fixed:lass")
+        // The binding stores the string directly in GameState::variable_sprites.
+        // No Crystal numeric index mapping in the engine layer.
         SemanticLuaEmitter::indent_line(out, I);
-        // Resolve assigned_sprite_id to integer index for engine-layer binding.
-        int sprite_index = 0;
-        if (o->assigned_sprite_id.starts_with("fixed:")) {
-            std::string bare = o->assigned_sprite_id.substr(6);
-            sprite_index = static_cast<int>(
-                crystal_sprite_id_to_index(bare));  // 1-102 or 0
-        }
-        // For non-fixed (pokemon_icon, daycare, variable): sprite_index = 0 (unset).
-        // Those capability milestones will add their own assignment mechanism.
         out << "ctx.world:set_variable_sprite(\""
-            << SemanticLuaEmitter::escape_lua_string(o->slot_name) << "\", "
-            << sprite_index << ")\n";
+            << SemanticLuaEmitter::escape_lua_string(o->slot_name) << "\", \""
+            << SemanticLuaEmitter::escape_lua_string(o->assigned_sprite_id) << "\")\n";
         return true;
     }
     if (auto* o = std::get_if<Sem_Follow>(&op)) {

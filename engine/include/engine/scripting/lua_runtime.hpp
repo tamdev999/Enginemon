@@ -151,7 +151,14 @@ struct StubServices {
 
     // Variable sprite stub state
     std::string last_variable_sprite_slot;
-    int last_variable_sprite_index = 0;
+    std::string last_variable_sprite_ref;   // stores the full sprite_id string
+
+    // Transient text argument buffers (per-script-execution, NOT persisted to save).
+    // Keyed by "strbuf<N>_<type>" (e.g., "strbuf1_money", "strbuf0_coins").
+    // Written by ctx.inventory:prepare_money_text() and similar ops.
+    // The text renderer reads these to substitute values into displayed text.
+    // These are NEVER serialized — they are regenerated each time a script runs.
+    std::unordered_map<std::string, int32_t> text_buffers;
 
     // Deferred script callback — called when ctx.game:behavior("Sdefer_<id>") is invoked.
     // Wired by HeadlessGameLoop (or test code) to schedule_deferred_script().
@@ -186,7 +193,8 @@ struct StubServices {
         last_behavior_name.clear();
         current_scene = 0;
         last_variable_sprite_slot.clear();
-        last_variable_sprite_index = 0;
+        last_variable_sprite_ref.clear();
+        text_buffers.clear();
         // deferred_script_fn is NOT reset — caller owns the binding lifetime
     }
     

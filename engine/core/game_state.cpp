@@ -97,7 +97,7 @@ bool read_uint8(const uint8_t*& ptr, const uint8_t* end, uint8_t& out) {
 
 // Magic number for save format
 constexpr uint32_t SAVE_MAGIC = 0x454E474D;  // "ENGM"
-constexpr uint32_t SAVE_VERSION = 2;  // Bumped for NPC state addition
+constexpr uint32_t SAVE_VERSION = 3;  // Bumped for variable_sprites addition
 
 // Write uint16
 void write_uint16(std::vector<uint8_t>& out, uint16_t val) {
@@ -174,6 +174,18 @@ std::vector<uint8_t> GameState::serialize() const {
     for (const auto& [key, value] : sorted_vars) {
         write_string(out, key);
         write_int32(out, value);
+    }
+
+    // Variable sprite assignments — sorted for canonical ordering.
+    // Key: slot_name (e.g., "copycat"), Value: assigned sprite_id (e.g., "fixed:lass").
+    std::vector<std::pair<std::string, std::string>> sorted_var_sprites(
+        variable_sprites.begin(), variable_sprites.end());
+    std::sort(sorted_var_sprites.begin(), sorted_var_sprites.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    write_int32(out, static_cast<int32_t>(sorted_var_sprites.size()));
+    for (const auto& [slot, sprite_id] : sorted_var_sprites) {
+        write_string(out, slot);
+        write_string(out, sprite_id);
     }
     
     // RNG state
@@ -350,6 +362,29 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
             return result;
         }
         state.variables[key] = value;
+    }
+
+    // Variable sprite assignments
+    int32_t var_sprite_count = 0;
+    if (!read_int32(ptr, end, var_sprite_count)) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    if (var_sprite_count < 0 || var_sprite_count > 1000000) {
+        result.error = DeserializeError::CorruptedPayload;
+        return result;
+    }
+    for (int32_t i = 0; i < var_sprite_count; i++) {
+        std::string slot, sprite_id;
+        if (!read_string(ptr, end, slot)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        if (!read_string(ptr, end, sprite_id)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        state.variable_sprites[slot] = sprite_id;
     }
     
     // RNG state

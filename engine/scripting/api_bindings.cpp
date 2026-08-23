@@ -621,25 +621,26 @@ int apply_movement(lua_State* L) {
     return 0;
 }
 
-// ctx.world:set_variable_sprite(slot_name, sprite_index)
-// Assigns a fixed sprite (by 1-102 index) to the named variable slot.
-// Stores the index in GameState::variables["var_sprite_<slot>"].
-// sprite_index: 1-102 for fixed sprites; 0 = unset/unsupported namespace.
+// ctx.world:set_variable_sprite(slot_name, sprite_ref)
+// Assigns a stable SpriteId to the named variable slot.
+// slot_name: semantic slot identity (e.g., "copycat", "fuchsia_gym_1")
+// sprite_ref: stable typed SpriteId string (e.g., "fixed:lass", "fixed:janine")
+// Stores in GameState::variable_sprites[slot_name] = sprite_ref.
 // Source: Crystal variablesprite opcode 0x6D + wVariableSprites semantic.
+// The SpriteId passes through to the package/renderer directly — no Crystal
+// numeric index mapping occurs in the engine layer.
 int set_variable_sprite(lua_State* L) {
-    const char* slot_name   = luaL_checkstring(L, 2);
-    int         sprite_index = static_cast<int>(luaL_checkinteger(L, 3));
+    const char* slot_name  = luaL_checkstring(L, 2);
+    const char* sprite_ref = luaL_checkstring(L, 3);
     LuaRuntime* runtime = get_runtime(L);
 
-    std::string key = std::string("var_sprite_") + slot_name;
-
     if (GameState* gs = runtime->get_game_state()) {
-        gs->variables[key] = sprite_index;
+        gs->variable_sprites[slot_name] = sprite_ref;
     } else {
-        // Stub mode: store in last_variable_sprite fields for test inspection.
+        // Stub mode: store for test inspection.
         auto& stubs = runtime->get_stub_services();
         stubs.last_variable_sprite_slot = slot_name;
-        stubs.last_variable_sprite_index = sprite_index;
+        stubs.last_variable_sprite_ref  = sprite_ref;
     }
     return 0;
 }
@@ -870,23 +871,36 @@ int money(lua_State* L) {
 }
 
 // ctx.inventory:prepare_money_text(account, buffer_slot)
-// Prepares the money value for the given account into a text buffer slot for display.
+// Reads the current money balance for the given account and stores it in a
+// per-runtime TRANSIENT text buffer for script text display.
 // account: 0=player (money_player), 1=mom (money_mom)
 // buffer_slot: strbuf index 0-2 (matches Sem_PrepareTextArg buffer_slot)
-// Stores the formatted value in GameState::variables["strbuf<N>_money"].
+//
+// The value is NOT written to GameState — it is a transient formatting artifact
+// that must not pollute the save state. StubServices::text_buffers provides
+// the per-runtime transient store.
+//
+// Balance authority: GameState::variables["money_player"/"money_mom"] (persistent).
+// Text buffer:       StubServices::text_buffers["strbuf<N>_money"] (transient, not saved).
+//
 // Source: Crystal getmoney opcode → text buffer substitution.
 int prepare_money_text(lua_State* L) {
     int account     = static_cast<int>(luaL_checkinteger(L, 2));
     int buffer_slot = static_cast<int>(luaL_checkinteger(L, 3));
     LuaRuntime* runtime = get_runtime(L);
     const char* src_key  = (account == 1) ? "money_mom" : "money_player";
-    std::string dest_key = "strbuf" + std::to_string(buffer_slot) + "_money";
+
+    // Read balance from GameState (authoritative) or stub.
+    int32_t balance = 0;
     if (GameState* gs = runtime->get_game_state()) {
         auto it = gs->variables.find(src_key);
-        int32_t bal = (it != gs->variables.end()) ? it->second : 0;
-        gs->variables[dest_key] = bal;
+        balance = (it != gs->variables.end()) ? it->second : 0;
     }
-    // In stub mode the text renderer will render nothing, which is correct.
+
+    // Store in transient text buffer — NOT in GameState.
+    std::string buf_key = "strbuf" + std::to_string(buffer_slot) + "_money";
+    runtime->get_stub_services().text_buffers[buf_key] = balance;
+
     return 0;
 }
 

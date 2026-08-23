@@ -124,8 +124,20 @@ struct GameState {
     // Event flags (semantic IDs)
     std::unordered_set<std::string> flags;
     
-    // Variables (semantic ID -> value)
+    // Variables (semantic ID -> integer value)
     std::unordered_map<std::string, int32_t> variables;
+    
+    // Variable sprite assignments (slot_name → assigned sprite_id string).
+    // Stores the stable Enginemon SpriteId (e.g., "fixed:lass") assigned to
+    // each named variable slot via the variablesprite script command.
+    // This is authoritative gameplay state: which sprite a named slot shows.
+    // Source: Crystal wVariableSprites semantic — each named slot tracks the
+    // current sprite identity assigned by variablesprite script commands.
+    //
+    // Key: semantic slot name (e.g., "copycat", "fuchsia_gym_1")
+    // Value: assigned sprite_id string (e.g., "fixed:lass", "fixed:janine")
+    //        or "" if slot has been explicitly cleared
+    std::unordered_map<std::string, std::string> variable_sprites;
     
     // RNG
     RngState rng;
