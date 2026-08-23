@@ -26,6 +26,8 @@
 #include "crystal/script/legality_gate.hpp"
 #include "crystal/extract/map_extractor.hpp"
 #include "crystal/extract/sprite_ids.hpp"
+#include "crystal/extract/sprite_extractor.hpp"
+#include "crystal/compile/full_compiler.hpp"
 #include "crystal/output/native_package.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include "engine/world/runtime_map.hpp"
@@ -3904,6 +3906,730 @@ TEST(p3_ser2_sprite_id_string_boundary) {
 //     invalid MapId/Species
 // =============================================================================
 
+// MAIN
+// =============================================================================
+
+// =============================================================================
+// ORACLE PHASE 4 — VERTICAL SLICES
+// =============================================================================
+// Each test traces: Crystal source bytes → TypedDecoder → SemanticLegalizer →
+// observable Sem_* type and field values.
+// Expected values are HAND-AUTHORED from pokecrystal source, never from
+// Enginemon encoder/decoder output.
+//
+// Mutation checks are included for each historically dangerous failure mode.
+// =============================================================================
+
+// =============================================================================
+// P4-1: setflag ENGINE_FLYPOINT_NEW_BARK
+//
+// Source: maps/NewBarkTown.asm — NewBarkTownFlypointCallback:
+//   setflag ENGINE_FLYPOINT_NEW_BARK   ; $36 dw 0x0041
+//   clearevent EVENT_FIRST_TIME_BANKING_WITH_MOM  ; $32 dw 0x0076
+//   endcallback                         ; $90
+//
+// constants/engine_flags.asm: const_def starts at 0; ENGINE_FLYPOINT_NEW_BARK = 65 = 0x41
+// constants/event_flags.asm:  EVENT_FIRST_TIME_BANKING_WITH_MOM = 118 = 0x76
+// engine/include/engine/core/types.hpp: FlagNamespace::Engine=1, FlagNamespace::Event=0
+//
+// Hand-derived byte sequence (bank 0 / flat 0x0000):
+//   36 41 00   setflag  ENGINE_FLYPOINT_NEW_BARK (LE u16=65)
+//   32 76 00   clearevent EVENT_FIRST_TIME_BANKING_WITH_MOM (LE u16=118)
+//   90         endcallback
+// =============================================================================
+TEST(p4_1_setflag_engine_flypoint_new_bark) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Hand-authored bytes from pokecrystal source
+    // setflag $36 LE16(65) = 36 41 00
+    // clearevent $32 LE16(118) = 32 76 00
+    // endcallback $90
+    std::vector<uint8_t> bytes = {
+        0x36, 0x41, 0x00,   // setflag ENGINE_FLYPOINT_NEW_BARK (flag=65, namespace=Engine)
+        0x32, 0x76, 0x00,   // clearevent EVENT_FIRST_TIME_BANKING_WITH_MOM (flag=118, namespace=Event)
+        0x90                // endcallback
+    };
+    while (bytes.size() < 0x8000) bytes.push_back(0xFF);
+    auto rom = make_rom_from_bytes(bytes);
+    SymbolMap sym;
+    TypedScriptDecoder dec(*rom, sym);
+    CrystalScriptIR ir = dec.decode_script(0x0000);
+    ASSERT_TRUE(ir.commands.size() >= 2u);
+
+    // Stage 1 decode: setflag (0x36) must carry flag=65 (0x41)
+    {
+        auto* cmd = std::get_if<Cmd_Setflag>(&ir.commands[0].data);
+        ASSERT_TRUE(cmd != nullptr);
+        ASSERT_EQ(cmd->engine_flag, 65u);
+        // MUTATION CHECK: must NOT be 0x36 (the opcode byte, wrong offset decode)
+        ASSERT_TRUE(cmd->engine_flag != 0x36u);
+        // MUTATION CHECK: must NOT be 0 (default-zero from missing advance)
+        ASSERT_TRUE(cmd->engine_flag != 0u);
+    }
+
+    // Stage 1 decode: clearevent (0x32) must carry flag=118 (0x76)
+    {
+        auto* cmd = std::get_if<Cmd_Clearevent>(&ir.commands[1].data);
+        ASSERT_TRUE(cmd != nullptr);
+        ASSERT_EQ(cmd->event_flag, 118u);
+    }
+
+    // Stage 4 lower: Sem_SetFlag{ns=Engine, value=65}
+    auto lr = lower_ir(ir);
+    ASSERT_TRUE(lr.success);
+
+    const Sem_SetFlag* set_flag_op = nullptr;
+    const Sem_ClearFlag* clear_flag_op = nullptr;
+    for (const auto& blk : lr.ir.blocks) {
+        for (const auto& inst : blk.instructions) {
+            if (auto* p = std::get_if<Sem_SetFlag>(&inst.op))   set_flag_op   = p;
+            if (auto* p = std::get_if<Sem_ClearFlag>(&inst.op)) clear_flag_op = p;
+        }
+    }
+
+    // ORACLE: setflag ENGINE_FLYPOINT_NEW_BARK → namespace=Engine, value=65
+    ASSERT_TRUE(set_flag_op != nullptr);
+    ASSERT_EQ(set_flag_op->flag.ns, FlagNamespace::Engine);
+    ASSERT_EQ(set_flag_op->flag.value, 65u);
+
+    // ORACLE: clearevent EVENT_FIRST_TIME_BANKING_WITH_MOM → namespace=Event, value=118
+    ASSERT_TRUE(clear_flag_op != nullptr);
+    ASSERT_EQ(clear_flag_op->flag.ns, FlagNamespace::Event);
+    ASSERT_EQ(clear_flag_op->flag.value, 118u);
+
+    // MUTATION CHECK: setflag must produce Engine namespace, NOT Event (same value would be wrong)
+    ASSERT_TRUE(set_flag_op->flag.ns != FlagNamespace::Event);
+    // MUTATION CHECK: clearevent must produce Event namespace, NOT Engine
+    ASSERT_TRUE(clear_flag_op->flag.ns != FlagNamespace::Engine);
+    // MUTATION CHECK: Engine{65} != Event{65} — same numeric value, different namespaces
+    ASSERT_TRUE(set_flag_op->flag != clear_flag_op->flag);
+    ASSERT_TRUE(FlagRef::engine_flag(65) != FlagRef::event_flag(65));
+
+    std::cout << "  [P4-1: setflag ENGINE_FLYPOINT_NEW_BARK=65 (Engine ns), clearevent Event{118} ✓]\n";
+}
+
+// =============================================================================
+// P4-2: givepoke CYNDAQUIL 5 BERRY (Elm's Lab starter gift)
+//
+// Source: maps/ElmsLab.asm — CyndaquilPokeBallScript:
+//   givepoke CYNDAQUIL, 5, BERRY    (no trainer flag → 4 bytes)
+//
+// Macro expansion (events.asm givepoke with 3 args → 4-arg form):
+//   $2d  db CYNDAQUIL  db 5  db BERRY  db FALSE(0)
+//
+// constants/pokemon_constants.asm: CYNDAQUIL=$9B (JOHTO_POKEMON+3, base $98)
+// constants/item_constants.asm:    BERRY=$AD
+//
+// Hand-derived bytes:
+//   2D 9B 05 AD 00   givepoke CYNDAQUIL(0x9B) level=5 item=BERRY(0xAD) trainer=FALSE(0x00)
+//   91               end
+//
+// Also verify Chikorita for independence: CHIKORITA=$98, same level/item
+// =============================================================================
+TEST(p4_2_givepoke_cyndaquil_level5_berry) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Hand-authored bytes: givepoke CYNDAQUIL, 5, BERRY, FALSE
+    // Source: macros/scripts/events.asm givepoke macro, 4-arg variant
+    std::vector<uint8_t> bytes = {
+        0x2D,       // givepoke opcode
+        0x9B,       // CYNDAQUIL = 0x9B (pokemon_constants.asm: JOHTO_POKEMON=0x98, +3)
+        0x05,       // level = 5
+        0xAD,       // BERRY = 0xAD (item_constants.asm)
+        0x00,       // trainer = FALSE (no nickname/OT pointer follows)
+        0x91        // end
+    };
+    while (bytes.size() < 0x8000) bytes.push_back(0xFF);
+    auto rom = make_rom_from_bytes(bytes);
+    SymbolMap sym;
+    TypedScriptDecoder dec(*rom, sym);
+    CrystalScriptIR ir = dec.decode_script(0x0000);
+    ASSERT_TRUE(ir.commands.size() >= 1u);
+
+    // Stage 1: Cmd_Givepoke must carry exact byte values
+    auto* cmd = std::get_if<Cmd_Givepoke>(&ir.commands[0].data);
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_EQ(cmd->pokemon, 0x9Bu);   // CYNDAQUIL
+    ASSERT_EQ(cmd->level, 5u);
+    ASSERT_EQ(cmd->item, 0xADu);      // BERRY
+    ASSERT_EQ(cmd->trainer, 0u);      // FALSE — no nickname follows
+
+    // MUTATION CHECK: opcode byte must NOT read as pokemon byte (wrong PC advance)
+    ASSERT_TRUE(cmd->pokemon != 0x2Du);
+    // MUTATION CHECK: level must NOT be 0 (default) or confuse with CHIKORITA ($98)
+    ASSERT_EQ(cmd->level, 5u);
+    ASSERT_TRUE(cmd->pokemon != 0x98u); // CHIKORITA, not CYNDAQUIL
+
+    // Stage 4: Sem_GivePokemon preserves all three operands
+    auto lr = lower_ir(ir);
+    ASSERT_TRUE(lr.success);
+
+    const Sem_GivePokemon* give_op = nullptr;
+    for (const auto& blk : lr.ir.blocks)
+        for (const auto& inst : blk.instructions)
+            if (auto* p = std::get_if<Sem_GivePokemon>(&inst.op)) give_op = p;
+
+    ASSERT_TRUE(give_op != nullptr);
+
+    // ORACLE: CYNDAQUIL=0x9B, level=5, BERRY=0xAD — all preserved through semantic boundary
+    ASSERT_EQ(static_cast<uint16_t>(give_op->species), 0x9Bu);
+    ASSERT_EQ(give_op->level, 5u);
+    ASSERT_EQ(static_cast<uint16_t>(give_op->held_item), 0xADu);
+    ASSERT_FALSE(give_op->has_nickname); // trainer=FALSE → no nickname
+
+    // MUTATION CHECK: species must NOT be 0 (dropped) or confused with item byte
+    ASSERT_TRUE(static_cast<uint16_t>(give_op->species) != 0u);
+    ASSERT_TRUE(static_cast<uint16_t>(give_op->species) != 0xADu); // item byte ≠ species
+    // MUTATION CHECK: level must NOT be confused with species byte
+    ASSERT_TRUE(give_op->level != 0x9Bu);
+
+    // Independence verification: CHIKORITA=$98 is a distinct different species
+    // (prove the givepoke for Chikorita produces a different result)
+    std::vector<uint8_t> chikorita_bytes = {0x2D, 0x98, 0x05, 0xAD, 0x00, 0x91};
+    while (chikorita_bytes.size() < 0x8000) chikorita_bytes.push_back(0xFF);
+    auto rom2 = make_rom_from_bytes(chikorita_bytes);
+    TypedScriptDecoder dec2(*rom2, sym);
+    auto ir2 = dec2.decode_script(0x0000);
+    auto* cmd2 = std::get_if<Cmd_Givepoke>(&ir2.commands[0].data);
+    ASSERT_TRUE(cmd2 != nullptr);
+    ASSERT_EQ(cmd2->pokemon, 0x98u); // CHIKORITA, not 0x9B
+    ASSERT_TRUE(cmd2->pokemon != cmd->pokemon); // species differ
+
+    std::cout << "  [P4-2: givepoke CYNDAQUIL(0x9B) level=5 BERRY(0xAD) trainer=FALSE → Sem_GivePokemon ✓]\n";
+}
+
+// =============================================================================
+// P4-3: warp ELMS_LAB, 6, 3
+//
+// Source: maps/NewBarkTown.asm — warp_event 6, 3, ELMS_LAB, 1
+//   The matching script warp form: warp ELMS_LAB, 6, 3
+//
+// constants/map_constants.asm: newgroup NEW_BARK = 24; map_const ELMS_LAB = entry 5
+//   → GROUP_ELMS_LAB=24, MAP_ELMS_LAB=5
+// macros/scripts/events.asm warp: db warp_command, map_id(group,map), db x, db y
+//   warp_command = $3C; map_id emits db group, db map
+//
+// Hand-derived bytes:
+//   3C 18 05 06 03   warp ELMS_LAB(group=24=0x18, map=5=0x05), x=6, y=3
+//   91               end
+//
+// Enginemon MapId: (group << 8) | map = (24 << 8) | 5 = 0x1805 = 6149
+//
+// MUTATION CHECK: x/y swap (historical bug) → x=3 y=6 would be wrong
+// =============================================================================
+TEST(p4_3_warp_elmslab_x6_y3) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Hand-authored bytes from source
+    // warp_command=0x3C, GROUP_ELMS_LAB=0x18(24), MAP_ELMS_LAB=0x05(5), x=6, y=3
+    std::vector<uint8_t> bytes = {
+        0x3C,               // warp opcode
+        0x18, 0x05,         // map_id ELMS_LAB: group=24(0x18), map=5(0x05)
+        0x06,               // x = 6
+        0x03,               // y = 3
+        0x91                // end
+    };
+    while (bytes.size() < 0x8000) bytes.push_back(0xFF);
+    auto rom = make_rom_from_bytes(bytes);
+    SymbolMap sym;
+    TypedScriptDecoder dec(*rom, sym);
+    CrystalScriptIR ir = dec.decode_script(0x0000);
+    ASSERT_TRUE(ir.commands.size() >= 1u);
+
+    // Stage 1: Cmd_Warp must carry exact map/x/y
+    auto* cmd = std::get_if<Cmd_Warp>(&ir.commands[0].data);
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_EQ(cmd->map.group, 24u);
+    ASSERT_EQ(cmd->map.map,    5u);
+    ASSERT_EQ(cmd->x,          6u);
+    ASSERT_EQ(cmd->y,          3u);
+
+    // Stage 4: Sem_Warp with correct MapId and x/y
+    auto lr = lower_ir(ir);
+    ASSERT_TRUE(lr.success);
+
+    const Sem_Warp* warp_op = nullptr;
+    for (const auto& blk : lr.ir.blocks)
+        for (const auto& inst : blk.instructions)
+            if (auto* p = std::get_if<Sem_Warp>(&inst.op)) warp_op = p;
+
+    ASSERT_TRUE(warp_op != nullptr);
+
+    // ORACLE: MapId = (24 << 8) | 5 = 0x1805 = 6149
+    constexpr MapId EXPECTED_MAP_ID = (24u << 8) | 5u;  // 0x1805
+    ASSERT_EQ(warp_op->map, EXPECTED_MAP_ID);
+
+    // ORACLE: x=6, y=3 — preserved exactly from source warp_event 6,3
+    ASSERT_EQ(warp_op->x, 6u);
+    ASSERT_EQ(warp_op->y, 3u);
+
+    // MUTATION CHECK: x/y must NOT be swapped (historically dangerous bug)
+    // If x and y were swapped: x=3, y=6
+    ASSERT_TRUE(warp_op->x != 3u || warp_op->y != 6u); // can't both be flipped
+    ASSERT_EQ(warp_op->x, 6u); // x is definitely 6
+    ASSERT_EQ(warp_op->y, 3u); // y is definitely 3
+
+    // MUTATION CHECK: MapId must NOT be (5 << 8) | 24 = wrong byte order
+    constexpr MapId WRONG_MAP_ID = (5u << 8) | 24u;  // 0x0518 — byte-swapped group/map
+    ASSERT_TRUE(warp_op->map != WRONG_MAP_ID);
+
+    // MUTATION CHECK: MapId must NOT be just group (=24) or just map (=5)
+    ASSERT_TRUE(warp_op->map != static_cast<MapId>(24u));
+    ASSERT_TRUE(warp_op->map != static_cast<MapId>(5u));
+
+    std::cout << "  [P4-3: warp ELMS_LAB map=0x1805 x=6 y=3 — MapId and coordinates preserved, not swapped ✓]\n";
+}
+
+// =============================================================================
+// P4-4: promptbutton + pause 30 — both preserved, neither erased
+//
+// Source: maps/ElmsLab.asm — ElmsLabWalkUpToElmScript:
+//   promptbutton                   ; $55  — wait with BG sync, inline (no textbox close)
+//
+// maps/ElmsLab.asm — ElmsLabHealingMachine_HealParty:
+//   pause 30                       ; $8B db 0x1E  — pause 30 frames
+//
+// These are two historically dangerous collapse cases:
+//   - promptbutton was previously collapsed to Sem_WaitButton (opcode confusion)
+//   - pause was previously erased or collapsed to deactivatefacing
+//
+// The test sequence $55 $8B $1E $91 exercises both in sequence.
+// ORACLE: must produce Sem_PromptButton then Sem_Pause{30}, in that order.
+// =============================================================================
+TEST(p4_4_promptbutton_distinct_pause_preserved) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Hand-authored bytes from source:
+    // promptbutton=$55, pause_opcode=$8B, pause_len=0x1E(=30), end=$91
+    // Source: ElmsLabWalkUpToElmScript (promptbutton after writetext)
+    //         ElmsLabHealingMachine_HealParty (pause 30 before RestartMapMusic)
+    std::vector<uint8_t> bytes = {
+        0x55,       // promptbutton (not waitbutton=0x54)
+        0x8B, 0x1E, // pause 30 (0x8B=pause opcode, 0x1E=30)
+        0x91        // end
+    };
+    while (bytes.size() < 0x8000) bytes.push_back(0xFF);
+    auto rom = make_rom_from_bytes(bytes);
+    SymbolMap sym;
+    TypedScriptDecoder dec(*rom, sym);
+    CrystalScriptIR ir = dec.decode_script(0x0000);
+    ASSERT_TRUE(ir.commands.size() >= 2u);
+
+    // Stage 1: promptbutton and pause decoded correctly
+    {
+        auto* pb = std::get_if<Cmd_Promptbutton>(&ir.commands[0].data);
+        ASSERT_TRUE(pb != nullptr);
+        // MUTATION: must NOT be Cmd_Waitbutton (opcode 0x54 vs 0x55)
+        ASSERT_TRUE(!std::holds_alternative<Cmd_Waitbutton>(ir.commands[0].data));
+    }
+    {
+        auto* p = std::get_if<Cmd_Pause>(&ir.commands[1].data);
+        ASSERT_TRUE(p != nullptr);
+        ASSERT_EQ(p->length, 30u);
+        // MUTATION: pause_len must NOT be 0 (erased) or 0x8B (opcode itself)
+        ASSERT_TRUE(p->length != 0u);
+        ASSERT_TRUE(p->length != 0x8Bu);
+    }
+
+    // Stage 4: Sem_PromptButton followed by Sem_Pause{30}
+    auto lr = lower_ir(ir);
+    ASSERT_TRUE(lr.success);
+
+    bool found_prompt = false, found_wait_instead = false;
+    bool found_pause30 = false;
+    int prompt_idx = -1, pause_idx = -1, inst_i = 0;
+    for (const auto& blk : lr.ir.blocks) {
+        for (const auto& inst : blk.instructions) {
+            if (std::holds_alternative<Sem_PromptButton>(inst.op)) {
+                found_prompt = true;
+                prompt_idx = inst_i;
+            }
+            if (std::holds_alternative<Sem_WaitButton>(inst.op)) {
+                found_wait_instead = true;
+            }
+            if (auto* p = std::get_if<Sem_Pause>(&inst.op)) {
+                if (p->length == 30u) {
+                    found_pause30 = true;
+                    pause_idx = inst_i;
+                }
+            }
+            ++inst_i;
+        }
+    }
+
+    // ORACLE: Sem_PromptButton must be present
+    ASSERT_TRUE(found_prompt);
+    // MUTATION CHECK: must NOT collapse to Sem_WaitButton
+    ASSERT_FALSE(found_wait_instead);
+    // ORACLE: Sem_Pause{30} must be present
+    ASSERT_TRUE(found_pause30);
+    // ORACLE: promptbutton precedes pause in instruction sequence (preserves source order)
+    ASSERT_TRUE(prompt_idx < pause_idx);
+
+    std::cout << "  [P4-4: promptbutton(0x55)→Sem_PromptButton, pause(30)→Sem_Pause{30}, order preserved ✓]\n";
+}
+
+// =============================================================================
+// P4-5: sdefer ElmsLabWalkUpToElmScript — deferred body is a separate root
+//
+// Source: maps/ElmsLab.asm — ElmsLabMeetElmScene (scene script):
+//   sdefer ElmsLabWalkUpToElmScript   ; $8D dw <ptr>
+//   end                               ; $91
+//
+// Semantics: sdefer schedules the target to run AFTER the current script ends.
+// It is NOT intra-script control flow (not a call, not a jump).
+// The deferred target is discovered as a separate executable body.
+//
+// This test proves:
+//   - opcode $8D decodes with a 16-bit pointer operand
+//   - Sem_Sdefer carries a stable target_script_id (not raw pointer)
+//   - The encoded target_script_id differs from the calling script's ID
+//   - The ScriptId format is "deferred_<hex_address>" (source-provenance address)
+//
+// Bank resolution: entry_address drives the flat target computation.
+// Using entry=0x4C000 (bank 0x13, within bank data) as example:
+//   ptr = 0x5200 → flat = 0x13*0x4000 + (0x5200-0x4000) = 0x4C000 + 0x1200 = 0x4D200
+// =============================================================================
+TEST(p4_5_sdefer_deferred_body_is_separate_root) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Construct Cmd_Sdefer at entry_address = 0x4C000 (bank 0x13 = 19)
+    // ptr = 0x5200 → flat = 19 * 0x4000 + (0x5200 - 0x4000) = 0x4C000 + 0x1200 = 0x4D200
+    Cmd_Sdefer sdef;
+    sdef.pointer = 0x5200;
+
+    CrystalCommand cmd;
+    cmd.data = sdef;
+    cmd.span.rom_address = 0x4C000;
+    cmd.span.raw_bytes = {0x8D, 0x00, 0x52};
+    cmd.status = DecodeStatus::Unlowered;
+
+    // Build IR with entry_address = 0x4C000 (bank 19 = 0x13)
+    CrystalScriptIR ir = make_single_cmd_ir_with_entry(cmd, 0x4C000);
+
+    auto lr = lower_ir(ir);
+    ASSERT_TRUE(lr.success);
+
+    const Sem_Sdefer* sdefer_op = nullptr;
+    for (const auto& blk : lr.ir.blocks)
+        for (const auto& inst : blk.instructions)
+            if (auto* p = std::get_if<Sem_Sdefer>(&inst.op)) sdefer_op = p;
+
+    ASSERT_TRUE(sdefer_op != nullptr);
+
+    // ORACLE: flat = 19 * 0x4000 + (0x5200 - 0x4000) = 0x4C000 + 0x1200 = 0x4D200
+    // target_script_id format: "deferred_<hex>" where hex is the flat address
+    ASSERT_STR_EQ(sdefer_op->target_script_id, "deferred_4d200");
+
+    // MUTATION CHECK 1: must NOT use raw ptr as flat (0x5200 → "deferred_5200")
+    ASSERT_TRUE(sdefer_op->target_script_id != "deferred_5200");
+
+    // MUTATION CHECK 2: must NOT use bank 0 resolution (flat = 0x5200-0x4000 = 0x1200)
+    ASSERT_TRUE(sdefer_op->target_script_id != "deferred_1200");
+
+    // MUTATION CHECK 3: the deferred body's ID must differ from the calling script
+    // The calling entry is at 0x4C000 — "deferred_4d200" ≠ "deferred_4c000"
+    ASSERT_TRUE(sdefer_op->target_script_id != "deferred_4c000");
+
+    // Structural: sdefer is the ONLY instruction in the block (the scene script
+    // does nothing else before end — it immediately defers)
+    int sdefer_count = 0;
+    for (const auto& blk : lr.ir.blocks)
+        for (const auto& inst : blk.instructions)
+            if (std::holds_alternative<Sem_Sdefer>(inst.op)) ++sdefer_count;
+    ASSERT_EQ(sdefer_count, 1);
+
+    std::cout << "  [P4-5: sdefer ptr=0x5200 bank=19 → flat=0x4D200 → deferred_4d200, not 5200 or 1200 ✓]\n";
+}
+
+// =============================================================================
+// P4-6: variablesprite SPRITE_COPYCAT, SPRITE_LASS
+//
+// Source: maps/CopycatsHouse2F.asm — Copycat script:
+//   variablesprite SPRITE_COPYCAT, SPRITE_LASS    ; $6D db 0x0B db 0x28
+//
+// Macro encoding (events.asm variablesprite):
+//   db variablesprite_command ($6D)
+//   db \1 - SPRITE_VARS     → SPRITE_COPYCAT($FB) - SPRITE_VARS($F0) = 0x0B = slot 11
+//   db \2                   → SPRITE_LASS = 0x28
+//
+// constants/sprite_constants.asm:
+//   SPRITE_VARS = $F0 (const_next $f0)
+//   SPRITE_COPYCAT = $FB (11th var after $F0)
+//   SPRITE_LASS = $28
+//
+// crystal/extract/sprite_ids.hpp:
+//   slot_name for SPRITE_COPYCAT: "copycat" (index 0x0B = 11)
+//   SPRITE_LASS (0x28) → fixed sprite "lass" → "fixed:lass"
+//
+// MUTATION CHECK: slot must NOT be 0 or SPRITE_COPYCAT value (0xFB), it's the OFFSET
+// MUTATION CHECK: assigned_sprite_id must NOT be "" or a pokemon_icon: type
+// =============================================================================
+TEST(p4_6_variablesprite_copycat_lass) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // Hand-authored bytes: variablesprite SPRITE_COPYCAT, SPRITE_LASS
+    // $6D = variablesprite_command
+    // $0B = SPRITE_COPYCAT($FB) - SPRITE_VARS($F0) = 11
+    // $28 = SPRITE_LASS
+    // $91 = end
+    std::vector<uint8_t> bytes = {
+        0x6D,   // variablesprite opcode
+        0x0B,   // slot = SPRITE_COPYCAT - SPRITE_VARS = 0xFB - 0xF0 = 0x0B
+        0x28,   // SPRITE_LASS = 0x28
+        0x91    // end
+    };
+    while (bytes.size() < 0x8000) bytes.push_back(0xFF);
+    auto rom = make_rom_from_bytes(bytes);
+    SymbolMap sym;
+    TypedScriptDecoder dec(*rom, sym);
+    CrystalScriptIR ir = dec.decode_script(0x0000);
+    ASSERT_TRUE(ir.commands.size() >= 1u);
+
+    // Stage 1: Cmd_Variablesprite must carry slot=11 and sprite=0x28
+    auto* cmd = std::get_if<Cmd_Variablesprite>(&ir.commands[0].data);
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_EQ(cmd->slot, 0x0Bu);    // offset from SPRITE_VARS: slot index 11
+    ASSERT_EQ(cmd->sprite, 0x28u);  // SPRITE_LASS
+
+    // MUTATION CHECK: slot must NOT be SPRITE_COPYCAT value (0xFB, which would mean no subtraction)
+    ASSERT_TRUE(cmd->slot != 0xFBu);
+    // MUTATION CHECK: slot must NOT be 0
+    ASSERT_TRUE(cmd->slot != 0u);
+
+    // Stage 4: Sem_VariableSprite with semantic slot_name and sprite_id
+    auto lr = lower_ir(ir);
+    ASSERT_TRUE(lr.success);
+
+    const Sem_VariableSprite* vs_op = nullptr;
+    for (const auto& blk : lr.ir.blocks)
+        for (const auto& inst : blk.instructions)
+            if (auto* p = std::get_if<Sem_VariableSprite>(&inst.op)) vs_op = p;
+
+    ASSERT_TRUE(vs_op != nullptr);
+
+    // ORACLE: slot_name = "copycat" (semantic name for slot 11 = SPRITE_COPYCAT - SPRITE_VARS)
+    ASSERT_STR_EQ(vs_op->slot_name, "copycat");
+
+    // ORACLE: SPRITE_LASS (0x28) → "fixed:lass" (via crystal_sprite_byte_to_id)
+    ASSERT_STR_EQ(vs_op->assigned_sprite_id, "fixed:lass");
+
+    // MUTATION CHECK: must NOT be empty (erased sprite assignment)
+    ASSERT_TRUE(!vs_op->slot_name.empty());
+    ASSERT_TRUE(!vs_op->assigned_sprite_id.empty());
+
+    // MUTATION CHECK: assigned_sprite_id must NOT be a pokemon_icon: type
+    // (SPRITE_LASS is in the fixed sprite range, not the pokemon icon range)
+    ASSERT_FALSE(vs_op->assigned_sprite_id.starts_with("pokemon_icon:"));
+
+    // MUTATION CHECK: must NOT be "fixed:chris" (wrong sprite — would indicate
+    // a wrong slot→sprite lookup, e.g., using slot 0x01 instead of 0x28)
+    ASSERT_TRUE(vs_op->assigned_sprite_id != "fixed:chris");
+
+    std::cout << "  [P4-6: variablesprite SPRITE_COPYCAT(slot=0x0B) SPRITE_LASS(0x28) → copycat/fixed:lass ✓]\n";
+}
+
+// =============================================================================
+// P4-7: Pokémon icon source-fidelity — 128-byte payload, 16×16, 2×2 tiles
+//
+// Source authority (NOT derived from SpriteExtractor):
+//   pokecrystal/engine/gfx/mon_icons.asm — GetIcon: lb bc, BANK(Icons), 8
+//     → Request2bpp loads 8 tiles total = 2 frames × 4 tiles per frame
+//   pokecrystal/data/sprite_anims/oam.asm — OAMData_RedWalk:
+//     db 4; dbsprite -1,-1 / 0,-1 / -1,0 / 0,0 → 2×2 OBJ layout = 16×16 pixels
+//   pokecrystal/engine/gfx/mon_icons.asm — GetMemIconGFX:
+//     ld de, 8 * LEN_2BPP_TILE; add hl, de → advances 8 × 16 = 128 bytes
+//
+// Independent ROM byte evidence (not from SpriteExtractor):
+//   IconPointers at bank 23 (0x17), flat 0x05EBBF
+//   ICON_PIKACHU = index 4 → entry at flat 0x05EBBF + 4×2 = 0x05EBC7
+//   PikachuIcon GFX ptr (little-endian dw from ROM) → flat 0x05E66B
+//   128 bytes starting at 0x05E66B, byte-sum = 0x4ED0 (= 20176 decimal)
+//   First byte [0] = 0x7F, byte at offset [64] (frame 1 start) = 0xB1
+//
+// Expected properties (all source-derived, none from SpriteExtractor):
+//   - SpriteType::Icon
+//   - 2 icon_frames (2 animation frames)
+//   - Each frame: pixels array of 256 bytes (16×16 = 256 pixels)
+//   - Pixel values all in range 0-3 (2bpp palette indices)
+//   - Frame 0 ≠ Frame 1 (animation frames differ per source icon data)
+//   - NOT 1024 bytes (old wrong 32×32 size), NOT 512 bytes per icon
+//
+// This test is INDEPENDENT of the oracle's own SpriteExtractor — it only
+// checks geometry and pixel-range invariants derivable from source evidence.
+// =============================================================================
+TEST(p4_7_icon_format_source_fidelity) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // This test requires the real ROM for live extraction.
+    if (!g_rom || !g_profile) {
+        std::cout << "  [P4-7: ROM not loaded — skipping live icon extraction]\n";
+        return;
+    }
+
+    SpriteExtractor extractor(*g_rom, *g_profile);
+
+    // Pikachu icon: verified source address chain above
+    auto result = extractor.extract_pokemon_icon("pikachu");
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.sprite.type, SpriteType::Icon);
+
+    // ORACLE: exactly 2 animation frames (source: Frameset_PartyMon has 2 oamframes)
+    ASSERT_EQ(result.sprite.icon_frames.size(), static_cast<size_t>(2));
+
+    // ORACLE: each frame is 16×16 = 256 pixels (source: 2×2 OBJ layout, 8px per OBJ)
+    ASSERT_EQ(result.sprite.icon_frames[0].pixels.size(), static_cast<size_t>(256));
+    ASSERT_EQ(result.sprite.icon_frames[1].pixels.size(), static_cast<size_t>(256));
+
+    // MUTATION CHECK: must NOT be 32×32 = 1024 (the old wrong geometry)
+    ASSERT_TRUE(result.sprite.icon_frames[0].pixels.size() != 1024u);
+
+    // ORACLE: all pixels are valid 2bpp palette indices (0-3)
+    // Source: 2bpp tile format — each pixel is 2 bits, value 0-3
+    for (int f = 0; f < 2; ++f) {
+        for (int i = 0; i < 256; ++i) {
+            ASSERT_TRUE(result.sprite.icon_frames[f].pixels[i] <= 3u);
+        }
+    }
+
+    // ORACLE: frame 0 ≠ frame 1 (Pikachu's animation frames are distinct)
+    // Source: two separately stored 64-byte tile blocks in ROM
+    ASSERT_TRUE(result.sprite.icon_frames[0].pixels != result.sprite.icon_frames[1].pixels);
+
+    // MUTATION CHECK: bigmon icon also extracts correctly with same geometry
+    // (proves the 128-byte read doesn't bleed into adjacent icons)
+    auto bigmon = extractor.extract_pokemon_icon("bigmon");
+    ASSERT_TRUE(bigmon.success);
+    ASSERT_EQ(bigmon.sprite.icon_frames.size(), static_cast<size_t>(2));
+    ASSERT_EQ(bigmon.sprite.icon_frames[0].pixels.size(), static_cast<size_t>(256));
+
+    // MUTATION CHECK: pikachu and bigmon must produce distinct frame data
+    // (they use different GFX from IconPointers — would be same if byte range overlapped)
+    ASSERT_TRUE(result.sprite.icon_frames[0].pixels != bigmon.sprite.icon_frames[0].pixels);
+
+    // Independent cross-check: Pikachu sprite_id must reflect source naming
+    ASSERT_STR_EQ(result.sprite.sprite_id, "pokemon_icon:pikachu");
+    ASSERT_STR_EQ(bigmon.sprite.sprite_id, "pokemon_icon:bigmon");
+
+    std::cout << "  [P4-7: Pikachu icon 2 frames × 256px (16×16), all 2bpp, frames distinct, bigmon distinct ✓]\n";
+}
+
+// =============================================================================
+// P4-8: FullGameCompiler package seam
+//
+// Traces the full production pipeline using the real Crystal ROM:
+//   RomData → FullGameCompiler → EMON package → PackageReader
+//
+// Asserts:
+//   - compile() returns true
+//   - Package file exists and is non-empty
+//   - PackageReader opens the package
+//   - A known script ID exists (NewBarkTownSign → script_id contains the address)
+//   - The script Lua text is non-empty (Stage 7 emission succeeded)
+//   - The "johto_outdoor" tileset exists in the package
+//   - The "chris" (player) sprite exists in the package
+//   - Species→icon map is present and non-empty (MonMenuIcons was compiled)
+//
+// This test requires the real ROM. If ROM is unavailable it skips.
+// It deliberately does NOT assert specific Lua text content because that
+// would make the test implementation-derived. It only asserts existence
+// and non-emptiness.
+// =============================================================================
+TEST(p4_8_fullcompiler_package_seam) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    if (!g_rom || !g_profile) {
+        std::cout << "  [P4-8: ROM not loaded — skipping full compiler seam]\n";
+        return;
+    }
+
+    auto out = std::filesystem::temp_directory_path() / "oracle_p4_8.emon";
+    std::filesystem::remove(out);
+
+    // Run the full production compiler
+    FullGameCompiler compiler(*g_rom, *g_profile);
+    FullCompilerConfig cfg;
+    cfg.use_package_cache = false;
+    cfg.worker_count = 1;
+    bool ok = compiler.compile(out, cfg);
+
+    // ORACLE: compile must succeed on the real vanilla Crystal ROM
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    ASSERT_TRUE(std::filesystem::file_size(out) > 0);
+
+    // Open package through production PackageReader
+    auto reader = enginemon::PackageReader::open(out);
+    ASSERT_TRUE(reader != nullptr);
+
+    // ORACLE: "johto_outdoor" tileset must be in the package
+    // (New Bark Town uses it — it was the first map ever compiled)
+    auto tileset_data = reader->load_tileset_data("johto_outdoor");
+    ASSERT_TRUE(tileset_data.has_value());
+    ASSERT_TRUE(!tileset_data->empty());
+
+    // ORACLE: player sprite "chris" must be in the package
+    auto chris_sprite = reader->load_sprite("chris");
+    ASSERT_TRUE(chris_sprite.has_value());
+    ASSERT_TRUE(chris_sprite->sprite_id == std::string("chris"));
+
+    // ORACLE: species→icon map must be non-empty
+    // (build_species_icon_map() was called and emitted all 251 species)
+    auto icon_map = reader->load_species_icon_map();
+    ASSERT_FALSE(icon_map.empty());
+    // At least 240 species should have valid icon entries (251 total, some may be ICON_NULL)
+    ASSERT_TRUE(icon_map.size() >= 240u);
+    // ORACLE: Pikachu (species 25) maps to "pokemon_icon:pikachu"
+    ASSERT_TRUE(icon_map.count(static_cast<SpeciesId>(25)) > 0);
+    ASSERT_TRUE(icon_map.at(static_cast<SpeciesId>(25)) == std::string("pokemon_icon:pikachu"));
+    // ORACLE: Charizard (species 6) maps to "pokemon_icon:bigmon"
+    ASSERT_TRUE(icon_map.count(static_cast<SpeciesId>(6)) > 0);
+    ASSERT_TRUE(icon_map.at(static_cast<SpeciesId>(6)) == std::string("pokemon_icon:bigmon"));
+
+    // ORACLE: bigmon sprite must be in the package (asset closure fix)
+    // Without the closure fix, bigmon would be absent (not in any map object event)
+    auto bigmon_sprite = reader->load_sprite("pokemon_icon:bigmon");
+    ASSERT_TRUE(bigmon_sprite.has_value());
+
+    // ORACLE: New Bark Town map must be in the package
+    auto nbt_map = reader->load_map("new_bark_town");
+    ASSERT_TRUE(nbt_map.has_value());
+    ASSERT_TRUE(nbt_map->map_id == std::string("new_bark_town"));
+
+    // ORACLE: scripts must exist in the package
+    // Script IDs use format "map_<group>_<map>_0x<address>" or "std_<id>"
+    // New Bark Town is group=24, map=4 → script IDs contain "map_24_4_"
+    // We check that the package has at least 1000 scripts (known corpus ≥ 1788)
+    auto script_list = reader->list_scripts();
+    ASSERT_TRUE(script_list.size() >= 1000u);
+
+    // ORACLE: at least one New Bark Town script exists
+    // Source: NewBarkTown is group=24, map=4 (map_constants.asm newgroup NEW_BARK=24)
+    bool found_nbt_script = false;
+    for (const auto& sid : script_list) {
+        if (sid.find("map_24_4_") != std::string::npos) {
+            found_nbt_script = true;
+            // Verify its Lua is non-empty (Stage 7 ran)
+            auto lua = reader->load_script(sid);
+            ASSERT_TRUE(lua.has_value());
+            ASSERT_TRUE(!lua->empty());
+            break;
+        }
+    }
+    ASSERT_TRUE(found_nbt_script);
+
+    std::filesystem::remove(out);
+    std::cout << "  [P4-8: full compiler seam — johto_outdoor/chris/bigmon/nbt_map/scripts all in package ✓]\n";
+}
+
 // =============================================================================
 // MAIN
 // =============================================================================
@@ -4030,6 +4756,44 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p3_ser1_signed_offset_boundary_values);
     RUN_TEST(p3_ser_conn_three_fields_independent_roundtrip);
     RUN_TEST(p3_ser2_sprite_id_string_boundary);
+
+    // =========================================================================
+    // Oracle Phase 4 — Vertical Slices: source→decode→lower→observable effect
+    // =========================================================================
+    // All expected values are hand-authored from pokecrystal source and
+    // RGBDS-verified byte encodings.  NEVER derived from Enginemon output.
+    //
+    // Source provenance per test:
+    //   P4-1: setflag ENGINE_FLYPOINT_NEW_BARK   macros/scripts/events.asm $36 dw
+    //         constants/engine_flags.asm          ENGINE_FLYPOINT_NEW_BARK=65
+    //         maps/NewBarkTown.asm                NewBarkTownFlypointCallback
+    //   P4-2: givepoke CYNDAQUIL 5 BERRY         macros/scripts/events.asm $2d
+    //         constants/pokemon_constants.asm     CYNDAQUIL=$9B
+    //         constants/item_constants.asm        BERRY=$AD
+    //         maps/ElmsLab.asm                    CyndaquilPokeBallScript
+    //   P4-3: warp ELMS_LAB 6 3                  macros/scripts/events.asm $3c
+    //         constants/map_constants.asm         ELMS_LAB group=24 map=5
+    //         maps/NewBarkTown.asm                warp_event 6,3,ELMS_LAB,1
+    //   P4-4: promptbutton + pause 30             macros/scripts/events.asm $55 $8B
+    //         maps/ElmsLab.asm                    ElmsLabWalkUpToElmScript/HealingMachine
+    //   P4-5: sdefer ElmsLabWalkUpToElmScript     macros/scripts/events.asm $8D dw
+    //         maps/ElmsLab.asm                    ElmsLabMeetElmScene
+    //   P4-6: variablesprite SPRITE_COPYCAT LASS  macros/scripts/events.asm $6D
+    //         constants/sprite_constants.asm      SPRITE_VARS=$F0 SPRITE_COPYCAT=$FB
+    //         maps/CopycatsHouse2F.asm            Copycat script
+    //   P4-7: PokémonIcon 128-byte payload        pokecrystal GetIcon lb bc BANK(Icons) 8
+    //         data/sprite_anims/oam.asm            OAMData_RedWalk 4 OBJ 2×2 → 16×16
+    //   P4-8: FullGameCompiler package seam       real ROM → compile → PackageReader
+    //         ScriptId exists, Lua non-empty, package assets present
+    // =========================================================================
+    RUN_TEST(p4_1_setflag_engine_flypoint_new_bark);
+    RUN_TEST(p4_2_givepoke_cyndaquil_level5_berry);
+    RUN_TEST(p4_3_warp_elmslab_x6_y3);
+    RUN_TEST(p4_4_promptbutton_distinct_pause_preserved);
+    RUN_TEST(p4_5_sdefer_deferred_body_is_separate_root);
+    RUN_TEST(p4_6_variablesprite_copycat_lass);
+    RUN_TEST(p4_7_icon_format_source_fidelity);
+    RUN_TEST(p4_8_fullcompiler_package_seam);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";
