@@ -20,9 +20,10 @@ enum class SpriteType : uint8_t {
     Walking = 1,    // 6 semantic frames: stand D/U/L, walk D/U/L; right uses flip
     Standing = 2,   // 6 semantic frames: can turn but doesn't walk
     Still = 3,      // 1 semantic frame: static object (items, etc.)
-    Icon = 4        // 2 animation frames, 32×32 pixels each (Pokémon overworld icons)
+    Icon = 4        // 2 animation frames, 16×16 pixels each (Pokémon party-menu icons)
                     // Source: Crystal party-menu icon GFX (bank 23, IconPointers table)
-                    // Frame 0 = icon animation frame A, Frame 1 = icon animation frame B
+                    // Each frame: 4 tiles (2×2) × 16 bytes = 64 bytes raw = 16×16 pixels
+                    // Frame 0 = icon animation frame A (tiles 0-3), Frame 1 = B (tiles 4-7)
 };
 
 // OBJ palette indices from Crystal (semantic, not hardware)
@@ -65,16 +66,23 @@ struct SpriteFrame {
     }
 };
 
-// 32×32 icon frame for SpriteType::Icon.
-// Source: Crystal party-menu icon GFX — 16 tiles (4×4) × 16 bytes = 256 bytes raw,
-// decoded to 32×32 = 1024 indexed pixels.
-// Tile layout (Crystal): 4 columns, 4 rows of 8×8 tiles assembled row-major.
+// 16×16 icon frame for SpriteType::Icon.
+// Source: Crystal party-menu icon GFX — 4 tiles (2×2) × 16 bytes = 64 bytes raw per frame,
+// decoded to 16×16 = 256 indexed pixels.
+//
+// Proven from pokecrystal/engine/gfx/mon_icons.asm:
+//   GetIcon: lb bc, BANK(Icons), 8   ; c=8 tiles total per icon (2 frames × 4 tiles)
+// Proven from data/sprite_anims/oam.asm OAMData_RedWalk:
+//   4 OBJ hardware sprites in 2×2 layout → 16×16 pixels rendered
+// Tile layout (Crystal): 2×2 grid of 8×8 tiles, row-major:
+//   [tile0][tile1]   top row    (y=0..7)
+//   [tile2][tile3]   bottom row (y=8..15)
 struct IconFrame {
-    std::array<uint8_t, 1024> pixels;  // 32x32, row-major, values 0-3
+    std::array<uint8_t, 256> pixels;  // 16×16, row-major, values 0-3
 
     uint8_t get_pixel(int x, int y) const {
-        if (x < 0 || x >= 32 || y < 0 || y >= 32) return 0;
-        return pixels[y * 32 + x];
+        if (x < 0 || x >= 16 || y < 0 || y >= 16) return 0;
+        return pixels[y * 16 + x];
     }
 };
 

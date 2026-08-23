@@ -404,6 +404,10 @@ private:
     std::unordered_set<std::string> emitted_sprite_ids_;
     bool emitted_obj_palettes_ = false;
     bool emitted_font_ = false;
+    // Icon type package keys referenced by the species→icon map.
+    // Populated in link_results() from build_species_icon_map() output.
+    // validate_references() gates: every entry here must be in emitted_sprite_ids_.
+    std::unordered_set<std::string> emitted_icon_type_ids_;
 
     // Single-use contract: compile() must not be called more than once on the
     // same instance.  Accumulated build state (content_, linker_input_, etc.)

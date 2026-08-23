@@ -468,6 +468,29 @@ void FullGameCompiler::discover_sprites() {
             }
         }
     }
+
+    // ASSET CLOSURE: ensure every icon type reachable via Day Care species resolution
+    // is packaged, even when it never appears in any static map object event.
+    // Without this, ICON_BIGMON (Charizard/Dragonite/Kingdra) and any other icon
+    // absent from the 0x80-0xA2 overworld range would cause silent runtime failures.
+    {
+        auto icon_entries = sprite_extractor_->build_species_icon_map();
+        size_t closure_added = 0;
+        for (const auto& [species, icon_id] : icon_entries) {
+            if (seen_pkg.contains(icon_id)) continue;
+            seen_pkg.insert(icon_id);
+
+            DiscoveredSprite ds;
+            ds.sprite_id    = icon_id;
+            ds.sprite_index = 0;
+            ds.is_player    = false;
+
+            content_.sprite_index[icon_id] = content_.sprites.size();
+            content_.sprites.push_back(ds);
+            ++closure_added;
+        }
+        std::cout << "  Icon types added for Day Care closure: " << closure_added << "\n";
+    }
 }
 
 //=============================================================================
@@ -1210,6 +1233,11 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
         }
         writer.add_species_icon_map(icon_map);
         std::cout << "  Species→icon entries: " << icon_map.size() << "\n";
+
+        for (const auto& [species, icon_id] : icon_map) {
+            emitted_icon_type_ids_.insert(icon_id);
+        }
+        std::cout << "  Distinct icon types in map: " << emitted_icon_type_ids_.size() << "\n";
     }
     
     // Add font
@@ -1414,7 +1442,25 @@ CompilerValidationResult FullGameCompiler::validate_references() {
             result.success = false;
         }
     }
-    
+
+    // ASSET CLOSURE GATE: every icon type referenced by the species→icon map
+    // must have a corresponding packaged sprite asset.
+    // emitted_icon_type_ids_ is populated in link_results() from build_species_icon_map().
+    // A missing entry means Day Care species resolution silently fails at runtime.
+    for (const auto& icon_id : emitted_icon_type_ids_) {
+        if (!emitted_sprite_ids_.contains(icon_id)) {
+            result.errors.push_back({
+                CompilerValidationError::Type::MissingSprite,
+                "(species_icon_map)",
+                icon_id,
+                std::format("Species→icon map references '{}' but that icon asset "
+                            "was not emitted into the package (Day Care closure failure)",
+                            icon_id)
+            });
+            result.success = false;
+        }
+    }
+
     return result;
 }
 

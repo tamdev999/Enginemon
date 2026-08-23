@@ -234,10 +234,18 @@ SpriteExtractionResult SpriteExtractor::extract_player_sprite(bool is_female) co
 // (e.g., "pikachu" for ICON_PIKACHU = 4).
 // The package key is "pokemon_icon:<icon_type_name>".
 //
-// Icon format: 32×32 pixels = 16 tiles (4×4 grid), 2 animation frames.
-//   Total GFX: 2 frames × 16 tiles × 16 bytes = 512 bytes per icon.
-//   Tile assembly: row-major 4×4 grid of 8×8 tiles.
-//     Frame 0: tiles 0–15, frame 1: tiles 16–31.
+// Icon format — source-proven from pokecrystal:
+//   GetIcon: lb bc, BANK(Icons), 8        ; c=8 → Request2bpp loads 8 tiles total
+//   GetMemIconGFX: ld de, 8 tiles / add hl, de  ; advances past 8 tiles (128 bytes)
+//   OAMData_RedWalk: 4 OBJ sprites in 2×2 layout → 16×16 pixels rendered
+//
+//   Per icon: 2 frames × 4 tiles × 16 bytes/tile = 128 bytes raw
+//   Frame 0: tiles 0–3 (bytes 0–63)
+//   Frame 1: tiles 4–7 (bytes 64–127)
+//   Tile assembly per frame: 2×2 grid of 8×8 tiles, row-major:
+//     [tile0][tile1]   top row    (y=0..7)
+//     [tile2][tile3]   bottom row (y=8..15)
+//   Decoded dimensions: 16×16 pixels per frame
 //=============================================================================
 
 // Icon type name → index mapping (ICON_* constants 0-38).
@@ -334,7 +342,6 @@ auto SpriteExtractor::build_species_icon_map() const
 }
 
 // Decode a single 8×8 2bpp tile to 64 indexed pixels.
-// Reuses the existing decode_tile logic but as a standalone function for icons.
 static void decode_icon_tile(const uint8_t* data, uint8_t* pixels) {
     for (int row = 0; row < 8; ++row) {
         uint8_t low  = data[row * 2];
@@ -347,24 +354,27 @@ static void decode_icon_tile(const uint8_t* data, uint8_t* pixels) {
     }
 }
 
-// Assemble 16 tiles (4 columns × 4 rows of 8×8) into a 32×32 IconFrame.
-// Tile order: row 0 = tiles 0,1,2,3; row 1 = tiles 4,5,6,7; etc.
-static enginemon::IconFrame compile_icon_frame(const uint8_t* tile_data) {
+// Assemble 4 tiles (2×2 grid of 8×8) into a 16×16 IconFrame.
+// Source: OAMData_RedWalk in data/sprite_anims/oam.asm — 4 OBJ sprites arranged:
+//   tile0 top-left, tile1 top-right, tile2 bottom-left, tile3 bottom-right.
+// tile_data points to 4 consecutive 2bpp tiles (64 bytes total).
+static enginemon::IconFrame compile_icon_frame_16(const uint8_t* tile_data) {
     enginemon::IconFrame frame;
-    uint8_t tile_pixels[16][64];  // 16 tiles × 64 pixels each
+    uint8_t tile_pixels[4][64];  // 4 tiles × 64 pixels each
 
-    for (int t = 0; t < 16; ++t) {
+    for (int t = 0; t < 4; ++t) {
         decode_icon_tile(&tile_data[t * 16], tile_pixels[t]);
     }
 
-    for (int y = 0; y < 32; ++y) {
-        for (int x = 0; x < 32; ++x) {
-            int tile_col = x / 8;   // 0-3
-            int tile_row = y / 8;   // 0-3
-            int tile_idx = tile_row * 4 + tile_col;
+    // 2×2 tile layout:
+    //   [0][1]  top row    (y=0..7)
+    //   [2][3]  bottom row (y=8..15)
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            int tile_idx = (y < 8 ? 0 : 2) + (x < 8 ? 0 : 1);
             int local_x  = x % 8;
             int local_y  = y % 8;
-            frame.pixels[y * 32 + x] = tile_pixels[tile_idx][local_y * 8 + local_x];
+            frame.pixels[y * 16 + x] = tile_pixels[tile_idx][local_y * 8 + local_x];
         }
     }
     return frame;
@@ -409,11 +419,15 @@ SpriteExtractionResult SpriteExtractor::extract_pokemon_icon(
     auto ptr_bytes = rom_.read_bytes(entry_off, ICON_PTR_ENTRY);
     uint16_t gfx_ptr = ptr_bytes[0] | (ptr_bytes[1] << 8);
 
-    // GFX data is in bank 23 at the address given by IconPointers.
-    // Each icon: 2 frames × 16 tiles × 16 bytes/tile = 512 bytes raw.
-    // Source: gfx/icons.asm — all files are raw uncompressed .2bpp
+    // GFX data: 2 frames × 4 tiles × 16 bytes/tile = 128 bytes per icon.
+    // Source: GetIcon lb bc, BANK(Icons), 8  →  Request2bpp loads 8 tiles total.
+    //         Frame 0: tiles 0-3 (bytes 0-63), Frame 1: tiles 4-7 (bytes 64-127).
+    constexpr size_t TILES_PER_FRAME = 4;
+    constexpr size_t BYTES_PER_TILE  = 16;
+    constexpr size_t BYTES_PER_FRAME = TILES_PER_FRAME * BYTES_PER_TILE;  // 64
+    constexpr size_t ICON_GFX_SIZE   = 2 * BYTES_PER_FRAME;               // 128
+
     uint32_t gfx_addr = rom_.bank_to_flat(ICON_BANK, gfx_ptr);
-    constexpr size_t ICON_GFX_SIZE = 512;  // 2 frames × 16 tiles × 16 bytes
 
     if (gfx_addr + ICON_GFX_SIZE > rom_.size()) {
         result.error = std::format(
@@ -430,12 +444,10 @@ SpriteExtractionResult SpriteExtractor::extract_pokemon_icon(
     sprite.type            = SpriteType::Icon;
     sprite.default_palette = SpritePalette::Red;  // OBJ palette 0 (icons use first OBJ pal)
 
-    // Assemble 2 animation frames, each 16 tiles (32×32 pixels)
-    constexpr size_t TILES_PER_FRAME = 16;
-    constexpr size_t BYTES_PER_FRAME = TILES_PER_FRAME * 16;  // 256 bytes of raw tile data
+    // Assemble 2 animation frames, each from 4 tiles (64 bytes raw → 16×16 pixels).
     sprite.icon_frames.resize(2);
-    sprite.icon_frames[0] = compile_icon_frame(gfx_data.data());
-    sprite.icon_frames[1] = compile_icon_frame(gfx_data.data() + BYTES_PER_FRAME);
+    sprite.icon_frames[0] = compile_icon_frame_16(gfx_data.data());
+    sprite.icon_frames[1] = compile_icon_frame_16(gfx_data.data() + BYTES_PER_FRAME);
 
     stats_.sprites_extracted++;
     result.success = true;
