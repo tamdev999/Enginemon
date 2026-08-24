@@ -747,18 +747,18 @@ void HeadlessGameLoop::restore_npc_states(const std::string& map_id) {
 // Reference: Gen2Recomped/src/world/NPC.lua
 //=============================================================================
 
-// Get next random value — uses the MAP-LOCAL RNG for NPC movement.
-// This is separate from the canonical gameplay RNG (game_state_->rng).
-// Map-local RNG is seeded per map and does not affect save state.
+// Get next random value — draws from the CANONICAL gameplay RNG (game_state_->rng).
+// NPC movement randomness affects NPC positions which are saved to GameState,
+// therefore it is authoritative gameplay state and must use the canonical stream.
+// REQUIRES: game_state_ to be set before any NPC movement tick.
 uint32_t HeadlessGameLoop::next_random() {
-    return map_rng_.next();
-}
-
-void HeadlessGameLoop::set_rng_seed(uint32_t seed) {
-    // Seeds the MAP-LOCAL RNG for NPC movement and map-scoped randomness.
-    // Does NOT touch the canonical gameplay RNG (game_state_->rng).
-    // The canonical gameplay RNG is a continuous save-persisted stream.
-    map_rng_.set_seed(seed);
+    if (game_state_) {
+        return game_state_->rng.next_u32();
+    }
+    // No GameState — simulation cannot proceed deterministically.
+    // This is a programmer error in production; tests must always bind game_state_.
+    // Return a fixed value rather than silently using non-authoritative entropy.
+    return 0u;
 }
 
 void HeadlessGameLoop::freeze_npc(uint16_t npc_id) {

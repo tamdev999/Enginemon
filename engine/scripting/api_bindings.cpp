@@ -1211,7 +1211,13 @@ int random(lua_State* L) {
 }
 
 // ctx.util:random_chance(percent) -> bool
-// percent is 0-100. Consumes 1 draw from canonical GameplayRng.
+// percent ∈ [0, 100]. probability = percent / 100.
+// Consumes 1+ draws from canonical GameplayRng (same as bounded — Lemire rejection).
+// Contract:
+//   0   → always false,  0 draws
+//   100 → always true,   0 draws
+//   >100 → programmer error, throws (0 draws consumed)
+//   [1,99] → 1+ draws, unbiased probability = percent/100
 int random_chance(lua_State* L) {
     int percent = luaL_checkinteger(L, 2);
     LuaRuntime* runtime = get_runtime(L);
@@ -1220,16 +1226,29 @@ int random_chance(lua_State* L) {
             if (percent <= 0) {
                 lua_pushboolean(L, false);
             } else if (percent >= 100) {
+                if (percent > 100) {
+                    // Programmer error — invalid percent, 0 draws
+                    luaL_error(L, "random_chance: percent %d is out of range [0,100]", percent);
+                    return 0;
+                }
                 lua_pushboolean(L, true);
             } else {
-                // 1 draw: hit if roll < percent (out of 100)
-                uint8_t roll = gs->rng.next_u8();
-                lua_pushboolean(L, roll < static_cast<uint8_t>(percent));
+                // bounded(100) returns [0,99] with uniform probability.
+                // Hit if result < percent → probability = percent/100 exactly.
+                // Consumes 1+ draws (Lemire — typically 1).
+                uint32_t roll = gs->rng.bounded(100u);
+                lua_pushboolean(L, roll < static_cast<uint32_t>(percent));
             }
             return 1;
         }
     }
-    // Fallback: no GameState — deterministic stub (percent >= 50 → true)
+    // Fallback: no GameState bound (isolated unit tests only).
+    // Returns deterministic result, 0 draws consumed.
+    // percent >= 50 → true is NOT a probability contract — it is an explicit stub marker.
+    if (percent > 100) {
+        luaL_error(L, "random_chance: percent %d is out of range [0,100]", percent);
+        return 0;
+    }
     lua_pushboolean(L, percent >= 50);
     return 1;
 }

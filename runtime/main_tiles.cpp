@@ -572,13 +572,6 @@ static bool transition_to_map(
     // Clear NPCs and add new ones from the new map
     ctx.game_loop->clear_npcs();
     
-    // Set RNG seed for deterministic NPC movement
-    uint32_t map_seed = 0;
-    for (char c : world_state.map.map_id) {
-        map_seed = map_seed * 31 + static_cast<uint32_t>(c);
-    }
-    ctx.game_loop->set_rng_seed(map_seed);
-    
     // Add NPCs from new map
     for (const auto& obj : world_state.map.objects) {
         NpcState npc;
@@ -838,13 +831,6 @@ int main(int argc, char* argv[]) {
     // directly at every spawn_player, handle_movement (facing), and
     // complete_player_movement (confirmed position) call.
     // The movement callback copy is no longer needed.
-    
-    // Set RNG seed for deterministic NPC movement (hash map_id string for seed)
-    uint32_t map_seed = 0;
-    for (char c : world_state.map.map_id) {
-        map_seed = map_seed * 31 + static_cast<uint32_t>(c);
-    }
-    game_loop.set_rng_seed(map_seed);
     
     // Add NPCs from map objects for collision, interaction, and autonomous movement
     // Reference: pokecrystal/maps/NewBarkTown.asm object_events

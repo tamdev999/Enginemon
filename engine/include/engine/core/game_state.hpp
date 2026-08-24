@@ -50,28 +50,6 @@ struct WarpMemory {
 };
 
 //=============================================================================
-// RNG STATE (MAP-LOCAL, NON-AUTHORITATIVE)
-// Used only by HeadlessGameLoop::map_rng_ for NPC movement.
-// NOT saved to GameState — seeded from map identity on each load.
-//=============================================================================
-
-struct RngState {
-    uint64_t seed = 0;
-    uint64_t state = 0;
-
-    void set_seed(uint64_t s) {
-        seed = s;
-        state = s;
-    }
-
-    // LCG — fast, low-quality, acceptable for non-authoritative NPC movement
-    uint32_t next() {
-        state = state * 1664525 + 1013904223;
-        return static_cast<uint32_t>(state);
-    }
-};
-
-//=============================================================================
 // GAMEPLAY RNG — CANONICAL AUTHORITATIVE STREAM
 //
 // PCG-XSH-RR (64-bit state, 32-bit output)
