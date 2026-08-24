@@ -68,7 +68,7 @@ inline const char* validation_class_name(ValidationClass vc) {
 //   Map, ElevatorId, Trainer, StdScript, PokeMailId, TextId
 //
 // PendingDefinition (authoritative closed-domain membership, artifact producer not yet compiled):
-//   Species, Item, Music, Sfx, Special, PhonePerson, TradeId, FruitTreeId, MartId, Emote
+//   Species, Item, Music, Sfx, PhonePerson, TradeId, FruitTreeId, MartId, Emote
 //   NOTE: These use Crystal profile table counts as domain authority.
 //         The domain is proven contiguous (no holes) for supported ROM profiles.
 //         NOT extracted definition membership - that comes when extractors are built.
@@ -101,7 +101,9 @@ enum class ReferenceType : uint8_t {
     Object,         // OwnershipValidated: object index in owning map
     Label,          // Stage2Validated: CFG block target (not corpus linking)
     StdScript,      // ExactResolved: std_id against compiled/legalized bodies
-    Special,        // PendingDefinition: special_id in domain, needs semantic classification
+    // NOTE: Special (raw Crystal Special ID) is intentionally absent.
+    //   Sem_Special is rejected by Stage 5 and never reaches Stage 6.
+    //   All Special opcodes lower to dedicated SemanticOps or Sem_GameSpecificEvent.
     Emote,          // PendingDefinition: emote bubble index in domain, awaits registry
     Scene,          // RangeOnly: map scene number (semantic domain 0-255)
     WarpId,         // OwnershipValidated: warp index in owning map
@@ -130,7 +132,6 @@ inline const char* reference_type_name(ReferenceType type) {
         case ReferenceType::Object: return "Object";
         case ReferenceType::Label: return "Label";
         case ReferenceType::StdScript: return "StdScript";
-        case ReferenceType::Special: return "Special";
         case ReferenceType::Emote: return "Emote";
         case ReferenceType::Scene: return "Scene";
         case ReferenceType::WarpId: return "WarpId";
@@ -166,7 +167,6 @@ inline ValidationClass expected_validation_class(ReferenceType type) {
         case ReferenceType::Item:         // Closed domain [0, num_items)
         case ReferenceType::Music:        // Closed domain [0, num_music)
         case ReferenceType::Sfx:          // Closed domain [0, num_sfx)
-        case ReferenceType::Special:      // Closed domain [0, num_specials) - awaits semantic classification
         case ReferenceType::PhonePerson:  // Closed domain [0, num_phone_contacts)
         case ReferenceType::TradeId:      // Closed domain [0, num_npc_trades)
         case ReferenceType::FruitTreeId:  // Closed domain [1, num_fruit_trees] (1-indexed)
@@ -302,8 +302,9 @@ struct CompiledGameData {
     // Only these should validate as ExactResolved
     std::unordered_set<uint16_t> compiled_std_scripts;
     
-    // Specials: authoritative domain (from profile.counts)
-    std::unordered_set<uint16_t> specials;
+    // Specials: intentionally removed.
+    // Sem_Special is rejected at Stage 5; no Special references reach Stage 6.
+    // has_special() is gone — use has_behavior_name() for Sem_GameSpecificEvent validation.
     
     // Phone contacts: exact compiled phone person IDs
     std::unordered_set<uint8_t> phone_persons;
@@ -346,7 +347,7 @@ struct CompiledGameData {
     bool has_sfx(enginemon::SfxId id) const { return sfx.contains(id); }
     bool has_trainer(uint8_t group, uint8_t id) const;
     bool has_std_script(uint16_t id) const { return compiled_std_scripts.contains(id); }
-    bool has_special(uint16_t id) const { return specials.contains(id); }
+    // has_special() removed — Sem_Special never reaches Stage 6 (rejected at Stage 5)
     bool has_phone_person(uint8_t id) const { return phone_persons.contains(id); }
     bool has_trade(uint8_t id) const { return trades.contains(id); }
     bool has_fruit_tree(uint8_t id) const { return fruit_trees.contains(id); }

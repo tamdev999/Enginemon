@@ -451,17 +451,6 @@ ValidatedReference SemanticLinker::validate_reference(
             }
             break;
             
-        case ReferenceType::Special:
-            // Special domain: 0-255 (indices into SpecialsPointers)
-            // NOTE: Sem_Special is a pass-through that needs semantic classification
-            if (game_data_->has_special(static_cast<uint16_t>(value))) {
-                ref.validation = ValidationClass::PendingDefinition;
-            } else {
-                ref.validation = ValidationClass::InvalidDomain;
-                ref.error_reason = "Special ID outside authoritative domain";
-            }
-            break;
-            
         case ReferenceType::PhonePerson:
             // Phone contacts domain: 0-37
             if (game_data_->has_phone_person(static_cast<uint8_t>(value))) {
@@ -816,10 +805,10 @@ void SemanticLinker::extract_and_validate_from_op(
             add_ref(ReferenceType::StdScript, sem_op.std_id, "JumpStd");
         }
         
-        // === Special References ===
-        else if constexpr (std::is_same_v<T, Sem_Special>) {
-            add_ref(ReferenceType::Special, sem_op.special_id, "Special");
-        }
+        // NOTE: Sem_Special has no branch here.
+        // Sem_Special is unconditionally rejected at Stage 5 (legality gate).
+        // No Sem_Special instance can survive to Stage 6 linking.
+        // The dead Sem_Special linker branch has been removed.
         
         // === Phone References ===
         else if constexpr (std::is_same_v<T, Sem_AddPhoneNumber>) {

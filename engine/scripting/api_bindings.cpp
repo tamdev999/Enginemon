@@ -8,6 +8,7 @@
 #include "engine/world/movement_manager.hpp"
 #include "engine/core/game_state.hpp"
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <utility>
 #include <memory>
@@ -1583,15 +1584,181 @@ static LuaRuntime* get_runtime(lua_State* L) {
     return runtime;
 }
 
+// =============================================================================
+// BehaviorRegistry
+//
+// Canonical set of all valid Sem_GameSpecificEvent behavior names.
+// Source authority: behavior_table.hpp / BEHAVIOR_TABLE.
+//
+// Dispatch policy (enforced at runtime — mirrors the compiler's Stage 5 gate):
+//
+//   Sdefer_<id>  → deferred-script scheduler (always routes to callback)
+//   known name   → capability-deferred: hard error naming the stable identity
+//   unknown name → hard error (Stage 5 should have rejected this; compiler bug)
+//
+// There is no silent no-op path.  If a behavior is not yet implemented, the
+// script errors explicitly so the caller cannot observe a fabricated result or
+// consume a stale wScriptVar value.
+// =============================================================================
+
+// All 95 valid Sem_GameSpecificEvent behavior names from BEHAVIOR_TABLE.
+// This list must stay in sync with crystal/script/behavior_table.hpp.
+static const std::unordered_set<std::string_view> KNOWN_BEHAVIORS = {
+    // Link/Trade/Communications
+    "SetBitsForLinkTradeRequest",
+    "WaitForLinkedFriend",
+    "CheckLinkTimeout_Receptionist",
+    "TryQuickSave",
+    "CheckBothSelectedSameRoom",
+    "FailedLinkToPast",
+    "CloseLink",
+    "WaitForOtherPlayerToExit",
+    "SetBitsForBattleRequest",
+    "SetBitsForTimeCapsuleRequest",
+    "CheckTimeCapsuleCompatibility",
+    "EnterTimeCapsule",
+    "TradeCenter",
+    "Colosseum",
+    "TimeCapsule",
+    "CableClubCheckWhichChris",
+    "CheckMysteryGift",
+    "GetMysteryGiftItem",
+    "UnlockMysteryGift",
+    // Bug Contest
+    "BugContestJudging",
+    "CheckPartyFullAfterContest",
+    "ContestDropOffMons",
+    "ContestReturnMons",
+    "GiveParkBalls",
+    "CheckMagikarpLength",
+    "MagikarpHouseSign",
+    // PC / Services
+    "PokemonCenterPC",
+    "PlayersHousePC",
+    // Day Care
+    "DayCareMan",
+    "DayCareLady",
+    "DayCareManOutside",
+    "MoveDeletion",
+    "BankOfMom",
+    // Transport/Map
+    "MagnetTrain",
+    // Name/Story events
+    "NameRival",
+    "SetDayOfWeek",
+    "OverworldTownMap",
+    "UnownPrinter",
+    // Game Corner
+    "UnownPuzzle",
+    "SlotMachine",
+    "CardFlip",
+    // Battle Tower / Fade
+    "BattleTowerFade",
+    // Sprites
+    "UpdateSprites",
+    // Pokemon Center heal animation
+    "HealMachineAnim",
+    // Day Care
+    "DayCareMon1",
+    "DayCareMon2",
+    "SelectRandomBugContestContestants",
+    // Decorations / Map
+    "ToggleMaptileDecorations",
+    "ToggleDecorationsVisibility",
+    // Shuckle events
+    "GiveShuckle",
+    "ReturnShuckie",
+    "BillsGrandfather",
+    // Lucky Number / Apricorn
+    "CheckForLuckyNumberWinners",
+    "CheckLuckyNumberShowFlag",
+    "ResetLuckyNumberShowFlag",
+    "PrintTodaysLuckyNumber",
+    "SelectApricornForKurt",
+    "NameRater",
+    // Link record
+    "DisplayLinkRecord",
+    // Party happiness/checks
+    "GetFirstPokemonHappiness",
+    "CheckFirstMonIsEgg",
+    "RandomPhoneMon",
+    // Snorlax / Grooming
+    "SnorlaxAwake",
+    "OlderHaircutBrother",
+    "YoungerHaircutBrother",
+    "DaisysGrooming",
+    // Cries / PC
+    "PlayCurMonCry",
+    "ProfOaksPCBoot",
+    "TrainerHouse",
+    "PhotoStudio",
+    "InitRoamMons",
+    // Diploma
+    "Diploma",
+    "PrintDiploma",
+    // Battle Tower
+    "BattleTowerRoomMenu",
+    "BattleTowerBattle",
+    "LoadOpponentTrainerAndPokemon",
+    "CheckForBattleTowerRules",
+    "GiveOddEgg",
+    "Reset",
+    // Mobile / Function stubs
+    "Function1011f1",
+    "Function101220",
+    "Function101225",
+    "Function101231",
+    // Move Tutor / Chambers
+    "MoveTutor",
+    "OmanyteChamber",
+    // Battle Tower action
+    "BattleTowerAction",
+    // Unown display
+    "DisplayUnownWords",
+    // Challenge explanation
+    "Menu_ChallengeExplanationCancel",
+    // Mobile errors
+    "BattleTowerMobileError",
+    "AskMobileOrCable",
+    // Chambers
+    "HoOhChamber",
+    "CelebiShrineEvent",
+    "CheckCaughtCelebi",
+    // PokeSeer / Buena's
+    "PokeSeer",
+    "BuenasPassword",
+    "BuenaPrize",
+    "GiveDratini",
+    // Beasts / Party checks
+    "BeastsCheck",
+    "MonCheck",
+    // Mobile
+    "Mobile_SelectThreeMons",
+    "Function1037eb",
+    "Function10383c",
+    "Function1037c2",
+    "Function103780",
+    "Function10387b",
+};
+
 // ctx.game:behavior(name) - dispatch a named game-specific behavior
+//
+// Dispatch policy:
+//   Sdefer_<id>  → deferred-script scheduler (real implementation)
+//   known name   → capability-deferred: luaL_error with explicit diagnostic
+//   unknown name → luaL_error (unknown behavior — compiler should have rejected)
+//
+// No silent no-op.  No fabricated result.
+// writes_script_var behaviors error before script can branch on stale state.
 int behavior(lua_State* L) {
     const char* name = luaL_checkstring(L, 2);
     LuaRuntime* runtime = get_runtime(L);
     auto& stubs = runtime->get_stub_services();
     stubs.last_behavior_name = name;
 
-    // Handle Sem_Sdefer deferred-script scheduling.
-    // The emitter encodes "Sdefer_<script_id>" as the behavior name.
+    // ── Sdefer_ prefix: deferred-script scheduling ──────────────────────────
+    // Sem_Sdefer emits "Sdefer_<script_id>" as the behavior name.
+    // This is the only behavior with a real implementation in the current runtime.
     static constexpr std::string_view SDEFER_PREFIX = "Sdefer_";
     std::string_view name_sv(name);
     if (name_sv.starts_with(SDEFER_PREFIX)) {
@@ -1599,10 +1766,30 @@ int behavior(lua_State* L) {
         if (stubs.deferred_script_fn) {
             stubs.deferred_script_fn(script_id);
         }
-        // If no callback is wired (test/stub mode), the deferred script is
-        // silently dropped — not a fabricated result, just no-op in isolation.
+        // If no deferred_script_fn is wired (isolated unit test), the deferred
+        // scheduling is a no-op — not a fabricated result.
+        return 0;
     }
-    return 0;
+
+    // ── Known behavior: capability-deferred ─────────────────────────────────
+    // The behavior name passed Stage 5 legality (it is in BEHAVIOR_TABLE).
+    // Its native implementation does not yet exist.  Error explicitly so the
+    // calling script cannot consume a stale wScriptVar value or fabricated state.
+    if (KNOWN_BEHAVIORS.contains(name_sv)) {
+        return luaL_error(L,
+            "behavior '%s' is recognized but not yet implemented "
+            "(capability deferred — add native implementation before use)",
+            name);
+    }
+
+    // ── Unknown behavior: compiler / package integrity failure ───────────────
+    // Stage 5 should have rejected any name not in BEHAVIOR_TABLE.
+    // Reaching here means the package was built by a compiler that allowed an
+    // unlicensed behavior name.  Hard fail with a clear diagnostic.
+    return luaL_error(L,
+        "behavior '%s' is not a registered game behavior "
+        "(unknown name — Stage 5 should have rejected this)",
+        name);
 }
 
 // ctx.game:set_scene(scene)

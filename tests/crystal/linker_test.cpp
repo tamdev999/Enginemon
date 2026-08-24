@@ -154,7 +154,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  Maps: " << game_data.maps.size() << "\n";
     std::cout << "  Trainers: " << game_data.trainers.size() << "\n";
     std::cout << "  StdScripts: " << game_data.std_scripts.size() << "\n";
-    std::cout << "  Specials: " << game_data.specials.size() << "\n";
+    // Specials domain removed — Sem_Special rejected at Stage 5, never reaches linker
     std::cout << "  Music: " << game_data.music.size() << "\n";
     std::cout << "  SFX: " << game_data.sfx.size() << "\n";
     std::cout << "  Phone persons: " << game_data.phone_persons.size() << "\n";

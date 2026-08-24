@@ -18449,6 +18449,206 @@ TEST(no_second_authoritative_rng_stream) {
     std::cout << "  [A5: no second authoritative RNG stream — map_rng_ removed, canonical only ✓]\n";
 }
 
+//=============================================================================
+// GAMESPECIFICEVENT CAPABILITY BOUNDARY — ADVERSARIAL TESTS
+// Verifies explicit failure semantics for ctx.game:behavior() dispatch.
+//
+// Architecture under test:
+//   Sdefer_<id>  → deferred-script scheduler (real path)
+//   known name   → luaL_error: capability-deferred, names the behavior
+//   unknown name → luaL_error: not a registered behavior
+//   writes_script_var behavior fails before script can branch on stale wScriptVar
+//   Sem_Special remains rejected by Stage 5 regardless of registry changes
+//=============================================================================
+
+TEST(behavior_sdefer_routes_to_scheduler) {
+    // ADVERSARIAL: Sdefer_<script_id> must route to deferred_script_fn, not error.
+    // This is the ONLY currently-implemented behavior; it must not regress.
+    LuaRuntime runtime;
+
+    // Wire a deferred_script_fn to capture scheduled script IDs.
+    std::vector<std::string> scheduled;
+    runtime.get_stub_services().deferred_script_fn = [&](const std::string& id) {
+        scheduled.push_back(id);
+    };
+
+    // Script that calls ctx.game:behavior("Sdefer_target_script") — must not error.
+    std::string code = R"(
+script = {}
+function script.main(ctx)
+    ctx.game:behavior("Sdefer_target_script")
+    ctx.flags:set_var(1, 1)  -- must reach here if Sdefer_ does not error
+    return
+end
+return script
+)";
+    runtime.execute_string(code, "sdefer_test");
+    uint32_t coro_id = runtime.start_script("script");
+
+    // Must not error — deferred scheduling must have fired.
+    ScriptState st = runtime.get_state(coro_id);
+    ASSERT_TRUE(st == ScriptState::Finished);  // Normal completion, not Error
+    ASSERT_EQ(scheduled.size(), 1u);
+    ASSERT_STR_EQ(scheduled[0].c_str(), "target_script");
+    ASSERT_STR_EQ(runtime.get_stub_services().last_behavior_name.c_str(), "Sdefer_target_script");
+    // var[1] set to 1 confirms execution continued past the Sdefer_ call.
+    auto& vars = runtime.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 1);
+    std::cout << "  [Sdefer_target_script routed to scheduler, no error, execution continued ✓]\n";
+}
+
+TEST(behavior_known_unimplemented_errors_explicitly) {
+    // ADVERSARIAL: A known (BEHAVIOR_TABLE) but unimplemented behavior must
+    // produce a Lua error naming the stable behavior identity.
+    // Must NOT silently succeed.
+    //
+    // "HealMachineAnim" (special_id=62, writes_script_var=false).
+    // It has no native implementation, so it must error.
+    LuaRuntime runtime;
+
+    // Use pcall to capture the error message into a game variable.
+    std::string code = R"(
+script = {}
+function script.main(ctx)
+    local ok, err = pcall(function()
+        ctx.game:behavior("HealMachineAnim")
+    end)
+    -- ok=false means error was raised (expected)
+    ctx.flags:set_var(1, ok and 1 or 0)   -- 0 = errored (expected)
+    -- Store whether error message names the behavior
+    local names_behavior = (err and err:find("HealMachineAnim") ~= nil) and 1 or 0
+    ctx.flags:set_var(2, names_behavior)
+    return
+end
+return script
+)";
+    runtime.execute_string(code, "known_behavior_test");
+    runtime.start_script("script");
+
+    // var[1] = 0 → pcall caught an error (behavior errored as expected)
+    auto& vars = runtime.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 0);
+    // var[2] = 1 → error message named "HealMachineAnim"
+    ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 1);
+
+    std::cout << "  [HealMachineAnim → explicit error naming behavior ✓]\n";
+}
+
+TEST(behavior_unknown_unregistered_errors_explicitly) {
+    // ADVERSARIAL: A completely unknown behavior name must hard-fail.
+    // This would indicate a package compiled by a rogue/buggy compiler that
+    // produced a Sem_GameSpecificEvent with a name not in BEHAVIOR_TABLE.
+    LuaRuntime runtime;
+
+    std::string code = R"(
+script = {}
+function script.main(ctx)
+    local ok, err = pcall(function()
+        ctx.game:behavior("NotARealBehavior_XYZ")
+    end)
+    ctx.flags:set_var(1, ok and 1 or 0)   -- 0 = errored (expected)
+    local names_unknown = (err and err:find("NotARealBehavior_XYZ") ~= nil) and 1 or 0
+    ctx.flags:set_var(2, names_unknown)
+    return
+end
+return script
+)";
+    runtime.execute_string(code, "unknown_behavior_test");
+    runtime.start_script("script");
+
+    auto& vars = runtime.get_stub_services().vars;
+    // var[1] = 0 → pcall caught an error
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 0);
+    // var[2] = 1 → error message named the unknown behavior
+    ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 1);
+
+    std::cout << "  [NotARealBehavior_XYZ → hard-fail, error names unknown behavior ✓]\n";
+}
+
+TEST(behavior_writes_script_var_errors_before_branch) {
+    // ADVERSARIAL: A known writes_script_var=true behavior that is not yet
+    // implemented must error BEFORE the script can test wScriptVar.
+    //
+    // "BugContestJudging" (special_id=20, writes_script_var=true).
+    // The error must fire before any branch-on-result code executes,
+    // preventing the script from observing a stale/fabricated var value.
+    LuaRuntime runtime;
+
+    // Pre-set var[2] to sentinel 99. If behavior() somehow silently succeeded
+    // and the script continued past it, var[2] would be overwritten to 77.
+    runtime.get_stub_services().vars[2] = 99;
+
+    std::string code = R"(
+script = {}
+function script.main(ctx)
+    local ok, err = pcall(function()
+        ctx.game:behavior("BugContestJudging")
+        -- Must NOT execute if error fires:
+        ctx.flags:set_var(2, 77)
+    end)
+    ctx.flags:set_var(1, ok and 1 or 0)   -- 0 = errored (expected)
+    local names_behavior = (err and err:find("BugContestJudging") ~= nil) and 1 or 0
+    ctx.flags:set_var(3, names_behavior)
+    return
+end
+return script
+)";
+    runtime.execute_string(code, "wsv_test");
+    runtime.start_script("script");
+
+    auto& vars = runtime.get_stub_services().vars;
+    // var[1] = 0 → behavior() errored (pcall caught it)
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 0);
+    // var[2] must still be 99 — NOT 77 — proving error fired before branch
+    ASSERT_EQ(vars.count(2) ? vars.at(2) : 99, 99);
+    // var[3] = 1 → error message named "BugContestJudging"
+    ASSERT_EQ(vars.count(3) ? vars.at(3) : -1, 1);
+
+    std::cout << "  [BugContestJudging (writes_var=true) errors before branch — stale state prevented ✓]\n";
+}
+
+TEST(sem_special_still_rejected_after_registry_cleanup) {
+    // REGRESSION: Confirm that removing ReferenceType::Special from the linker
+    // did NOT break Stage 5 rejection of Sem_Special.
+    // Stage 5 must still unconditionally reject Sem_Special.
+    using namespace crystal;
+    using namespace enginemon;
+    using namespace legality_test_helpers;
+
+    auto ir       = make_minimal_ir(0x2000);
+    auto cfg      = make_minimal_cfg(ir, "test_sem_special_post_cleanup");
+    auto lowering = make_minimal_lowering(ir, cfg);
+
+    // Inject Sem_Special directly (simulates what Stage 4 must never produce).
+    SemanticBasicBlock sblock;
+    sblock.id = 0; sblock.label = "block_0"; sblock.is_entry = true;
+    SemanticInstruction inst;
+    Sem_Special op;
+    op.special_id = 17;
+    op.name = "special_17";
+    inst.op = std::move(op);
+    sblock.instructions.push_back(std::move(inst));
+    lowering.ir.blocks = {std::move(sblock)};
+
+    auto input = make_minimal_input(ir, cfg, lowering);
+    LegalityGate gate;
+    auto result = gate.validate(input);
+
+    // Must still be rejected — registry cleanup must not have weakened Stage 5.
+    ASSERT_FALSE(result.is_legal);
+    ASSERT_TRUE(result.illegal.has_value());
+    bool found_rejection = false;
+    for (const auto& d : result.illegal->diagnostics) {
+        if (d.reason.find("Sem_Special") != std::string::npos ||
+            d.reason.find("raw Crystal") != std::string::npos) {
+            found_rejection = true;
+        }
+    }
+    ASSERT_TRUE(found_rejection);
+
+    std::cout << "  [Sem_Special still rejected at Stage 5 after registry cleanup ✓]\n";
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <rom_path>\n";
@@ -19098,6 +19298,12 @@ int main(int argc, char* argv[]) {
     RUN_TEST(pcg_dv_draw_count_two_semantic);
     RUN_TEST(pcg_v4_migration_deterministic);
     RUN_TEST(pcg_v5_save_roundtrip);
+    // GameSpecificEvent capability boundary adversarial tests
+    RUN_TEST(behavior_sdefer_routes_to_scheduler);
+    RUN_TEST(behavior_known_unimplemented_errors_explicitly);
+    RUN_TEST(behavior_unknown_unregistered_errors_explicitly);
+    RUN_TEST(behavior_writes_script_var_errors_before_branch);
+    RUN_TEST(sem_special_still_rejected_after_registry_cleanup);
 
     // Summary
     std::cout << "\n=== Results ===\n";

@@ -895,13 +895,10 @@ void FullGameCompiler::build_production_game_data() {
         compiled_game_data_.items.insert(static_cast<enginemon::ItemId>(i));
     }
     
-    // === Specials [0, num_specials) - Closed contiguous domain ===
-    // Authority: pokecrystal/engine/specials.asm SpecialsPointers
-    // All 256 function pointer indices defined (some may be no-ops)
-    // Known architecture violation: Sem_Special passes raw Crystal IDs
-    for (uint16_t i = 0; i < c.num_specials; ++i) {
-        compiled_game_data_.specials.insert(i);
-    }
+    // === Specials: intentionally omitted ===
+    // Sem_Special is rejected at Stage 5 and never reaches the linker.
+    // The specials domain set has been removed from CompiledGameData.
+    // Sem_GameSpecificEvent behavior names are validated via behavior_names set.
     
     // === Music [0, num_music) - Closed contiguous domain ===
     // Authority: pokecrystal/constants/music_constants.asm
@@ -999,8 +996,7 @@ void FullGameCompiler::build_production_game_data() {
               << " [1-" << c.num_pokemon << "] closed contiguous\n";
     std::cout << "    Items:        " << compiled_game_data_.items.size()
               << " [0-" << (c.num_items - 1) << "] closed contiguous\n";
-    std::cout << "    Specials:     " << compiled_game_data_.specials.size()
-              << " [0-" << (c.num_specials - 1) << "] closed contiguous (awaits semantic classification)\n";
+    // Specials domain removed — Sem_Special rejected at Stage 5
     std::cout << "    Music:        " << compiled_game_data_.music.size()
               << " [0-" << (c.num_music - 1) << "] closed contiguous\n";
     std::cout << "    SFX:          " << compiled_game_data_.sfx.size()
