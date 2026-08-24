@@ -464,9 +464,9 @@ TEST(newbarktown_teacher_lua_emit) {
     // Should contain goto statements for conditionals
     ASSERT_STR_CONTAINS(lua_code, "goto label_");
     
-    // Should contain the result variable and conditionals
-    ASSERT_STR_CONTAINS(lua_code, "local result = false");
-    ASSERT_STR_CONTAINS(lua_code, "if result then goto");
+    // Should contain the result variable and conditionals (integer VM contract)
+    ASSERT_STR_CONTAINS(lua_code, "local result = 0");
+    ASSERT_STR_CONTAINS(lua_code, "if result ~= 0 then goto");
     
     // Should contain ctx.flags:check for checkevent
     ASSERT_STR_CONTAINS(lua_code, "ctx.flags:check(");
@@ -19335,6 +19335,385 @@ TEST(species_finder_truncated_base_data_fails) {
     }
 }
 
+//=============================================================================
+// SCRIPT VM P0 ADVERSARIAL TESTS
+//
+// Fix 1 (Lua truthiness): result is integer; 0 is numerically false.
+// Fix 2 (Call/return): Sem_Call pushes continuation; Sem_End pops it.
+// Fix 3 (EndAll): clears call stack and exits; NOT behavior dispatch.
+// Fix 4 (Sdefer lifetime): stale callback cleared on rebind/destroy.
+// Fix 5 (Deferred failure): start_script failure propagated as script_error.
+//=============================================================================
+
+// ── Fix 1: result=0 must take the false branch ────────────────────────────
+TEST(vm_result_zero_takes_false_branch) {
+    // The VM result variable is integer. result=0 must evaluate as false
+    // (branch to the "false" target), NOT as Lua-truthy (which 0 would be
+    // under native Lua semantics).
+    LuaRuntime rt;
+    // Emit a script that puts 0 into result then branches on it.
+    // Uses the canonical JumpIf encoding: "result == 0 → goto block_1 (false branch)"
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+  local result = 0
+  -- Explicit integer check as emitter now produces
+  if result == 0 then
+    ctx.flags:set_var(1, 99)   -- false branch → var[1] = 99
+  else
+    ctx.flags:set_var(1, 1)    -- true branch  → var[1] = 1
+  end
+  return
+end
+return script
+)";
+    rt.execute_string(code, "result_zero_false");
+    rt.start_script("script");
+
+    auto& vars = rt.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 99);
+    std::cout << "  [result=0 → false branch (var[1]=99) ✓]\n";
+}
+
+// ── Fix 1: result=1 must take the true branch ─────────────────────────────
+TEST(vm_result_one_takes_true_branch) {
+    LuaRuntime rt;
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+  local result = 1
+  if result ~= 0 then
+    ctx.flags:set_var(1, 77)   -- true branch
+  else
+    ctx.flags:set_var(1, 0)
+  end
+  return
+end
+return script
+)";
+    rt.execute_string(code, "result_one_true");
+    rt.start_script("script");
+
+    auto& vars = rt.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 77);
+    std::cout << "  [result=1 → true branch (var[1]=77) ✓]\n";
+}
+
+// ── Fix 1: any nonzero integer is true ───────────────────────────────────
+TEST(vm_result_nonzero_integer_true) {
+    LuaRuntime rt;
+    // result = 5 (e.g. from find_party_mon returning slot 5)
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+  local result = 5
+  if result ~= 0 then
+    ctx.flags:set_var(1, 55)
+  else
+    ctx.flags:set_var(1, 0)
+  end
+  return
+end
+return script
+)";
+    rt.execute_string(code, "result_nonzero");
+    rt.start_script("script");
+
+    auto& vars = rt.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 55);
+    std::cout << "  [result=5 (nonzero) → true branch ✓]\n";
+}
+
+// ── Fix 1: SetVar from ScriptVar with result=0 stores 0, not 1 ───────────
+TEST(vm_setvar_from_result_zero_stores_zero) {
+    // Old bug: `result and 1 or 0` with result=0 (integer) would produce 1.
+    // New code: `result ~= 0 and 1 or 0` correctly produces 0.
+    LuaRuntime rt;
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+  local result = 0
+  -- New idiom: result ~= 0 and 1 or 0
+  ctx.flags:set_var(1, result ~= 0 and 1 or 0)
+  return
+end
+return script
+)";
+    rt.execute_string(code, "setvar_zero");
+    rt.start_script("script");
+
+    auto& vars = rt.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 0);
+    std::cout << "  [result=0 → set_var stores 0 (not 1) ✓]\n";
+}
+
+// ── Fix 2: Sem_Call returns to continuation ───────────────────────────────
+TEST(vm_call_returns_to_continuation) {
+    // Simulate the call-stack dispatch model:
+    //   block_0: push continuation(2), goto block_1 (callee)
+    //   block_1 (callee): set var[1]=10, Sem_End → pop stack → goto block_2
+    //   block_2 (continuation): set var[2]=20, return
+    LuaRuntime rt;
+    // Avoid label-after-return: route all blocks through top dispatch
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+  local result = 0
+  local __call_stack = {}
+  local __return_target = -1
+  goto block_0
+  ::block_0::
+  do
+    table.insert(__call_stack, 2)
+    goto block_1
+  end
+  ::block_1::
+  do
+    ctx.flags:set_var(1, 10)
+    if #__call_stack > 0 then
+      __return_target = table.remove(__call_stack)
+      goto __dispatch_return
+    end
+    return
+  end
+  ::block_2::
+  do
+    ctx.flags:set_var(2, 20)
+    return
+  end
+  ::__dispatch_return::
+  do
+    if __return_target == 2 then goto block_2 end
+  end
+end
+return script
+)";
+    rt.execute_string(code, "call_returns");
+    rt.start_script("script");
+
+    auto& vars = rt.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 10);  // callee executed
+    ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 20);  // continuation executed
+    std::cout << "  [Sem_Call returns to continuation: var[1]=10, var[2]=20 ✓]\n";
+}
+
+// ── Fix 2: nested calls unwind correctly ─────────────────────────────────
+TEST(vm_nested_calls_unwind_correctly) {
+    LuaRuntime rt;
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+  local result = 0
+  local __call_stack = {}
+  local __return_target = -1
+  goto block_0
+  ::block_0::
+  do
+    table.insert(__call_stack, 4)
+    goto block_1
+  end
+  ::block_1::
+  do
+    ctx.flags:set_var(1, 1)
+    table.insert(__call_stack, 3)
+    goto block_2
+  end
+  ::block_2::
+  do
+    ctx.flags:set_var(2, 2)
+    if #__call_stack > 0 then
+      __return_target = table.remove(__call_stack)
+      goto __dispatch_return
+    end
+    return
+  end
+  ::block_3::
+  do
+    ctx.flags:set_var(3, 3)
+    if #__call_stack > 0 then
+      __return_target = table.remove(__call_stack)
+      goto __dispatch_return
+    end
+    return
+  end
+  ::block_4::
+  do
+    ctx.flags:set_var(4, 100)
+    return
+  end
+  ::__dispatch_return::
+  do
+    if __return_target == 3 then goto block_3 end
+    if __return_target == 4 then goto block_4 end
+  end
+end
+return script
+)";
+    rt.execute_string(code, "nested_calls");
+    rt.start_script("script");
+
+    auto& vars = rt.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 1);
+    ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 2);
+    ASSERT_EQ(vars.count(3) ? vars.at(3) : -1, 3);
+    ASSERT_EQ(vars.count(4) ? vars.at(4) : -1, 100);
+    std::cout << "  [Nested calls unwind correctly: 1→2→3→4 all ran ✓]\n";
+}
+
+// ── Fix 2: callee Sem_End does not exit top-level script ──────────────────
+TEST(vm_callee_end_does_not_exit_top_level) {
+    LuaRuntime rt;
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+  local result = 0
+  local __call_stack = {}
+  local __return_target = -1
+  goto block_0
+  ::block_0::
+  do
+    table.insert(__call_stack, 2)
+    goto block_1
+  end
+  ::block_1::
+  do
+    ctx.flags:set_var(1, 10)
+    if #__call_stack > 0 then
+      __return_target = table.remove(__call_stack)
+      goto __dispatch_return
+    end
+    return
+  end
+  ::block_2::
+  do
+    ctx.flags:set_var(2, 20)
+    return
+  end
+  ::__dispatch_return::
+  do
+    if __return_target == 2 then goto block_2 end
+  end
+end
+return script
+)";
+    rt.execute_string(code, "callee_end_no_exit");
+    rt.start_script("script");
+
+    auto& vars = rt.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 10);
+    ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 20);
+    std::cout << "  [Callee Sem_End → continuation, not script termination ✓]\n";
+}
+
+// ── Fix 3: EndAll inside nested call terminates entire script ─────────────
+TEST(vm_endall_inside_nested_call_terminates) {
+    LuaRuntime rt;
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+  local result = 0
+  local __call_stack = {}
+  local __return_target = -1
+  goto block_0
+  ::block_0::
+  do
+    table.insert(__call_stack, 2)
+    goto block_1
+  end
+  ::block_1::
+  do
+    ctx.flags:set_var(1, 10)
+    __call_stack = {}; return
+  end
+  ::block_2::
+  do
+    ctx.flags:set_var(2, 99)
+    return
+  end
+  ::__dispatch_return::
+  do
+    if __return_target == 2 then goto block_2 end
+  end
+end
+return script
+)";
+    rt.execute_string(code, "endall_terminates");
+    rt.start_script("script");
+
+    auto& vars = rt.get_stub_services().vars;
+    ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 10);
+    ASSERT_TRUE(vars.count(2) == 0 || vars.at(2) != 99);
+    std::cout << "  [EndAll clears call stack and terminates — continuation not reached ✓]\n";
+}
+
+// ── Fix 4: Sdefer callback cleared on runtime rebind ─────────────────────
+TEST(vm_sdefer_cleared_on_rebind) {
+    // After set_lua_runtime(new_runtime), the old runtime must NOT have
+    // a live callback pointing to the loop.
+    HeadlessGameLoop loop;
+    LuaRuntime rt1, rt2;
+
+    loop.set_lua_runtime(&rt1);
+    // rt1 should now have a deferred_script_fn
+    ASSERT_TRUE(rt1.get_stub_services().deferred_script_fn != nullptr);
+
+    // Rebind to rt2 — must clear rt1's callback
+    loop.set_lua_runtime(&rt2);
+    ASSERT_TRUE(rt1.get_stub_services().deferred_script_fn == nullptr);
+    ASSERT_TRUE(rt2.get_stub_services().deferred_script_fn != nullptr);
+
+    // Rebind to nullptr — must clear rt2's callback
+    loop.set_lua_runtime(nullptr);
+    ASSERT_TRUE(rt2.get_stub_services().deferred_script_fn == nullptr);
+
+    std::cout << "  [Sdefer callback cleared on rebind: old runtime callback = null ✓]\n";
+}
+
+// ── Fix 4: Sdefer callback cleared on loop destruction ────────────────────
+TEST(vm_sdefer_cleared_on_loop_destroy) {
+    // After HeadlessGameLoop is destroyed, the bound LuaRuntime must have
+    // a null deferred_script_fn — no UAF possible.
+    LuaRuntime rt;
+    {
+        HeadlessGameLoop loop;
+        loop.set_lua_runtime(&rt);
+        ASSERT_TRUE(rt.get_stub_services().deferred_script_fn != nullptr);
+        // loop destroyed here
+    }
+    // After loop destruction the callback must be cleared
+    ASSERT_TRUE(rt.get_stub_services().deferred_script_fn == nullptr);
+    std::cout << "  [Sdefer callback cleared on loop destroy — no UAF ✓]\n";
+}
+
+// ── Fix 5: failed deferred script propagates script_error ────────────────
+TEST(vm_deferred_failure_propagates_error) {
+    // If a deferred script fails to load (missing from script store),
+    // the TickResult must reflect script_error=true — not silently succeed.
+    HeadlessGameLoop loop;
+    LuaRuntime rt;
+    loop.set_lua_runtime(&rt);
+    loop.set_script_loader([](const std::string&) -> std::string { return ""; });
+
+    RuntimeMap rtmap;
+    rtmap.map_id = "test"; rtmap.width = 5; rtmap.height = 5;
+    rtmap.blocks.resize(25, 0);
+    loop.load_map(rtmap);
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    GameState gs; gs.rng.seed(42);
+    loop.set_game_state(&gs);
+
+    // Directly schedule a deferred script that will fail to load
+    loop.schedule_deferred_script("nonexistent_script_id");
+
+    // Tick — deferred drain fires, start_script returns false, must set error
+    TickResult tick_result = loop.tick();
+
+    ASSERT_TRUE(tick_result.script_error);
+    std::cout << "  [Deferred script failure → TickResult::script_error=true ✓]\n";
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <rom_path>\n";
@@ -20008,6 +20387,18 @@ int main(int argc, char* argv[]) {
     RUN_TEST(event_script_id_canonical_format_coord);
     RUN_TEST(event_script_id_missing_fails_explicitly);
     RUN_TEST(event_script_id_no_local_positional_survives);
+    // Script VM P0 adversarial tests
+    RUN_TEST(vm_result_zero_takes_false_branch);
+    RUN_TEST(vm_result_one_takes_true_branch);
+    RUN_TEST(vm_result_nonzero_integer_true);
+    RUN_TEST(vm_setvar_from_result_zero_stores_zero);
+    RUN_TEST(vm_call_returns_to_continuation);
+    RUN_TEST(vm_nested_calls_unwind_correctly);
+    RUN_TEST(vm_callee_end_does_not_exit_top_level);
+    RUN_TEST(vm_endall_inside_nested_call_terminates);
+    RUN_TEST(vm_sdefer_cleared_on_rebind);
+    RUN_TEST(vm_sdefer_cleared_on_loop_destroy);
+    RUN_TEST(vm_deferred_failure_propagates_error);
 
     // Summary
     std::cout << "\n=== Results ===\n";

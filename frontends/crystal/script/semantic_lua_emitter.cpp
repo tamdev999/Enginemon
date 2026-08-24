@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <iomanip>
+#include <set>
 
 namespace crystal {
 
@@ -160,15 +161,78 @@ std::string SemanticLuaEmitter::movement_commands_to_lua(
 std::string SemanticLuaEmitter::emit(const SemanticScriptIR& ir) const {
     std::ostringstream out;
 
+    // =========================================================================
+    // Pass 1: collect continuation targets.
+    //
+    // A "continuation target" is the block that follows a Sem_Call instruction.
+    // When the callee hits Sem_End, instead of exiting script.main it should
+    // return to the continuation.  We track all such block IDs so the
+    // __dispatch_return table can redirect to them.
+    //
+    // The blocks are laid out in ir.blocks in execution order.  After a block
+    // whose last instruction is Sem_Call, the *next* block in the array is the
+    // continuation (the fallthrough target the CFG recorded as has_fallthrough).
+    // =========================================================================
+    std::set<enginemon::SemanticLabelId> continuation_targets;
+
+    for (std::size_t block_idx = 0; block_idx + 1 < ir.blocks.size(); ++block_idx) {
+        const auto& block = ir.blocks[block_idx];
+        if (!block.instructions.empty()) {
+            if (std::get_if<enginemon::Sem_Call>(&block.instructions.back().op)) {
+                // The next block is the return continuation.
+                continuation_targets.insert(ir.blocks[block_idx + 1].id);
+            }
+        }
+    }
+
     out << "script = {}\n";
     out << "function script.main(ctx)\n";
-    out << "  local result = false\n";
+    out << "  local result = 0\n";
+    out << "  local __call_stack = {}\n";
+    out << "  local __return_target = 0\n";
 
+    // =========================================================================
+    // Pass 2: emit blocks.
+    //
+    // Sem_Call is handled here (not in emit_op_part1) because we need block_idx
+    // to compute the continuation ID.  All other ops are handled by emit_op.
+    // =========================================================================
     for (std::size_t block_idx = 0; block_idx < ir.blocks.size(); ++block_idx) {
         const auto& block = ir.blocks[block_idx];
         out << "  ::block_" << block.id << "::\n";
-        for (const auto& inst : block.instructions) {
-            emit_instruction(out, inst, 1);
+
+        for (std::size_t inst_idx = 0; inst_idx < block.instructions.size(); ++inst_idx) {
+            const auto& inst = block.instructions[inst_idx];
+
+            if (const auto* call = std::get_if<enginemon::Sem_Call>(&inst.op)) {
+                // Sem_Call — push return continuation then jump to callee.
+                // The continuation is the block immediately after this one in
+                // the ir.blocks sequence (the StaticCall fallthrough target).
+                if (block_idx + 1 < ir.blocks.size()) {
+                    enginemon::SemanticLabelId cont_id = ir.blocks[block_idx + 1].id;
+                    indent_line(out, 1);
+                    out << "table.insert(__call_stack, " << cont_id << ")\n";
+                }
+                indent_line(out, 1);
+                out << "goto block_" << call->target.id << "\n";
+            } else {
+                emit_instruction(out, inst, 1);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Pass 3: emit __dispatch_return table.
+    //
+    // Called when Sem_End finds a non-empty call stack.  __return_target holds
+    // the numeric block ID popped from __call_stack; this dispatch jumps to it.
+    // Only continuation targets (blocks that follow a Sem_Call) are listed.
+    // =========================================================================
+    if (!continuation_targets.empty()) {
+        out << "  ::__dispatch_return::\n";
+        for (enginemon::SemanticLabelId cid : continuation_targets) {
+            out << "  if __return_target == " << cid
+                << " then goto block_" << cid << " end\n";
         }
     }
 
@@ -201,11 +265,23 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
     // Control flow
     if (auto* o = std::get_if<Sem_End>(&op)) {
         (void)o;
+        // If a call is pending on the call stack, pop and dispatch to the
+        // continuation instead of terminating script.main.  This implements
+        // the scall/farscall return semantics: callee End returns one frame.
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "if #__call_stack > 0 then "
+            << "__return_target = table.remove(__call_stack); "
+            << "goto __dispatch_return "
+            << "end\n";
         SemanticLuaEmitter::indent_line(out, I); out << "return\n"; return true;
     }
     if (auto* o = std::get_if<Sem_EndAll>(&op)) {
+        // EndAll is core VM control flow: discard entire call stack, exit script.
+        // Source-proven from pokecrystal Script_endall: clears ALL pending frames.
+        // NOT dispatched through BehaviorTable.
         (void)o;
-        SemanticLuaEmitter::indent_line(out, I); out << "ctx.game:behavior(\"EndAll\"); return\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "__call_stack = {}; return\n"; return true;
     }
     if (auto* o = std::get_if<Sem_Return>(&op)) {
         (void)o;
@@ -218,13 +294,18 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I);
         std::string cond;
         const std::string& c = o->condition;
-        if (c == "true")       cond = "result";
-        else if (c == "false") cond = "not result";
-        else                   cond = "result " + c;
+        // VM result is integer. Never use Lua truthiness (0 is truthy in Lua).
+        if (c == "true")       cond = "result ~= 0";
+        else if (c == "false") cond = "result == 0";
+        else                   cond = "result " + c;   // numeric comparison like "== 3"
         out << "if " << cond << " then goto block_" << o->target.id << " end\n"; return true;
     }
     if (auto* o = std::get_if<Sem_Call>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "goto block_" << o->target.id << "\n"; return true;
+        // Sem_Call is handled directly in emit() with call-stack push.
+        // If reached here the emitter has a bug — emit an error.
+        (void)o;
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "error(\"internal: Sem_Call reached emit_op outside emit() dispatch\")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_Sdefer>(&op)) {
         SemanticLuaEmitter::indent_line(out, I);
@@ -249,7 +330,7 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         if (o->source.type == VarValueSourceType::Literal)
             out << "ctx.flags:set_var(" << o->var << ", " << o->source.value << ")\n";
         else
-            out << "ctx.flags:set_var(" << o->var << ", result and 1 or 0)\n";
+            out << "ctx.flags:set_var(" << o->var << ", result ~= 0 and 1 or 0)\n";
         return true;
     }
     if (auto* o = std::get_if<Sem_AddVar>(&op)) {
@@ -642,6 +723,7 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
     if (auto* o = std::get_if<Sem_CheckTime>(&op)) {
         // time_flags is a bitmask: MORN_F=1, DAY_F=2, NITE_F=4
         // Source: pokecrystal/engine/events/checktime.asm
+        // VM result is integer: 1=true, 0=false.
         SemanticLuaEmitter::indent_line(out, I);
         uint8_t tf = o->time_flags;
         if (tf == 1) {
@@ -651,13 +733,13 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
         } else if (tf == 4) {
             out << "result = ctx.time:is_night()\n";
         } else if (tf == 3) {
-            out << "result = ctx.time:is_morning() or ctx.time:is_day()\n";
+            out << "result = (ctx.time:is_morning() ~= 0 or ctx.time:is_day() ~= 0) and 1 or 0\n";
         } else if (tf == 5) {
-            out << "result = ctx.time:is_morning() or ctx.time:is_night()\n";
+            out << "result = (ctx.time:is_morning() ~= 0 or ctx.time:is_night() ~= 0) and 1 or 0\n";
         } else if (tf == 6) {
-            out << "result = ctx.time:is_day() or ctx.time:is_night()\n";
+            out << "result = (ctx.time:is_day() ~= 0 or ctx.time:is_night() ~= 0) and 1 or 0\n";
         } else if (tf == 7) {
-            out << "result = true\n";
+            out << "result = 1\n";
         } else {
             out << "error(\"check_time: unrecognised time_flags=" << (int)tf << "\")\n";
         }

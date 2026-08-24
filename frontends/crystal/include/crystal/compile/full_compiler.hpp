@@ -172,7 +172,18 @@ namespace crystal {
 //        using that canonical map — local positional IDs like "object_script_0" never survive
 //        into the final package.  handle_interact() now hard-fails (script_start_failed=true)
 //        when a recognised interaction's script is missing from the package.
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-3.3.0";
+// 3.4.0: Script VM P0 fixes:
+//   Fix 1: VM result is integer; all bool-returning bindings now return 0/1 int.
+//          JumpIf branches use result~=0/result==0. SetVar from ScriptVar uses
+//          result~=0 and 1 or 0. CheckTime compound uses explicit integer or.
+//   Fix 2: scall/farscall call/return stack: emit() pushes continuation ID onto
+//          __call_stack before goto callee; Sem_End pops and dispatches via
+//          __dispatch_return table; nested calls unwind correctly.
+//   Fix 3: Sem_EndAll emits `__call_stack={}; return` (core VM, not BehaviorTable).
+//   Fix 4: HeadlessGameLoop destructor and set_lua_runtime() clear deferred_script_fn
+//          from old LuaRuntime preventing stale callback UAF.
+//   Fix 5: Deferred script drain propagates start_script failure as script_error.
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-3.4.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================

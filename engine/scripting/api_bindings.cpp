@@ -257,8 +257,8 @@ int choice(lua_State* L) {
 
 // ctx.ui:yes_no() -> bool
 int yes_no(lua_State* L) {
-    // Stub: return true (yes)
-    lua_pushboolean(L, true);
+    // Stub: return true (yes) — returns 1 (integer) per VM result contract
+    lua_pushinteger(L, 1);
     return 1;
 }
 
@@ -598,7 +598,7 @@ int hide_npc(lua_State* L) {
 // ctx.world:npc_visible(npc_id) -> bool
 int npc_visible(lua_State* L) {
     int npc_id = luaL_checkinteger(L, 2);
-    lua_pushboolean(L, true);
+    lua_pushinteger(L, 1);  // stub: visible
     return 1;
 }
 
@@ -732,7 +732,7 @@ int get(lua_State* L) {
 // ctx.party:has_species(species_id) -> bool
 int has_species(lua_State* L) {
     int species_id = luaL_checkinteger(L, 2);
-    lua_pushboolean(L, false);
+    lua_pushinteger(L, 0);  // stub: not found — 0 per VM result contract
     return 1;
 }
 
@@ -772,21 +772,21 @@ int add_pokemon(lua_State* L) {
     stubs.last_add_pokemon_nickname = nickname;
     stubs.last_add_pokemon_ot_name = ot_name;
     
-    lua_pushboolean(L, true);
+    lua_pushinteger(L, 1);  // stub success — 1 per VM result contract
     return 1;
 }
 
 // ctx.party:has_move(move_id) -> bool
 int has_move(lua_State* L) {
     int move_id = luaL_checkinteger(L, 2);
-    lua_pushboolean(L, false);
+    lua_pushinteger(L, 0);  // stub: not found
     return 1;
 }
 
 // ctx.party:can_use_hm(hm_name) -> bool
 int can_use_hm(lua_State* L) {
     const char* hm_name = luaL_checkstring(L, 2);
-    lua_pushboolean(L, false);
+    lua_pushinteger(L, 0);  // stub: cannot use
     return 1;
 }
 
@@ -811,7 +811,7 @@ int take(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
     int count = luaL_optinteger(L, 3, 1);
     (void)item_id; (void)count;
-    lua_pushboolean(L, true);
+    lua_pushinteger(L, 1);  // stub: success
     return 1;
 }
 
@@ -819,7 +819,7 @@ int take(lua_State* L) {
 int has(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
     int count = luaL_optinteger(L, 3, 1);
-    lua_pushboolean(L, false);
+    lua_pushinteger(L, 0);  // stub: not found
     return 1;
 }
 
@@ -871,7 +871,7 @@ int take_money(lua_State* L) {
         stubs.last_take_money_account = account;
         success = true;  // stub always succeeds
     }
-    lua_pushboolean(L, success);
+    lua_pushinteger(L, success ? 1 : 0);
     return 1;
 }
 
@@ -887,7 +887,7 @@ int has_money(lua_State* L) {
         int32_t current = (it != gs->variables.end()) ? it->second : 0;
         result = (current >= static_cast<int32_t>(amount));
     }
-    lua_pushboolean(L, result);
+    lua_pushinteger(L, result ? 1 : 0);
     return 1;
 }
 
@@ -1064,7 +1064,7 @@ int check(lua_State* L) {
         value = get_test_flag(runtime, flag_id);
     }
     runtime->get_stub_services().flag_calls.push_back({"check", flag_id});
-    lua_pushboolean(L, value);
+    lua_pushinteger(L, value ? 1 : 0);
     return 1;
 }
 
@@ -1152,21 +1152,21 @@ int time_of_day(lua_State* L) {
     return 1;
 }
 
-// ctx.time:is_morning() -> bool
+// ctx.time:is_morning() -> bool (1 or 0)
 int is_morning(lua_State* L) {
-    lua_pushboolean(L, false);
+    lua_pushinteger(L, 0);  // stub: not morning
     return 1;
 }
 
-// ctx.time:is_day() -> bool
+// ctx.time:is_day() -> bool (1 or 0)
 int is_day(lua_State* L) {
-    lua_pushboolean(L, true);
+    lua_pushinteger(L, 1);  // stub: daytime
     return 1;
 }
 
-// ctx.time:is_night() -> bool
+// ctx.time:is_night() -> bool (1 or 0)
 int is_night(lua_State* L) {
-    lua_pushboolean(L, false);
+    lua_pushinteger(L, 0);  // stub: not night
     return 1;
 }
 
@@ -1864,7 +1864,7 @@ int find_party_mon(lua_State* L) {
 
 // ctx.game:check_pokerus() -> bool
 int check_pokerus(lua_State* L) {
-    lua_pushboolean(L, false); // stub
+    lua_pushinteger(L, 0); // stub: no pokerus
     return 1;
 }
 

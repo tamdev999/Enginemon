@@ -25,7 +25,13 @@ HeadlessGameLoop::HeadlessGameLoop() {
     );
 }
 
-HeadlessGameLoop::~HeadlessGameLoop() = default;
+HeadlessGameLoop::~HeadlessGameLoop() {
+    // Clear the deferred_script_fn from the bound LuaRuntime.
+    // Prevents a surviving LuaRuntime from invoking the destroyed loop.
+    if (lua_runtime_) {
+        lua_runtime_->get_stub_services().deferred_script_fn = nullptr;
+    }
+}
 
 //=============================================================================
 // INITIALIZATION
@@ -414,6 +420,12 @@ bool HeadlessGameLoop::update_movement() {
 //=============================================================================
 
 void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
+    // Clear the callback from the old runtime BEFORE rebinding.
+    // This prevents a stale LuaRuntime from invoking a destroyed or rebound
+    // HeadlessGameLoop via the deferred_script_fn lambda.
+    if (lua_runtime_ && lua_runtime_ != runtime) {
+        lua_runtime_->get_stub_services().deferred_script_fn = nullptr;
+    }
     lua_runtime_ = runtime;
     if (runtime) {
         // Wire deferred-script scheduling so ctx.game:behavior("Sdefer_<id>")
@@ -622,7 +634,13 @@ TickResult HeadlessGameLoop::tick() {
     if (state_ == LoopState::Idle && !deferred_scripts_.empty()) {
         std::string next_id = std::move(deferred_scripts_.front());
         deferred_scripts_.erase(deferred_scripts_.begin());
-        start_script(next_id);  // errors here surface through start_script's return value
+        if (!start_script(next_id)) {
+            // Deferred script failed to load or errored immediately.
+            // Propagate as script_error so the caller's TickResult reflects
+            // the failure instead of silently discarding the deferred work.
+            script_error_this_tick_ = true;
+            result.script_error = true;
+        }
     }
     
     return result;

@@ -118,8 +118,8 @@ void LuaEmitter::emit(const ScriptIR& script, std::ostream& out) {
     out << "function script.main(ctx)\n";
     current_indent_ = 1;
     
-    // Initialize result variable that check operations use
-    emit_line(out, "local result = false");
+    // Initialize result variable as integer (VM result contract: 0=false, nonzero=true)
+    emit_line(out, "local result = 0");
     emit_line(out, "");
     
     for (const auto& inst : script.instructions) {
@@ -414,12 +414,13 @@ void LuaEmitter::emit_op(std::ostream& out, const Op_JumpIf& op) {
     auto it = state_.address_to_label.find(op.target.rom_address);
     if (it != state_.address_to_label.end()) {
         // Determine condition based on Op_JumpIf.condition
-        // condition is "true", "false", "== N", "!= N", "> N", "< N"
+        // VM result is integer: use explicit numeric predicates.
+        // Never use Lua native truthiness (integer 0 is truthy in Lua).
         std::string cond;
         if (op.condition == "true") {
-            cond = "result";
+            cond = "result ~= 0";
         } else if (op.condition == "false") {
-            cond = "not result";
+            cond = "result == 0";
         } else {
             // Comparison conditions like "== 5", "!= 3"
             cond = "result " + op.condition;
