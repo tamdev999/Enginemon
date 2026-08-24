@@ -202,9 +202,21 @@ InputResult HeadlessGameLoop::handle_interact() {
     if (interaction_result.found()) {
         result.script_id = interaction_result.script_id();
         
-        // Try to start the script
+        // Start the script — hard failure if the referenced script is missing.
+        // A recognised interaction with a missing script_id is a package integrity
+        // failure: the map event was packaged referencing a script that is not in
+        // the Script chunk.  Silent success is not acceptable here because the
+        // player would press A on an NPC and nothing would happen, which is
+        // indistinguishable from a gameplay bug.
         if (!result.script_id.empty() && lua_runtime_) {
-            start_script(result.script_id);
+            bool started = start_script(result.script_id);
+            if (!started) {
+                // Package integrity failure — the script referenced by this event
+                // could not be loaded.  Surface as a script error so the runtime
+                // can log and the test framework can catch it.
+                result.script_start_failed = true;
+                result.block_reason = "script_missing:" + result.script_id;
+            }
         }
     } else {
         result.interaction = false;

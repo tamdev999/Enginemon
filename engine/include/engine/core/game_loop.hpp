@@ -86,8 +86,9 @@ struct InputResult {
     bool accepted = false;      // Input was processed
     bool blocked = false;       // Movement was blocked (collision)
     bool interaction = false;   // Interaction triggered
+    bool script_start_failed = false;  // Interaction found but script missing (package integrity failure)
     std::string script_id;      // Script triggered (if any)
-    std::string block_reason;   // Why movement blocked
+    std::string block_reason;   // Why movement blocked / why script start failed
 };
 
 // Result of ticking the loop

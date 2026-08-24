@@ -726,9 +726,13 @@ bool FullGameCompiler::process_map_root_scripts(
     
     map_root_irs_.clear();
     map_root_irs_.reserve(addresses.size());
+    rom_addr_to_script_id_.clear();  // Reset canonical ID map
     
     for (uint32_t addr : addresses) {
-        // Generate script_id based on map
+        // Generate script_id based on map.
+        // This is the CANONICAL script identity — it is stored both in the
+        // SemanticScriptIR and in rom_addr_to_script_id_ so that link_results()
+        // can rewrite map event script_id fields to match before serialization.
         std::string script_id;
         auto map_it = address_to_map.find(addr);
         if (map_it != address_to_map.end()) {
@@ -738,6 +742,12 @@ bool FullGameCompiler::process_map_root_scripts(
         } else {
             script_id = "script_0x" + std::to_string(addr);
         }
+
+        // Register canonical ROM address → script_id mapping.
+        // Used by link_results() to rewrite ExtractedMap event script_ids before
+        // add_map() is called — ensures every packaged event reference matches its
+        // package Script chunk key.
+        rom_addr_to_script_id_[addr] = script_id;
         
         auto ir = process_script_typed(addr, script_id);
         if (!ir) {
@@ -1190,8 +1200,63 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
     // Sort results by stable ID for deterministic output
     sort_by_stable_id();
     
-    // Add maps
+    // Add maps — with event script_id canonicalization.
+    // INVARIANT: every map event that references a script must carry the same
+    // script_id string used as the package Script chunk key.  The extractor
+    // assigns local positional IDs like "object_script_0"; the compiler assigns
+    // canonical ROM-address-based IDs like "map_24_4_0x1a9abc".  Rewrite here
+    // at the single serialization boundary so the package is internally consistent.
     for (auto& map_result : linker_input_.maps) {
+        // Rewrite ObjectEvent script_ids
+        for (auto& obj : map_result.map.objects) {
+            if (obj.script_rom_address != 0) {
+                auto it = rom_addr_to_script_id_.find(obj.script_rom_address);
+                if (it != rom_addr_to_script_id_.end()) {
+                    obj.script_id = it->second;
+                } else {
+                    // Every script-bearing event must have a compiled IR entry.
+                    // A missing entry means the script was silently dropped from
+                    // corpus discovery — fail hard rather than package an event
+                    // that can never execute.
+                    std::cerr << "FATAL: ObjectEvent in map '" << map_result.map_id
+                              << "' has script_rom_address=0x"
+                              << std::hex << obj.script_rom_address
+                              << " with no canonical script_id. "
+                              << "Script was not discovered or failed compilation.\n";
+                    return false;
+                }
+            }
+        }
+        // Rewrite BgEvent script_ids
+        for (auto& bg : map_result.map.bg_events) {
+            if (bg.script_rom_address != 0) {
+                auto it = rom_addr_to_script_id_.find(bg.script_rom_address);
+                if (it != rom_addr_to_script_id_.end()) {
+                    bg.script_id = it->second;
+                } else {
+                    std::cerr << "FATAL: BgEvent in map '" << map_result.map_id
+                              << "' has script_rom_address=0x"
+                              << std::hex << bg.script_rom_address
+                              << " with no canonical script_id.\n";
+                    return false;
+                }
+            }
+        }
+        // Rewrite CoordEvent script_ids
+        for (auto& coord : map_result.map.coord_events) {
+            if (coord.script_rom_address != 0) {
+                auto it = rom_addr_to_script_id_.find(coord.script_rom_address);
+                if (it != rom_addr_to_script_id_.end()) {
+                    coord.script_id = it->second;
+                } else {
+                    std::cerr << "FATAL: CoordEvent in map '" << map_result.map_id
+                              << "' has script_rom_address=0x"
+                              << std::hex << coord.script_rom_address
+                              << " with no canonical script_id.\n";
+                    return false;
+                }
+            }
+        }
         writer.add_map(map_result.map);
     }
     

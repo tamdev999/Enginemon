@@ -165,7 +165,14 @@ namespace crystal {
 //          layout changes (padding, reordering) now produce compile-time failures.
 //        Adjacent: load_sprite() in package_reader.cpp hardened — stream failures
 //          during sprite deserialization now return nullopt instead of partial sprite.
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-3.2.0";
+// 3.3.0: Map event ↔ script ID namespace fix:
+//        Every packaged map event script reference now matches its package Script chunk key.
+//        process_map_root_scripts() persists rom_addr_to_script_id_ (ROM address → canonical ID).
+//        link_results() rewrites ObjectEvent/BgEvent/CoordEvent script_id fields before add_map()
+//        using that canonical map — local positional IDs like "object_script_0" never survive
+//        into the final package.  handle_interact() now hard-fails (script_start_failed=true)
+//        when a recognised interaction's script is missing from the package.
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-3.3.0";
 constexpr uint32_t EMON_FORMAT_VERSION = 2;
 
 //=============================================================================
@@ -395,6 +402,17 @@ private:
     // Collected script IRs for linking
     std::vector<enginemon::SemanticScriptIR> map_root_irs_;
     std::vector<enginemon::SemanticScriptIR> std_script_irs_;
+
+    // Canonical script ID map: ROM flat address → compiler-assigned script_id.
+    // Built in process_map_root_scripts() from ir.source_rom_address → ir.script_id.
+    // Used in link_results() to rewrite map event script_id fields before package
+    // serialization so every event's script reference matches its package script key.
+    //
+    // This is the single canonicalization point.  Every event that carries a
+    // script_rom_address gets its script_id replaced with the value from this map.
+    // Local positional IDs like "object_script_0" or "bg_event_2" never survive
+    // into the final package; they are rewritten here before add_map() is called.
+    std::unordered_map<uint32_t, std::string> rom_addr_to_script_id_;
     
     // Emitted-resource inventories — populated in link_results() from
     // successfully emitted assets.  validate_references() checks these, not
