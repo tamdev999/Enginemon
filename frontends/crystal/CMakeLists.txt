@@ -14,6 +14,7 @@ add_library(enginemon_crystal STATIC
     extract/tilesets.cpp
     extract/sprites.cpp
     extract/fonts.cpp
+    extract/species.cpp
     
     # Output/packaging
     output/native_package.cpp

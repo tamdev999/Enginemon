@@ -91,16 +91,37 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // Identify ROM version
+    // Identify ROM version — try exact hash first, then Crystal layout validation
     auto& registry = crystal::ProfileRegistry::instance();
-    auto profile = registry.get_profile_by_hash(rom->hash());
-    if (!profile) {
-        std::cerr << "ROM not recognized as Pokemon Crystal.\n";
+
+    // Pass the stock Crystal v1.1 profile as the explicit compatibility fallback.
+    // This allows Crystal ROM hacks (different SHA-1 but same table layout) to
+    // compile without requiring a separate registered profile.
+    const crystal::ExtractionProfile* crystal_v11 =
+        registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+
+    auto compat = registry.get_profile_for_rom(
+        rom->hash(),
+        rom->raw().data(),
+        rom->size(),
+        crystal_v11);
+
+    if (!compat.profile) {
+        std::cerr << "ROM not recognized and layout validation failed.\n";
         std::cerr << "SHA-1: " << rom->hash() << "\n";
+        std::cerr << "Reason: " << compat.reason << "\n";
         return 1;
     }
-    
-    std::cout << "ROM identified: " << profile->version_string << "\n\n";
+
+    const crystal::ExtractionProfile* profile = compat.profile;
+
+    if (compat.match_type == crystal::ProfileRegistry::CompatMatchType::ExactHash) {
+        std::cout << "ROM identified: " << profile->version_string << "\n\n";
+    } else {
+        std::cout << "ROM SHA-1 not in registry — accepted via layout validation "
+                  << "against " << profile->version_string << " profile.\n";
+        std::cout << "SHA-1: " << rom->hash() << "\n\n";
+    }
     
     // Create full compiler and compile
     crystal::FullGameCompiler compiler(*rom, *profile);

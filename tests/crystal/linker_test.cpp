@@ -24,6 +24,7 @@
 #include "crystal/extract/map_extractor.hpp"
 #include "crystal/compile/full_compiler.hpp"  // For production discover_reachable_maps
 #include "crystal/compile/corpus_discovery.hpp"  // AUTHORITATIVE corpus discovery
+#include "crystal/extract/species_extractor.hpp"  // Species Finder
 #include <iostream>
 #include <iomanip>
 #include <set>
@@ -149,7 +150,7 @@ int main(int argc, char* argv[]) {
     CompiledGameData game_data = build_compiled_game_data(
         *rom, *profile, discovered_maps, std_scripts, extractor);
     
-    std::cout << "  Species: " << game_data.species.size() << "\n";
+    std::cout << "  Species: " << game_data.species_defs.size() << " (extracted definitions)\n";
     std::cout << "  Items: " << game_data.items.size() << "\n";
     std::cout << "  Maps: " << game_data.maps.size() << "\n";
     std::cout << "  Trainers: " << game_data.trainers.size() << "\n";
@@ -1526,10 +1527,20 @@ CompiledGameData build_compiled_game_data(const RomData& rom,
     // ROM data, not arbitrary ranges.
     //=========================================================================
     
-    // === Species (1-251 for Gen 2, from profile.counts.num_pokemon) ===
-    // Species 0 is SPECIES_NONE (sentinel), valid species are 1-251
-    for (uint16_t i = 1; i <= c.num_pokemon; ++i) {
-        data.species.insert(static_cast<SpeciesId>(i));
+    // === Species — extracted from ROM BaseData table via Species Finder ===
+    // Uses extract_all_species() so this test exercises the same production path.
+    {
+        auto sr = extract_all_species(rom, profile);
+        if (sr.success) {
+            data.species_defs = std::move(sr.species);
+        } else {
+            // Fall back to range fill if extraction fails in test context
+            for (uint16_t i = 1; i <= c.num_pokemon; ++i) {
+                SpeciesDefinition def;
+                def.id = static_cast<SpeciesId>(i);
+                data.species_defs[def.id] = def;
+            }
+        }
     }
     
     // === Items (0-255 in Crystal, from profile.counts.num_items) ===
@@ -1569,11 +1580,8 @@ CompiledGameData build_compiled_game_data(const RomData& rom,
     // Any value in [0, count) is valid by definition.
     //=========================================================================
     
-    // === Specials (0 to num_specials-1, indices into SpecialsPointers) ===
-    // SemanticEnum: Just function pointer indices, no "definition" data
-    for (uint16_t i = 0; i < c.num_specials; ++i) {
-        data.specials.insert(i);
-    }
+    // === Specials: intentionally omitted (same as in full_compiler.cpp) ===
+    // Sem_Special is rejected at Stage 5 and never reaches Stage 6.
     
     // === Music (0 to num_music-1, indices into music_pointers.asm) ===
     // SemanticEnum: Song header indices, MUSIC_NONE = 0 is valid

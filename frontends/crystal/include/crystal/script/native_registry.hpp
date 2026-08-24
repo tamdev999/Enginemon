@@ -92,11 +92,18 @@ struct NativeCallEntry {
     }
 };
 
+// Forward declaration
+struct ExtractionProfile;
+
 // Registry of native call targets
 class NativeCallRegistry {
 public:
-    // Initialize with known native routines from pokecrystal analysis
+    // Initialize with known native routines from the default Crystal v1.1 profile.
+    // Calls initialize_from_profile(ProfileRegistry::instance().Crystal_USA_v1_1).
     void initialize();
+
+    // Initialize from a specific profile (for non-default ROMs / Gold / Silver).
+    void initialize_from_profile(const ExtractionProfile& profile);
     
     // Register a native target (from callasm/memcallasm)
     void register_target(uint32_t address);
@@ -197,8 +204,11 @@ struct RamAddressEntry {
 // Registry of RAM addresses
 class RamAddressRegistry {
 public:
-    // Initialize with known RAM addresses from pokecrystal wram.asm
+    // Initialize with known RAM addresses from the default Crystal v1.1 profile.
     void initialize();
+
+    // Initialize from a specific profile (for non-default ROMs / Gold / Silver).
+    void initialize_from_profile(const ExtractionProfile& profile);
     
     // Register a RAM address access
     void register_access(uint16_t address, RamAccessKind kind);

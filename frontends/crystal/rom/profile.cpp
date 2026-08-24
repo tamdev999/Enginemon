@@ -181,6 +181,38 @@ void ProfileRegistry::register_crystal_v11() {
     o.std_scripts_count     = 52;                         // 52 standard scripts
     
     //-------------------------------------------------------------------------
+    // Graphics extended — inline addresses migrated from extractor .cpp files
+    // These were previously hardcoded as constexpr in sprites.cpp, fonts.cpp,
+    // and tilesets.cpp. They are now profile-driven for hack compatibility.
+    //-------------------------------------------------------------------------
+    o.overworld_sprites     = flat_offset(0x05, 0x4736);  // 05:4736 OverworldSprites
+    o.mon_menu_icons        = flat_offset(0x23, 0x6ac4);  // 23:6ac4 MonMenuIcons (RGBDS hex bank)
+    o.icon_pointers         = flat_offset(0x23, 0x6bbf);  // 23:6bbf IconPointers
+    o.obj_palettes          = flat_offset(0x02, 0x7469);  // 02:7469 MapObjectPals
+    o.tileset_bg_palette    = flat_offset(0x02, 0x7319);  // 02:7319 TilesetBGPalette
+    o.font_tiles            = flat_offset(0x3e, 0x4200);  // 3e:4200 Font (128 1bpp tiles)
+    o.font_extra_tiles      = flat_offset(0x3e, 0x4000);  // 3e:4000 FontExtra (32 2bpp tiles)
+
+    // Special per-tileset palette overrides (bank 0x12 for all)
+    // Source: pokecrystal/gfx/tilesets/*.pal  (pokecrystal11.sym bank 12 addresses)
+    {
+        constexpr uint8_t SPAL_BANK = 0x12;
+        const struct { uint8_t ti; uint16_t addr; } entries[] = {
+            { 5,  0x55EE },  // TILESET_HOUSE        → HousePalette
+            { 13, 0x567D },  // TILESET_MANSION       → MansionPalette1
+            { 21, 0x5501 },  // TILESET_POKECOM_CENTER→ PokeComPalette
+            { 22, 0x5550 },  // TILESET_BATTLETOWER_I → BattleTowerInsidePalette
+            { 27, 0x563D },  // TILESET_RADIO_TOWER   → RadioTowerPalette
+            { 29, 0x559F },  // TILESET_ICE_PATH      → IcePathPalette
+        };
+        for (const auto& e : entries) {
+            auto& slot = o.special_tileset_palettes[o.special_tileset_palette_count++];
+            slot.tileset_index = e.ti;
+            slot.rom_address   = flat_offset(SPAL_BANK, e.addr);
+        }
+    }
+    
+    //-------------------------------------------------------------------------
     // Counts
     //-------------------------------------------------------------------------
     // These counts establish the authoritative semantic domains for validation.
@@ -213,12 +245,150 @@ void ProfileRegistry::register_crystal_v11() {
     c.num_marts             = 34;   // NUM_MARTS (0-33)
     
     //-------------------------------------------------------------------------
+    // Native call specs — moved from NativeCallRegistry::initialize()
+    // These flat addresses are Crystal v1.1 specific.
+    //-------------------------------------------------------------------------
+    {
+        auto& calls = o.native_calls;
+        uint8_t& n  = o.native_call_count;
+        using C = NativeCallClass;
+        using F = NativeCallFlow;
+
+        auto add = [&](uint32_t addr, const char* sym, const char* sem,
+                       C cls, F flow, const char* src, const char* notes = "") {
+            if (n < ProfileOffsets::MAX_NATIVE_CALLS) {
+                calls[n++] = { addr, sym, sem, cls, flow, src, notes };
+            }
+        };
+
+        add(0x2f8c,  "Random",                        "random",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/home/random.asm", "Returns random byte in a");
+        add(0xC658,  "HealParty",                     "heal_party",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/engine/pokemon/party.asm", "Heals all party pokemon");
+        add(0xC07a,  "HealPartySpecial",               "heal_party",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/engine/events/specials.asm", "Heals party special wrapper");
+        add(0xC706,  "GetPartyNickname",               "get_party_nickname",
+            C::Trivial, F::Returns,
+            "pokecrystal/engine/pokemon/party.asm", "Gets nickname of party member");
+        add(0xCD78,  "TryStrengthOW",                  "try_strength_overworld",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/engine/events/overworld.asm",
+            "Checks if Strength can be used overworld");
+        add(0xCD12,  "SetStrengthFlag",                "set_strength_flag",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/engine/events/overworld.asm", "Sets the Strength active flag");
+        add(0xCF7C,  "HasRockSmash",                   "has_rock_smash",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/engine/events/overworld.asm",
+            "Checks if party has Rock Smash");
+        add(0xB8219, "RockMonEncounter",               "rock_mon_encounter",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/engine/events/treemons.asm",
+            "Triggers rock smash wild encounter");
+        add(0x9f5cb, "BattleTowerHallway.asm_load_battle_room",
+            "load_battle_tower_level_group",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/maps/BattleTowerHallway.asm",
+            "Reads Battle Tower level group selection into wScriptVar");
+        add(0x966d0, "EnableEvents",                   "enable_events",
+            C::HostCapability, F::Returns,
+            "pokecrystal/engine/overworld/events.asm",
+            "Re-enables event processing");
+        add(0x966ee, "DisableWildEncounters",          "disable_wild_encounters",
+            C::HostCapability, F::Returns,
+            "pokecrystal/engine/overworld/events.asm", "Disables wild encounters");
+        add(0x96706, "EnableWildEncounters",           "enable_wild_encounters",
+            C::HostCapability, F::Returns,
+            "pokecrystal/engine/overworld/events.asm", "Enables wild encounters");
+        add(0x8571,  "HealPartyPredef",                "heal_party",
+            C::PureSemantic, F::Returns,
+            "pokecrystal/engine/predefs.asm", "Heal party predef wrapper");
+    }
+
+    //-------------------------------------------------------------------------
+    // RAM address specs — moved from RamAddressRegistry::initialize()
+    // Crystal v1.1 wram addresses.
+    //-------------------------------------------------------------------------
+    {
+        auto& rams = o.ram_addresses;
+        uint8_t& n  = o.ram_address_count;
+
+        // RamClassification values (0=KnownSemanticState, 1=KnownCapabilitySlot,
+        //                           2=ControlFlowPointer, 3=OpaqueRam)
+        constexpr uint8_t STATE  = 0;
+        constexpr uint8_t CAP    = 1;
+        constexpr uint8_t CTLPTR = 2;
+
+        auto add = [&](uint16_t addr, const char* sym, const char* sem,
+                       uint8_t cls, const char* src, const char* notes = "") {
+            if (n < ProfileOffsets::MAX_RAM_ADDRESSES) {
+                rams[n++] = { addr, sym, sem, cls, src, notes };
+            }
+        };
+
+        add(0xc2dd, "wScriptVar",              "script_var",
+            STATE, "pokecrystal/ram/wram.asm",
+            "Primary script variable for return values");
+        add(0xd437, "wScriptMode",             "script_mode",
+            CAP,   "pokecrystal/ram/wram.asm",
+            "Current script processing mode");
+        add(0xd109, "wCurPartyMon",            "current_party_mon",
+            STATE, "pokecrystal/ram/wram.asm",
+            "Index of current party pokemon");
+        add(0xd03f, "wCurFruit",               "current_fruit",
+            STATE, "pokecrystal/ram/wram.asm",
+            "ID of current fruit tree item");
+        add(0xd03e, "wCurFruitTree",           "current_fruit_tree",
+            STATE, "pokecrystal/ram/wram.asm",
+            "ID of current fruit tree");
+        add(0xc2de, "wPlayerNextMovement",     "player_next_movement",
+            STATE, "pokecrystal/ram/wram.asm",
+            "Player's next movement byte");
+        add(0xc2df, "wPlayerMovement",         "player_movement",
+            STATE, "pokecrystal/ram/wram.asm",
+            "Player's current movement byte");
+        add(0xc2e2, "wMovementObject",         "movement_object",
+            STATE, "pokecrystal/ram/wram.asm",
+            "Object ID for movement commands");
+        add(0xc2e3, "wMovementDataBank",       "movement_data_bank",
+            CAP,   "pokecrystal/ram/wram.asm",
+            "Bank of movement data");
+        add(0xc2e4, "wMovementDataAddress",    "movement_data_address",
+            CTLPTR,"pokecrystal/ram/wram.asm",
+            "Pointer to movement data");
+        add(0xd962, "wMooMooBerries",          "moo_moo_berries",
+            STATE, "pokecrystal11.sym",
+            "MooMoo Farm berry feeding count");
+        add(0xd963, "wUndergroundSwitchPositions","underground_switch_positions",
+            STATE, "pokecrystal11.sym",
+            "Goldenrod Underground switch states");
+        add(0xd964, "wFarfetchdPosition",      "farfetchd_position",
+            STATE, "pokecrystal11.sym",
+            "Farfetch'd herding mini-game position");
+        add(0xcf51, "wOtherPlayerLinkMode",    "other_player_link_mode",
+            CAP,   "pokecrystal11.sym",
+            "Link mode state (multi-use UNION address)");
+        add(0xd1ef, "wStrengthSpecies",        "strength_species",
+            STATE, "pokecrystal11.sym",
+            "Species that used Strength (field move context)");
+        add(0xd22e, "wTempWildMonSpecies",     "temp_wild_mon_species",
+            STATE, "pokecrystal11.sym",
+            "Pending wild encounter species (field move context)");
+        add(0xcf64, "wNrOfBeatenBattleTowerTrainers","battle_tower_beaten_trainers",
+            STATE, "pokecrystal11.sym",
+            "Number of beaten Battle Tower trainers in current streak");
+    }
+
+    //-------------------------------------------------------------------------
     // Register
     //-------------------------------------------------------------------------
     hash_to_version_[profile.sha1] = profile.version;
     profiles_[profile.version] = profile;
     supported_list_.emplace_back(profile.sha1, profile.version_string);
-}
+}  // end register_crystal_v11()
 
 std::optional<RomVersion> ProfileRegistry::identify(std::string_view sha1) const {
     auto it = hash_to_version_.find(std::string(sha1));
@@ -246,6 +416,114 @@ const ExtractionProfile* ProfileRegistry::get_profile_by_hash(std::string_view s
 
 const std::vector<std::pair<std::string, std::string>>& ProfileRegistry::supported_roms() const {
     return supported_list_;
+}
+
+// =============================================================================
+// LAYOUT VALIDATION
+// Checks that a profile's key structural assumptions hold for a ROM.
+// This is a lightweight set of spot-checks — not a full extraction attempt.
+// The intent is to catch "completely wrong profile" situations (e.g., Gold ROM
+// vs Crystal profile) without running the full compiler.
+// =============================================================================
+
+bool ProfileRegistry::validate_profile_layout(
+    const ExtractionProfile& profile,
+    const uint8_t* rom_bytes,
+    size_t rom_size,
+    std::string* out_reason)
+{
+    auto fail = [&](const char* msg) -> bool {
+        if (out_reason) *out_reason = msg;
+        return false;
+    };
+
+    // Minimum ROM size sanity check (2 MB for all Crystal-family ROMs)
+    if (rom_size < 0x200000) {
+        return fail("ROM too small (< 2 MB); not a Crystal-family ROM");
+    }
+
+    const auto& o = profile.offsets;
+    const auto& c = profile.counts;
+    const auto& fmt = profile.format;
+
+    // Helper: read one byte from a flat offset
+    auto read_byte = [&](uint32_t flat) -> uint8_t {
+        if (flat >= rom_size) return 0xFF;
+        return rom_bytes[flat];
+    };
+
+    auto in_range = [&](uint32_t flat, uint32_t size) -> bool {
+        return flat + size <= rom_size;
+    };
+
+    // ── Check 1: BaseData table is reachable ──────────────────────────────────
+    // The BaseData table must fit: base_data + num_pokemon * base_data_size bytes.
+    uint32_t base_data_end = o.base_data +
+        static_cast<uint32_t>(c.num_pokemon) * fmt.pokemon.base_data_size;
+    if (!in_range(o.base_data, base_data_end - o.base_data)) {
+        return fail("profile.offsets.base_data + num_pokemon*base_data_size exceeds ROM");
+    }
+
+    // ── Check 2: First BaseData record dex number is non-zero ────────────────
+    // Record 0 is an unused slot; record 1 (entry at index 0 = base_data + 0*32)
+    // must have a non-zero dex number at offset 0.
+    // For Crystal/Gold/Silver the first species (Bulbasaur=1) has dex num = 1.
+    uint8_t first_dex = read_byte(o.base_data + fmt.pokemon.dex_num_offset);
+    if (first_dex == 0 || first_dex > c.num_pokemon) {
+        return fail("first BaseData record has implausible dex_num; profile/ROM mismatch");
+    }
+
+    // ── Check 3: MapGroupPointers table is reachable ─────────────────────────
+    if (!in_range(o.map_group_pointers, 2)) {
+        return fail("profile.offsets.map_group_pointers exceeds ROM");
+    }
+
+    // ── Check 4: StdScripts table is reachable ───────────────────────────────
+    if (!in_range(o.std_scripts, o.std_scripts_count * 3u)) {
+        return fail("profile.offsets.std_scripts + count*3 exceeds ROM");
+    }
+
+    // ── Check 5: MonMenuIcons table is reachable ─────────────────────────────
+    if (o.mon_menu_icons != 0 && !in_range(o.mon_menu_icons, c.num_pokemon)) {
+        return fail("profile.offsets.mon_menu_icons + num_pokemon exceeds ROM");
+    }
+
+    return true;  // All checks passed
+}
+
+// =============================================================================
+// HASH POLICY — get_profile_for_rom
+// =============================================================================
+
+ProfileRegistry::CompatResult ProfileRegistry::get_profile_for_rom(
+    std::string_view sha1,
+    const uint8_t* rom_bytes,
+    size_t rom_size,
+    const ExtractionProfile* fallback) const
+{
+    // ── Path 1: Exact SHA-1 match ─────────────────────────────────────────────
+    if (const ExtractionProfile* exact = get_profile_by_hash(sha1)) {
+        return { exact, CompatMatchType::ExactHash, "" };
+    }
+
+    // ── Path 2: Fallback profile + layout validation ──────────────────────────
+    if (!fallback) {
+        std::string reason = "ROM SHA-1 not recognized and no fallback profile supplied. "
+                             "Supported: ";
+        for (const auto& [hash, name] : supported_roms()) {
+            reason += name + " ";
+        }
+        return { nullptr, CompatMatchType::ExactHash, reason };
+    }
+
+    std::string layout_reason;
+    if (!validate_profile_layout(*fallback, rom_bytes, rom_size, &layout_reason)) {
+        std::string reason = "ROM SHA-1 not recognized and supplied profile failed layout "
+                             "validation: " + layout_reason;
+        return { nullptr, CompatMatchType::LayoutValidated, reason };
+    }
+
+    return { fallback, CompatMatchType::LayoutValidated, "" };
 }
 
 //=============================================================================

@@ -36,6 +36,9 @@
 #include "crystal/world/collision_classifier.hpp"
 #include "crystal/extract/sprite_ids.hpp"
 #include "crystal/extract/sprite_extractor.hpp"
+#include "crystal/extract/species_extractor.hpp"
+#include "crystal/script/semantic_linker.hpp"
+#include "crystal/script/crystal_state_vars.hpp"
 #include "engine/core/registry.hpp"
 
 #include <iostream>
@@ -10631,7 +10634,7 @@ TEST(corpus_readmem_0xcf64_produces_read_state_var) {
     
     const auto& read_state = std::get<Sem_ReadStateVar>(op);
     ASSERT_EQ(static_cast<uint16_t>(read_state.state_var), 
-              static_cast<uint16_t>(WellKnownStateVar::BattleTowerBeatenTrainers));
+              crystal_state_var_id(CrystalStateVar::BattleTowerBeatenTrainers));
     
     std::cout << "  [readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)]\n";
 }
@@ -10731,7 +10734,7 @@ TEST(corpus_callasm_0x9f5cb_produces_read_state_var) {
     
     const auto& read_state = std::get<Sem_ReadStateVar>(op);
     ASSERT_EQ(static_cast<uint16_t>(read_state.state_var), 
-              static_cast<uint16_t>(WellKnownStateVar::BattleTowerLevelGroup));
+              crystal_state_var_id(CrystalStateVar::BattleTowerLevelGroup));
     
     std::cout << "  [callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)]\n";
 }
@@ -18649,6 +18652,407 @@ TEST(sem_special_still_rejected_after_registry_cleanup) {
     std::cout << "  [Sem_Special still rejected at Stage 5 after registry cleanup ✓]\n";
 }
 
+//=============================================================================
+// MAX-COMPAT + SPECIES FINDER ADVERSARIAL TESTS
+//
+// Required test scenarios (12):
+//  1. stock Crystal exact hash → ExactHash match type
+//  2. modified-hash Crystal-compatible ROM → LayoutValidated, not rejected
+//  3. incompatible profile → explicit failure
+//  4. stock species count = 251 via profile
+//  5. first BaseData record (Bulbasaur) extracted correctly
+//  6. last record (Mew = 151) extracted correctly
+//  7. non-251 profile uses same extraction path
+//  8. linker species refs are ExactResolved (not PendingDefinition)
+//  9. unknown species ID rejected by registry (InvalidDomain)
+// 10. Day Care species 252 round-trips through save/load (not rejected at boundary)
+// 11. species→icon map covers the full configured domain
+// 12. truncated BaseData table fails extraction with a clear error
+//=============================================================================
+
+// Test 1: Exact hash gives ExactHash match type
+TEST(compat_exact_hash_gives_exacthash_match) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+    const auto* crystal_v11 = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(crystal_v11 != nullptr);
+
+    auto result = registry.get_profile_for_rom(
+        g_rom->hash(),
+        g_rom->raw().data(),
+        g_rom->size(),
+        crystal_v11);
+
+    ASSERT_TRUE(result.profile != nullptr);
+    ASSERT_EQ(static_cast<int>(result.match_type),
+              static_cast<int>(crystal::ProfileRegistry::CompatMatchType::ExactHash));
+    ASSERT_STR_EQ(result.profile->sha1.c_str(), g_rom->hash().c_str());
+
+    std::cout << "  [Exact hash match → ExactHash, correct profile returned ✓]\n";
+}
+
+// Test 2: Modified-hash Crystal-compatible ROM is NOT rejected for hash mismatch alone
+TEST(compat_modified_hash_layout_valid_not_rejected) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+    const auto* crystal_v11 = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(crystal_v11 != nullptr);
+
+    // Present a fake SHA-1 that is NOT registered (simulates a ROM hack)
+    // but pass the real ROM bytes so layout validation succeeds.
+    const std::string fake_sha1 = "0000000000000000000000000000000000000000";
+
+    auto result = registry.get_profile_for_rom(
+        fake_sha1,
+        g_rom->raw().data(),
+        g_rom->size(),
+        crystal_v11);
+
+    // Must succeed via layout validation, not fail for hash mismatch
+    ASSERT_TRUE(result.profile != nullptr);
+    ASSERT_EQ(static_cast<int>(result.match_type),
+              static_cast<int>(crystal::ProfileRegistry::CompatMatchType::LayoutValidated));
+    ASSERT_TRUE(result.reason.empty());
+
+    std::cout << "  [Unknown hash + valid layout → LayoutValidated, not rejected ✓]\n";
+}
+
+// Test 3: Incompatible profile (mismatched offsets) fails with explicit error
+TEST(compat_incompatible_profile_fails_explicitly) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+
+    // Build a profile with a plausible-looking but wrong base_data address
+    // so the first BaseData record's dex_num comes back implausible.
+    crystal::ExtractionProfile bad_profile = *registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    bad_profile.offsets.base_data = 0x100;  // Clearly wrong — ROM header area, not species data
+    bad_profile.sha1 = "0000000000000000000000000000000000000001";
+
+    const std::string fake_sha1 = "0000000000000000000000000000000000000001";
+
+    auto result = registry.get_profile_for_rom(
+        fake_sha1,
+        g_rom->raw().data(),
+        g_rom->size(),
+        &bad_profile);
+
+    // Must fail because the layout check catches the wrong base_data
+    ASSERT_TRUE(result.profile == nullptr);
+    ASSERT_FALSE(result.reason.empty());
+
+    std::cout << "  [Incompatible profile (bad base_data) → explicit failure with reason ✓]\n";
+    std::cout << "    Reason: " << result.reason << "\n";
+}
+
+// Test 4: Stock Crystal profile gives exactly 251 species
+TEST(species_finder_stock_count_is_251) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+    const auto* profile = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(profile != nullptr);
+    ASSERT_EQ(profile->counts.num_pokemon, 251u);
+
+    auto result = crystal::extract_all_species(*g_rom, *profile);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.species.size(), 251u);
+    ASSERT_EQ(result.ordered_ids.size(), 251u);
+
+    // First ID must be 1 (Bulbasaur), last must be 251 (Celebi)
+    ASSERT_EQ(result.ordered_ids.front(), static_cast<enginemon::SpeciesId>(1));
+    ASSERT_EQ(result.ordered_ids.back(),  static_cast<enginemon::SpeciesId>(251));
+
+    std::cout << "  [Stock profile → 251 species extracted ✓]\n";
+}
+
+// Test 5: First BaseData record — Bulbasaur (species 1)
+TEST(species_finder_bulbasaur_record_correct) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+    const auto* profile = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(profile != nullptr);
+
+    auto result = crystal::extract_all_species(*g_rom, *profile);
+    ASSERT_TRUE(result.success);
+
+    auto it = result.species.find(1);
+    ASSERT_TRUE(it != result.species.end());
+    const auto& bulbasaur = it->second;
+
+    // Source-proven from pokecrystal/data/pokemon/base_stats/bulbasaur.asm
+    ASSERT_EQ(bulbasaur.id, static_cast<enginemon::SpeciesId>(1));
+    ASSERT_EQ(bulbasaur.hp,      45u);
+    ASSERT_EQ(bulbasaur.attack,  49u);
+    ASSERT_EQ(bulbasaur.defense, 49u);
+    ASSERT_EQ(bulbasaur.speed,   45u);
+    ASSERT_EQ(bulbasaur.sp_atk,  65u);
+    ASSERT_EQ(bulbasaur.sp_def,  65u);
+    // Type1 = GRASS (0x16 = 22), Type2 = POISON (0x03 = 3)
+    ASSERT_EQ(bulbasaur.type1, 0x16u);
+    ASSERT_EQ(bulbasaur.type2, 0x03u);
+
+    std::cout << "  [Bulbasaur (species 1) base stats correct ✓]\n";
+}
+
+// Test 6: Last record — Mew (species 151) and Celebi (species 251) extracted
+TEST(species_finder_last_record_is_mew) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+    const auto* profile = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(profile != nullptr);
+
+    auto result = crystal::extract_all_species(*g_rom, *profile);
+    ASSERT_TRUE(result.success);
+
+    // Mew (151) — from pokecrystal/data/pokemon/base_stats/mew.asm
+    auto mew_it = result.species.find(151);
+    ASSERT_TRUE(mew_it != result.species.end());
+    const auto& mew = mew_it->second;
+    ASSERT_EQ(mew.hp,      100u);
+    ASSERT_EQ(mew.attack,  100u);
+    ASSERT_EQ(mew.defense, 100u);
+    ASSERT_EQ(mew.speed,   100u);
+
+    // Celebi (251) — last valid species in Gen 2
+    auto celebi_it = result.species.find(251);
+    ASSERT_TRUE(celebi_it != result.species.end());
+    const auto& celebi = celebi_it->second;
+    ASSERT_EQ(celebi.id, static_cast<enginemon::SpeciesId>(251));
+    ASSERT_EQ(celebi.hp, 100u);  // Celebi base HP = 100
+
+    // Species 252 must NOT be present in the map
+    ASSERT_EQ(result.species.count(252u), 0u);
+
+    std::cout << "  [Mew (151) and Celebi (251) extracted; species 252 absent ✓]\n";
+}
+
+// Test 7: Non-251 profile uses exactly the same extraction path
+TEST(species_finder_non251_profile_same_path) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+    const auto* base_profile = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(base_profile != nullptr);
+
+    // Create a profile claiming 100 Pokémon (truncated domain)
+    crystal::ExtractionProfile truncated = *base_profile;
+    truncated.counts.num_pokemon = 100;
+
+    auto result = crystal::extract_all_species(*g_rom, truncated);
+    ASSERT_TRUE(result.success);
+    // Only the first 100 species should be extracted
+    ASSERT_EQ(result.species.size(), 100u);
+    ASSERT_TRUE(result.species.contains(1));    // Bulbasaur
+    ASSERT_TRUE(result.species.contains(100));  // Voltorb
+    ASSERT_FALSE(result.species.contains(101)); // Electrode not included
+
+    std::cout << "  [Non-251 profile (count=100) extracts exactly 100 species ✓]\n";
+}
+
+// Test 8: Linker species refs are ExactResolved after extraction
+TEST(species_linker_refs_are_exact_resolved) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    using namespace enginemon;
+    using namespace crystal;
+
+    auto& registry = ProfileRegistry::instance();
+    const auto* profile = registry.get_profile(RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(profile != nullptr);
+
+    // Build CompiledGameData with extracted species
+    CompiledGameData data;
+    auto sr = extract_all_species(*g_rom, *profile);
+    ASSERT_TRUE(sr.success);
+    data.species_defs = std::move(sr.species);
+
+    // Create a SemanticLinker and validate a known-good species reference
+    SemanticLinker linker;
+    linker.set_game_data(&data);
+
+    // Build a minimal IR with Sem_GivePokemon{species=25 (Pikachu)}
+    SemanticScriptIR ir;
+    ir.script_id = "test_exact_resolved";
+    SemanticBasicBlock block;
+    block.id = 0; block.is_entry = true;
+    Sem_GivePokemon give;
+    give.species = 25;  // Pikachu — must be ExactResolved
+    give.level   = 5;
+    give.held_item = 0;
+    SemanticInstruction inst; inst.op = give;
+    block.instructions.push_back(inst);
+    ir.blocks.push_back(block);
+
+    auto refs = linker.link_script(ir);
+    ASSERT_FALSE(refs.empty());
+
+    bool found_species_ref = false;
+    for (const auto& ref : refs) {
+        if (ref.type == ReferenceType::Species && ref.value == 25) {
+            found_species_ref = true;
+            ASSERT_EQ(static_cast<int>(ref.validation),
+                      static_cast<int>(ValidationClass::ExactResolved));
+        }
+    }
+    ASSERT_TRUE(found_species_ref);
+
+    std::cout << "  [Species 25 (Pikachu) → ExactResolved after extraction ✓]\n";
+}
+
+// Test 9: Unknown species ID is InvalidDomain (not in extracted set)
+TEST(species_linker_unknown_species_invalid_domain) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    using namespace enginemon;
+    using namespace crystal;
+
+    auto& registry = ProfileRegistry::instance();
+    const auto* profile = registry.get_profile(RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(profile != nullptr);
+
+    CompiledGameData data;
+    auto sr = extract_all_species(*g_rom, *profile);
+    ASSERT_TRUE(sr.success);
+    data.species_defs = std::move(sr.species);
+
+    SemanticLinker linker;
+    linker.set_game_data(&data);
+
+    // Species 300 is not in vanilla Crystal
+    SemanticScriptIR ir;
+    ir.script_id = "test_invalid_domain";
+    SemanticBasicBlock block;
+    block.id = 0; block.is_entry = true;
+    Sem_GivePokemon give;
+    give.species = 300;  // Does not exist
+    give.level = 5;
+    give.held_item = 0;
+    SemanticInstruction inst; inst.op = give;
+    block.instructions.push_back(inst);
+    ir.blocks.push_back(block);
+
+    auto refs = linker.link_script(ir);
+    bool found_invalid = false;
+    for (const auto& ref : refs) {
+        if (ref.type == ReferenceType::Species && ref.value == 300) {
+            found_invalid = true;
+            ASSERT_EQ(static_cast<int>(ref.validation),
+                      static_cast<int>(ValidationClass::InvalidDomain));
+        }
+    }
+    ASSERT_TRUE(found_invalid);
+
+    std::cout << "  [Species 300 (not extracted) → InvalidDomain ✓]\n";
+}
+
+// Test 10: Day Care species 252 round-trips through save/load without rejection
+TEST(daycare_species_252_save_load_accepted) {
+    // The save/load ceiling was removed (was > 251, now > 65534).
+    // Species 252 (valid for expanded Crystal ROM) must survive round-trip.
+    GameState gs;
+    gs.daycare_slot[0] = static_cast<enginemon::SpeciesId>(252);  // Valid for expanded ROM
+    gs.daycare_slot[1] = 0;  // Empty
+
+    auto bytes = gs.serialize();
+    auto result = GameState::try_deserialize(bytes);
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.state.daycare_slot[0], static_cast<enginemon::SpeciesId>(252));
+    ASSERT_EQ(result.state.daycare_slot[1], static_cast<enginemon::SpeciesId>(0));
+
+    // For vanilla Crystal runtime the actual domain check is by registry membership —
+    // 252 would get no sprite but the save itself must not be rejected as corrupted.
+    std::cout << "  [Day Care species 252 round-trips through save/load ✓]\n";
+}
+
+// Test 11: Species→icon map covers the full configured domain
+TEST(species_icon_map_covers_full_domain) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+    const auto* profile = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(profile != nullptr);
+
+    crystal::SpriteExtractor extractor(*g_rom, *profile);
+    auto icon_map = extractor.build_species_icon_map();
+
+    // Every species in the map must be within [1, profile.counts.num_pokemon]
+    ASSERT_FALSE(icon_map.empty());
+    for (const auto& [species_id, asset_id] : icon_map) {
+        ASSERT_TRUE(species_id >= 1u);
+        ASSERT_TRUE(species_id <= profile->counts.num_pokemon);
+        ASSERT_FALSE(asset_id.empty());
+        // Asset ID must be "pokemon_icon:<name>" format
+        ASSERT_TRUE(asset_id.substr(0, 13) == "pokemon_icon:");
+    }
+
+    // Spot-check: Pikachu (25) must have the pikachu icon
+    bool found_pikachu = false;
+    for (const auto& [sid, aid] : icon_map) {
+        if (sid == 25) {
+            found_pikachu = true;
+            ASSERT_STR_EQ(aid.c_str(), "pokemon_icon:pikachu");
+        }
+    }
+    ASSERT_TRUE(found_pikachu);
+
+    // The map must not contain species 0 (SPECIES_NONE sentinel)
+    for (const auto& [sid, aid] : icon_map) {
+        ASSERT_TRUE(sid != 0u);
+    }
+
+    std::cout << "  [Icon map: " << icon_map.size() << " entries, covers [1,"
+              << profile->counts.num_pokemon << "], Pikachu→pikachu ✓]\n";
+}
+
+// Test 12: Malformed/truncated BaseData fails extraction with a clear error
+TEST(species_finder_truncated_base_data_fails) {
+    if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
+
+    auto& registry = crystal::ProfileRegistry::instance();
+    const auto* profile = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
+    ASSERT_TRUE(profile != nullptr);
+
+    // ── Case A: base_data = 0 → "not configured" error ──────────────────────
+    {
+        crystal::ExtractionProfile bad = *profile;
+        bad.offsets.base_data = 0;
+        auto result = crystal::extract_all_species(*g_rom, bad);
+        ASSERT_FALSE(result.success);
+        ASSERT_FALSE(result.error.empty());
+        ASSERT_EQ(result.species.size(), 0u);
+        std::cout << "  [base_data=0 → fails: " << result.error.substr(0, 50) << " ✓]\n";
+    }
+
+    // ── Case B: base_data points to the very end of the ROM ──────────────────
+    // 251 * 32 = 8032 bytes needed; if base_data is near end, table exceeds ROM.
+    {
+        crystal::ExtractionProfile bad = *profile;
+        // Place base_data near end so table extends past EOF
+        bad.offsets.base_data = static_cast<uint32_t>(g_rom->size() - 16);
+        auto result = crystal::extract_all_species(*g_rom, bad);
+        ASSERT_FALSE(result.success);
+        ASSERT_FALSE(result.error.empty());
+        ASSERT_EQ(result.species.size(), 0u);
+        std::cout << "  [base_data at EOF-16 → fails: " << result.error.substr(0, 50) << " ✓]\n";
+    }
+
+    // ── Case C: num_pokemon = 0 → "nothing to extract" error ─────────────────
+    {
+        crystal::ExtractionProfile bad = *profile;
+        bad.counts.num_pokemon = 0;
+        auto result = crystal::extract_all_species(*g_rom, bad);
+        ASSERT_FALSE(result.success);
+        ASSERT_FALSE(result.error.empty());
+        std::cout << "  [num_pokemon=0 → fails: " << result.error.substr(0, 50) << " ✓]\n";
+    }
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <rom_path>\n";
@@ -19304,6 +19708,18 @@ int main(int argc, char* argv[]) {
     RUN_TEST(behavior_unknown_unregistered_errors_explicitly);
     RUN_TEST(behavior_writes_script_var_errors_before_branch);
     RUN_TEST(sem_special_still_rejected_after_registry_cleanup);
+    // Max-compat + Species Finder adversarial tests
+    RUN_TEST(compat_exact_hash_gives_exacthash_match);
+    RUN_TEST(compat_modified_hash_layout_valid_not_rejected);
+    RUN_TEST(compat_incompatible_profile_fails_explicitly);
+    RUN_TEST(species_finder_stock_count_is_251);
+    RUN_TEST(species_finder_bulbasaur_record_correct);
+    RUN_TEST(species_finder_last_record_is_mew);
+    RUN_TEST(species_finder_non251_profile_same_path);
+    RUN_TEST(species_linker_refs_are_exact_resolved);
+    RUN_TEST(species_linker_unknown_species_invalid_domain);
+    RUN_TEST(daycare_species_252_save_load_accepted);
+    RUN_TEST(species_icon_map_covers_full_domain);
 
     // Summary
     std::cout << "\n=== Results ===\n";

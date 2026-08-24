@@ -107,25 +107,19 @@ SpriteFrame SpriteExtractor::compile_frame(const uint8_t* tile_data) const {
 SpriteExtractionResult SpriteExtractor::extract_sprite(uint8_t sprite_index) const {
     SpriteExtractionResult result;
     
+    // OverworldSprites table address from profile (moved from inline constexpr).
+    // Source: profile.offsets.overworld_sprites — 6 bytes per entry.
     if (sprite_index == 0 || sprite_index > 102) {
         result.error = std::format("Invalid sprite index: {}", sprite_index);
         return result;
     }
-    
-    // OverworldSprites table structure (from sprites.asm):
-    // dw pointer  (2 bytes) - GFX address
-    // db tiles    (1 byte)  - tiles per VRAM bank (12 for walking, 4 for still)
-    // db bank     (1 byte)  - ROM bank
-    // db type     (1 byte)  - WALKING_SPRITE/STANDING_SPRITE/STILL_SPRITE
-    // db palette  (1 byte)  - PAL_OW_*
-    // Total: 6 bytes per entry (NUM_SPRITEDATA_FIELDS)
-    
-    // From pokecrystal symbols: 05:4736 OverworldSprites
-    constexpr uint8_t SPRITES_BANK = 0x05;
-    constexpr uint16_t SPRITES_ADDR = 0x4736;
+
+    const uint32_t table_addr = profile_.offsets.overworld_sprites;
+    if (table_addr == 0) {
+        result.error = "profile.offsets.overworld_sprites not configured";
+        return result;
+    }
     constexpr size_t ENTRY_SIZE = 6;
-    
-    uint32_t table_addr = rom_.bank_to_flat(SPRITES_BANK, SPRITES_ADDR);
     uint32_t entry_addr = table_addr + (sprite_index - 1) * ENTRY_SIZE;
     
     if (entry_addr + ENTRY_SIZE > rom_.size()) {
@@ -308,26 +302,29 @@ auto SpriteExtractor::build_species_icon_map() const
     -> std::vector<std::pair<enginemon::SpeciesId, std::string>>
 {
     std::vector<std::pair<enginemon::SpeciesId, std::string>> result;
-    result.reserve(251);
 
-    // MonMenuIcons table: bank 23 (0x17), address 0x6ac4
-    // Source: pokecrystal/data/pokemon/menu_icons.asm, sym: 23:6ac4
-    // NOTE: RGBDS sym files use hexadecimal bank numbers.
-    //       "23:6ac4" means bank=0x23 (=35 decimal), addr=0x6ac4.
-    constexpr uint8_t  MON_ICONS_BANK = rgbds_bank(0x23); // sym: "23:6ac4" MonMenuIcons
-    constexpr uint16_t MON_ICONS_ADDR = 0x6ac4;
-    constexpr uint16_t NUM_SPECIES = 251;
+    const auto& o = profile_.offsets;
+    const auto& c = profile_.counts;
 
-    uint32_t table_addr = rom_.bank_to_flat(MON_ICONS_BANK, MON_ICONS_ADDR);
+    if (o.mon_menu_icons == 0) {
+        // Profile does not provide MonMenuIcons address — return empty map.
+        return result;
+    }
 
-    if (table_addr + NUM_SPECIES > rom_.size()) {
+    uint16_t num_species = c.num_pokemon;
+    result.reserve(num_species);
+
+    // MonMenuIcons: profile.offsets.mon_menu_icons — num_pokemon bytes,
+    // 1 byte per species (0-indexed), mapping species S (1-indexed) →
+    // ICON_* type index (0–38).
+    if (o.mon_menu_icons + num_species > static_cast<uint32_t>(rom_.size())) {
         // ROM too small — return empty map to signal failure
         return result;
     }
 
-    auto table = rom_.read_bytes(table_addr, NUM_SPECIES);
+    auto table = rom_.read_bytes(o.mon_menu_icons, num_species);
 
-    for (uint16_t s = 1; s <= NUM_SPECIES; ++s) {
+    for (uint16_t s = 1; s <= num_species; ++s) {
         uint8_t icon_type = table[s - 1];
         if (icon_type >= NUM_ICON_TYPES) continue;  // Invalid type — skip
 
@@ -402,16 +399,16 @@ SpriteExtractionResult SpriteExtractor::extract_pokemon_icon(
         return result;
     }
 
-    // IconPointers table: bank 0x23 (35 decimal), address 0x6bbf
-    // Format: 39 × dw (2 bytes little-endian), 0-indexed by icon_type
-    // Source: pokecrystal/data/icon_pointers.asm, sym: 23:6bbf
-    // NOTE: "23:6bbf" in RGBDS sym = bank 0x23 (hex), not 0x17 (decimal 23).
-    constexpr uint8_t  ICON_BANK        = rgbds_bank(0x23); // sym: "23:6bbf" IconPointers
-    constexpr uint16_t ICON_PTRS_ADDR   = 0x6bbf; // IconPointers
-    constexpr size_t   ICON_PTR_ENTRY   = 2;       // 2 bytes per dw entry
+    // IconPointers table from profile (moved from inline constexpr).
+    // Source: profile.offsets.icon_pointers — 2 bytes per icon_type (dw).
+    const uint32_t icon_ptrs_addr = profile_.offsets.icon_pointers;
+    if (icon_ptrs_addr == 0) {
+        result.error = "profile.offsets.icon_pointers not configured";
+        return result;
+    }
+    constexpr size_t ICON_PTR_ENTRY = 2;  // 2 bytes per dw entry
 
-    uint32_t ptrs_addr = rom_.bank_to_flat(ICON_BANK, ICON_PTRS_ADDR);
-    uint32_t entry_off = ptrs_addr + icon_type * ICON_PTR_ENTRY;
+    uint32_t entry_off = icon_ptrs_addr + icon_type * ICON_PTR_ENTRY;
 
     if (entry_off + ICON_PTR_ENTRY > rom_.size()) {
         result.error = std::format("IconPointers entry out of bounds (icon_type={})", icon_type);
@@ -430,7 +427,12 @@ SpriteExtractionResult SpriteExtractor::extract_pokemon_icon(
     constexpr size_t BYTES_PER_FRAME = TILES_PER_FRAME * BYTES_PER_TILE;  // 64
     constexpr size_t ICON_GFX_SIZE   = 2 * BYTES_PER_FRAME;               // 128
 
-    uint32_t gfx_addr = rom_.bank_to_flat(ICON_BANK, gfx_ptr);
+    // Derive the bank from icon_pointers flat address.
+    // icon_pointers flat = bank * 0x4000 + (bank_addr - 0x4000)
+    // → bank = icon_pointers / 0x4000
+    // The GFX pointer from the table is a bank-local address in the same bank.
+    uint8_t icon_bank = static_cast<uint8_t>(icon_ptrs_addr / 0x4000);
+    uint32_t gfx_addr = rom_.bank_to_flat(icon_bank, gfx_ptr);
 
     if (gfx_addr + ICON_GFX_SIZE > rom_.size()) {
         result.error = std::format(
@@ -479,17 +481,20 @@ std::vector<RuntimeSprite> SpriteExtractor::extract_sprites_for_map(
 SpritePaletteExtractionResult SpriteExtractor::extract_obj_palettes() const {
     SpritePaletteExtractionResult result;
     
-    // From pokecrystal symbols: 02:7469 MapObjectPals
-    // Format: 4 time-of-day sets (morn, day, nite, dark)
-    // Each set: 8 palettes × 4 colors × 2 bytes = 64 bytes
-    constexpr uint8_t OBJ_PAL_BANK = 0x02;
-    constexpr uint16_t OBJ_PAL_ADDR = 0x7469;
+    // MapObjectPals address from profile (moved from inline constexpr).
+    // Source: profile.offsets.obj_palettes
+    const uint32_t obj_pal_base = profile_.offsets.obj_palettes;
+    if (obj_pal_base == 0) {
+        result.error = "profile.offsets.obj_palettes not configured";
+        stats_.bounds_check_failures++;
+        return result;
+    }
     constexpr size_t COLORS_PER_PAL = 4;
     constexpr size_t BYTES_PER_COLOR = 2;
     constexpr size_t PALS_PER_SET = 8;
     constexpr size_t SET_SIZE = PALS_PER_SET * COLORS_PER_PAL * BYTES_PER_COLOR;  // 64 bytes
     
-    uint32_t base_addr = rom_.bank_to_flat(OBJ_PAL_BANK, OBJ_PAL_ADDR);
+    uint32_t base_addr = obj_pal_base;
     
     // Read 4 time-of-day sets
     for (int tod = 0; tod < 4; ++tod) {

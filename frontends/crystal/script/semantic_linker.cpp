@@ -410,14 +410,18 @@ ValidatedReference SemanticLinker::validate_reference(
         // =================================================================
         
         case ReferenceType::Species:
-            // Species domain: 0 = SPECIES_NONE sentinel, 1-251 valid
+            // Species domain: SPECIES_NONE (0) is a valid sentinel for optional/empty.
+            // Non-zero species IDs are ExactResolved against the extracted species
+            // definition map (CompiledGameData::species_defs).
+            // InvalidDomain = the extractor found no definition for that ID.
             if (value == 0) {
-                ref.validation = ValidationClass::PendingDefinition;  // Sentinel
+                // SPECIES_NONE sentinel — no definition needed
+                ref.validation = ValidationClass::ExactResolved;
             } else if (game_data_->has_species(static_cast<enginemon::SpeciesId>(value))) {
-                ref.validation = ValidationClass::PendingDefinition;
+                ref.validation = ValidationClass::ExactResolved;
             } else {
                 ref.validation = ValidationClass::InvalidDomain;
-                ref.error_reason = "Species ID outside authoritative domain";
+                ref.error_reason = "Species ID has no extracted definition in compiled game data";
             }
             break;
             

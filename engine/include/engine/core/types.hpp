@@ -97,12 +97,18 @@ inline constexpr StdScriptId STDSCRIPT_NONE = 0xFFFF;
 
 // Well-known semantic state variable IDs
 // These are semantic gameplay states, NOT RAM addresses
+// These represent mini-game/puzzle states that are common enough to
+// name in the engine layer. Game-specific mini-game state vars
+// (e.g. Battle Tower streak) live in the frontend that defines them.
 enum class WellKnownStateVar : uint16_t {
-    FarfetchdPosition = 1,       // Ilex Forest mini-game position (1-10)
-    MooMooBerries = 2,           // MooMoo Farm berry feeding count
+    FarfetchdPosition = 1,           // Ilex Forest mini-game position (1-10)
+    MooMooBerries = 2,               // MooMoo Farm berry feeding count
     UndergroundSwitchPositions = 3,  // Goldenrod Underground switch puzzle state
-    BattleTowerBeatenTrainers = 4,   // Number of beaten Battle Tower trainers in current streak
-    BattleTowerLevelGroup = 5,       // Battle Tower level group selection (1-10 for L10-L100)
+    // NOTE: 4 and 5 are Crystal-specific (BattleTower).
+    // They are defined as CrystalStateVar::BattleTowerBeatenTrainers /
+    // CrystalStateVar::BattleTowerLevelGroup in
+    // frontends/crystal/include/crystal/script/crystal_state_vars.hpp
+    // and must not be referenced by generic engine code.
 };
 
 // Link mode capability query results (read-only)

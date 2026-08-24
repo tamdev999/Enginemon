@@ -16,6 +16,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <array>
 
 namespace crystal {
 
@@ -86,6 +87,12 @@ struct MapFormatRules {
     uint8_t coord_event_size = 8;       // db scene, y, x, 0; dw script; dw 0
     uint8_t bg_event_size = 5;          // db y, x, type; dw script
     uint8_t object_event_size = 13;     // complex structure
+
+    // MapGroup entry size (MAP_LENGTH from map_data_constants.asm)
+    // Crystal: 9 bytes per entry (attr_bank, tileset, environment, attr_ptr(2),
+    //          location, music, phone_palette, fishgroup)
+    // GEN2-STABLE: same layout in Gold/Silver — field meanings identical.
+    uint8_t map_entry_size = 9;
 };
 
 // Pokemon data format rules
@@ -197,6 +204,51 @@ struct FormatRules {
 };
 
 //=============================================================================
+// NATIVE CALL AND RAM ADDRESS SPECS
+// Profile-driven knowledge of known callasm targets and readmem/writemem RAM
+// addresses. Previously hardcoded in NativeCallRegistry::initialize() and
+// RamAddressRegistry::initialize() with Crystal v1.1 flat addresses.
+//
+// Moving them here lets a non-vanilla profile override the addresses without
+// changing any C++ code. Gold/Silver profiles provide their own tables.
+//=============================================================================
+
+// Classification enumerations (mirrored from native_registry.hpp for independence)
+// These must stay in sync with NativeClassification / NativeControlFlow.
+enum class NativeCallClass : uint8_t {
+    PureSemantic  = 0,
+    HostCapability = 1,
+    Trivial       = 2,
+    Opaque        = 3,
+};
+
+enum class NativeCallFlow : uint8_t {
+    Returns          = 0,
+    Terminal         = 1,
+    ComputedTransfer = 2,
+    Unknown          = 3,
+};
+
+struct NativeCallSpec {
+    uint32_t flat_address = 0;           // Flat ROM address (bank * 0x4000 + offset)
+    const char* symbol_name   = nullptr; // e.g. "HealParty"
+    const char* semantic_name = nullptr; // e.g. "heal_party"
+    NativeCallClass classification = NativeCallClass::Opaque;
+    NativeCallFlow  control_flow   = NativeCallFlow::Unknown;
+    const char* source_ref = nullptr;    // Source file reference
+    const char* notes      = nullptr;    // Optional notes
+};
+
+struct RamAddressSpec {
+    uint16_t    address       = 0;       // GB WRAM address (e.g. 0xc2dd)
+    const char* symbol_name   = nullptr; // e.g. "wScriptVar"
+    const char* semantic_name = nullptr; // e.g. "script_var"
+    uint8_t     classification = 0;      // mirrors RamClassification
+    const char* source_ref    = nullptr;
+    const char* notes         = nullptr;
+};
+
+//=============================================================================
 // LOCATIONS - where data structures are in ROM
 //=============================================================================
 
@@ -256,6 +308,46 @@ struct ProfileOffsets {
     // Script system extended
     uint32_t std_scripts;               // StdScripts table (bank 0x2f)
     uint16_t std_scripts_count;         // Number of standard scripts (52)
+
+    // Graphics — additional tables (moved from inline constexpr in extractors)
+    // These were previously hardcoded in sprites.cpp / fonts.cpp / tilesets.cpp.
+    // Moving them here makes them profile-driven and hackable.
+    uint32_t overworld_sprites;         // OverworldSprites table (6 bytes/entry)
+    uint32_t mon_menu_icons;            // MonMenuIcons table (1 byte/species, 0-indexed)
+    uint32_t icon_pointers;             // IconPointers table (2 bytes/icon_type, dw)
+    uint32_t obj_palettes;              // MapObjectPals (OBJ time-of-day palette sets)
+    uint32_t tileset_bg_palette;        // TilesetBGPalette (BG time-of-day palette sets)
+    uint32_t font_tiles;                // Font (main 1bpp font, 128 tiles)
+    uint32_t font_extra_tiles;          // FontExtra (border/extra 2bpp font, 32 tiles)
+
+    // Special per-tileset palette overrides.
+    // Each entry: (tileset_1indexed, flat_rom_address) of a 7-palette (56-byte) block.
+    // The table is profile-driven so ROM hacks that relocate palette data still work.
+    // Crystal v1.1 has 6 overrides (HOUSE, MANSION, POKECOM, BATTLETOWER, RADIOTOWER, ICEPATH).
+    static constexpr size_t MAX_SPECIAL_TILESET_PALETTES = 16;
+    struct SpecialTilesetPalette {
+        uint8_t  tileset_index = 0;   // 1-indexed tileset number
+        uint32_t rom_address   = 0;   // Flat ROM address of 7-palette block (56 bytes)
+    };
+    std::array<SpecialTilesetPalette, MAX_SPECIAL_TILESET_PALETTES> special_tileset_palettes{};
+    uint8_t special_tileset_palette_count = 0;
+
+    // Native call and RAM address specs — moved from NativeCallRegistry::initialize()
+    // and RamAddressRegistry::initialize(). These are now profile data so non-vanilla
+    // profiles (ROM hacks, Gold/Silver) can provide their own address tables.
+    //
+    // NativeCallRegistry::initialize(profile) iterates native_calls and registers them.
+    // RamAddressRegistry::initialize(profile) iterates ram_addresses and registers them.
+    //
+    // Crystal v1.1 entries are populated in register_crystal_v11().
+    static constexpr size_t MAX_NATIVE_CALLS   = 32;
+    static constexpr size_t MAX_RAM_ADDRESSES  = 32;
+
+    std::array<NativeCallSpec,  MAX_NATIVE_CALLS>  native_calls{};
+    uint8_t native_call_count = 0;
+
+    std::array<RamAddressSpec, MAX_RAM_ADDRESSES> ram_addresses{};
+    uint8_t ram_address_count = 0;
 };
 
 //=============================================================================
@@ -329,6 +421,46 @@ public:
     // Get profile by exact ROM hash (combines identify + get_profile)
     // Returns nullptr if ROM not supported - caller must handle
     const ExtractionProfile* get_profile_by_hash(std::string_view sha1) const;
+
+    // Get profile for a ROM, with explicit fallback to a supplied compatible profile.
+    //
+    // Policy:
+    //   1. If the ROM hash exactly matches a registered profile → use that profile.
+    //   2. Otherwise, if 'fallback' is non-null and passes layout validation
+    //      against the ROM bytes → accept it with CompatMatchType::LayoutValidated.
+    //   3. Otherwise → fail.
+    //
+    // 'rom_bytes' must be the full ROM contents for layout validation.
+    // 'fallback'  may be nullptr (disables the fallback path entirely).
+    //
+    // This allows ordinary Crystal hacks (modified bytes, same table layout)
+    // to compile with the stock Crystal profile as a fallback without
+    // treating hash mismatch as "ROM is not Crystal."
+    enum class CompatMatchType {
+        ExactHash,        // ROM SHA-1 matched a registered profile exactly
+        LayoutValidated,  // Hash unknown; fallback profile passed layout checks
+    };
+
+    struct CompatResult {
+        const ExtractionProfile* profile = nullptr;
+        CompatMatchType match_type = CompatMatchType::ExactHash;
+        std::string reason;  // Non-empty on failure
+    };
+
+    CompatResult get_profile_for_rom(
+        std::string_view sha1,
+        const uint8_t* rom_bytes,
+        size_t rom_size,
+        const ExtractionProfile* fallback) const;
+
+    // Validate that a profile's key layout assumptions hold for the given ROM bytes.
+    // Returns true (valid) or false with a reason string.
+    // Called internally by get_profile_for_rom; also usable by tests.
+    static bool validate_profile_layout(
+        const ExtractionProfile& profile,
+        const uint8_t* rom_bytes,
+        size_t rom_size,
+        std::string* out_reason = nullptr);
     
     // Get all supported ROMs (for error messages)
     const std::vector<std::pair<std::string, std::string>>& supported_roms() const;

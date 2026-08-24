@@ -513,20 +513,15 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
         }
     }
     
-    // Extract time-of-day palettes from TilesetBGPalette
-    // From pokecrystal-symbols: 02:7319 TilesetBGPalette
+    // Extract time-of-day palettes from TilesetBGPalette.
+    // Address from profile (moved from inline constexpr 0x02:0x7319).
     // Format: 5 time-of-day sets (morn, day, nite, dark, indoor)
-    // Each set has 8 palettes (7 BG + 1 text), each palette has 4 colors × 2 bytes
-    // From gfx/tilesets/bg_tiles.pal:
-    //   morn, day, nite, dark, indoor
-    //   Each: gray, red, green, water, yellow, brown, roof, text
-    constexpr uint8_t PALETTE_BANK = 0x02;
-    constexpr uint16_t PALETTE_ADDR = 0x7319;  // TilesetBGPalette
-    constexpr size_t PALETTE_SIZE = 8;  // bytes per palette (4 colors × 2 bytes)
+    // Each set has 8 palettes (7 BG + 1 text), each palette has 4 colors × 2 bytes.
+    constexpr size_t PALETTE_SIZE = 8;      // bytes per palette (4 colors × 2 bytes)
     constexpr size_t PALETTES_PER_SET = 8;  // 7 BG + 1 text
     constexpr size_t SET_SIZE = PALETTE_SIZE * PALETTES_PER_SET;  // 64 bytes per time-of-day
     
-    uint32_t palette_base = rom_.bank_to_flat(PALETTE_BANK, PALETTE_ADDR);
+    uint32_t palette_base = profile_.offsets.tileset_bg_palette;
     
     // Read all 5 time-of-day palette sets
     for (int tod = 0; tod < 5; ++tod) {
@@ -554,44 +549,21 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
     // Palette 7 is TEXT (not used for tiles)
     tileset.palettes[7] = tileset.time_palettes[static_cast<int>(TimeOfDay::Day)][0];
     
-    // Extract special tileset palettes (from tileset_palettes.asm)
-    // These completely override environment+time-based palette selection for specific tilesets.
-    // From pokecrystal:
-    //   TILESET_HOUSE (5) → HousePalette
-    //   TILESET_ICE_PATH (29) → IcePathPalette (unless Hall of Fame = INDOOR environment)
-    //   TILESET_POKECOM_CENTER (21) → PokecomPalette  
-    //   TILESET_BATTLE_TOWER_INSIDE (22) → BattleTowerPalette
-    //   TILESET_RADIO_TOWER (27) → RadioTowerPalette
-    //   TILESET_MANSION (13) → MansionPalette
-    //
-    // Special palette addresses from pokecrystal11.sym (bank 0x12):
-    constexpr uint8_t SPECIAL_BANK = 0x12;
-    
-    // Special palette table - maps tileset_index to palette ROM address
-    // These are 7 palettes × 4 colors × 2 bytes = 56 bytes each
-    // Addresses verified from pokecrystal11.sym
-    struct SpecialPaletteInfo {
-        uint8_t tileset_index;
-        uint16_t rom_address;
-    };
-    static constexpr SpecialPaletteInfo SPECIAL_PALETTES[] = {
-        {5,  0x55EE},   // TILESET_HOUSE → HousePalette (12:55EE)
-        {13, 0x567D},   // TILESET_MANSION → MansionPalette1 (12:567D)
-        {21, 0x5501},   // TILESET_POKECOM_CENTER → PokeComPalette (12:5501)
-        {22, 0x5550},   // TILESET_BATTLE_TOWER_INSIDE → BattleTowerInsidePalette (12:5550)
-        {27, 0x563D},   // TILESET_RADIO_TOWER → RadioTowerPalette (12:563D)
-        {29, 0x559F},   // TILESET_ICE_PATH → IcePathPalette (12:559F)
-    };
-    
-    // Check if this tileset has a special palette
-    for (const auto& special : SPECIAL_PALETTES) {
-        if (tileset_index == special.tileset_index) {
-            uint32_t special_addr = rom_.bank_to_flat(SPECIAL_BANK, special.rom_address);
-            constexpr size_t SPECIAL_SIZE = 7 * 8;  // 7 palettes × 8 bytes each
-            
+    // Extract special tileset palettes from the profile.
+    // These are per-tileset palette overrides loaded from profile.offsets.special_tileset_palettes.
+    // Previously they were hardcoded inline with SPECIAL_BANK=0x12 and fixed addresses.
+    // Now the profile provides the (tileset_index, flat_rom_address) pairs, making
+    // ROM hacks that relocate these palettes work without code changes.
+    {
+        const auto& stp = profile_.offsets;
+        constexpr size_t SPECIAL_SIZE = 7 * 8;  // 7 palettes × 8 bytes each
+        for (uint8_t pi = 0; pi < stp.special_tileset_palette_count; ++pi) {
+            const auto& entry = stp.special_tileset_palettes[pi];
+            if (entry.tileset_index != tileset_index) continue;
+
+            uint32_t special_addr = entry.rom_address;
             if (special_addr + SPECIAL_SIZE <= rom_.size()) {
                 auto special_data = rom_.read_bytes(special_addr, SPECIAL_SIZE);
-                
                 std::array<Palette, 7> special_set;
                 for (int pal_id = 0; pal_id < 7; ++pal_id) {
                     for (int c = 0; c < 4; ++c) {

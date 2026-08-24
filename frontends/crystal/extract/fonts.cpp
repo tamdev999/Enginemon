@@ -23,10 +23,9 @@ namespace crystal {
 //   FontExtra = 3e:4000 (32 2bpp tiles = 512 bytes)
 //=============================================================================
 
-// These should eventually move to ProfileOffsets but are hardcoded for now
-static constexpr uint8_t FONT_BANK = 0x3E;
-static constexpr uint16_t FONT_ADDR = 0x4200;        // Main font (1bpp)
-static constexpr uint16_t FONT_EXTRA_ADDR = 0x4000;  // Extra font with borders (2bpp)
+// Font ROM addresses are now profile-driven.
+// Profile fields used: profile.offsets.font_tiles, profile.offsets.font_extra_tiles.
+// (Previously hardcoded as FONT_BANK=0x3E / FONT_ADDR=0x4200 / FONT_EXTRA_ADDR=0x4000)
 
 static constexpr size_t FONT_TILE_COUNT = 128;       // Main font tiles
 static constexpr size_t FONT_EXTRA_TILE_COUNT = 32;  // Extra font tiles
@@ -309,9 +308,15 @@ FontExtractionResult FontExtractor::extract_font() const {
     FontExtractionResult result;
     result.font.font_id = "crystal_main";
     
-    // Calculate flat ROM addresses
-    uint32_t font_extra_flat = rom_.bank_to_flat(FONT_BANK, FONT_EXTRA_ADDR);
-    uint32_t font_flat = rom_.bank_to_flat(FONT_BANK, FONT_ADDR);
+    // Font ROM addresses from profile (moved from inline constexpr).
+    // Source: profile.offsets.font_tiles, profile.offsets.font_extra_tiles.
+    const uint32_t font_extra_flat = profile_.offsets.font_extra_tiles;
+    const uint32_t font_flat       = profile_.offsets.font_tiles;
+    
+    if (font_extra_flat == 0 || font_flat == 0) {
+        result.error = "profile.offsets.font_tiles or font_extra_tiles not configured";
+        return result;
+    }
     
     // Verify ROM has enough data
     size_t font_extra_bytes = FONT_EXTRA_TILE_COUNT * BYTES_PER_2BPP_TILE;

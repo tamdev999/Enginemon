@@ -17,6 +17,7 @@
 
 #include "engine/scripting/semantic_ir.hpp"
 #include "engine/core/types.hpp"
+#include "crystal/extract/species_extractor.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -158,12 +159,12 @@ inline ValidationClass expected_validation_class(ReferenceType type) {
         case ReferenceType::StdScript:   // Validated against compiled/legalized bodies
         case ReferenceType::PokeMailId:  // Validated against compiled PokeMail registry
         case ReferenceType::TextId:      // Validated against compiled Text registry
+        case ReferenceType::Species:     // Validated against extracted BaseData definitions
             return ValidationClass::ExactResolved;
             
         // PendingDefinition - authoritative closed-domain membership from Crystal profile
         // Domain is proven contiguous (no holes) for supported ROM profiles.
         // Actual extracted definitions will replace count-derived membership when built.
-        case ReferenceType::Species:      // Closed domain [1, num_pokemon]
         case ReferenceType::Item:         // Closed domain [0, num_items)
         case ReferenceType::Music:        // Closed domain [0, num_music)
         case ReferenceType::Sfx:          // Closed domain [0, num_sfx)
@@ -268,8 +269,12 @@ struct ValidationStats {
 // Represents the actual compiled game data for link-time validation
 // NOT Crystal numeric ranges - actual compiled resources
 struct CompiledGameData {
-    // Species: exact compiled set from ROM extraction
-    std::unordered_set<enginemon::SpeciesId> species;
+    // Species: actual extracted definitions, keyed by SpeciesId.
+    // Populated by SpeciesExtractor via extract_all_species().
+    // Species references in scripts are ExactResolved when the definition
+    // exists here; InvalidDomain when no definition was extracted for the ID.
+    // SPECIES_NONE (0) is never a key in this map.
+    std::unordered_map<enginemon::SpeciesId, SpeciesDefinition> species_defs;
     
     // Items: exact compiled set from ROM extraction
     std::unordered_set<enginemon::ItemId> items;
@@ -340,7 +345,7 @@ struct CompiledGameData {
     void load_std_scripts(const StdScriptsTable& table);
     
     // Validation methods (return true if entity exists in compiled data)
-    bool has_species(enginemon::SpeciesId id) const { return species.contains(id); }
+    bool has_species(enginemon::SpeciesId id) const { return species_defs.contains(id); }
     bool has_item(enginemon::ItemId id) const { return items.contains(id); }
     bool has_map(enginemon::MapId id) const { return maps.contains(id); }
     bool has_music(enginemon::MusicId id) const { return music.contains(id); }

@@ -3,6 +3,7 @@
 
 #include "crystal/script/semantic_legalizer.hpp"
 #include "crystal/script/behavior_table.hpp"
+#include "crystal/script/crystal_state_vars.hpp"
 #include "crystal/script/decoder.hpp"  // For text decoding
 #include "crystal/script/pokemail_registry.hpp"
 #include "crystal/script/text_registry.hpp"
@@ -694,8 +695,7 @@ static std::optional<enginemon::StateVarId> ram_to_statevar(uint16_t ram_address
             return static_cast<enginemon::StateVarId>(
                 static_cast<uint16_t>(enginemon::WellKnownStateVar::UndergroundSwitchPositions));
         case RAM_BATTLE_TOWER_BEATEN_TRAINERS:
-            return static_cast<enginemon::StateVarId>(
-                static_cast<uint16_t>(enginemon::WellKnownStateVar::BattleTowerBeatenTrainers));
+            return crystal_state_var_id(CrystalStateVar::BattleTowerBeatenTrainers);
         default:
             return std::nullopt;
     }
@@ -898,8 +898,7 @@ RuleResult rule_callasm_field_moves(LoweringContext& ctx) {
         r.consumed = 1;
         // Lower to read of Battle Tower level group state variable into wScriptVar
         enginemon::Sem_ReadStateVar op;
-        op.state_var = static_cast<enginemon::StateVarId>(
-            static_cast<uint16_t>(enginemon::WellKnownStateVar::BattleTowerLevelGroup));
+        op.state_var = crystal_state_var_id(CrystalStateVar::BattleTowerLevelGroup);
         r.instructions.push_back(make_inst(std::move(op)));
         return r;
     }

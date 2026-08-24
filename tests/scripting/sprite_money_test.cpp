@@ -298,12 +298,36 @@ TEST(daycare_save_load_species_survives) {
 }
 
 TEST(daycare_invalid_species_fails_closed) {
-    // A save file with daycare species 252 (above valid range) must fail deserialization.
+    // Previously this test checked that species 252 was rejected at save/load time
+    // with a hardcoded > 251 ceiling. That ceiling has been removed.
+    //
+    // New semantics: save/load accepts any species in [1, 65534] — the actual domain
+    // validation is by registry membership at runtime, not a numeric ceiling.
+    // This allows non-251 profiles (ROM hacks, expanded Crystal) to save/load correctly.
+    //
+    // Species 252 round-trips correctly (not rejected at save boundary).
     GameState gs;
-    gs.daycare_slot[0] = 252;  // Invalid
+    gs.daycare_slot[0] = 252;
     auto bytes = gs.serialize();
     auto result = GameState::try_deserialize(bytes);
-    ASSERT_FALSE(result.ok());
+    ASSERT_TRUE(result.ok());  // 252 is within [1, 65534] — accepted at save boundary
+    ASSERT_EQ(result.state.daycare_slot[0], static_cast<enginemon::SpeciesId>(252));
+
+    // SPECIES_NONE (0) is still valid (clears the slot)
+    GameState gs2;
+    gs2.daycare_slot[0] = 0;
+    auto bytes2 = gs2.serialize();
+    auto result2 = GameState::try_deserialize(bytes2);
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.state.daycare_slot[0], static_cast<enginemon::SpeciesId>(0));
+
+    // Truly out-of-range (> 65534) still fails
+    GameState gs3;
+    gs3.daycare_slot[0] = static_cast<enginemon::SpeciesId>(65535);  // SPECIES_NONE equiv / invalid
+    auto bytes3 = gs3.serialize();
+    auto result3 = GameState::try_deserialize(bytes3);
+    ASSERT_FALSE(result3.ok());
+
 }
 
 //=============================================================================

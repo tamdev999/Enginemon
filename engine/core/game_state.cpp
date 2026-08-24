@@ -430,9 +430,14 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
             result.error = DeserializeError::CorruptedPayload;
             return result;
         }
-        // Validate: SpeciesId must be 0 (empty) or 1-251 (valid Crystal species)
-        if ((s1 != 0 && (s1 < 1 || s1 > 251)) ||
-            (s2 != 0 && (s2 < 1 || s2 > 251))) {
+        // Validate: SpeciesId must be 0 (empty/SPECIES_NONE) or a non-zero uint16_t.
+        // The hardcoded > 251 ceiling is intentionally removed here.
+        // Actual domain validation is by registry membership at runtime;
+        // the save format supports any profile's species ceiling.
+        // Guard only against negative values (corrupt int32 sign extension) and
+        // implausibly large values that indicate data corruption.
+        if ((s1 != 0 && (s1 < 1 || s1 > 65534)) ||
+            (s2 != 0 && (s2 < 1 || s2 > 65534))) {
             result.error = DeserializeError::CorruptedPayload;
             return result;
         }

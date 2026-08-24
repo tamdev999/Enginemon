@@ -341,8 +341,9 @@ bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEn
     uint8_t map_bank = o.map_groups_bank;
     uint32_t group_flat = rom_.bank_to_flat(map_bank, group_addr);
     
-    // MapGroup entries are 9 bytes each (MAP_LENGTH)
-    constexpr uint8_t map_entry_size = 9;
+    // MapGroup entry size from profile.format.map.map_entry_size (was inline constexpr 9).
+    // Crystal MAP_LENGTH = 9 bytes per entry; Gold/Silver uses the same layout.
+    const uint8_t map_entry_size = profile_.format.map.map_entry_size;
     
     // index is 1-based in pokecrystal
     uint32_t map_entry_addr = group_flat + ((index - 1) * map_entry_size);

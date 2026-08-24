@@ -17,6 +17,7 @@
 #include "crystal/script/text_registry.hpp"
 #include "crystal/script/semantic_lua_emitter.hpp"
 #include "crystal/extract/sprite_ids.hpp"
+#include "crystal/extract/species_extractor.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
 #include <iomanip>
@@ -879,12 +880,25 @@ void FullGameCompiler::build_production_game_data() {
     // Status: PendingDefinition (domain valid, artifact producer not yet built)
     //=========================================================================
     
-    // === Species [1, num_pokemon] - Closed contiguous domain ===
-    // Authority: pokecrystal/constants/pokemon_constants.asm
-    // SPECIES_NONE (0) is sentinel, valid species are 1-251
-    // No holes: all 251 species have definitions in base_stats/*.asm
-    for (uint16_t i = 1; i <= c.num_pokemon; ++i) {
-        compiled_game_data_.species.insert(static_cast<enginemon::SpeciesId>(i));
+    // === Species [1, num_pokemon] — EXTRACTED from ROM BaseData table ===
+    // Authority: ROM BaseData records at profile.offsets.base_data.
+    // Each record is profile.format.pokemon.base_data_size bytes.
+    // Count is profile.counts.num_pokemon (profile metadata — not ROM-derived).
+    //
+    // Species are ExactResolved (not PendingDefinition) because actual
+    // definitions exist in species_defs. A species ID not in this map is
+    // InvalidDomain at Stage 6.
+    {
+        auto species_result = extract_all_species(rom_, profile_);
+        if (!species_result.success) {
+            // Extraction failure is fatal — the species domain cannot be
+            // established without valid BaseData records.
+            throw std::runtime_error(
+                "Species Finder failed: " + species_result.error);
+        }
+        compiled_game_data_.species_defs = std::move(species_result.species);
+        std::cout << "    Species:      " << compiled_game_data_.species_defs.size()
+                  << " definitions extracted from BaseData table\n";
     }
     
     // === Items [0, num_items) - Closed contiguous domain ===
@@ -991,9 +1005,9 @@ void FullGameCompiler::build_production_game_data() {
               << " (from registry - content-addressed)\n";
     std::cout << "    Text:         " << compiled_game_data_.text_ids.size()
               << " (from registry - content-addressed)\n";
+    std::cout << "    Species:      " << compiled_game_data_.species_defs.size()
+              << " (from BaseData extraction - ExactResolved)\n";
     std::cout << "  --- PendingDefinition (closed-domain authority, awaiting extractors) ---\n";
-    std::cout << "    Species:      " << compiled_game_data_.species.size() 
-              << " [1-" << c.num_pokemon << "] closed contiguous\n";
     std::cout << "    Items:        " << compiled_game_data_.items.size()
               << " [0-" << (c.num_items - 1) << "] closed contiguous\n";
     // Specials domain removed — Sem_Special rejected at Stage 5

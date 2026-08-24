@@ -649,7 +649,9 @@ int set_variable_sprite(lua_State* L) {
 // ctx.world:set_daycare_species(slot, species_id)
 // Sets which Pokémon species occupies a Day Care slot.
 // slot: 1 or 2 (matching "daycare:1" / "daycare:2" sprite namespaces)
-// species_id: 1-251, or 0 to clear the slot
+// species_id: 1-N (valid species per loaded game data), or 0 to clear the slot.
+// The upper species ceiling is not hardcoded — it is validated by the species
+// registry at runtime. This allows non-251 profiles to work without engine changes.
 // Stores in GameState::daycare_slot[slot-1].
 int set_daycare_species(lua_State* L) {
     int slot       = static_cast<int>(luaL_checkinteger(L, 2));
@@ -659,9 +661,14 @@ int set_daycare_species(lua_State* L) {
     if (slot < 1 || slot > 2) {
         return luaL_error(L, "set_daycare_species: slot must be 1 or 2, got %d", slot);
     }
-    if (species_id < 0 || species_id > 251) {
+    // species_id == 0 clears the slot (SPECIES_NONE).
+    // Upper bound is not hardcoded to 251 — actual validation is by registry
+    // membership at runtime (FrozenGameData species registry).
+    // Any non-zero uint16_t is accepted here; invalid IDs will fail downstream
+    // when the species registry lookup returns no definition.
+    if (species_id < 0 || species_id > 65534) {
         return luaL_error(L,
-            "set_daycare_species: species_id must be 0-251, got %d", species_id);
+            "set_daycare_species: species_id out of range [0, 65534], got %d", species_id);
     }
 
     if (GameState* gs = runtime->get_game_state()) {
