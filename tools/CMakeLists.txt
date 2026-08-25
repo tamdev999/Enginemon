@@ -75,6 +75,15 @@ target_link_libraries(special_inventory PRIVATE
     enginemon_engine
 )
 
+# Corpus diagnostic - finds endall/scall scripts, startable scripts
+add_executable(corpus_diagnostic
+    corpus_diagnostic.cpp
+)
+target_link_libraries(corpus_diagnostic PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+
 # Corpus lowering audit - enumerates ALL lowering failures in expanded corpus
 # Reports corpus=1679/1679 invariant
 add_executable(corpus_lowering_audit

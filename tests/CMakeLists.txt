@@ -145,14 +145,22 @@ endif()
 # Independent source-fidelity tests using RGBDS-derived (or hand-authored) binary fixtures.
 # Expected values come from pokecrystal semantics, NOT from Enginemon encoder output.
 add_executable(oracle_test
-    oracle/oracle_test.cpp
+    oracle/oracle_test_helpers.cpp
+    oracle/oracle_test_p1a.cpp
+    oracle/oracle_test_p1b_p2.cpp
+    oracle/oracle_test_p3_p4.cpp
+    oracle/oracle_test_p5_p55.cpp
+    oracle/oracle_test_main.cpp
 )
 target_link_libraries(oracle_test PRIVATE
     enginemon_crystal
     enginemon_engine
 )
+# /bigobj: required for variant-heavy translation units
+# /Od:     disables optimization to reduce MSVC compiler heap pressure (C1060/C1002)
+# /Zm2000: raises compiler heap limit (matches runtime_test treatment)
 if(MSVC)
-    target_compile_options(oracle_test PRIVATE /bigobj)
+    target_compile_options(oracle_test PRIVATE /bigobj /Zm2000 /Od)
 endif()
 
 # TODO: Enable these when GTest is available and dependencies are built
