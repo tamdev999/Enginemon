@@ -119,6 +119,8 @@ void test_p55_endall_no_behavior_table_in_corpus();
 void test_p55_closure_scall_abc();
 void test_p55_closure_farscall_fullpipe();
 void test_p55_closure_endall_behavioral();
+void test_p55_closure_scall_e2e();
+void test_p55_closure_farscall_e2e();
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -387,6 +389,11 @@ int main(int argc, char* argv[]) {
     // Phase 5.5 closure tests that use ROM+profile but not oracle package
     RUN_TEST(p55_closure_farscall_fullpipe);
     RUN_TEST(p55_closure_endall_behavioral);
+    // Phase 5.5 E2E behavioral: real Crystal bytecode through full pipeline
+    // Uses only fully-implemented stubs (setevent/setscene/scall/farscall/end)
+    // No g_rom required — fixture ROM is built from hand-authored bytes
+    RUN_TEST(p55_closure_scall_e2e);
+    RUN_TEST(p55_closure_farscall_e2e);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";

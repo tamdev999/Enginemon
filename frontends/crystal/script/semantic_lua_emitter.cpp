@@ -273,7 +273,12 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
             << "__return_target = table.remove(__call_stack); "
             << "goto __dispatch_return "
             << "end\n";
-        SemanticLuaEmitter::indent_line(out, I); out << "return\n"; return true;
+        // Use "do return end" instead of bare "return" so that Lua labels
+        // (::block_N::) can legally appear after this statement in the same
+        // function body. Bare "return" must be the last statement of a block;
+        // "do return end" satisfies that constraint while allowing subsequent
+        // labels (which are valid after any statement, including do-end).
+        SemanticLuaEmitter::indent_line(out, I); out << "do return end\n"; return true;
     }
     if (auto* o = std::get_if<Sem_EndAll>(&op)) {
         // EndAll is core VM control flow: discard entire call stack, exit script.

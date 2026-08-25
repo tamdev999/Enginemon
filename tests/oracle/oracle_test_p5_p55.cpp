@@ -2280,3 +2280,376 @@ TEST(p55_endall_no_behavior_table_in_corpus) {
     ASSERT_TRUE(true);  // pass either way — structural coverage is in p55-6
 }
 
+
+// ── P5.5-E2E-1: scall A/B/C full-pipeline behavioral proof ───────────────────
+//
+// Fixture design: minimal Crystal bytecode using ONLY fully-implemented ops.
+// All flags/scenes go through the real production pipeline end-to-end.
+// No hand-written Lua. No hand-built SemanticIR.
+//
+// Pipeline path:
+//   ROM bytes → TypedScriptDecoder → CFGBuilder → SemanticLegalizer
+//   → SemanticLuaEmitter → LuaRuntime + HeadlessGameLoop → GameState
+//
+// Bytecode layout (bank 2, addresses ≥ 0x4000):
+//
+//   Caller at 0x4100 (flat 0x8100):
+//     0x33 0x05 0x00   setevent EVENT_5  → sets EventFlag{5}  [A mutation]
+//     0x00 0x10 0x41   scall 0x4110      → call callee
+//     0x14 0x04        setscene 4        → sets scene=4        [C mutation — AFTER callee End]
+//     0x91             end
+//
+//   Callee at 0x4110 (flat 0x8110):
+//     0x14 0x03        setscene 3        → sets scene=3        [B mutation — in callee]
+//     0x33 0x06 0x00   setevent EVENT_6  → sets EventFlag{6}   [B2 mutation]
+//     0x91             end               → pops __call_stack, returns to continuation
+//
+// ORACLE assertions:
+//   A: gs.check_flag("flag_5") == true    — setevent before scall fired
+//   B: gs.check_flag("flag_6") == true    — callee body executed
+//   C: current_scene == 4                 — setscene(4) in caller post-call ran
+//
+// Ordering proof: scene=4 (not 3) proves C ran AFTER callee End returned.
+//   If scall return were broken (callee's End terminated the whole script),
+//   scene would be 3 (last value set) and C would never run.
+//   If scall call were broken (callee never ran), flag_6 would not be set.
+//
+// Source authority:
+//   setevent = 0x33 (frontends/crystal/include/crystal/script/decoder.hpp:setevent)
+//   setscene = 0x14 (decoder.hpp:setscene)
+//   scall    = 0x00 (decoder.hpp:scall) — 2-byte LE bank-local pointer
+//   end      = 0x91 (decoder.hpp:end)
+//   EventFlag encoding: enc = value (FlagNamespace::Event = 0, so enc = (0<<16)|value = value)
+//   EngineFlag encoding: enc = (1<<16)|value
+//   ctx.game:set_scene(N): api_bindings.cpp set_scene → stub_services.current_scene
+//   ctx.flags:set(enc): api_bindings.cpp set → gs.flags.insert("flag_" + enc)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(p55_closure_scall_e2e) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // ── Build fixture ROM ─────────────────────────────────────────────────────
+    // Bank 2: flat base = 2 * 0x4000 = 0x8000
+    // Caller at bank-addr 0x4100 → flat 0x8100
+    // Callee at bank-addr 0x4110 → flat 0x8110
+    constexpr uint32_t BANK         = 2;
+    constexpr uint32_t CALLER_ADDR  = 0x4100;
+    constexpr uint32_t CALLEE_ADDR  = 0x4110;
+    constexpr uint32_t CALLER_FLAT  = BANK * 0x4000 + (CALLER_ADDR - 0x4000);  // 0x8100
+    constexpr uint32_t CALLEE_FLAT  = BANK * 0x4000 + (CALLEE_ADDR - 0x4000);  // 0x8110
+
+    static_assert(CALLER_FLAT == 0x8100u, "caller flat oracle");
+    static_assert(CALLEE_FLAT == 0x8110u, "callee flat oracle");
+
+    // ROM must be large enough to hold both bodies
+    std::vector<uint8_t> rom_bytes(0x9000, 0xFF);  // 36 KB, safely covers both
+
+    // Caller body at flat 0x8100
+    uint32_t c = CALLER_FLAT;
+    rom_bytes[c++] = 0x33;             // setevent (A)
+    rom_bytes[c++] = 0x05;             // EventFlag{5} lo
+    rom_bytes[c++] = 0x00;             // EventFlag{5} hi
+    rom_bytes[c++] = 0x00;             // scall opcode
+    rom_bytes[c++] = 0x10;             // callee ptr lo = 0x4110 → lo byte
+    rom_bytes[c++] = 0x41;             // callee ptr hi
+    rom_bytes[c++] = 0x14;             // setscene (C — post-scall continuation)
+    rom_bytes[c++] = 0x04;             // scene = 4
+    rom_bytes[c++] = 0x91;             // end
+
+    // Callee body at flat 0x8110
+    uint32_t d = CALLEE_FLAT;
+    rom_bytes[d++] = 0x14;             // setscene (B)
+    rom_bytes[d++] = 0x03;             // scene = 3
+    rom_bytes[d++] = 0x33;             // setevent (B2)
+    rom_bytes[d++] = 0x06;             // EventFlag{6} lo
+    rom_bytes[d++] = 0x00;             // EventFlag{6} hi
+    rom_bytes[d++] = 0x91;             // end → pops __call_stack, goes to continuation
+
+    auto rom = make_rom_from_bytes(rom_bytes);
+    ASSERT_TRUE(rom != nullptr);
+
+    // ── Stage 1: Decode ───────────────────────────────────────────────────────
+    SymbolMap symbols;
+    TypedScriptDecoder decoder(*rom, symbols);
+    CrystalScriptIR ir = decoder.decode_script(CALLER_FLAT);
+
+    // Caller discovers callee via scall pending queue; both bodies in ir.commands
+    ASSERT_TRUE(ir.commands.size() >= 2u);
+
+    // Find Cmd_Scall in caller body
+    bool has_scall = false;
+    for (const auto& cmd : ir.commands) {
+        if (const auto* sc = std::get_if<Cmd_Scall>(&cmd.data)) {
+            // ORACLE: scall target resolves to CALLEE_FLAT (bank-local)
+            ASSERT_EQ(sc->target.rom_address, CALLEE_FLAT);
+            has_scall = true;
+        }
+    }
+    ASSERT_TRUE(has_scall);
+
+    // ── Stage 2: CFG ──────────────────────────────────────────────────────────
+    CFGBuilder cfg_builder;
+    // No std_scripts / native_registry needed for this fixture (no callstd/callasm)
+    CrystalCFG cfg = cfg_builder.build(ir);
+    ASSERT_TRUE(cfg.validation.valid);
+
+    // ── Stage 3: Semantic lowering ────────────────────────────────────────────
+    SemanticLegalizer legalizer;
+    auto lr = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(lr.success);
+
+    // Verify Sem_Call is present (from scall) and Sem_SetScene / Sem_SetFlag present
+    bool has_sem_call = false, has_setscene = false, has_setflag = false;
+    for (const auto& blk : lr.ir.blocks) {
+        for (const auto& inst : blk.instructions) {
+            if (std::get_if<Sem_Call>(&inst.op))    has_sem_call = true;
+            if (std::get_if<Sem_SetScene>(&inst.op)) has_setscene = true;
+            if (std::get_if<Sem_SetFlag>(&inst.op))  has_setflag  = true;
+        }
+    }
+    ASSERT_TRUE(has_sem_call);
+    ASSERT_TRUE(has_setscene);
+    ASSERT_TRUE(has_setflag);
+
+    // ── Stage 7: Emit Lua ─────────────────────────────────────────────────────
+    SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(lr.ir);
+    ASSERT_FALSE(lua.empty());
+
+    // The structural ordering proof: set_scene(3) and flag(6) appear in the callee block.
+    // set_scene(4) appears in the continuation block.
+    // Both are in the emitted Lua — the dispatch table links callee End back to continuation.
+    size_t pos_scene3  = lua.find("ctx.game:set_scene(3)");
+    size_t pos_flag6   = lua.find("ctx.flags:set(6)");
+    size_t pos_scene4  = lua.find("ctx.game:set_scene(4)");
+    ASSERT_TRUE(pos_scene3 != std::string::npos);
+    ASSERT_TRUE(pos_flag6  != std::string::npos);
+    ASSERT_TRUE(pos_scene4 != std::string::npos);
+    // set_scene(3) (callee) and set_scene(4) (continuation) are at different positions
+    ASSERT_TRUE(pos_scene3 != pos_scene4);
+
+    std::cout << "  [P5.5-E2E-1 structural: A=flag(5), B=scene(3)+flag(6), C=scene(4) in Lua ✓]\n";
+
+    // ── Runtime behavioral execution ──────────────────────────────────────────
+    // Load the emitter-produced Lua into LuaRuntime + HeadlessGameLoop.
+    // All ops used (setscene/setevent/scall/end) are fully implemented stubs.
+    // No yields → script runs to completion in a single start_script() call.
+    GameState gs;
+    gs.rng.seed(0xDEADBEEFULL);
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.set_lua_runtime(&rt);
+    loop.set_collision_data([](int32_t, int32_t) {
+        return enginemon::CollisionClass::Floor;
+    });
+
+    // Execute the compiler-emitted Lua
+    rt.execute_string(lua, "scall_fixture");
+
+    // Verify pre-execution state (nothing set yet)
+    ASSERT_FALSE(gs.check_flag("flag_5"));   // A not yet set
+    ASSERT_FALSE(gs.check_flag("flag_6"));   // B not yet set
+    ASSERT_EQ(rt.get_stub_services().current_scene, 0);  // C not yet set
+
+    uint32_t coro = rt.start_script("script");
+    ScriptState state = rt.get_state(coro);
+
+    // The fixture uses no yields — script runs to Finished in one resume
+    // (setevent/setscene have no coroutine.yield; End has no yield)
+    if (state == ScriptState::Yielded) {
+        // Shouldn't yield but handle gracefully
+        for (int i = 0; i < 50 && rt.get_state(coro) == ScriptState::Yielded; ++i)
+            rt.resume(coro);
+        state = rt.get_state(coro);
+    }
+    ASSERT_TRUE(state == ScriptState::Finished);
+
+    // ORACLE BEHAVIORAL A/B/C:
+    // A: EventFlag{5} set by caller setevent before scall
+    ASSERT_TRUE(gs.check_flag("flag_5"));
+
+    // B: EventFlag{6} set by callee setevent inside scall body
+    ASSERT_TRUE(gs.check_flag("flag_6"));
+
+    // C: scene == 4 (setscene 4 in caller CONTINUATION, after callee End returned)
+    // If scall return were broken: scene would be 3 (callee's last setscene, script terminates there)
+    // scene == 4 PROVES the caller continuation executed AFTER the callee End
+    ASSERT_EQ(rt.get_stub_services().current_scene, 4);
+
+    std::cout << "  [P5.5-E2E-1 BEHAVIORAL: A=flag_5 ✓, B=flag_6 ✓, "
+              << "C=scene(4) ✓ — proves scall returns to caller continuation]\n";
+    std::cout << "  [Pipeline: ROM bytes → TypedScriptDecoder → CFGBuilder "
+              << "→ SemanticLegalizer → SemanticLuaEmitter → LuaRuntime ✓]\n";
+}
+
+// ── P5.5-E2E-2: farscall A/B/C full-pipeline behavioral proof ────────────────
+//
+// Identical behavioral contract to p55_closure_scall_e2e but uses farscall (0x01)
+// with an explicit bank operand, proving CROSS-BANK address resolution.
+//
+// Bytecode layout:
+//   Caller at bank 2, addr 0x4100 (flat 0x8100):
+//     0x33 0x07 0x00    setevent EVENT_7   → EventFlag{7} [A]
+//     0x01 0x03 0x10 0x41  farscall bank=3, addr=0x4110 → flat 0xC110 [CALL]
+//     0x14 0x06         setscene 6         → scene=6 [C — post-call]
+//     0x91              end
+//
+//   Callee at bank 3, addr 0x4110 (flat 0xC110):
+//     0x14 0x05         setscene 5         → scene=5 [B]
+//     0x33 0x08 0x00    setevent EVENT_8   → EventFlag{8} [B2]
+//     0x91              end                → pops __call_stack, returns to caller
+//
+// ORACLE:
+//   A: gs.check_flag("flag_7") == true
+//   B: gs.check_flag("flag_8") == true
+//   C: current_scene == 6  (not 5) — caller post-call ran
+//
+// farscall address resolution proof:
+//   farscall [0x01, 0x03, 0x10, 0x41] → bank=3, addr=0x4110
+//   flat = 3 * 0x4000 + (0x4110 - 0x4000) = 0xC110
+//   If resolved as scall (bank-local from bank 2): flat = 2 * 0x4000 + (0x4110 - 0x4000) = 0x8110
+//   0xC110 ≠ 0x8110: proves farscall used the explicit bank operand, not caller's bank
+//
+// Source authority: CrystalOp::farscall = 0x01, encoding [opcode, bank, ptr_lo, ptr_hi]
+//   from frontends/crystal/include/crystal/script/decoder.hpp line 21
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(p55_closure_farscall_e2e) {
+    using namespace crystal;
+    using namespace enginemon;
+
+    // ── Flat address constants ─────────────────────────────────────────────────
+    constexpr uint32_t CALLER_BANK = 2;
+    constexpr uint32_t CALLEE_BANK = 3;
+    constexpr uint32_t CALLER_ADDR = 0x4100;
+    constexpr uint32_t CALLEE_ADDR = 0x4110;
+    constexpr uint32_t CALLER_FLAT = CALLER_BANK * 0x4000 + (CALLER_ADDR - 0x4000);  // 0x8100
+    constexpr uint32_t CALLEE_FLAT = CALLEE_BANK * 0x4000 + (CALLEE_ADDR - 0x4000);  // 0xC110
+
+    static_assert(CALLER_FLAT == 0x8100u, "caller flat oracle");
+    static_assert(CALLEE_FLAT == 0xC110u, "callee flat oracle");
+
+    // Cross-bank proof: farscall uses CALLEE_BANK (3), not CALLER_BANK (2)
+    constexpr uint32_t WRONG_FLAT = CALLER_BANK * 0x4000 + (CALLEE_ADDR - 0x4000);  // 0x8110
+    static_assert(CALLEE_FLAT != WRONG_FLAT, "farscall must resolve differently than scall");
+
+    // ROM large enough for both banks (bank 3 max addr 0x7FFF → flat 0xFFFF)
+    std::vector<uint8_t> rom_bytes(0xD000, 0xFF);  // 52 KB, covers banks 0-3
+
+    // Caller body at flat 0x8100 (bank 2, addr 0x4100)
+    uint32_t c = CALLER_FLAT;
+    rom_bytes[c++] = 0x33;             // setevent (A)
+    rom_bytes[c++] = 0x07;             // EventFlag{7} lo
+    rom_bytes[c++] = 0x00;             // EventFlag{7} hi
+    rom_bytes[c++] = 0x01;             // farscall opcode (0x01)
+    rom_bytes[c++] = 0x03;             // bank operand = 3
+    rom_bytes[c++] = 0x10;             // callee addr lo = 0x4110 → lo
+    rom_bytes[c++] = 0x41;             // callee addr hi
+    rom_bytes[c++] = 0x14;             // setscene (C — post-farscall)
+    rom_bytes[c++] = 0x06;             // scene = 6
+    rom_bytes[c++] = 0x91;             // end
+
+    // Callee body at flat 0xC110 (bank 3, addr 0x4110)
+    uint32_t d = CALLEE_FLAT;
+    rom_bytes[d++] = 0x14;             // setscene (B)
+    rom_bytes[d++] = 0x05;             // scene = 5
+    rom_bytes[d++] = 0x33;             // setevent (B2)
+    rom_bytes[d++] = 0x08;             // EventFlag{8} lo
+    rom_bytes[d++] = 0x00;             // EventFlag{8} hi
+    rom_bytes[d++] = 0x91;             // end
+
+    auto rom = make_rom_from_bytes(rom_bytes);
+    ASSERT_TRUE(rom != nullptr);
+
+    // ── Stage 1: Decode ───────────────────────────────────────────────────────
+    SymbolMap symbols;
+    TypedScriptDecoder decoder(*rom, symbols);
+    CrystalScriptIR ir = decoder.decode_script(CALLER_FLAT);
+
+    ASSERT_TRUE(ir.commands.size() >= 2u);
+
+    // Find Cmd_Farscall and verify cross-bank resolution
+    bool has_farscall = false;
+    for (const auto& cmd : ir.commands) {
+        if (const auto* fc = std::get_if<Cmd_Farscall>(&cmd.data)) {
+            // ORACLE: farscall resolves to CALLEE_FLAT (bank 3), not WRONG_FLAT (bank 2)
+            ASSERT_EQ(fc->target.rom_address, CALLEE_FLAT);
+            ASSERT_TRUE(fc->target.rom_address != WRONG_FLAT);
+            ASSERT_EQ(fc->bank, static_cast<uint8_t>(CALLEE_BANK));
+            has_farscall = true;
+        }
+    }
+    ASSERT_TRUE(has_farscall);
+
+    // ── Stage 2: CFG ──────────────────────────────────────────────────────────
+    CFGBuilder cfg_builder;
+    CrystalCFG cfg = cfg_builder.build(ir);
+    ASSERT_TRUE(cfg.validation.valid);
+
+    // ── Stage 3: Semantic lowering ────────────────────────────────────────────
+    SemanticLegalizer legalizer;
+    auto lr = legalizer.lower(ir, cfg);
+    ASSERT_TRUE(lr.success);
+
+    // ── Stage 7: Emit Lua ─────────────────────────────────────────────────────
+    SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(lr.ir);
+    ASSERT_FALSE(lua.empty());
+
+    // farscall emits identical __call_stack machinery as scall (same Sem_Call)
+    ASSERT_TRUE(lua.find("table.insert(__call_stack") != std::string::npos);
+    ASSERT_TRUE(lua.find("__dispatch_return") != std::string::npos);
+    // A, B, C mutations in Lua
+    ASSERT_TRUE(lua.find("ctx.flags:set(7)") != std::string::npos);   // A
+    ASSERT_TRUE(lua.find("ctx.game:set_scene(5)") != std::string::npos); // B
+    ASSERT_TRUE(lua.find("ctx.flags:set(8)") != std::string::npos);   // B2
+    ASSERT_TRUE(lua.find("ctx.game:set_scene(6)") != std::string::npos); // C
+
+    std::cout << "  [P5.5-E2E-2 structural: farscall flat=" << CALLEE_FLAT
+              << " ≠ scall-same-ptr flat=" << WRONG_FLAT << " ✓]\n";
+
+    // ── Runtime behavioral execution ──────────────────────────────────────────
+    GameState gs;
+    gs.rng.seed(0xDEADBEEFULL);
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.set_lua_runtime(&rt);
+    loop.set_collision_data([](int32_t, int32_t) {
+        return enginemon::CollisionClass::Floor;
+    });
+
+    try {
+        rt.execute_string(lua, "farscall_fixture");
+    } catch (const std::exception& e) {
+        std::cerr << "  Lua load error: " << e.what() << "\n";
+        std::cerr << "  Generated Lua:\n" << lua << "\n";
+        ASSERT_TRUE(false);  // fail with context
+    }
+
+    uint32_t coro = rt.start_script("script");
+    ScriptState state = rt.get_state(coro);
+    if (state == ScriptState::Yielded) {
+        for (int i = 0; i < 50 && rt.get_state(coro) == ScriptState::Yielded; ++i)
+            rt.resume(coro);
+        state = rt.get_state(coro);
+    }
+    ASSERT_TRUE(state == ScriptState::Finished);
+
+    // ORACLE BEHAVIORAL:
+    // A: EventFlag{7} set by caller before farscall
+    ASSERT_TRUE(gs.check_flag("flag_7"));
+
+    // B: EventFlag{8} set by callee (in bank 3, resolved cross-bank by farscall)
+    ASSERT_TRUE(gs.check_flag("flag_8"));
+
+    // C: scene == 6 (caller post-farscall continuation)
+    // scene == 6, not 5: proves continuation ran AFTER callee End returned
+    ASSERT_EQ(rt.get_stub_services().current_scene, 6);
+
+    std::cout << "  [P5.5-E2E-2 BEHAVIORAL: A=flag_7 ✓, B=flag_8 ✓, "
+              << "C=scene(6) ✓ — farscall cross-bank return proven]\n";
+    std::cout << "  [farscall(bank=3, addr=0x4110) → flat=0xC110 ≠ scall-from-bank2 flat=0x8110 ✓]\n";
+}
