@@ -14,7 +14,14 @@ target_link_libraries(golden_test PRIVATE
 # Requires engine library (with Lua) + crystal frontend
 if(ENGINEMON_ENABLE_ENGINE)
     add_executable(runtime_test
-        scripting/runtime_test.cpp
+        scripting/runtime_test_core.cpp
+        scripting/runtime_test_maps.cpp
+        scripting/runtime_test_scripts.cpp
+        scripting/runtime_test_batches.cpp
+        scripting/runtime_test_vm_state.cpp
+        scripting/runtime_test_text_rng.cpp
+        scripting/runtime_test_pcg_vm.cpp
+        scripting/runtime_test_main.cpp
     )
     target_link_libraries(runtime_test PRIVATE
         enginemon_crystal

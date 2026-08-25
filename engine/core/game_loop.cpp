@@ -7,6 +7,7 @@
 // - interact(): NPC → counter → sign → hidden → field move → bookshelf
 
 #include "engine/core/game_loop.hpp"
+#include <any>
 #include <functional>
 #include <numeric>
 #include <stdexcept>
@@ -425,6 +426,7 @@ void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
     // HeadlessGameLoop via the deferred_script_fn lambda.
     if (lua_runtime_ && lua_runtime_ != runtime) {
         lua_runtime_->get_stub_services().deferred_script_fn = nullptr;
+        lua_runtime_->get_stub_services().scripted_movement_manager = nullptr;
     }
     lua_runtime_ = runtime;
     if (runtime) {
@@ -434,6 +436,10 @@ void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
             [this](const std::string& script_id) {
                 schedule_deferred_script(script_id);
             };
+        // Wire HeadlessGameLoop::movement_manager_ as the single authority for
+        // scripted NPC movement.  ctx.world:move_actor uses this pointer when
+        // async movement is enabled through the HeadlessGameLoop path.
+        runtime->get_stub_services().scripted_movement_manager = &movement_manager_;
     }
 }
 
@@ -459,6 +465,10 @@ bool HeadlessGameLoop::start_script(const std::string& script_id) {
     // Start the script
     active_coroutine_ = lua_runtime_->start_script("script");
     active_script_id_ = script_id;
+    // Publish active coroutine ID so move_actor can store it in the movement entry.
+    if (lua_runtime_) {
+        lua_runtime_->get_stub_services().active_script_coroutine_id = active_coroutine_;
+    }
     
     // Check state
     ScriptState script_state = lua_runtime_->get_state(active_coroutine_);
@@ -552,9 +562,19 @@ bool HeadlessGameLoop::update_script() {
                 break;
                 
             case YieldReason::Movement:
-                // Check if movement is complete
-                if (!movement_manager_.is_actor_moving(0)) {
-                    resume_script();
+                // Check if the moving actor has completed — use the actor_id
+                // stored in yield_data by ctx.world:move_actor, not hardcoded 0.
+                {
+                    uint32_t moving_actor = 0;  // default: player
+                    auto yield_data = lua_runtime_->get_yield_data(active_coroutine_);
+                    if (yield_data) {
+                        if (auto* actor_id_ptr = std::any_cast<uint32_t>(&*yield_data)) {
+                            moving_actor = *actor_id_ptr;
+                        }
+                    }
+                    if (!movement_manager_.is_actor_moving(moving_actor)) {
+                        resume_script();
+                    }
                 }
                 break;
                 
@@ -614,6 +634,16 @@ TickResult HeadlessGameLoop::tick() {
     // Update movement
     if (state_ == LoopState::Moving) {
         result.movement_complete = update_movement();
+    }
+    
+    // Also tick movement manager during script execution so scripted NPC
+    // movements (applymovement) can complete and unblock the script.
+    // When state_ == ScriptYielded with YieldReason::Movement, update_script()
+    // will call resume_script() once is_actor_moving(actor_id) returns false.
+    if (state_ == LoopState::ScriptRunning || state_ == LoopState::ScriptYielded) {
+        // Tick all active movements — this advances NPC positions and fires
+        // completion callbacks that mark actors as no longer moving.
+        movement_manager_.update();
     }
     
     // Update script

@@ -1,4 +1,4 @@
-﻿// tests/scripting/runtime_test.cpp
+// tests/scripting/runtime_test.cpp
 // End-to-end Lua runtime test
 // Verifies: ROM script → decoder → IR → Lua emitter → Lua VM → ctx.* → yield/resume
 //
@@ -19623,7 +19623,7 @@ function script.main(ctx)
   ::block_1::
   do
     ctx.flags:set_var(1, 10)
-    __call_stack = {}; return
+    __call_stack = {}; do return end
   end
   ::block_2::
   do

@@ -117,11 +117,11 @@ void LuaRuntime::bind_ui_api() {
     lua_pushcfunction(L_, ui_api::show_map_name);
     lua_setfield(L_, -2, "show_map_name");
 
-    // In-stream input gate (TX_PROMPT_BUTTON — non-terminating, text continues after)
+    // In-stream input gate (TX_PROMPT_BUTTON â€” non-terminating, text continues after)
     lua_pushcfunction(L_, ui_api::inline_prompt_button);
     lua_setfield(L_, -2, "inline_prompt_button");
 
-    // Timed pause in text stream (TX_PAUSE — frames delay, button-skippable)
+    // Timed pause in text stream (TX_PAUSE â€” frames delay, button-skippable)
     lua_pushcfunction(L_, ui_api::pause_text);
     lua_setfield(L_, -2, "pause_text");
 
@@ -717,9 +717,9 @@ void LuaRuntime::resume_first(uint32_t coroutine_id) {
                 if (nres > 1 && lua_isnumber(co.thread, -nres + 1)) {
                     // WaitSeconds: convert to integer ticks using ceil()
                     // ceil() ensures coroutine never resumes earlier than requested
-                    // 0.05s → ceil(0.05 * 60) = ceil(3.0) = 3 ticks
-                    // 0.1s  → ceil(0.1 * 60)  = ceil(6.0) = 6 ticks
-                    // 1.0s  → ceil(1.0 * 60)  = ceil(60.0) = 60 ticks
+                    // 0.05s â†’ ceil(0.05 * 60) = ceil(3.0) = 3 ticks
+                    // 0.1s  â†’ ceil(0.1 * 60)  = ceil(6.0) = 6 ticks
+                    // 1.0s  â†’ ceil(1.0 * 60)  = ceil(60.0) = 60 ticks
                     float seconds = static_cast<float>(lua_tonumber(co.thread, -nres + 1));
                     co.wait_ticks = static_cast<int>(std::ceil(seconds * SIM_TICKS_PER_SECOND));
                 }
@@ -735,6 +735,12 @@ void LuaRuntime::resume_first(uint32_t coroutine_id) {
             }
             else if (yield_type == "movement") {
                 co.yield_reason = YieldReason::Movement;
+                // Second yield value is the actor_id (uint32_t) being moved.
+                // Stored in yield_data so HeadlessGameLoop::update_script() can
+                // call is_actor_moving(actor_id) for the correct actor.
+                if (nres > 1 && lua_isinteger(co.thread, -nres + 1)) {
+                    co.yield_data = static_cast<uint32_t>(lua_tointeger(co.thread, -nres + 1));
+                }
             }
             else if (yield_type == "fade") {
                 co.yield_reason = YieldReason::Fade;
@@ -847,6 +853,12 @@ void LuaRuntime::resume(uint32_t coroutine_id) {
             }
             else if (yield_type == "movement") {
                 co.yield_reason = YieldReason::Movement;
+                // Second yield value is the actor_id (uint32_t) being moved.
+                // Stored in yield_data so HeadlessGameLoop::update_script() can
+                // call is_actor_moving(actor_id) for the correct actor.
+                if (nres > 1 && lua_isinteger(co.thread, -nres + 1)) {
+                    co.yield_data = static_cast<uint32_t>(lua_tointeger(co.thread, -nres + 1));
+                }
             }
             else if (yield_type == "fade") {
                 co.yield_reason = YieldReason::Fade;
@@ -938,6 +950,12 @@ void LuaRuntime::resume_with_result(uint32_t coroutine_id, int result) {
             }
             else if (yield_type == "movement") {
                 co.yield_reason = YieldReason::Movement;
+                // Second yield value is the actor_id (uint32_t) being moved.
+                // Stored in yield_data so HeadlessGameLoop::update_script() can
+                // call is_actor_moving(actor_id) for the correct actor.
+                if (nres > 1 && lua_isinteger(co.thread, -nres + 1)) {
+                    co.yield_data = static_cast<uint32_t>(lua_tointeger(co.thread, -nres + 1));
+                }
             }
             else if (yield_type == "fade") {
                 co.yield_reason = YieldReason::Fade;
@@ -1013,7 +1031,7 @@ std::vector<uint32_t> LuaRuntime::update(float delta_time) {
     }
     
     // F6: Deterministic simultaneous wakeup ordering.
-    // coroutines_ is an unordered_map — iteration order is hash-dependent and
+    // coroutines_ is an unordered_map â€” iteration order is hash-dependent and
     // non-reproducible across runs/platforms.  Sort to_resume by coroutine ID
     // (ascending) before executing any resume.  IDs are monotonically allocated
     // (next_coroutine_id_++ in start_script()) and are never reused during a
@@ -1051,6 +1069,13 @@ YieldReason LuaRuntime::get_yield_reason(uint32_t coroutine_id) const {
     auto it = coroutines_.find(coroutine_id);
     if (it == coroutines_.end()) return YieldReason::None;
     return it->second.yield_reason;
+}
+
+std::optional<std::any> LuaRuntime::get_yield_data(uint32_t coroutine_id) const {
+    auto it = coroutines_.find(coroutine_id);
+    if (it == coroutines_.end()) return std::nullopt;
+    if (!it->second.yield_data.has_value()) return std::nullopt;
+    return it->second.yield_data;
 }
 
 bool LuaRuntime::has_active_scripts() const {

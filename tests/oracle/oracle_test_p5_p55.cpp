@@ -1,4 +1,4 @@
-﻿#include "oracle_shared.hpp"
+#include "oracle_shared.hpp"
 
 
 namespace {
@@ -318,7 +318,7 @@ function script.main(ctx)
   ::block_1::
   do
     ctx.flags:set_var(1, 10)
-    __call_stack = {}; return
+    __call_stack = {}; do return end
   end
   ::block_2::
   do
@@ -1296,7 +1296,7 @@ return script
 //   (2) Stage 7 emits the correct clearing pattern (compiler-path, structural)
 //
 // Source: engine/events/whiteout.asm Script_Whiteout (bank 04, addr 64ce)
-//   final opcode is endall → Sem_EndAll{} → Lua: __call_stack = {}; return
+//   final opcode is endall → Sem_EndAll{} → Lua: __call_stack = {}; do return end
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(p55_hardened_endall_compiler_path_structural) {
     if (!g_oracle_reader || !g_rom) {
@@ -1316,12 +1316,12 @@ TEST(p55_hardened_endall_compiler_path_structural) {
         if (!lua) continue;
         // The REAL endall emission from semantic_lua_emitter.cpp line 284:
         //   SemanticLuaEmitter::indent_line(out, I);
-        //   out << "__call_stack = {}; return\n";
-        // This produces "  __call_stack = {}; return" (with leading indent).
+        //   out << "__call_stack = {}; do return end\n";
+        // This produces "  __call_stack = {}; do return end" (with leading indent).
         // MUST NOT match the per-script initialization "  local __call_stack = {}"
         // (every script has that init — it is NOT an endall).
         bool has_endall_emission =
-            lua->find("__call_stack = {}; return") != std::string::npos;
+            lua->find("__call_stack = {}; do return end") != std::string::npos;
         if (!has_endall_emission) continue;
         found_endall = true;
         endall_sid = sid;
@@ -1331,10 +1331,10 @@ TEST(p55_hardened_endall_compiler_path_structural) {
         ASSERT_TRUE(lua->find(":behavior(\"EndAll\")") == std::string::npos);
 
         // ORACLE-2: real endall emission pattern present (not just init)
-        ASSERT_TRUE(lua->find("__call_stack = {}; return") != std::string::npos);
+        ASSERT_TRUE(lua->find("__call_stack = {}; do return end") != std::string::npos);
 
         std::cout << "  [P5.5-HARDENED-C: endall script '" << sid
-                  << "' → '__call_stack = {}; return' NOT behavior dispatch ✓]\n";
+                  << "' → '__call_stack = {}; do return end' NOT behavior dispatch ✓]\n";
         break;
     }
 
@@ -1705,7 +1705,7 @@ TEST(p55_closure_farscall_fullpipe) {
 // Source: engine/events/whiteout.asm Script_Whiteout (bank 04, addr 64ce)
 //   ...
 //   setscene SCENE_ELMSLAB_NOOP (not actually — just illustrating)
-//   endall  ← Sem_EndAll{} → Lua: __call_stack = {}; return
+//   endall  ← Sem_EndAll{} → Lua: __call_stack = {}; do return end
 //
 // CORPUS STATUS: Script_Whiteout is NOT in the vanilla corpus as a map-root or
 // std entry (it is reached via callasm from assembly engine code). The only
@@ -1718,7 +1718,7 @@ TEST(p55_closure_farscall_fullpipe) {
 // This test provides the COMPILER-PATH complement using a fixture script that:
 //   1. Goes through the real TypedScriptDecoder (opcode 0x93 = endall)
 //   2. Goes through SemanticLegalizer → Sem_EndAll
-//   3. Goes through SemanticLuaEmitter → "__call_stack = {}; return"
+//   3. Goes through SemanticLuaEmitter → "__call_stack = {}; do return end"
 //   4. Goes through LuaRuntime + HeadlessGameLoop
 //   5. Asserts: a variable set BEFORE endall IS set (reached the endall point)
 //   6. Asserts: a variable set AFTER endall would-be-continuation is NOT set
@@ -1743,7 +1743,7 @@ TEST(p55_closure_endall_behavioral) {
     //
     // Expected behavior:
     //   setscene(3) fires → stub_services.current_scene = 3
-    //   endall fires → __call_stack = {}; return (script terminates)
+    //   endall fires → __call_stack = {}; do return end (script terminates)
     //   setscene(7) is NEVER reached
     //   loop goes idle cleanly
     //
@@ -1832,8 +1832,8 @@ TEST(p55_closure_endall_behavioral) {
 
         // ORACLE: Lua contains the real endall emission pattern
         ASSERT_TRUE(lua.find("ctx.game:set_scene(3)") != std::string::npos);
-        // endall emits "  __call_stack = {}; return" (with 2-space indent from indent_line)
-        ASSERT_TRUE(lua.find("__call_stack = {}; return") != std::string::npos);
+        // endall emits "  __call_stack = {}; do return end" (with 2-space indent from indent_line)
+        ASSERT_TRUE(lua.find("__call_stack = {}; do return end") != std::string::npos);
         // setscene(7) must NOT appear — it was after endall, unreachable
         ASSERT_TRUE(lua.find("ctx.game:set_scene(7)") == std::string::npos);
         // Must NOT use behavior dispatch for endall
@@ -1883,7 +1883,7 @@ TEST(p55_closure_endall_behavioral) {
 
 
 // ORACLE: The compiled Lua for this script must contain
-//   "__call_stack = {}; return"  (from Sem_EndAll emission)
+//   "__call_stack = {}; do return end"  (from Sem_EndAll emission)
 //   and must NOT contain  ctx.game:behavior("EndAll")  (old broken path)
 // We do NOT run the script (it hits capability-deferred behaviors before endall).
 // The oracle is the EMITTED LUA CONTENT — it proves Stage 7 emits endall correctly.
@@ -1917,10 +1917,10 @@ TEST(p55_endall_emits_core_vm_not_behavior_table) {
     }
 
     // ORACLE: endall must emit the VM-level stack clear, NOT a behavior dispatch
-    // The exact pattern from semantic_lua_emitter: "  __call_stack = {}; return"
-    ASSERT_TRUE(lua->find("__call_stack = {}; return") != std::string::npos);
+    // The exact pattern from semantic_lua_emitter: "  __call_stack = {}; do return end"
+    ASSERT_TRUE(lua->find("__call_stack = {}; do return end") != std::string::npos);
     ASSERT_TRUE(lua->find("behavior(\"EndAll\")") == std::string::npos);
-    std::cout << "  [P5.5-6: endall Lua contains '__call_stack = {}; return', not behavior dispatch ✓]\n";
+    std::cout << "  [P5.5-6: endall Lua contains '__call_stack = {}; do return end', not behavior dispatch ✓]\n";
 }
 
 // ── P5.5-7: checkscene/setscene — ElmsLabMoveElmCallback ─────────────────────
@@ -2259,10 +2259,10 @@ TEST(p55_endall_no_behavior_table_in_corpus) {
     for (const auto& sid : scripts) {
         auto lua = g_oracle_reader->load_script(sid);
         if (!lua) continue;
-        // The real endall emission is: "  __call_stack = {}; return" (with indent).
+        // The real endall emission is: "  __call_stack = {}; do return end" (with indent).
         // This is DISTINCT from the per-script init "  local __call_stack = {}"
         // that every script has. Only Sem_EndAll produces the non-local assignment.
-        if (lua->find("__call_stack = {}; return") != std::string::npos) {
+        if (lua->find("__call_stack = {}; do return end") != std::string::npos) {
             found_endall_script = true;
             // ORACLE: must NOT contain the old behavior dispatch
             ASSERT_TRUE(lua->find("behavior(\"EndAll\")") == std::string::npos);

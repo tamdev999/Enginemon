@@ -403,7 +403,8 @@ bool is_async_movement_enabled(LuaRuntime* runtime) {
     return runtime->get_stub_services().async_movement_enabled;
 }
 
-// ctx.world:move_actor(actor_id, direction, steps) - legacy API
+// ctx.world:move_actor(actor_id, direction, steps) - string-direction API
+// Used by isolated tests that write Lua directly.
 int move_actor(lua_State* L) {
     auto& stubs = get_stubs(L);
     
@@ -421,20 +422,33 @@ int move_actor(lua_State* L) {
     else if (dir == "right") right = steps;
     
     if (stubs.async_movement_enabled) {
-        // Async mode: enqueue movement and yield
+        // Select the authoritative movement manager.
+        // scripted_movement_manager is set by HeadlessGameLoop::set_lua_runtime();
+        // it points to HeadlessGameLoop::movement_manager_ which update_script()
+        // observes.  When not wired (isolated unit tests), fall back to the
+        // per-runtime stub manager.
+        MovementManager& mm = stubs.scripted_movement_manager
+            ? *stubs.scripted_movement_manager
+            : stubs.get_movement_manager();
+
         StubActorState& state = (actor_id == 0) ? stubs.player : stubs.actors[actor_id];
-        auto& mm = stubs.get_movement_manager();
-        
+        // Use published active coroutine ID — NOT actor_id — so the completion
+        // callback can resume the correct Lua coroutine.
+        uint32_t coro_id = stubs.active_script_coroutine_id;
         mm.enqueue_movement_table(
-            actor_id, 
             static_cast<uint32_t>(actor_id),
+            coro_id,
             down, up, left, right,
             state.x, state.y,
             direction_from_string(state.facing)
         );
         
+        // Yield with actor_id in yield_data so HeadlessGameLoop::update_script()
+        // can call is_actor_moving(actor_id) on the right actor.
+        stubs.movement_calls.push_back({"waiting_actor", std::to_string(actor_id)});
         lua_pushstring(L, "movement");
-        return lua_yield(L, 1);
+        lua_pushinteger(L, static_cast<lua_Integer>(actor_id));  // yield_data[1]
+        return lua_yield(L, 2);  // yield "movement", actor_id
     } else {
         // Sync mode: apply immediately
         apply_sync_movement(stubs, actor_id, down, up, left, right);
@@ -442,45 +456,103 @@ int move_actor(lua_State* L) {
     }
 }
 
-// ctx.world:move_actor(actor_id, {down=N, up=N, left=N, right=N}) - new semantic API
+// Parse the emitter's {type,dir} array format into batched counts.
+// Emitter produces: {{type="step",dir="left"},{type="step",dir="down"},...}
+// Returns false if the table is not in array-of-tables format (falls back to batch).
+static bool parse_movement_command_array(lua_State* L, int table_idx,
+                                          int& down, int& up, int& left, int& right) {
+    // Detect: if t[1] exists and is a table, it's the emitter's command array.
+    lua_rawgeti(L, table_idx, 1);
+    bool is_array = lua_istable(L, -1);
+    lua_pop(L, 1);
+    if (!is_array) return false;
+
+    int n = static_cast<int>(lua_rawlen(L, table_idx));
+    for (int i = 1; i <= n; ++i) {
+        lua_rawgeti(L, table_idx, i);
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+
+        lua_getfield(L, -1, "type");
+        const char* t = lua_isstring(L, -1) ? lua_tostring(L, -1) : nullptr;
+        lua_pop(L, 1);
+
+        lua_getfield(L, -1, "dir");
+        const char* d = lua_isstring(L, -1) ? lua_tostring(L, -1) : nullptr;
+        lua_pop(L, 1);
+
+        lua_pop(L, 1);  // pop command table
+
+        if (!t || !d) continue;
+        std::string type(t), dir(d);
+        // Only count step-type commands; turns, sleep, step_end don't move tiles.
+        if (type == "step" || type == "slow_step" || type == "big_step") {
+            if (dir == "down")        ++down;
+            else if (dir == "up")     ++up;
+            else if (dir == "left")   ++left;
+            else if (dir == "right")  ++right;
+        }
+    }
+    return true;
+}
+
+// ctx.world:move_actor(actor_id, table) — table is either:
+//   emitter format: {{type="step",dir="left"},...}   (from SemanticLuaEmitter)
+//   batch format:   {down=N, up=N, left=N, right=N}  (hand-written tests)
 int move_actor_table(lua_State* L, int actor_id, int table_idx) {
     auto& stubs = get_stubs(L);
     
     int down = 0, up = 0, left = 0, right = 0;
-    
-    lua_getfield(L, table_idx, "down");
-    if (!lua_isnil(L, -1)) down = static_cast<int>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
-    
-    lua_getfield(L, table_idx, "up");
-    if (!lua_isnil(L, -1)) up = static_cast<int>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
-    
-    lua_getfield(L, table_idx, "left");
-    if (!lua_isnil(L, -1)) left = static_cast<int>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
-    
-    lua_getfield(L, table_idx, "right");
-    if (!lua_isnil(L, -1)) right = static_cast<int>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
-    
-    stubs.movement_calls.push_back({"move_table", std::to_string(down) + "," + std::to_string(up) + 
-                             "," + std::to_string(left) + "," + std::to_string(right)});
+    bool parsed_as_array = parse_movement_command_array(L, table_idx, down, up, left, right);
+
+    if (!parsed_as_array) {
+        // Batch format: {down=N, up=N, left=N, right=N}
+        lua_getfield(L, table_idx, "down");
+        if (!lua_isnil(L, -1)) down = static_cast<int>(lua_tointeger(L, -1));
+        lua_pop(L, 1);
+
+        lua_getfield(L, table_idx, "up");
+        if (!lua_isnil(L, -1)) up = static_cast<int>(lua_tointeger(L, -1));
+        lua_pop(L, 1);
+
+        lua_getfield(L, table_idx, "left");
+        if (!lua_isnil(L, -1)) left = static_cast<int>(lua_tointeger(L, -1));
+        lua_pop(L, 1);
+
+        lua_getfield(L, table_idx, "right");
+        if (!lua_isnil(L, -1)) right = static_cast<int>(lua_tointeger(L, -1));
+        lua_pop(L, 1);
+    }
+
+    // Reject completely empty movement — it discards the yield and the script
+    // would resume immediately without any movement occurring.
+    if (down == 0 && up == 0 && left == 0 && right == 0) {
+        // No-op movement (turn-only or empty sequence): apply facing, no yield.
+        stubs.movement_calls.push_back({"move_noop", std::to_string(actor_id)});
+        return 0;
+    }
+
+    stubs.movement_calls.push_back({"move_table",
+        std::to_string(down) + "," + std::to_string(up) + "," +
+        std::to_string(left) + "," + std::to_string(right)});
     
     if (stubs.async_movement_enabled) {
+        MovementManager& mm = stubs.scripted_movement_manager
+            ? *stubs.scripted_movement_manager
+            : stubs.get_movement_manager();
+
         StubActorState& state = (actor_id == 0) ? stubs.player : stubs.actors[actor_id];
-        auto& mm = stubs.get_movement_manager();
-        
+        uint32_t coro_id = stubs.active_script_coroutine_id;
         mm.enqueue_movement_table(
-            actor_id,
             static_cast<uint32_t>(actor_id),
+            coro_id,
             down, up, left, right,
             state.x, state.y,
             direction_from_string(state.facing)
         );
-        
+
         lua_pushstring(L, "movement");
-        return lua_yield(L, 1);
+        lua_pushinteger(L, static_cast<lua_Integer>(actor_id));  // yield_data[1]
+        return lua_yield(L, 2);  // yield "movement", actor_id
     } else {
         apply_sync_movement(stubs, actor_id, down, up, left, right);
         return 0;

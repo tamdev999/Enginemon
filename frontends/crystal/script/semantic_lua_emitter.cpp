@@ -284,13 +284,19 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         // EndAll is core VM control flow: discard entire call stack, exit script.
         // Source-proven from pokecrystal Script_endall: clears ALL pending frames.
         // NOT dispatched through BehaviorTable.
+        // "__call_stack = {}; do return end" — the do-return-end wrapper is
+        // required for the same reason as Sem_End: flat-block emission means
+        // labels (::block_N::) can legally appear after this statement.
         (void)o;
         SemanticLuaEmitter::indent_line(out, I);
-        out << "__call_stack = {}; return\n"; return true;
+        out << "__call_stack = {}; do return end\n"; return true;
     }
     if (auto* o = std::get_if<Sem_Return>(&op)) {
+        // Sem_Return (endcallback) terminates the script frame.
+        // Use "do return end" so ::block_N:: labels may follow in the flat
+        // block loop without causing a Lua parse error.
         (void)o;
-        SemanticLuaEmitter::indent_line(out, I); out << "return\n"; return true;
+        SemanticLuaEmitter::indent_line(out, I); out << "do return end\n"; return true;
     }
     if (auto* o = std::get_if<Sem_Jump>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "goto block_" << o->target.id << "\n"; return true;
@@ -378,7 +384,9 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.ui:text_sequence(" << SemanticLuaEmitter::emit_text_sequence(o->sequence) << ")\n";
         SemanticLuaEmitter::indent_line(out, I); out << "coroutine.yield(\"wait_button\")\n";
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.ui:close_text()\n";
-        SemanticLuaEmitter::indent_line(out, I); out << "return\n"; return true;
+        // Use "do return end" so ::block_N:: labels can legally follow in the same
+        // function body.  Bare "return" must be the last statement of a Lua block.
+        SemanticLuaEmitter::indent_line(out, I); out << "do return end\n"; return true;
     }
     if (auto* o = std::get_if<Sem_FacePlayerAndShowText>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:face_player()\n";
@@ -386,7 +394,8 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.ui:text_sequence(" << SemanticLuaEmitter::emit_text_sequence(o->sequence) << ")\n";
         SemanticLuaEmitter::indent_line(out, I); out << "coroutine.yield(\"wait_button\")\n";
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.ui:close_text()\n";
-        SemanticLuaEmitter::indent_line(out, I); out << "return\n"; return true;
+        // do return end — same reason as Sem_ShowTextAndEnd above.
+        SemanticLuaEmitter::indent_line(out, I); out << "do return end\n"; return true;
     }
     if (std::get_if<Sem_WaitButton>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "coroutine.yield(\"wait_button\")\n"; return true;
@@ -904,7 +913,9 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
     }
     if (auto* o = std::get_if<Sem_JumpStd>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.game:jump_std(" << (int)o->std_id << ", \"" << SemanticLuaEmitter::escape_lua_string(o->name) << "\")\n";
-        SemanticLuaEmitter::indent_line(out, I); out << "return\n"; return true;
+        // do return end — bare return would be a Lua parse error when followed by
+        // ::block_N:: labels in the flat block emission loop.
+        SemanticLuaEmitter::indent_line(out, I); out << "do return end\n"; return true;
     }
 
     // Field move operations
@@ -930,8 +941,14 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.field:play_actor_cry()\n"; return true;
     }
     if (std::get_if<Sem_LoadPendingEncounter>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "local enc_species, enc_level = ctx.field:load_pending_encounter()\n";
-        SemanticLuaEmitter::indent_line(out, I); out << "ctx.battle:start_wild(enc_species, enc_level)\n";
+        // Wrap the local declarations in "do...end" so that no legal CFG goto
+        // can jump into their scope.  Lua 5.2+ rejects "goto X" that jumps
+        // forward over a local declaration in the same function block; wrapping
+        // in do...end confines the locals to an inner block that no label enters.
+        SemanticLuaEmitter::indent_line(out, I); out << "do\n";
+        SemanticLuaEmitter::indent_line(out, I+1); out << "local enc_species, enc_level = ctx.field:load_pending_encounter()\n";
+        SemanticLuaEmitter::indent_line(out, I+1); out << "ctx.battle:start_wild(enc_species, enc_level)\n";
+        SemanticLuaEmitter::indent_line(out, I); out << "end\n";
         SemanticLuaEmitter::indent_line(out, I); out << "coroutine.yield(\"battle\")\n"; return true;
     }
 

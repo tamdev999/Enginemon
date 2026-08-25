@@ -118,6 +118,17 @@ struct StubServices {
     std::vector<std::pair<std::string, std::string>> movement_calls;
     std::unique_ptr<MovementManager> movement_manager;
     bool async_movement_enabled = false;
+
+    // Scripted-movement authority — pointer to HeadlessGameLoop::movement_manager_,
+    // set by HeadlessGameLoop::set_lua_runtime().  When non-null, scripted NPC
+    // moves are enqueued here instead of the per-runtime stub manager, ensuring
+    // HeadlessGameLoop::update_script() can observe them.
+    // OWNERSHIP: pointed-to manager is owned by HeadlessGameLoop, NOT by us.
+    MovementManager* scripted_movement_manager = nullptr;
+
+    // Active script coroutine ID — set by HeadlessGameLoop before each yield so
+    // ctx.world:move_actor can store the real coroutine ID in the movement entry.
+    uint32_t active_script_coroutine_id = 0;
     
     // Warp stub state (for F4)
     int last_warp_map = 0;
@@ -174,6 +185,8 @@ struct StubServices {
             movement_manager->cancel_all();
             movement_manager->clear_pending_completions();
         }
+        // scripted_movement_manager and active_script_coroutine_id are NOT reset
+        // here — they are owned/set by HeadlessGameLoop and reset on set_lua_runtime.
         last_warp_map = 0;
         last_warp_x = -1;
         last_warp_y = -1;
@@ -298,6 +311,8 @@ public:
     // Query script state
     ScriptState get_state(uint32_t coroutine_id) const;
     YieldReason get_yield_reason(uint32_t coroutine_id) const;
+    // Get yield_data for a yielded coroutine (nullopt if not found or not yielded).
+    std::optional<std::any> get_yield_data(uint32_t coroutine_id) const;
     bool has_active_scripts() const;
     
     // Cancel a running script
