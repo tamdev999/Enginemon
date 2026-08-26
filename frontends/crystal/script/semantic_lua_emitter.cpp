@@ -172,8 +172,15 @@ std::string SemanticLuaEmitter::emit(const SemanticScriptIR& ir) const {
     // The blocks are laid out in ir.blocks in execution order.  After a block
     // whose last instruction is Sem_Call, the *next* block in the array is the
     // continuation (the fallthrough target the CFG recorded as has_fallthrough).
+    //
+    // We also track whether any Sem_End exists in the IR.  Sem_End always emits
+    // "goto __dispatch_return" (inside an if-guard), so the label must exist in
+    // the Lua function whenever Sem_End is present — even if there are no
+    // Sem_Call instructions.  Lua rejects a "goto L" to a non-existent label
+    // even when the goto is unreachable.
     // =========================================================================
     std::set<enginemon::SemanticLabelId> continuation_targets;
+    bool has_sem_end = false;
 
     for (std::size_t block_idx = 0; block_idx + 1 < ir.blocks.size(); ++block_idx) {
         const auto& block = ir.blocks[block_idx];
@@ -183,6 +190,16 @@ std::string SemanticLuaEmitter::emit(const SemanticScriptIR& ir) const {
                 continuation_targets.insert(ir.blocks[block_idx + 1].id);
             }
         }
+    }
+    // Scan all blocks for Sem_End (can appear anywhere, not just at the back).
+    for (const auto& block : ir.blocks) {
+        for (const auto& inst : block.instructions) {
+            if (std::get_if<enginemon::Sem_End>(&inst.op)) {
+                has_sem_end = true;
+                break;
+            }
+        }
+        if (has_sem_end) break;
     }
 
     out << "script = {}\n";
@@ -227,8 +244,13 @@ std::string SemanticLuaEmitter::emit(const SemanticScriptIR& ir) const {
     // Called when Sem_End finds a non-empty call stack.  __return_target holds
     // the numeric block ID popped from __call_stack; this dispatch jumps to it.
     // Only continuation targets (blocks that follow a Sem_Call) are listed.
+    //
+    // The label must also be present whenever any Sem_End exists in the IR —
+    // even with no Sem_Call — because Sem_End always emits "goto __dispatch_return"
+    // inside an if-guard, and Lua rejects goto to a missing label at parse time
+    // even when the goto is statically unreachable.
     // =========================================================================
-    if (!continuation_targets.empty()) {
+    if (!continuation_targets.empty() || has_sem_end) {
         out << "  ::__dispatch_return::\n";
         for (enginemon::SemanticLabelId cid : continuation_targets) {
             out << "  if __return_target == " << cid
@@ -348,7 +370,14 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.flags:add_var(" << o->var << ", " << o->delta << ")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_CheckVar>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "result = ctx.flags:get_var(" << o->var << ") " << o->op << " " << o->value << "\n"; return true;
+        // Wrap the Lua comparison in "(... and 1 or 0)" to produce an integer
+        // result (0 or 1) rather than a Lua boolean.  The VM result register
+        // is always an integer; Sem_JumpIf uses "result ~= 0" / "result == 0",
+        // which does not work correctly with Lua booleans since in Lua
+        // "false ~= 0" is true (boolean and number are distinct types).
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "result = (ctx.flags:get_var(" << o->var << ") " << o->op << " " << o->value << ") and 1 or 0\n";
+        return true;
     }
     if (auto* o = std::get_if<Sem_Random>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "result = ctx.util:random(0, " << (int)o->range - 1 << ")\n"; return true;

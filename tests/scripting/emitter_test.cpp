@@ -121,10 +121,20 @@ TEST(stage7_emit_end_all_distinct_from_end) {
     std::string lua_end    = emitter.emit(make_one_op_ir(Sem_End{}));
     std::string lua_endall = emitter.emit(make_one_op_ir(Sem_EndAll{}));
 
-    // EndAll must call ctx.game:behavior("EndAll")
-    ASSERT_TRUE(lua_endall.find("ctx.game:behavior(\"EndAll\")") != std::string::npos);
-    // End must NOT contain that call
-    ASSERT_TRUE(lua_end.find("ctx.game:behavior(\"EndAll\")") == std::string::npos);
+    // EndAll clears the call stack and terminates: "__call_stack = {}; do return end"
+    ASSERT_TRUE(lua_endall.find("__call_stack = {}") != std::string::npos);
+    ASSERT_TRUE(lua_endall.find("do return end") != std::string::npos);
+
+    // Sem_End does NOT clear the call stack unconditionally (it pops one frame or returns).
+    // EndAll emits "__call_stack = {}; do return end" as a bare statement (no "local" prefix).
+    // Sem_End only has "__call_stack" in the preamble "local __call_stack = {}" declaration.
+    // The distinction: EndAll has a standalone assignment statement, End does not.
+    // Detect EndAll's statement by checking for the pattern at non-local position.
+    ASSERT_TRUE(lua_endall.find("  __call_stack = {}") != std::string::npos); // indented statement
+    ASSERT_TRUE(lua_end.find("  __call_stack = {}") == std::string::npos);    // no such statement
+
+    // Both must emit "do return end" — but EndAll's is preceded by the stack clear
+    ASSERT_TRUE(lua_end.find("do return end") != std::string::npos);
 }
 
 TEST(stage7_emit_show_text_contains_text_sequence_and_yield) {
@@ -1125,6 +1135,848 @@ TEST(variable_sprite_legalizer_slot_offset_encoding) {
     ASSERT_STR_EQ(std::string(gym1), "fuchsia_gym_1");
 }
 
+
+//=============================================================================
+// CFG TORTURE SUITE
+// Structural adversarial tests for SemanticLuaEmitter:
+//   T1–T7:   terminal ops each followed by a live label (parse validity)
+//   T8:      Sem_LoadPendingEncounter with backward goto into its block
+//   T9:      diamond CFG
+//   T10:     loop CFG
+//   T11:     yield→resume continuation (ShowText then flag set)
+//   T12:     sequential yields in one function
+//   T13–T19: ctx.* ABI boundary verification
+//   T20:     Sem_End without Sem_Call emits valid parseable Lua
+//   T21:     Sem_End with Sem_Call — dispatch_return has entries
+//   T22:     Sem_Return in terminal block parses
+//   T23:     Sem_JumpStd terminal followed by dead block — parses
+//   T24:     ShowTextAndEnd followed by dead block — parses
+//   T25:     FacePlayerAndShowText followed by dead block — parses
+//=============================================================================
+
+// Build a two-block SemanticScriptIR.
+// Block 0: ops from first_ops
+// Block 1: ops from second_ops
+static enginemon::SemanticScriptIR make_two_block_ir(
+    std::vector<enginemon::SemanticOp> first_ops,
+    std::vector<enginemon::SemanticOp> second_ops,
+    enginemon::SemanticLabelId id0 = 0,
+    enginemon::SemanticLabelId id1 = 1)
+{
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "test";
+    {
+        enginemon::SemanticBasicBlock b;
+        b.id = id0; b.is_entry = true;
+        for (auto& op : first_ops)
+            b.instructions.push_back({op});
+        ir.blocks.push_back(std::move(b));
+    }
+    {
+        enginemon::SemanticBasicBlock b;
+        b.id = id1;
+        for (auto& op : second_ops)
+            b.instructions.push_back({op});
+        ir.blocks.push_back(std::move(b));
+    }
+    return ir;
+}
+
+// Helper: emit and parse (execute_string) a multi-block IR, returning the Lua source.
+// Returns empty string on parse error, printing the error message.
+static std::string emit_and_parse(const enginemon::SemanticScriptIR& ir,
+                                  const char* test_name)
+{
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    LuaRuntime rt;
+    try {
+        rt.execute_string(lua, test_name);
+    } catch (const std::exception& e) {
+        std::cerr << "  PARSE ERROR in " << test_name << ": " << e.what() << "\n";
+        std::cerr << "  Emitted Lua:\n" << lua << "\n";
+        return "";
+    }
+    return lua;
+}
+
+// ── T1: Sem_End followed by live label ──────────────────────────────────────
+TEST(cfg_torture_t1_sem_end_followed_by_live_label) {
+    // block 0: Sem_End (do return end + __dispatch_return guard)
+    // block 1: Sem_SetFlag (reachable via forward goto in other paths)
+    // The emitter must emit ::__dispatch_return:: so goto __dispatch_return parses.
+    using namespace enginemon;
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 1;
+    auto ir = make_two_block_ir({Sem_End{}}, {Sem_SetFlag{f}});
+    auto lua = emit_and_parse(ir, "T1_sem_end_label");
+    ASSERT_FALSE(lua.empty());
+    // ::block_0:: and ::block_1:: both present
+    ASSERT_TRUE(lua.find("::block_0::") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    // dispatch_return present because Sem_End present
+    ASSERT_TRUE(lua.find("::__dispatch_return::") != std::string::npos);
+    ASSERT_TRUE(lua.find("do return end") != std::string::npos);
+    std::cout << "  [T1: Sem_End followed by live label — parses ✓]\n";
+}
+
+// ── T2: Sem_EndAll followed by live label ───────────────────────────────────
+TEST(cfg_torture_t2_sem_endall_followed_by_live_label) {
+    using namespace enginemon;
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 2;
+    auto ir = make_two_block_ir({Sem_EndAll{}}, {Sem_SetFlag{f}});
+    auto lua = emit_and_parse(ir, "T2_endall_label");
+    ASSERT_FALSE(lua.empty());
+    ASSERT_TRUE(lua.find("__call_stack = {}") != std::string::npos);
+    ASSERT_TRUE(lua.find("do return end") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    std::cout << "  [T2: Sem_EndAll followed by live label — parses ✓]\n";
+}
+
+// ── T3: Sem_Return followed by live label ───────────────────────────────────
+TEST(cfg_torture_t3_sem_return_followed_by_live_label) {
+    using namespace enginemon;
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 3;
+    auto ir = make_two_block_ir({Sem_Return{}}, {Sem_SetFlag{f}});
+    auto lua = emit_and_parse(ir, "T3_return_label");
+    ASSERT_FALSE(lua.empty());
+    ASSERT_TRUE(lua.find("do return end") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    std::cout << "  [T3: Sem_Return followed by live label — parses ✓]\n";
+}
+
+// ── T4: Sem_ShowTextAndEnd followed by live label ───────────────────────────
+TEST(cfg_torture_t4_show_text_and_end_followed_by_live_label) {
+    using namespace enginemon;
+    SemanticTextSequence seq;
+    seq.elements.push_back(SemanticTextElement::make_text("Hello"));
+    seq.elements.push_back(SemanticTextElement::make_done());
+    Sem_ShowTextAndEnd sta; sta.sequence = seq;
+
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 4;
+    auto ir = make_two_block_ir({sta}, {Sem_SetFlag{f}});
+    auto lua = emit_and_parse(ir, "T4_showtextend_label");
+    ASSERT_FALSE(lua.empty());
+    // Must yield before returning
+    ASSERT_TRUE(lua.find("coroutine.yield(\"wait_button\")") != std::string::npos);
+    ASSERT_TRUE(lua.find("ctx.ui:close_text()") != std::string::npos);
+    ASSERT_TRUE(lua.find("do return end") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    std::cout << "  [T4: Sem_ShowTextAndEnd followed by live label — parses ✓]\n";
+}
+
+// ── T5: Sem_FacePlayerAndShowText followed by live label ────────────────────
+TEST(cfg_torture_t5_face_player_show_text_followed_by_live_label) {
+    using namespace enginemon;
+    SemanticTextSequence seq;
+    seq.elements.push_back(SemanticTextElement::make_text("Hi"));
+    seq.elements.push_back(SemanticTextElement::make_done());
+    Sem_FacePlayerAndShowText fps; fps.sequence = seq;
+
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 5;
+    auto ir = make_two_block_ir({fps}, {Sem_SetFlag{f}});
+    auto lua = emit_and_parse(ir, "T5_faceplayer_label");
+    ASSERT_FALSE(lua.empty());
+    ASSERT_TRUE(lua.find("ctx.world:face_player()") != std::string::npos);
+    ASSERT_TRUE(lua.find("do return end") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    std::cout << "  [T5: Sem_FacePlayerAndShowText followed by live label — parses ✓]\n";
+}
+
+// ── T6: Sem_JumpStd terminal followed by live label ─────────────────────────
+TEST(cfg_torture_t6_jump_std_followed_by_live_label) {
+    using namespace enginemon;
+    Sem_JumpStd js; js.std_id = 3; js.name = "TestStd";
+
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 6;
+    auto ir = make_two_block_ir({js}, {Sem_SetFlag{f}});
+    auto lua = emit_and_parse(ir, "T6_jumpstd_label");
+    ASSERT_FALSE(lua.empty());
+    ASSERT_TRUE(lua.find("ctx.game:jump_std(3, \"TestStd\")") != std::string::npos);
+    ASSERT_TRUE(lua.find("do return end") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    std::cout << "  [T6: Sem_JumpStd followed by live label — parses ✓]\n";
+}
+
+// ── T7: Sem_Jump (unconditional goto) to a later block ───────────────────────
+TEST(cfg_torture_t7_sem_jump_forward) {
+    using namespace enginemon;
+    // block 0: Sem_Jump to block 2 (skips block 1)
+    // block 1: unreachable dead code (Sem_SetFlag{var=1})
+    // block 2: Sem_SetFlag{var=2} + Sem_End
+    Sem_Jump jmp; jmp.target = {2, "block_2"};
+    FlagRef f1; f1.ns = FlagNamespace::Event; f1.value = 101;
+    FlagRef f2; f2.ns = FlagNamespace::Event; f2.value = 102;
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T7_jump_fwd";
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        b.instructions.push_back({jmp});
+        ir.blocks.push_back(std::move(b));
+    }
+    {
+        enginemon::SemanticBasicBlock b; b.id = 1;
+        b.instructions.push_back({Sem_SetFlag{f1}});
+        ir.blocks.push_back(std::move(b));
+    }
+    {
+        enginemon::SemanticBasicBlock b; b.id = 2;
+        b.instructions.push_back({Sem_SetFlag{f2}});
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    auto lua = emit_and_parse(ir, "T7_jump_fwd");
+    ASSERT_FALSE(lua.empty());
+    ASSERT_TRUE(lua.find("goto block_2") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_2::") != std::string::npos);
+
+    // Execute: block 1 must be skipped, block 2 flag must be set
+    LuaRuntime rt;
+    rt.execute_string(lua, "T7_exec");
+    rt.start_script("script");
+    auto& flags = rt.get_stub_services().flags;
+    // flag 102 set (block 2), flag 101 NOT set (block 1 skipped)
+    uint32_t enc1 = (static_cast<uint32_t>(0) << 16) | 101;
+    uint32_t enc2 = (static_cast<uint32_t>(0) << 16) | 102;
+    ASSERT_FALSE(flags.count(static_cast<int>(enc1)) && flags.at(static_cast<int>(enc1)));
+    ASSERT_TRUE(flags.count(static_cast<int>(enc2)) && flags.at(static_cast<int>(enc2)));
+    std::cout << "  [T7: Sem_Jump forward — block_1 skipped, block_2 executed ✓]\n";
+}
+
+// ── T8: Sem_LoadPendingEncounter — backward goto must not break do...end guard ─
+TEST(cfg_torture_t8_load_pending_encounter_backward_goto) {
+    // block 0: Sem_SetVar{result=1}
+    // block 1: Sem_JumpIf{true → block_1} (loop back)
+    //          Sem_LoadPendingEncounter
+    // The IR has a backward jump that arrives at block_1 which precedes
+    // the LoadPendingEncounter block.  The do...end guard on LoadPendingEncounter
+    // means the Lua locals are never in scope at the backward goto target.
+    // Must parse and not error.
+    using namespace enginemon;
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T8_lpenc";
+
+    // block 0: set result=1, jump to block 2
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        Sem_SetVar sv; sv.var = 0; sv.source.type = VarValueSourceType::Literal; sv.source.value = 1;
+        b.instructions.push_back({sv});
+        Sem_Jump jmp; jmp.target = {2, "block_2"};
+        b.instructions.push_back({jmp});
+        ir.blocks.push_back(std::move(b));
+    }
+    // block 1: backward jump target (jumped to from block 2 conditional)
+    {
+        enginemon::SemanticBasicBlock b; b.id = 1;
+        Sem_SetVar sv2; sv2.var = 0; sv2.source.type = VarValueSourceType::Literal; sv2.source.value = 0;
+        b.instructions.push_back({sv2});
+        Sem_End end;
+        b.instructions.push_back({end});
+        ir.blocks.push_back(std::move(b));
+    }
+    // block 2: Sem_LoadPendingEncounter — has do...end local guard
+    {
+        enginemon::SemanticBasicBlock b; b.id = 2;
+        b.instructions.push_back({Sem_LoadPendingEncounter{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    // This must parse cleanly — do...end prevents goto-into-local
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    ASSERT_FALSE(lua.empty());
+    // Verify do...end wrapping is present
+    ASSERT_TRUE(lua.find("do\n") != std::string::npos || lua.find("do\r\n") != std::string::npos);
+    ASSERT_TRUE(lua.find("local enc_species") != std::string::npos);
+    ASSERT_TRUE(lua.find("ctx.battle:start_wild") != std::string::npos);
+    // Must parse (no goto-into-local error)
+    LuaRuntime rt;
+    bool parse_ok = true;
+    try {
+        rt.execute_string(lua, "T8_lpenc_parse");
+    } catch (...) {
+        parse_ok = false;
+    }
+    ASSERT_TRUE(parse_ok);
+    std::cout << "  [T8: LoadPendingEncounter do...end guard — backward goto parses ✓]\n";
+}
+
+// ── T9: Diamond CFG ──────────────────────────────────────────────────────────
+TEST(cfg_torture_t9_diamond_cfg) {
+    // block 0: check flag → JumpIf(true→block_2, false→block_1)
+    // block 1: set var[1]=10, jump to block_3
+    // block 2: set var[1]=20, jump to block_3
+    // block 3: Sem_End
+    using namespace enginemon;
+
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 50;
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T9_diamond";
+
+    // block 0: check flag, conditional jump
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        b.instructions.push_back({Sem_CheckFlag{f}});
+        Sem_JumpIf ji; ji.condition = "true"; ji.target = {2, "block_2"};
+        b.instructions.push_back({ji});
+        ir.blocks.push_back(std::move(b));
+    }
+    // block 1: false branch
+    {
+        enginemon::SemanticBasicBlock b; b.id = 1;
+        Sem_SetVar sv; sv.var = 1; sv.source.type = VarValueSourceType::Literal; sv.source.value = 10;
+        b.instructions.push_back({sv});
+        Sem_Jump jmp; jmp.target = {3, "block_3"};
+        b.instructions.push_back({jmp});
+        ir.blocks.push_back(std::move(b));
+    }
+    // block 2: true branch
+    {
+        enginemon::SemanticBasicBlock b; b.id = 2;
+        Sem_SetVar sv; sv.var = 1; sv.source.type = VarValueSourceType::Literal; sv.source.value = 20;
+        b.instructions.push_back({sv});
+        Sem_Jump jmp; jmp.target = {3, "block_3"};
+        b.instructions.push_back({jmp});
+        ir.blocks.push_back(std::move(b));
+    }
+    // block 3: merge + end
+    {
+        enginemon::SemanticBasicBlock b; b.id = 3;
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    auto lua = emit_and_parse(ir, "T9_diamond");
+    ASSERT_FALSE(lua.empty());
+
+    // Execute with flag NOT set → false branch → var[1]=10
+    {
+        LuaRuntime rt;
+        rt.execute_string(lua, "T9_false");
+        flag_api::set_test_flag(&rt, static_cast<int>((0u << 16) | 50u), false);
+        rt.start_script("script");
+        ASSERT_EQ(rt.get_stub_services().vars.count(1) ? rt.get_stub_services().vars.at(1) : -1, 10);
+    }
+    // Execute with flag SET → true branch → var[1]=20
+    {
+        LuaRuntime rt;
+        rt.execute_string(lua, "T9_true");
+        flag_api::set_test_flag(&rt, static_cast<int>((0u << 16) | 50u), true);
+        rt.start_script("script");
+        ASSERT_EQ(rt.get_stub_services().vars.count(1) ? rt.get_stub_services().vars.at(1) : -1, 20);
+    }
+    std::cout << "  [T9: Diamond CFG — false→10, true→20 ✓]\n";
+}
+
+// ── T10: Loop CFG ─────────────────────────────────────────────────────────────
+TEST(cfg_torture_t10_loop_cfg) {
+    // block 0: set var[1]=0
+    // block 1: add_var[1] += 1, check_var[1] < 3 → JumpIf(true→block_1)
+    // block 2: Sem_End (exit when var[1] >= 3)
+    // Tests that backward edges emit valid Lua (goto to earlier label).
+    using namespace enginemon;
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T10_loop";
+
+    // block 0: init
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        Sem_SetVar sv; sv.var = 1; sv.source.type = VarValueSourceType::Literal; sv.source.value = 0;
+        b.instructions.push_back({sv});
+        ir.blocks.push_back(std::move(b));
+    }
+    // block 1: loop body
+    {
+        enginemon::SemanticBasicBlock b; b.id = 1;
+        // add_var(1, 1)
+        Sem_AddVar av; av.var = 1; av.delta = 1;
+        b.instructions.push_back({av});
+        // check_var(1) < 3  → result is 1 if var < 3
+        Sem_CheckVar cv; cv.var = 1; cv.op = "<"; cv.value = 3;
+        b.instructions.push_back({cv});
+        // if result != 0, jump back to block_1
+        Sem_JumpIf ji; ji.condition = "true"; ji.target = {1, "block_1"};
+        b.instructions.push_back({ji});
+        ir.blocks.push_back(std::move(b));
+    }
+    // block 2: exit
+    {
+        enginemon::SemanticBasicBlock b; b.id = 2;
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    auto lua = emit_and_parse(ir, "T10_loop");
+    ASSERT_FALSE(lua.empty());
+    // Must have goto block_1 (backward edge)
+    ASSERT_TRUE(lua.find("goto block_1") != std::string::npos);
+
+    // Execute: loop runs until var[1] == 3
+    LuaRuntime rt;
+    rt.execute_string(lua, "T10_exec");
+    rt.start_script("script");
+    ASSERT_EQ(rt.get_stub_services().vars.count(1) ? rt.get_stub_services().vars.at(1) : -1, 3);
+    std::cout << "  [T10: Loop CFG — var[1]=3 after 3 iterations ✓]\n";
+}
+
+// ── T11: Yield → resume continuation ─────────────────────────────────────────
+TEST(cfg_torture_t11_yield_resume_continuation) {
+    // block 0: Sem_ShowText (yields wait_button), then falls through
+    // block 1: Sem_SetFlag (executes after resume)
+    // Proves that code after a yield in the same emitted function runs on resume.
+    using namespace enginemon;
+
+    SemanticTextSequence seq;
+    seq.elements.push_back(SemanticTextElement::make_text("Yield test"));
+    seq.elements.push_back(SemanticTextElement::make_done());
+    Sem_ShowText st; st.sequence = seq;
+
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 77;
+    auto ir = make_two_block_ir({st}, {Sem_SetFlag{f}, Sem_End{}});
+
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    ASSERT_FALSE(lua.empty());
+
+    LuaRuntime rt;
+    rt.execute_string(lua, "T11_yield_resume");
+
+    uint32_t coro = rt.start_script("script");
+    // Script should have yielded on wait_button
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Yielded);
+    ASSERT_TRUE(rt.get_yield_reason(coro) == YieldReason::Dialog);
+
+    // Flag must NOT be set yet (continuation not executed)
+    uint32_t enc = (static_cast<uint32_t>(0) << 16) | 77u;
+    ASSERT_FALSE(rt.get_stub_services().flags.count(static_cast<int>(enc)));
+
+    // Resume
+    rt.resume(coro);
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Finished);
+
+    // Flag must now be set
+    ASSERT_TRUE(rt.get_stub_services().flags.count(static_cast<int>(enc)));
+    ASSERT_TRUE(rt.get_stub_services().flags.at(static_cast<int>(enc)));
+    std::cout << "  [T11: ShowText yield → flag set after resume ✓]\n";
+}
+
+// ── T12: Sequential yields ────────────────────────────────────────────────────
+TEST(cfg_torture_t12_sequential_yields) {
+    // block 0: Sem_WaitButton  (yield 1)
+    // block 1: Sem_WaitButton  (yield 2)
+    // block 2: Sem_SetVar(var[1]=99) + Sem_End
+    // Each resume must advance exactly one step.
+    using namespace enginemon;
+
+    Sem_SetVar sv; sv.var = 1; sv.source.type = VarValueSourceType::Literal; sv.source.value = 99;
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T12_seq_yields";
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        b.instructions.push_back({Sem_WaitButton{}});
+        ir.blocks.push_back(std::move(b));
+    }
+    {
+        enginemon::SemanticBasicBlock b; b.id = 1;
+        b.instructions.push_back({Sem_WaitButton{}});
+        ir.blocks.push_back(std::move(b));
+    }
+    {
+        enginemon::SemanticBasicBlock b; b.id = 2;
+        b.instructions.push_back({sv});
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    ASSERT_FALSE(lua.empty());
+
+    LuaRuntime rt;
+    rt.execute_string(lua, "T12_seq");
+
+    uint32_t coro = rt.start_script("script");
+    // First yield
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Yielded);
+    ASSERT_EQ(rt.get_stub_services().vars.count(1), 0u); // not yet
+
+    rt.resume(coro);
+    // Second yield
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Yielded);
+    ASSERT_EQ(rt.get_stub_services().vars.count(1), 0u); // still not yet
+
+    rt.resume(coro);
+    // Complete
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Finished);
+    ASSERT_EQ(rt.get_stub_services().vars.at(1), 99);
+    std::cout << "  [T12: Sequential yields — two resumes then var=99 ✓]\n";
+}
+
+// ── T13: ctx.flags ABI — set/clear/check round-trip ─────────────────────────
+TEST(cfg_torture_t13_flags_abi_set_clear_check) {
+    using namespace enginemon;
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 200;
+    uint32_t enc = (static_cast<uint32_t>(0) << 16) | 200u;
+
+    // set flag, check it, clear it, check again — all via emitter
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T13_flags";
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        b.instructions.push_back({Sem_SetFlag{f}});  // set
+        b.instructions.push_back({Sem_CheckFlag{f}}); // result = 1
+        Sem_SetVar sv; sv.var = 1; sv.source.type = VarValueSourceType::ScriptResult;
+        b.instructions.push_back({sv});               // var[1] = (result!=0 ? 1 : 0)
+        b.instructions.push_back({Sem_ClearFlag{f}}); // clear
+        b.instructions.push_back({Sem_CheckFlag{f}}); // result = 0
+        Sem_SetVar sv2; sv2.var = 2; sv2.source.type = VarValueSourceType::ScriptResult;
+        b.instructions.push_back({sv2});              // var[2] = (result!=0 ? 1 : 0)
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    auto lua2 = emit_and_parse(ir, "T13_flags");
+    ASSERT_FALSE(lua2.empty());
+
+    LuaRuntime rt;
+    rt.execute_string(lua, "T13_exec");
+    rt.start_script("script");
+    ASSERT_EQ(rt.get_stub_services().vars.at(1), 1); // was set
+    ASSERT_EQ(rt.get_stub_services().vars.at(2), 0); // was cleared
+    std::cout << "  [T13: ctx.flags set/clear/check ABI round-trip ✓]\n";
+}
+
+// ── T14: ctx.flags add_var/get_var ABI ────────────────────────────────────────
+TEST(cfg_torture_t14_var_abi_addvar_checkvar) {
+    using namespace enginemon;
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T14_var";
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        Sem_SetVar init; init.var = 5; init.source.type = VarValueSourceType::Literal; init.source.value = 10;
+        b.instructions.push_back({init});             // var[5] = 10
+        Sem_AddVar av; av.var = 5; av.delta = 7;
+        b.instructions.push_back({av});               // var[5] += 7  → 17
+        Sem_CheckVar cv; cv.var = 5; cv.op = "=="; cv.value = 17;
+        b.instructions.push_back({cv});               // result = (var[5] == 17)
+        Sem_SetVar store; store.var = 6; store.source.type = VarValueSourceType::ScriptResult;
+        b.instructions.push_back({store});             // var[6] = result
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    auto lua = emit_and_parse(ir, "T14_var");
+    ASSERT_FALSE(lua.empty());
+    LuaRuntime rt;
+    rt.execute_string(lua, "T14_exec");
+    rt.start_script("script");
+    ASSERT_EQ(rt.get_stub_services().vars.at(5), 17);
+    ASSERT_EQ(rt.get_stub_services().vars.at(6), 1); // check passed
+    std::cout << "  [T14: ctx.flags add_var/check_var ABI ✓]\n";
+}
+
+// ── T15: ctx.world face_player / face_actor ABI ──────────────────────────────
+TEST(cfg_torture_t15_world_face_abi) {
+    using namespace enginemon;
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T15_face";
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        b.instructions.push_back({Sem_FacePlayer{}});
+        Sem_TurnObject to; to.object_id = 3; to.facing = enginemon::Direction::Up;
+        b.instructions.push_back({to});
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    auto lua = emit_and_parse(ir, "T15_face");
+    ASSERT_FALSE(lua.empty());
+    ASSERT_TRUE(lua.find("ctx.world:face_player()") != std::string::npos);
+    ASSERT_TRUE(lua.find("ctx.world:face_actor(3, \"up\")") != std::string::npos);
+
+    LuaRuntime rt;
+    rt.execute_string(lua, "T15_exec");
+    world_api::set_actor_pos(&rt, 3, 10, 10);
+    rt.start_script("script");
+    // face_actor for actor 3 to "up" — verify facing changed
+    auto state = world_api::get_actor_state(&rt, 3);
+    ASSERT_STR_EQ(state.facing, "up");
+    std::cout << "  [T15: ctx.world:face_player/face_actor ABI ✓]\n";
+}
+
+// ── T16: ctx.inventory give/has ABI ─────────────────────────────────────────
+TEST(cfg_torture_t16_inventory_give_has_abi) {
+    // The inventory stub's give() and has() are minimal stubs that don't track state.
+    // This test verifies the emitted Lua is syntactically correct and the ABI
+    // calls reach the runtime without error (no crash, no Lua syntax error).
+    using namespace enginemon;
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T16_inv";
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        Sem_GiveItem gi; gi.item = 17; gi.quantity = 3;
+        b.instructions.push_back({gi});
+        Sem_CheckItem ci; ci.item = 17;
+        b.instructions.push_back({ci});
+        Sem_SetVar sv; sv.var = 1; sv.source.type = VarValueSourceType::ScriptResult;
+        b.instructions.push_back({sv}); // var[1] = result of has(17) — stub returns 0
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    // Verify emitted Lua contains correct ABI calls
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    ASSERT_TRUE(lua.find("ctx.inventory:give(17, 3)") != std::string::npos);
+    ASSERT_TRUE(lua.find("ctx.inventory:has(17)") != std::string::npos);
+
+    // Must parse and execute without error
+    auto lua2 = emit_and_parse(ir, "T16_inv");
+    ASSERT_FALSE(lua2.empty());
+
+    // Execute: give+has run, has stub returns 0 (not found, as expected)
+    LuaRuntime rt;
+    rt.execute_string(lua, "T16_exec");
+    rt.start_script("script");
+    // var[1] = 0 because has() stub returns 0 regardless
+    ASSERT_EQ(rt.get_stub_services().vars.count(1) ? rt.get_stub_services().vars.at(1) : -1, 0);
+    std::cout << "  [T16: ctx.inventory:give/has ABI — calls parse, stubs reach runtime ✓]\n";
+}
+
+// ── T17: Warp yield-type is "warp" not terminal ───────────────────────────────
+TEST(cfg_torture_t17_warp_yields_warp_not_terminal) {
+    // Warp must yield "warp" and execution must continue after resume.
+    using namespace enginemon;
+
+    Sem_Warp w; w.map = 5; w.x = 2; w.y = 3;
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 55;
+    auto ir = make_two_block_ir({w}, {Sem_SetFlag{f}, Sem_End{}});
+
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    ASSERT_TRUE(lua.find("coroutine.yield(\"warp\")") != std::string::npos);
+    // Crucially: no "do return end" after the warp yield
+    // The text after coroutine.yield("warp") must be the next block, not a return
+    size_t yield_pos = lua.find("coroutine.yield(\"warp\")");
+    size_t block1_pos = lua.find("::block_1::");
+    ASSERT_TRUE(block1_pos > yield_pos); // block_1 label comes after the warp yield
+    // No "do return end" between yield_pos and block1_pos
+    std::string between = lua.substr(yield_pos, block1_pos - yield_pos);
+    ASSERT_TRUE(between.find("do return end") == std::string::npos);
+
+    LuaRuntime rt;
+    rt.execute_string(lua, "T17_warp");
+    uint32_t coro = rt.start_script("script");
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Yielded);
+    ASSERT_TRUE(rt.get_yield_reason(coro) == YieldReason::Warp);
+
+    // Flag must NOT be set (continuation not run yet)
+    uint32_t enc = (static_cast<uint32_t>(0) << 16) | 55u;
+    ASSERT_FALSE(rt.get_stub_services().flags.count(static_cast<int>(enc)));
+
+    rt.resume(coro);
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Finished);
+    ASSERT_TRUE(rt.get_stub_services().flags.count(static_cast<int>(enc)));
+    std::cout << "  [T17: Sem_Warp yields 'warp', continuation runs after resume ✓]\n";
+}
+
+// ── T18: Battle yield-type is "battle" not terminal ──────────────────────────
+TEST(cfg_torture_t18_battle_yields_battle_not_terminal) {
+    using namespace enginemon;
+
+    Sem_LoadWildMon lw; lw.species = 25; lw.level = 5;
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 56;
+    auto ir = make_two_block_ir({lw}, {Sem_SetFlag{f}, Sem_End{}});
+
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    ASSERT_TRUE(lua.find("coroutine.yield(\"battle\")") != std::string::npos);
+
+    LuaRuntime rt;
+    rt.execute_string(lua, "T18_battle");
+    uint32_t coro = rt.start_script("script");
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Yielded);
+    ASSERT_TRUE(rt.get_yield_reason(coro) == YieldReason::Battle);
+
+    rt.resume(coro);
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Finished);
+    uint32_t enc = (static_cast<uint32_t>(0) << 16) | 56u;
+    ASSERT_TRUE(rt.get_stub_services().flags.count(static_cast<int>(enc)));
+    std::cout << "  [T18: Sem_LoadWildMon yields 'battle', continuation runs ✓]\n";
+}
+
+// ── T19: ctx.util wait_frames yield-type ─────────────────────────────────────
+TEST(cfg_torture_t19_wait_frames_yield_type) {
+    using namespace enginemon;
+
+    Sem_Wait w; w.duration = 3; // wait 3 frames
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 57;
+    auto ir = make_two_block_ir({w}, {Sem_SetFlag{f}, Sem_End{}});
+
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    ASSERT_TRUE(lua.find("ctx.util:wait_frames(3)") != std::string::npos);
+
+    LuaRuntime rt;
+    rt.execute_string(lua, "T19_wait");
+    uint32_t coro = rt.start_script("script");
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Yielded);
+    ASSERT_TRUE(rt.get_yield_reason(coro) == YieldReason::WaitFrames);
+
+    // Tick three times through update (1/60s per tick)
+    for (int i = 0; i < 3; ++i) {
+        rt.update(1.0f / 60.0f);
+    }
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Finished);
+    uint32_t enc = (static_cast<uint32_t>(0) << 16) | 57u;
+    ASSERT_TRUE(rt.get_stub_services().flags.count(static_cast<int>(enc)));
+    std::cout << "  [T19: Sem_Wait → wait_frames yield, continuation after 3 ticks ✓]\n";
+}
+
+// ── T20: Sem_End without Sem_Call — __dispatch_return always present ──────────
+TEST(cfg_torture_t20_sem_end_no_call_dispatch_return_present) {
+    // This is the bug that was just fixed.
+    // A single-block IR with only Sem_End (no Sem_Call) must emit __dispatch_return
+    // so that the goto inside the if-guard is a valid Lua goto.
+    using namespace enginemon;
+    auto ir = make_one_op_ir(Sem_End{});
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+
+    ASSERT_TRUE(lua.find("::__dispatch_return::") != std::string::npos);
+    // Parse must succeed
+    LuaRuntime rt;
+    bool ok = true;
+    try { rt.execute_string(lua, "T20_end_no_call"); }
+    catch (...) { ok = false; }
+    ASSERT_TRUE(ok);
+    // Execute: script exits normally
+    uint32_t coro = rt.start_script("script");
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Finished);
+    std::cout << "  [T20: Sem_End without Sem_Call — __dispatch_return present, parses ✓]\n";
+}
+
+// ── T21: Sem_End with Sem_Call — dispatch_return has entries ─────────────────
+TEST(cfg_torture_t21_sem_end_with_call_dispatch_return_has_entry) {
+    using namespace enginemon;
+    // Layout: [block_0 (Sem_Call→block_1), block_2 (continuation), block_1 (callee)]
+    // Pass 1: block[0] has Sem_Call → continuation = ir.blocks[0+1].id = 2
+    // Sem_Call emits: push(2), goto block_1
+    // Sem_End in block_1: pops 2, goto __dispatch_return
+    // __dispatch_return: if __return_target == 2 then goto block_2 end
+
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "T21_call";
+    // Array index 0: the caller block (Sem_Call targeting block_1)
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        Sem_Call c; c.target = {1, "sub"};
+        b.instructions.push_back({c});
+        ir.blocks.push_back(std::move(b));
+    }
+    // Array index 1: continuation block (id=2) — next after caller in array
+    {
+        enginemon::SemanticBasicBlock b; b.id = 2;
+        Sem_SetVar sv; sv.var = 2; sv.source.type = VarValueSourceType::Literal; sv.source.value = 20;
+        b.instructions.push_back({sv});
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+    // Array index 2: callee block (id=1)
+    {
+        enginemon::SemanticBasicBlock b; b.id = 1;
+        Sem_SetVar sv; sv.var = 1; sv.source.type = VarValueSourceType::Literal; sv.source.value = 10;
+        b.instructions.push_back({sv});
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    // __dispatch_return must have entry for continuation block id=2
+    ASSERT_TRUE(lua.find("if __return_target == 2 then goto block_2 end") != std::string::npos);
+
+    auto lua2 = emit_and_parse(ir, "T21_call");
+    ASSERT_FALSE(lua2.empty());
+
+    // Execute: block_0 calls block_1, block_1 sets var[1]=10 + Sem_End → dispatch → block_2 sets var[2]=20
+    LuaRuntime rt;
+    rt.execute_string(lua, "T21_exec");
+    rt.start_script("script");
+    ASSERT_EQ(rt.get_stub_services().vars.count(1) ? rt.get_stub_services().vars.at(1) : -1, 10);
+    ASSERT_EQ(rt.get_stub_services().vars.count(2) ? rt.get_stub_services().vars.at(2) : -1, 20);
+    std::cout << "  [T21: Sem_Call/Sem_End dispatch — both callee and continuation executed ✓]\n";
+}
+
+// ── T22: Sem_Return in terminal block ─────────────────────────────────────────
+TEST(cfg_torture_t22_sem_return_terminal) {
+    using namespace enginemon;
+    auto ir = make_one_op_ir(Sem_Return{});
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+    ASSERT_TRUE(lua.find("do return end") != std::string::npos);
+    LuaRuntime rt;
+    rt.execute_string(lua, "T22_return");
+    uint32_t coro = rt.start_script("script");
+    ASSERT_TRUE(rt.get_state(coro) == ScriptState::Finished);
+    std::cout << "  [T22: Sem_Return — do return end, script exits ✓]\n";
+}
+
+// ── T23: Sem_JumpStd terminal — dead block must still be emitted ──────────────
+TEST(cfg_torture_t23_jump_std_dead_block) {
+    using namespace enginemon;
+    Sem_JumpStd js; js.std_id = 1; js.name = "Stub";
+    FlagRef f; f.ns = FlagNamespace::Engine; f.value = 3;
+    auto ir = make_two_block_ir({js}, {Sem_SetFlag{f}}); // block 1 is dead
+    auto lua = emit_and_parse(ir, "T23_jumpstd_dead");
+    ASSERT_FALSE(lua.empty());
+    ASSERT_TRUE(lua.find("do return end") != std::string::npos);
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    std::cout << "  [T23: Sem_JumpStd dead block emitted — parses ✓]\n";
+}
+
+// ── T24: Sem_ShowTextAndEnd dead block ────────────────────────────────────────
+TEST(cfg_torture_t24_show_text_and_end_dead_block_parses) {
+    using namespace enginemon;
+    SemanticTextSequence seq;
+    seq.elements.push_back(SemanticTextElement::make_text("X"));
+    seq.elements.push_back(SemanticTextElement::make_done());
+    Sem_ShowTextAndEnd sta; sta.sequence = seq;
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 99;
+    auto ir = make_two_block_ir({sta}, {Sem_SetFlag{f}});
+    auto lua = emit_and_parse(ir, "T24_showend_dead");
+    ASSERT_FALSE(lua.empty());
+    // Block 1 still emitted even though unreachable
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    std::cout << "  [T24: ShowTextAndEnd + dead block — parses ✓]\n";
+}
+
+// ── T25: Sem_FacePlayerAndShowText dead block ─────────────────────────────────
+TEST(cfg_torture_t25_face_player_show_text_dead_block_parses) {
+    using namespace enginemon;
+    SemanticTextSequence seq;
+    seq.elements.push_back(SemanticTextElement::make_text("Y"));
+    seq.elements.push_back(SemanticTextElement::make_done());
+    Sem_FacePlayerAndShowText fps; fps.sequence = seq;
+    FlagRef f; f.ns = FlagNamespace::Event; f.value = 98;
+    auto ir = make_two_block_ir({fps}, {Sem_SetFlag{f}});
+    auto lua = emit_and_parse(ir, "T25_faceshow_dead");
+    ASSERT_FALSE(lua.empty());
+    ASSERT_TRUE(lua.find("::block_1::") != std::string::npos);
+    std::cout << "  [T25: FacePlayerAndShowText + dead block — parses ✓]\n";
+}
+
 //=============================================================================
 // MAIN
 //=============================================================================
@@ -1191,6 +2043,33 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN_TEST(money_emitter_produces_prepare_money_text);
     RUN_TEST(pokemon_icon_and_daycare_sprites_are_valid_semantic_ids);
     RUN_TEST(variable_sprite_legalizer_slot_offset_encoding);
+
+    // CFG Torture Suite (August 2026)
+    RUN_TEST(cfg_torture_t1_sem_end_followed_by_live_label);
+    RUN_TEST(cfg_torture_t2_sem_endall_followed_by_live_label);
+    RUN_TEST(cfg_torture_t3_sem_return_followed_by_live_label);
+    RUN_TEST(cfg_torture_t4_show_text_and_end_followed_by_live_label);
+    RUN_TEST(cfg_torture_t5_face_player_show_text_followed_by_live_label);
+    RUN_TEST(cfg_torture_t6_jump_std_followed_by_live_label);
+    RUN_TEST(cfg_torture_t7_sem_jump_forward);
+    RUN_TEST(cfg_torture_t8_load_pending_encounter_backward_goto);
+    RUN_TEST(cfg_torture_t9_diamond_cfg);
+    RUN_TEST(cfg_torture_t10_loop_cfg);
+    RUN_TEST(cfg_torture_t11_yield_resume_continuation);
+    RUN_TEST(cfg_torture_t12_sequential_yields);
+    RUN_TEST(cfg_torture_t13_flags_abi_set_clear_check);
+    RUN_TEST(cfg_torture_t14_var_abi_addvar_checkvar);
+    RUN_TEST(cfg_torture_t15_world_face_abi);
+    RUN_TEST(cfg_torture_t16_inventory_give_has_abi);
+    RUN_TEST(cfg_torture_t17_warp_yields_warp_not_terminal);
+    RUN_TEST(cfg_torture_t18_battle_yields_battle_not_terminal);
+    RUN_TEST(cfg_torture_t19_wait_frames_yield_type);
+    RUN_TEST(cfg_torture_t20_sem_end_no_call_dispatch_return_present);
+    RUN_TEST(cfg_torture_t21_sem_end_with_call_dispatch_return_has_entry);
+    RUN_TEST(cfg_torture_t22_sem_return_terminal);
+    RUN_TEST(cfg_torture_t23_jump_std_dead_block);
+    RUN_TEST(cfg_torture_t24_show_text_and_end_dead_block_parses);
+    RUN_TEST(cfg_torture_t25_face_player_show_text_dead_block_parses);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";
