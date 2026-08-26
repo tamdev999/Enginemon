@@ -217,6 +217,15 @@ struct GameState {
     // RNG — canonical authoritative gameplay stream (PCG-XSH-RR)
     GameplayRng rng;
     
+    // Item bag — canonical item inventory.
+    // ItemId -> quantity (quantity 0 means item is absent; entries may be absent).
+    // Source: Crystal wNumItems / wItems (PC item list not tracked yet).
+    // Crystal bag is capped at 20 items / 99 per slot.  We do not enforce the
+    // 20-slot cap here — that is a presentation constraint, not a semantic one.
+    // Quantity cap of 99 per slot matches Crystal Gen2 bag semantics.
+    static constexpr int32_t ITEM_QUANTITY_MAX = 99;
+    std::unordered_map<ItemId, int32_t> items;
+
     // NPC states per map (map_id -> NPC states)
     // This captures all gameplay-relevant NPC runtime state for deterministic resume
     std::unordered_map<std::string, std::vector<NpcSaveState>> npc_states;
@@ -254,8 +263,42 @@ struct GameState {
     }
     
     //=========================================================================
-    // SERIALIZATION (minimal binary format)
+    // ITEM BAG OPERATIONS
+    // Source: Crystal Gen2 bag semantics (wNumItems, wItems).
+    // Quantity cap: 99 per slot (Crystal ITEM_QUANTITY_MAX).
     //=========================================================================
+
+    // Give count of item_id.  Returns true if the item was added (always true
+    // unless count <= 0).  Quantity is clamped at ITEM_QUANTITY_MAX (99).
+    bool give_item(ItemId item_id, int32_t count) {
+        if (count <= 0) return false;
+        auto& qty = items[item_id];
+        qty = std::min(qty + count, ITEM_QUANTITY_MAX);
+        return true;
+    }
+
+    // Take count of item_id.  Returns true if the player had enough.
+    bool take_item(ItemId item_id, int32_t count) {
+        if (count <= 0) return false;
+        auto it = items.find(item_id);
+        if (it == items.end() || it->second < count) return false;
+        it->second -= count;
+        if (it->second == 0) items.erase(it);
+        return true;
+    }
+
+    // Returns true if the player has at least count of item_id.
+    bool has_item(ItemId item_id, int32_t count = 1) const {
+        if (count <= 0) return true;
+        auto it = items.find(item_id);
+        return it != items.end() && it->second >= count;
+    }
+
+    // Returns the current quantity of item_id in the bag (0 if absent).
+    int32_t item_count(ItemId item_id) const {
+        auto it = items.find(item_id);
+        return it != items.end() ? it->second : 0;
+    }
     
     // Serialize to bytes
     std::vector<uint8_t> serialize() const;

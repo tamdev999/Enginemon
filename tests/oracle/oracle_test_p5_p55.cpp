@@ -1484,11 +1484,20 @@ TEST(p55_closure_scall_abc) {
     }
 
     // ==========================================================================
-    // Part 3: Behavioral proof -- canonical callee if available
-    //         Deterministic behavioral call/return proof: p55_closure_scall_e2e
-    //         (hand-crafted bytecode, no capability-deferred gaps, deterministic
-    //          expected values: A=flag_5, B=scene(3)+flag_6, C=scene(4)).
-    // Here: if callee is executable, verify it runs without mid-execution errors.
+    // Part 3: Behavioral proof
+    //
+    // If the canonical callee is in the corpus: execute it, assert no
+    // mid-execution errors, assert scene==2 (SCENE_ELMSLAB_NOOP).
+    //
+    // If the canonical callee is NOT in the corpus: this test is structural-only
+    // for the real-corpus evidence.  The deterministic behavioral A/B/C proof
+    // lives in p55_closure_scall_e2e (hand-crafted bytecode, no capability gaps,
+    // deterministic expected values: setevent A -> scall -> [setscene B +
+    // setevent B2] -> setscene C; asserts C=scene(4) proving callee End returned).
+    // That test runs unconditionally and MUST pass for the oracle gate to pass.
+    // When callee is absent here, we assert the caller scall machinery is present
+    // in corpus (the structural link between scall and __call_stack) so this test
+    // is never a no-op silent pass.
     // ==========================================================================
     if (callee_lua.has_value()) {
         P5Harness h;
@@ -1523,8 +1532,25 @@ TEST(p55_closure_scall_abc) {
         ASSERT_TRUE(h.loop.is_idle());
         std::cout << "  [P5.5-CLOSURE-1 Part3: A=flag_1001, B=scene=2, C=idle]\n";
     } else {
-        std::cout << "  [P5.5-CLOSURE-1 Part3: callee not in corpus --"
-                  << " behavioral proof deferred to p55_closure_scall_e2e]\n";
+        // Callee not in corpus. Assert that the oracle corpus contains at least
+        // one ElmsLab script with scall __call_stack machinery — the structural
+        // link that proves the Stage7 emitter produces scall Lua.
+        // Behavioral A/B/C is proven by the mandatory p55_closure_scall_e2e test.
+        bool found_scall_lua = false;
+        auto all_scripts = g_oracle_reader->list_scripts();
+        for (const auto& s : all_scripts) {
+            if (s.find("map_24_5_") != 0) continue;
+            auto l = g_oracle_reader->load_script(s);
+            if (l && l->find("table.insert(__call_stack") != std::string::npos) {
+                found_scall_lua = true;
+                break;
+            }
+        }
+        // Hard assertion: at least one corpus script must use scall machinery.
+        // If this fails, Stage7 is not emitting scall Lua at all.
+        ASSERT_TRUE(found_scall_lua);
+        std::cout << "  [P5.5-CLOSURE-1 Part3: corpus scall machinery confirmed;"
+                  << " A/B/C behavioral proof in p55_closure_scall_e2e]\n";
     }
 }
 TEST(p55_closure_farscall_fullpipe) {

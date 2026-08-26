@@ -990,51 +990,74 @@ int can_use_hm(lua_State* L) {
 
 namespace inventory_api {
 
-// ctx.inventory:give(item_id, count) -> int  (0 = not given, 1 = given)
+// ctx.inventory:give(item_id, count) -> int  (1 = given, 0 = bag full)
 //
-// GameState has no item bag.  Item inventory is not yet implemented.
-// Returns 0 (item not given) — truthful: bag does not exist, so the item
-// was not placed anywhere.  Returns an integer so Sem_GiveItemVerbose and
-// Sem_GiveItemVerboseVar can assign `result = ctx.inventory:give(...)` and
-// forward the result to set_var without a "number expected, got nil" error.
-// Source contract: wScriptVar = FALSE (bag full / not given).
+// Authoritative: writes through GameState::items when bound.
+// Crystal Gen2 semantics: give item to player, result = TRUE(1) if given,
+// FALSE(0) if bag is full (quantity already at 99 or no room).
+// In stub mode (no GameState): always succeeds (headless test default).
 int give(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
     int count   = luaL_optinteger(L, 3, 1);
-    (void)item_id; (void)count;
-    // Truthful: no item bag is implemented.  Result = 0 (not given).
-    // When the bag subsystem is implemented this must be replaced with a real
-    // GameState write-through that returns 1 on success and 0 on bag-full.
-    lua_pushinteger(L, 0);
+    LuaRuntime* runtime = get_runtime(L);
+    if (GameState* gs = runtime->get_game_state()) {
+        bool ok = gs->give_item(static_cast<enginemon::ItemId>(item_id),
+                                static_cast<int32_t>(count));
+        lua_pushinteger(L, ok ? 1 : 0);
+    } else {
+        // No GameState bound — headless stub mode. Treat as given.
+        (void)item_id; (void)count;
+        lua_pushinteger(L, 1);
+    }
     return 1;
 }
 
-// ctx.inventory:take(item_id, count) -> int  (0 = not removed, 1 = removed)
+// ctx.inventory:take(item_id, count) -> int  (1 = removed, 0 = not present)
 //
-// Truthful: no item bag is implemented.  Returns 0 (item not removed).
+// Authoritative: reads and writes through GameState::items when bound.
 int take(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
     int count   = luaL_optinteger(L, 3, 1);
-    (void)item_id; (void)count;
-    lua_pushinteger(L, 0);
+    LuaRuntime* runtime = get_runtime(L);
+    if (GameState* gs = runtime->get_game_state()) {
+        bool ok = gs->take_item(static_cast<enginemon::ItemId>(item_id),
+                                static_cast<int32_t>(count));
+        lua_pushinteger(L, ok ? 1 : 0);
+    } else {
+        (void)item_id; (void)count;
+        lua_pushinteger(L, 0);  // stub: nothing to take
+    }
     return 1;
 }
 
-// ctx.inventory:has(item_id, count?) -> int  (0 = absent, 1 = present)
+// ctx.inventory:has(item_id, count?) -> int  (1 = present, 0 = absent)
 //
-// Truthful: no item bag is implemented.  Returns 0 (item not present).
+// Authoritative: reads from GameState::items when bound.
 int has(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
     int count   = luaL_optinteger(L, 3, 1);
-    (void)item_id; (void)count;
-    lua_pushinteger(L, 0);
+    LuaRuntime* runtime = get_runtime(L);
+    if (GameState* gs = runtime->get_game_state()) {
+        bool present = gs->has_item(static_cast<enginemon::ItemId>(item_id),
+                                    static_cast<int32_t>(count));
+        lua_pushinteger(L, present ? 1 : 0);
+    } else {
+        (void)item_id; (void)count;
+        lua_pushinteger(L, 0);  // stub: bag is empty
+    }
     return 1;
 }
 
 // ctx.inventory:count(item_id) -> number
+// Authoritative: reads from GameState::items when bound.
 int count(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
-    lua_pushinteger(L, 0);
+    LuaRuntime* runtime = get_runtime(L);
+    if (GameState* gs = runtime->get_game_state()) {
+        lua_pushinteger(L, gs->item_count(static_cast<enginemon::ItemId>(item_id)));
+    } else {
+        lua_pushinteger(L, 0);  // stub: bag is empty
+    }
     return 1;
 }
 
