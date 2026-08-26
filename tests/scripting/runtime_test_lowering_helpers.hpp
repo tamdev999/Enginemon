@@ -9,8 +9,7 @@
 
 static std::pair<crystal::CrystalScriptIR, crystal::CrystalCFG>
 make_single_cmd_ir(crystal::CrystalCommandData data, uint32_t entry_address,
-                   const std::string& name, std::vector<uint8_t> raw_bytes)
-{
+                   const std::string& name, std::vector<uint8_t> raw_bytes) {
     using namespace crystal;
     CrystalCommand cmd;
     cmd.data = std::move(data);
@@ -39,8 +38,7 @@ make_single_cmd_ir(crystal::CrystalCommandData data, uint32_t entry_address,
 static std::pair<crystal::CrystalScriptIR, crystal::CrystalCFG>
 make_three_cmd_ir(crystal::CrystalCommandData d1, crystal::CrystalCommandData d2,
                   crystal::CrystalCommandData d3, uint32_t entry_address,
-                  const std::string& name)
-{
+                  const std::string& name) {
     using namespace crystal;
     CrystalScriptIR ir;
     ir.name = name;

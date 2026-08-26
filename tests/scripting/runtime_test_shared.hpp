@@ -223,16 +223,22 @@ static const std::array<std::array<uint8_t, 4>, 128> JOHTO_COLLISION_TABLE = {{
 }};
 
 // Flatten JOHTO_COLLISION_TABLE into per-quadrant vector format
+// This creates 128 * 4 = 512 bytes in the format: [metatile0_TL, metatile0_TR, metatile0_BL, metatile0_BR, metatile1_TL, ...]
 inline std::vector<uint8_t> make_flat_collision_table() {
     std::vector<uint8_t> flat;
     flat.reserve(128 * 4);
-    for (size_t i = 0; i < 128; ++i)
-        for (int q = 0; q < 4; ++q)
+    for (size_t i = 0; i < 128; ++i) {
+        for (int q = 0; q < 4; ++q) {
             flat.push_back(JOHTO_COLLISION_TABLE[i][q]);
+        }
+    }
     return flat;
 }
 
-// Get raw collision byte at tile position (per-tileset collision data, 4 bytes per metatile)
+// Get collision byte at tile position from metatile block array
+// Uses per-tileset collision data (4 bytes per metatile: TL, TR, BL, BR)
+// Index formula: collision[metatile * 4 + (cell_x % 2) + (cell_y % 2) * 2]
+// Reference: Gen2Recomped Map.lua cellTile()
 inline uint8_t get_collision_from_blocks(
     const std::vector<uint8_t>& blocks,
     const std::vector<uint8_t>& collision,
@@ -241,19 +247,37 @@ inline uint8_t get_collision_from_blocks(
 ) {
     int block_x = tile_x / 2;
     int block_y = tile_y / 2;
-    int quad_idx = (tile_x % 2) + (tile_y % 2) * 2;
-    if (block_x < 0 || block_y < 0 ||
-        block_x >= map_width_blocks ||
-        block_y >= static_cast<int>(blocks.size()) / map_width_blocks)
+    int quad_x = tile_x % 2;
+    int quad_y = tile_y % 2;
+    // Quadrant index: (cx % 2) + (cy % 2) * 2 = TL=0, TR=1, BL=2, BR=3
+    int quad_idx = quad_x + quad_y * 2;
+    
+    if (block_x < 0 || block_y < 0 || 
+        block_x >= map_width_blocks || 
+        block_y >= static_cast<int>(blocks.size()) / map_width_blocks) {
+        return 0xFF;  // Out of bounds = wall
+    }
+    
+    int block_idx = block_y * map_width_blocks + block_x;
+    uint8_t metatile = blocks[block_idx];
+    
+    // Block 0 always reads as wall (Gen2Recomped: "if blockId == 0 then return 0xFF")
+    if (metatile == 0) {
         return 0xFF;
-    uint8_t metatile = blocks[block_y * map_width_blocks + block_x];
-    if (metatile == 0) return 0xFF;
+    }
+    
+    // Collision index: metatile * 4 + quadrant
     size_t coll_idx = static_cast<size_t>(metatile) * 4 + quad_idx;
-    if (coll_idx >= collision.size()) return 0xFF;
+    
+    if (coll_idx >= collision.size()) {
+        return 0xFF;  // Invalid = wall
+    }
+    
     return collision[coll_idx];
 }
 
 // Backward-compatible version using hardcoded JOHTO_COLLISION_TABLE
+// Used by tests that don't have tileset collision extracted yet
 inline uint8_t get_collision_from_blocks_johto_raw(
     const std::vector<uint8_t>& blocks,
     int map_width_blocks,
@@ -263,18 +287,30 @@ inline uint8_t get_collision_from_blocks_johto_raw(
     return get_collision_from_blocks(blocks, flat_johto, map_width_blocks, tile_x, tile_y);
 }
 
-// Maps raw Johto collision bytes to semantic CollisionClass (test-only)
+//=============================================================================
+// TEST-ONLY COLLISION CLASSIFIER
+// Mimics Crystal frontend's collision classifier for test purposes
+// Maps raw Johto collision bytes to semantic CollisionClass
+//=============================================================================
+
 inline CollisionClass classify_raw_johto_collision(uint8_t raw_byte) {
-    if (raw_byte == 0xFF || raw_byte == 0x07) return CollisionClass::Wall;
+    // This is a TEST-ONLY helper - the real classifier is in frontends/crystal/
+    // Simplified mapping for common collision types
+    if (raw_byte == 0xFF) return CollisionClass::Wall;
+    if (raw_byte == 0x07) return CollisionClass::Wall;  // COLL_WALL
+    
+    // Water tiles (0x20-0x3F)
     uint8_t hi = raw_byte & 0xF0;
     if (hi == 0x20 || hi == 0x30) {
-        if (raw_byte == 0x23 || raw_byte == 0x2B) return CollisionClass::Ice;
+        if (raw_byte == 0x23 || raw_byte == 0x2B) return CollisionClass::Ice;  // ICE
         if (raw_byte == 0x24 || raw_byte == 0x2C) return CollisionClass::Whirlpool;
         if (raw_byte == 0x33) return CollisionClass::Waterfall;
         return CollisionClass::Water;
     }
+    
+    // Warp tiles (0x70-0x7F)
     if (hi == 0x70) {
-        if (raw_byte == 0x71 || raw_byte == 0x75 || raw_byte == 0x79 || raw_byte == 0x7D)
+        if (raw_byte == 0x71 || raw_byte == 0x75 || raw_byte == 0x79 || raw_byte == 0x7D) 
             return CollisionClass::WarpDoor;
         if (raw_byte == 0x7B || raw_byte == 0x74) return CollisionClass::WarpCave;
         if (raw_byte == 0x72 || raw_byte == 0x7A) return CollisionClass::WarpStair;
@@ -282,29 +318,36 @@ inline CollisionClass classify_raw_johto_collision(uint8_t raw_byte) {
             return CollisionClass::WarpCarpet;
         return CollisionClass::WarpFloor;
     }
+    
+    // Pit tiles (0x60, 0x68)
     if (raw_byte == 0x60 || raw_byte == 0x68) return CollisionClass::WarpPit;
+    
+    // Counter tiles (0x90-0x9F)
     if (hi == 0x90) return CollisionClass::Counter;
+    
+    // Grass tiles
     if (raw_byte == 0x18 || raw_byte == 0x14) return CollisionClass::Grass;
+    
+    // Side walls (0xB0-0xB7)
     if (hi == 0xB0) {
         switch (raw_byte & 0x07) {
-            case 2: return CollisionClass::SideWallN;
-            case 3: return CollisionClass::SideWallS;
-            case 1: return CollisionClass::SideWallE;
-            case 0: return CollisionClass::SideWallW;
+            case 2: return CollisionClass::SideWallN;  // UP_WALL
+            case 3: return CollisionClass::SideWallS;  // DOWN_WALL
+            case 1: return CollisionClass::SideWallE;  // LEFT_WALL (blocks from east)
+            case 0: return CollisionClass::SideWallW;  // RIGHT_WALL (blocks from west)
         }
     }
+    
+    // Default: floor (walkable)
     return CollisionClass::Floor;
 }
 
-// Semantic collision lookup using Johto table (test-only)
+// Semantic version that returns CollisionClass - use this for tests
 inline CollisionClass get_collision_from_blocks_johto(
     const std::vector<uint8_t>& blocks,
     int map_width_blocks,
     int tile_x, int tile_y
 ) {
-    return classify_raw_johto_collision(
-        get_collision_from_blocks_johto_raw(blocks, map_width_blocks, tile_x, tile_y));
+    uint8_t raw = get_collision_from_blocks_johto_raw(blocks, map_width_blocks, tile_x, tile_y);
+    return classify_raw_johto_collision(raw);
 }
-
-
-// =============================================================================
