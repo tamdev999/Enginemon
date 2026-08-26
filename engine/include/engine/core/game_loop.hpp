@@ -201,6 +201,14 @@ class HeadlessGameLoop {
 public:
     HeadlessGameLoop();
     ~HeadlessGameLoop();
+
+    // HeadlessGameLoop owns a MovementManager that stores a callback capturing
+    // [this].  Moving or copying would silently strand that callback on a stale
+    // address.  Neither operation is needed anywhere in the codebase.
+    HeadlessGameLoop(const HeadlessGameLoop&)            = delete;
+    HeadlessGameLoop& operator=(const HeadlessGameLoop&) = delete;
+    HeadlessGameLoop(HeadlessGameLoop&&)                 = delete;
+    HeadlessGameLoop& operator=(HeadlessGameLoop&&)      = delete;
     
     //=========================================================================
     // INITIALIZATION

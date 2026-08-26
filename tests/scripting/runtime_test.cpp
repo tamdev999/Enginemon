@@ -1,6 +1,6 @@
-// tests/scripting/runtime_test.cpp
+﻿// tests/scripting/runtime_test.cpp
 // End-to-end Lua runtime test
-// Verifies: ROM script → decoder → IR → Lua emitter → Lua VM → ctx.* → yield/resume
+// Verifies: ROM script â†’ decoder â†’ IR â†’ Lua emitter â†’ Lua VM â†’ ctx.* â†’ yield/resume
 //
 // Run with: runtime_test <rom_path>
 
@@ -729,12 +729,12 @@ TEST(newbarktown_teacher_third_branch) {
 }
 
 TEST(charmap_pokemon_text) {
-    // Verify charmap correctly decodes POKé, POKéMON, contractions, etc.
+    // Verify charmap correctly decodes POKÃ©, POKÃ©MON, contractions, etc.
     // Cross-reference: pokecrystal/constants/charmap.asm
     SymbolMap symbols;
     ScriptDecoder decoder(*g_rom, symbols);
     
-    // NewBarkTownTeacherScript has "POKé" and "POKéMON" in its text
+    // NewBarkTownTeacherScript has "POKÃ©" and "POKÃ©MON" in its text
     uint32_t script_addr = g_rom->bank_to_flat(0x6A, 0x406F);
     auto script = decoder.decode_script(script_addr, "NewBarkTownTeacherScript");
     
@@ -749,13 +749,13 @@ TEST(charmap_pokemon_text) {
         }, inst.op);
     }
     
-    // Should contain properly decoded "POKéMON" (via 0x54 = "POKé")
-    // The text uses "#MON" which expands 0x54 to "POKé" and MON is regular letters
-    // Note: "POKé" contains U+00E9 (é); use the UTF-8 bytes directly to avoid
+    // Should contain properly decoded "POKÃ©MON" (via 0x54 = "POKÃ©")
+    // The text uses "#MON" which expands 0x54 to "POKÃ©" and MON is regular letters
+    // Note: "POKÃ©" contains U+00E9 (Ã©); use the UTF-8 bytes directly to avoid
     // Windows console encoding issues in the test assertion string.
-    // The decoded text contains "POK" followed by é (U+00E9 = 0xC3 0xA9 in UTF-8).
+    // The decoded text contains "POK" followed by Ã© (U+00E9 = 0xC3 0xA9 in UTF-8).
     ASSERT_TRUE(all_text.find("POK") != std::string::npos);
-    // Verify the é character appears (charmap 0x54 → "POKé", rest is MON)
+    // Verify the Ã© character appears (charmap 0x54 â†’ "POKÃ©", rest is MON)
     bool has_e_accent = false;
     for (size_t i = 0; i + 1 < all_text.size(); ++i) {
         if ((uint8_t)all_text[i] == 0xC3 && (uint8_t)all_text[i+1] == 0xA9) {
@@ -764,7 +764,7 @@ TEST(charmap_pokemon_text) {
     }
     ASSERT_TRUE(has_e_accent);
     
-    std::cout << "  [Charmap correctly decodes POKé]\n";
+    std::cout << "  [Charmap correctly decodes POKÃ©]\n";
 }
 
 TEST(charmap_contractions) {
@@ -947,7 +947,7 @@ TEST(movement_lua_emit_turn) {
 // =============================================================================
 TEST(f2_movement_order_right_down_down) {
     using namespace enginemon;
-    // Source sequence: RIGHT, DOWN, DOWN — must NOT be reordered to DOWN, DOWN, RIGHT
+    // Source sequence: RIGHT, DOWN, DOWN â€” must NOT be reordered to DOWN, DOWN, RIGHT
     ScriptIR script;
     script.name = "TestOrderRDD";
     script.rom_start = 0;
@@ -992,12 +992,12 @@ TEST(f2_movement_order_right_down_down) {
     ASSERT_TRUE(lua_code.find("{right=") == std::string::npos);
     ASSERT_TRUE(lua_code.find("{down=")  == std::string::npos);
 
-    std::cout << "  [F2: RIGHT,DOWN,DOWN emitted in source order, right before down ✓]\n";
+    std::cout << "  [F2: RIGHT,DOWN,DOWN emitted in source order, right before down âœ“]\n";
 }
 
 TEST(f2_movement_order_right_right_up) {
     using namespace enginemon;
-    // Source sequence: RIGHT, RIGHT, UP — UP must come AFTER both RIGHTs
+    // Source sequence: RIGHT, RIGHT, UP â€” UP must come AFTER both RIGHTs
     ScriptIR script;
     script.name = "TestOrderRRU";
     script.rom_start = 0;
@@ -1032,7 +1032,7 @@ TEST(f2_movement_order_right_right_up) {
     ASSERT_TRUE(lua_code.find("{right=") == std::string::npos);
     ASSERT_TRUE(lua_code.find("{up=")    == std::string::npos);
 
-    std::cout << "  [F2: RIGHT,RIGHT,UP emitted in source order ✓]\n";
+    std::cout << "  [F2: RIGHT,RIGHT,UP emitted in source order âœ“]\n";
 }
 
 TEST(movement_world_state_changes) {
@@ -1332,7 +1332,7 @@ TEST(async_movement_with_turns) {
     // This means turns are NOT instant - they take 1 frame.
     //
     // Verified timing from pokecrystal:
-    // - Frame 1-16:  step_left(0) executes (STEP_DURATION 16→0)
+    // - Frame 1-16:  step_left(0) executes (STEP_DURATION 16â†’0)
     // - Frame 17-32: step_left(1) executes
     // - Frame 33:    turn_down executes, STEP_TYPE stays FROM_MOVEMENT
     // - Frame 34-49: step_down executes
@@ -1926,7 +1926,7 @@ TEST(collision_classifier_adversarial_misclassified_ids) {
     
     ASSERT_EQ(crystal::classify_crystal_collision(0x2C), CollisionClass::Whirlpool);
     
-    std::cout << "  [Collision classifier adversarial IDs all verified ✓]\n";
+    std::cout << "  [Collision classifier adversarial IDs all verified âœ“]\n";
 }
 
 TEST(collision_classifier_source_proven_constants) {
@@ -1996,7 +1996,7 @@ TEST(collision_classifier_source_proven_constants) {
     ASSERT_EQ(crystal::classify_crystal_collision(0x3A), CollisionClass::Water);
     ASSERT_EQ(crystal::classify_crystal_collision(0x3B), CollisionClass::Water);
     
-    std::cout << "  [Collision classifier source-proven constants verified ✓]\n";
+    std::cout << "  [Collision classifier source-proven constants verified âœ“]\n";
 }
 
 //=============================================================================
@@ -2058,45 +2058,45 @@ end
     result = loop.process_input(InputAction::MoveUp);
     ASSERT_TRUE(result.accepted);
     
-    std::cout << "  [ScriptYielded input locking verified ✓]\n";
+    std::cout << "  [ScriptYielded input locking verified âœ“]\n";
 }
 
 TEST(tileset_id_bounds_0_1_36_37) {
     // ADVERSARIAL TEST: Prove tileset extraction bounds are 1..36 (Crystal 1-indexed)
-    // - tileset 0 → rejected (invalid, Crystal tilesets are 1-indexed)
-    // - tileset 1 → accepted (johto_outdoor)
-    // - tileset 36 → accepted and identifies "aerodactyl_word_room"
-    // - tileset 37 → rejected (out of range)
+    // - tileset 0 â†’ rejected (invalid, Crystal tilesets are 1-indexed)
+    // - tileset 1 â†’ accepted (johto_outdoor)
+    // - tileset 36 â†’ accepted and identifies "aerodactyl_word_room"
+    // - tileset 37 â†’ rejected (out of range)
     
     TilesetExtractor extractor(*g_rom, *g_profile);
     
     // Tileset 0 - MUST be rejected (Crystal is 1-indexed)
     auto result0 = extractor.extract_tileset(static_cast<uint8_t>(0));
     ASSERT_FALSE(result0.success);
-    std::cout << "  [Tileset 0: rejected ✓]\n";
+    std::cout << "  [Tileset 0: rejected âœ“]\n";
     
     // Tileset 1 (johto_outdoor) - MUST succeed
     auto result1 = extractor.extract_tileset(static_cast<uint8_t>(1));
     ASSERT_TRUE(result1.success);
     ASSERT_TRUE(result1.tileset.tiles.size() > 0);
-    std::cout << "  [Tileset 1: accepted ✓]\n";
+    std::cout << "  [Tileset 1: accepted âœ“]\n";
     
     // Tileset 36 - MUST succeed and be "aerodactyl_word_room"
     auto result36 = extractor.extract_tileset(static_cast<uint8_t>(36));
     ASSERT_TRUE(result36.success);
     ASSERT_TRUE(result36.tileset.tiles.size() > 0);
-    std::cout << "  [Tileset 36: accepted ✓]\n";
+    std::cout << "  [Tileset 36: accepted âœ“]\n";
     
     // Also verify by name
     auto result_aerodactyl = extractor.extract_tileset("aerodactyl_word_room");
     ASSERT_TRUE(result_aerodactyl.success);
     ASSERT_TRUE(result_aerodactyl.tileset.tiles.size() > 0);
-    std::cout << "  [Tileset 36 = aerodactyl_word_room ✓]\n";
+    std::cout << "  [Tileset 36 = aerodactyl_word_room âœ“]\n";
     
     // Tileset 37 - MUST be rejected (out of range, Crystal has 36 tilesets)
     auto result37 = extractor.extract_tileset(static_cast<uint8_t>(37));
     ASSERT_FALSE(result37.success);
-    std::cout << "  [Tileset 37: rejected ✓]\n";
+    std::cout << "  [Tileset 37: rejected âœ“]\n";
 }
 
 //=============================================================================
@@ -2142,7 +2142,7 @@ TEST(bg_event_ifset_unset_blocked) {
     // IFSET with unset flag must NOT trigger
     ASSERT_EQ(result.type, InteractionType::None);
     
-    std::cout << "  [IFSET unset: blocked ✓]\n";
+    std::cout << "  [IFSET unset: blocked âœ“]\n";
 }
 
 TEST(bg_event_ifset_set_triggers) {
@@ -2180,7 +2180,7 @@ TEST(bg_event_ifset_set_triggers) {
     ASSERT_EQ(result.type, InteractionType::BgEvent);
     ASSERT_STR_EQ(result.bg_script_id, "test_script");
     
-    std::cout << "  [IFSET set: triggers ✓]\n";
+    std::cout << "  [IFSET set: triggers âœ“]\n";
 }
 
 TEST(bg_event_ifnotset_unset_triggers) {
@@ -2218,7 +2218,7 @@ TEST(bg_event_ifnotset_unset_triggers) {
     ASSERT_EQ(result.type, InteractionType::BgEvent);
     ASSERT_STR_EQ(result.bg_script_id, "test_script");
     
-    std::cout << "  [IFNOTSET unset: triggers ✓]\n";
+    std::cout << "  [IFNOTSET unset: triggers âœ“]\n";
 }
 
 TEST(bg_event_ifnotset_set_blocked) {
@@ -2255,7 +2255,7 @@ TEST(bg_event_ifnotset_set_blocked) {
     // IFNOTSET with set flag must NOT trigger
     ASSERT_EQ(result.type, InteractionType::None);
     
-    std::cout << "  [IFNOTSET set: blocked ✓]\n";
+    std::cout << "  [IFNOTSET set: blocked âœ“]\n";
 }
 
 TEST(bg_event_hidden_item_uncollected_triggers) {
@@ -2295,7 +2295,7 @@ TEST(bg_event_hidden_item_uncollected_triggers) {
     ASSERT_EQ(result.type, InteractionType::HiddenItem);
     ASSERT_STR_EQ(result.bg_item_id, "potion");
     
-    std::cout << "  [Hidden item uncollected: triggers ✓]\n";
+    std::cout << "  [Hidden item uncollected: triggers âœ“]\n";
 }
 
 TEST(bg_event_hidden_item_collected_blocked) {
@@ -2334,7 +2334,7 @@ TEST(bg_event_hidden_item_collected_blocked) {
     // Hidden item with collected flag must NOT trigger
     ASSERT_EQ(result.type, InteractionType::None);
     
-    std::cout << "  [Hidden item collected: blocked ✓]\n";
+    std::cout << "  [Hidden item collected: blocked âœ“]\n";
 }
 
 //=============================================================================
@@ -2380,14 +2380,14 @@ TEST(sprite_id_mapping_authoritative) {
     ASSERT_EQ(crystal::crystal_sprite_id_to_index("standing_youngster"), 102);
     ASSERT_EQ(crystal::crystal_sprite_id_to_index("invalid_name"), 0);  // 0 = SPRITE_NONE = invalid
     
-    std::cout << "  [Sprite ID mapping authoritative 1..102 ✓]\n";
+    std::cout << "  [Sprite ID mapping authoritative 1..102 âœ“]\n";
 }
 
 TEST(directional_ledge_semantic_preservation) {
     // ADVERSARIAL TEST: Prove ledge direction is NOT collapsed to a single value
     // 
-    // Previously: All Crystal ledges (0xA0-0xA7) → CollisionClass::Ledge (direction lost)
-    // Now: 0xA0 → LedgeRight, 0xA1 → LedgeLeft, 0xA2 → LedgeUp, 0xA3 → LedgeDown
+    // Previously: All Crystal ledges (0xA0-0xA7) â†’ CollisionClass::Ledge (direction lost)
+    // Now: 0xA0 â†’ LedgeRight, 0xA1 â†’ LedgeLeft, 0xA2 â†’ LedgeUp, 0xA3 â†’ LedgeDown
     
     // Basic ledge classification
     ASSERT_EQ(crystal::classify_crystal_collision(0xA0), CollisionClass::LedgeRight);
@@ -2396,10 +2396,10 @@ TEST(directional_ledge_semantic_preservation) {
     ASSERT_EQ(crystal::classify_crystal_collision(0xA3), CollisionClass::LedgeDown);
     
     // Diagonal ledges map to primary direction
-    ASSERT_EQ(crystal::classify_crystal_collision(0xA4), CollisionClass::LedgeDown);  // DOWN_RIGHT → Down
-    ASSERT_EQ(crystal::classify_crystal_collision(0xA5), CollisionClass::LedgeDown);  // DOWN_LEFT → Down
-    ASSERT_EQ(crystal::classify_crystal_collision(0xA6), CollisionClass::LedgeUp);    // UP_RIGHT → Up
-    ASSERT_EQ(crystal::classify_crystal_collision(0xA7), CollisionClass::LedgeUp);    // UP_LEFT → Up
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA4), CollisionClass::LedgeDown);  // DOWN_RIGHT â†’ Down
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA5), CollisionClass::LedgeDown);  // DOWN_LEFT â†’ Down
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA6), CollisionClass::LedgeUp);    // UP_RIGHT â†’ Up
+    ASSERT_EQ(crystal::classify_crystal_collision(0xA7), CollisionClass::LedgeUp);    // UP_LEFT â†’ Up
     
     // Prove different ledge types are distinguishable
     auto ledge_right = crystal::classify_crystal_collision(0xA0);
@@ -2412,7 +2412,7 @@ TEST(directional_ledge_semantic_preservation) {
     ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeUp), enginemon::Direction::Up);
     ASSERT_EQ(collision_ledge_direction(CollisionClass::LedgeDown), enginemon::Direction::Down);
     
-    std::cout << "  [Directional ledge semantic preservation verified ✓]\n";
+    std::cout << "  [Directional ledge semantic preservation verified âœ“]\n";
 }
 
 TEST(duplicate_physical_binding_release) {
@@ -2443,7 +2443,7 @@ TEST(duplicate_physical_binding_release) {
     input.on_key_up(200);
     ASSERT_FALSE(input.snapshot().is_held(InputButton::A));
     
-    std::cout << "  [Duplicate physical binding aggregation verified ✓]\n";
+    std::cout << "  [Duplicate physical binding aggregation verified âœ“]\n";
 }
 
 TEST(special_tileset_fixed_palette_extracted) {
@@ -2483,7 +2483,7 @@ TEST(special_tileset_fixed_palette_extracted) {
     ASSERT_TRUE(result_outdoor.success);
     ASSERT_FALSE(result_outdoor.tileset.fixed_special_palette.has_value());
     
-    std::cout << "  [Special tileset fixed_special_palette extraction verified ✓]\n";
+    std::cout << "  [Special tileset fixed_special_palette extraction verified âœ“]\n";
 }
 
 // =============================================================================
@@ -3541,7 +3541,7 @@ TEST(newbarktown_object_priority_integration) {
 
 TEST(newbarktown_package_roundtrip_interaction) {
     // QUALITY GATE: Package-only integration
-    // ROM → compiler → package → reload → interaction works
+    // ROM â†’ compiler â†’ package â†’ reload â†’ interaction works
     // This proves interaction data survives serialization
     
     MapExtractor extractor(*g_rom, *g_profile);
@@ -3608,7 +3608,7 @@ TEST(newbarktown_package_roundtrip_interaction) {
 //=============================================================================
 // BG EVENT TYPE PACKAGE SEAM TEST
 //=============================================================================
-// Proves all 9 BgEventTypes survive compiler → package → runtime round-trip.
+// Proves all 9 BgEventTypes survive compiler â†’ package â†’ runtime round-trip.
 // This test explicitly covers types that were previously collapsed to Read:
 // FacingDown, FacingRight, FacingLeft, IfSet, IfNotSet, Copy
 
@@ -3837,7 +3837,7 @@ TEST(newbarktown_no_rom_addresses_in_scripts) {
 
 TEST(newbarktown_interaction_determinism) {
     // QUALITY GATE: Determinism
-    // Same input → same output
+    // Same input â†’ same output
     MapExtractor extractor(*g_rom, *g_profile);
     auto result = extractor.extract_map("new_bark_town");
     ASSERT_TRUE(result.success);
@@ -4281,7 +4281,7 @@ TEST(headless_newbark_determinism) {
         ASSERT_EQ(hashes1[i], hashes2[i]);
     }
     
-    std::cout << "  [Determinism verified: same input → same state hash]\n";
+    std::cout << "  [Determinism verified: same input â†’ same state hash]\n";
 }
 
 TEST(headless_newbark_script_execution) {
@@ -4351,7 +4351,7 @@ TEST(headless_newbark_script_execution) {
 
 // =============================================================================
 // WORLD CONTINUITY TESTS - Warps, Connections, Save/Load
-// Proves: map transitions work, LAST_MAP exits resolve, save→load roundtrip
+// Proves: map transitions work, LAST_MAP exits resolve, saveâ†’load roundtrip
 // =============================================================================
 
 // Global map cache for world manager tests
@@ -4579,20 +4579,20 @@ TEST(collision_dimension_uses_collision_not_tile_width) {
     // Verifies that gameplay bounds use collision_width()/collision_height() (blocks*2)
     // NOT tile_width()/tile_height() (blocks*4)
     //
-    // Player coordinates are in collision cells (16×16 pixel grid), not render tiles (8×8).
-    // A map of 10×9 blocks has:
-    //   - collision dimensions: 20×18 cells (collision_width/height)
-    //   - render dimensions: 40×36 tiles (tile_width/height)
+    // Player coordinates are in collision cells (16Ã—16 pixel grid), not render tiles (8Ã—8).
+    // A map of 10Ã—9 blocks has:
+    //   - collision dimensions: 20Ã—18 cells (collision_width/height)
+    //   - render dimensions: 40Ã—36 tiles (tile_width/height)
     //
     // The bug was: bounds checks used tile_width (40) when they should use collision_width (20)
-    // This caused the collision boundary to be 2× larger than correct.
+    // This caused the collision boundary to be 2Ã— larger than correct.
     
     HeadlessGameLoop loop;
     GameState game_state;
     game_state.rng.seed(12345);
     loop.set_game_state(&game_state);
     
-    // Create a 10×9 block map (like New Bark Town)
+    // Create a 10Ã—9 block map (like New Bark Town)
     RuntimeMap rtmap;
     rtmap.width = 10;
     rtmap.height = 9;
@@ -4849,11 +4849,11 @@ TEST(typechart_immunity_is_zero_not_unset) {
     
     // Before any set_effectiveness calls, all matchups should be neutral (10)
     // Chart is pre-filled with 10 in constructor
-    ASSERT_EQ(chart.get_effectiveness(1, 2), 10);  // Unset pair → neutral
-    ASSERT_EQ(chart.get_effectiveness(5, 5), 10);  // Unset pair → neutral
+    ASSERT_EQ(chart.get_effectiveness(1, 2), 10);  // Unset pair â†’ neutral
+    ASSERT_EQ(chart.get_effectiveness(5, 5), 10);  // Unset pair â†’ neutral
     
     // Set explicit immunity (0)
-    chart.set_effectiveness(1, 2, 0);  // Type 1 → Type 2 = immune
+    chart.set_effectiveness(1, 2, 0);  // Type 1 â†’ Type 2 = immune
     ASSERT_EQ(chart.get_effectiveness(1, 2), 0);   // Should return 0, NOT 10
     
     // Set super effective (20)
@@ -4873,13 +4873,13 @@ TEST(typechart_dual_type_immunity_remains_zero) {
     
     TypeChart chart;
     
-    // Set up: Type 1 → Type 10 = immune (0)
-    // Type 1 → Type 11 = super effective (20)
+    // Set up: Type 1 â†’ Type 10 = immune (0)
+    // Type 1 â†’ Type 11 = super effective (20)
     chart.set_effectiveness(1, 10, 0);   // Immune
     chart.set_effectiveness(1, 11, 20);  // Super effective
     
     // Dual-type: Type 10 + Type 11
-    // One type immune → result is immune (0)
+    // One type immune â†’ result is immune (0)
     uint8_t dual_eff = chart.get_effectiveness(1, 10, 11);
     ASSERT_EQ(dual_eff, 0);  // Immune takes priority
     
@@ -4916,8 +4916,8 @@ TEST(typechart_explicit_values_survive_lookup) {
 
 // Fix 2: create_pokemon hard-fail on missing SpeciesId
 TEST(create_pokemon_missing_species_throws) {
-    // NEGATIVE TEST: SpeciesId not in registry → must throw, not return zero-stat Pokémon
-    Registries reg;  // Empty registry — no species registered
+    // NEGATIVE TEST: SpeciesId not in registry â†’ must throw, not return zero-stat PokÃ©mon
+    Registries reg;  // Empty registry â€” no species registered
 
     GameplayRng rng;
     rng.seed(42);
@@ -4933,11 +4933,11 @@ TEST(create_pokemon_missing_species_throws) {
         threw = true;
     }
     ASSERT_TRUE(threw);
-    std::cout << "  [create_pokemon: missing SpeciesId throws, not zero-stat Pokémon ✓]\n";
+    std::cout << "  [create_pokemon: missing SpeciesId throws, not zero-stat PokÃ©mon âœ“]\n";
 }
 
 TEST(create_pokemon_registered_species_succeeds) {
-    // POSITIVE TEST: registered species → succeeds, stats > 0
+    // POSITIVE TEST: registered species â†’ succeeds, stats > 0
     Registries reg;
     SpeciesData sd;
     sd.base_stats.hp      = 45;
@@ -4957,16 +4957,16 @@ TEST(create_pokemon_registered_species_succeeds) {
     ASSERT_TRUE(mon.max_hp > 0);
     ASSERT_TRUE(mon.current_hp > 0);
     ASSERT_EQ(mon.level, 10);
-    std::cout << "  [create_pokemon: registered species produces valid Pokémon (HP=" << mon.max_hp << ") ✓]\n";
+    std::cout << "  [create_pokemon: registered species produces valid PokÃ©mon (HP=" << mon.max_hp << ") âœ“]\n";
 }
 
 // Fix 3: TypeChart invalid TypeId throws
 TEST(typechart_out_of_range_get_throws) {
-    // NEGATIVE TEST: TypeId ≥ MAX_TYPES (32) must throw, not return neutral 10
+    // NEGATIVE TEST: TypeId â‰¥ MAX_TYPES (32) must throw, not return neutral 10
     TypeChart chart;
     bool threw = false;
     try {
-        (void)chart.get_effectiveness(32, 0);  // 32 == MAX_TYPES → out of range
+        (void)chart.get_effectiveness(32, 0);  // 32 == MAX_TYPES â†’ out of range
     } catch (const std::out_of_range&) {
         threw = true;
     }
@@ -4979,7 +4979,7 @@ TEST(typechart_out_of_range_get_throws) {
         threw2 = true;
     }
     ASSERT_TRUE(threw2);
-    std::cout << "  [TypeChart: TypeId≥32 throws out_of_range ✓]\n";
+    std::cout << "  [TypeChart: TypeIdâ‰¥32 throws out_of_range âœ“]\n";
 }
 
 TEST(typechart_out_of_range_set_throws) {
@@ -4996,7 +4996,7 @@ TEST(typechart_out_of_range_set_throws) {
     // In-range set must still work (regression check)
     chart.set_effectiveness(1, 2, 20);
     ASSERT_EQ(chart.get_effectiveness(1, 2), 20);
-    std::cout << "  [TypeChart: set_effectiveness out-of-range throws; in-range still works ✓]\n";
+    std::cout << "  [TypeChart: set_effectiveness out-of-range throws; in-range still works âœ“]\n";
 }
 
 TEST(typechart_max_valid_index_accepted) {
@@ -5004,7 +5004,7 @@ TEST(typechart_max_valid_index_accepted) {
     TypeChart chart;
     chart.set_effectiveness(31, 31, 5);
     ASSERT_EQ(chart.get_effectiveness(31, 31), 5);
-    std::cout << "  [TypeChart: TypeId 31 (MAX_TYPES-1) is valid boundary ✓]\n";
+    std::cout << "  [TypeChart: TypeId 31 (MAX_TYPES-1) is valid boundary âœ“]\n";
 }
 
 TEST(typechart_dual_type_out_of_range_throws) {
@@ -5017,19 +5017,19 @@ TEST(typechart_dual_type_out_of_range_throws) {
         threw = true;
     }
     ASSERT_TRUE(threw);
-    std::cout << "  [TypeChart: dual-type with out-of-range TypeId throws ✓]\n";
+    std::cout << "  [TypeChart: dual-type with out-of-range TypeId throws âœ“]\n";
 }
 
 // Fix 4: Lua load_script_directory deterministic sort
 TEST(lua_load_script_directory_deterministic_order) {
     // DETERMINISM TEST: two scripts define the same global key with different values.
-    // Lexicographic sort → a_script.lua loads first, b_script.lua loads second → b wins.
+    // Lexicographic sort â†’ a_script.lua loads first, b_script.lua loads second â†’ b wins.
     // Creation order is reversed to prove sort overrides filesystem order.
     {
         auto tmp = std::filesystem::temp_directory_path() / "oracle_lua_order_test";
         std::filesystem::create_directories(tmp);
 
-        // Write b_script.lua first (creation order: b before a — "wrong" filesystem order)
+        // Write b_script.lua first (creation order: b before a â€” "wrong" filesystem order)
         {
             std::ofstream f(tmp / "b_script.lua");
             f << "g_order_winner = 'b'\n";
@@ -5041,13 +5041,13 @@ TEST(lua_load_script_directory_deterministic_order) {
         }
 
         // load_script_directory sorts lexicographically:
-        //   a_script.lua < b_script.lua → a loads first, b loads second → b wins.
-        // Without sort: filesystem might return b first → a loads second → a would win.
+        //   a_script.lua < b_script.lua â†’ a loads first, b loads second â†’ b wins.
+        // Without sort: filesystem might return b first â†’ a loads second â†’ a would win.
         LuaRuntime rt;
         rt.load_script_directory(tmp);
 
         // Verify by running a Lua snippet that asserts g_order_winner == 'b'
-        // If sort is working, b loaded last → 'b' wins.
+        // If sort is working, b loaded last â†’ 'b' wins.
         // If sort is broken and creation order was used, 'a' would win and this throws.
         bool threw = false;
         try {
@@ -5063,7 +5063,7 @@ TEST(lua_load_script_directory_deterministic_order) {
 
         std::filesystem::remove_all(tmp);
     }
-    std::cout << "  [Lua load_script_directory: sorted — b_script.lua wins over creation order ✓]\n";
+    std::cout << "  [Lua load_script_directory: sorted â€” b_script.lua wins over creation order âœ“]\n";
 }
 
 TEST(pcstorage_deposit_moves_pokemon_exactly_once) {
@@ -5183,7 +5183,7 @@ TEST(connection_strip_last_valid_coordinate) {
     source.width = 10;
     source.height = 10;
     
-    // src_skip_blocks=2, strip_length_blocks=3 → cells 4-9 (exclusive: 4,5,6,7,8,9)
+    // src_skip_blocks=2, strip_length_blocks=3 â†’ cells 4-9 (exclusive: 4,5,6,7,8,9)
     RuntimeConnection conn;
     conn.direction = ConnectionDirection::West;
     conn.target_map_id = "dest";
@@ -5223,7 +5223,7 @@ TEST(connection_strip_before_strip_rejected) {
     source.width = 10;
     source.height = 10;
     
-    // src_skip_blocks=2, strip_length_blocks=3 → cells 4-9
+    // src_skip_blocks=2, strip_length_blocks=3 â†’ cells 4-9
     RuntimeConnection conn;
     conn.direction = ConnectionDirection::West;
     conn.target_map_id = "dest";
@@ -5264,7 +5264,7 @@ TEST(connection_strip_after_strip_rejected) {
     source.width = 10;
     source.height = 10;
     
-    // src_skip_blocks=2, strip_length_blocks=3 → cells 4-9
+    // src_skip_blocks=2, strip_length_blocks=3 â†’ cells 4-9
     RuntimeConnection conn;
     conn.direction = ConnectionDirection::West;
     conn.target_map_id = "dest";
@@ -5415,7 +5415,7 @@ TEST(npc_cannot_cross_side_wall_from_forbidden_direction) {
         ASSERT_FALSE(updated->x == 5 && updated->y == 5);
     }
     
-    std::cout << "  [NPC cannot cross SideWallN from forbidden direction (south→north)]\n";
+    std::cout << "  [NPC cannot cross SideWallN from forbidden direction (southâ†’north)]\n";
 }
 
 TEST(npc_can_traverse_side_wall_from_allowed_direction) {
@@ -5460,7 +5460,7 @@ TEST(npc_can_traverse_side_wall_from_allowed_direction) {
     
     loop.spawn_player(0, 0, enginemon::Direction::Down);
     
-    // Tick until NPC reaches (5,5) or we timeout — allow more ticks with canonical RNG
+    // Tick until NPC reaches (5,5) or we timeout â€” allow more ticks with canonical RNG
     bool reached_side_wall = false;
     for (int i = 0; i < 5000 && !reached_side_wall; i++) {
         loop.tick();
@@ -5472,7 +5472,7 @@ TEST(npc_can_traverse_side_wall_from_allowed_direction) {
     }
     
     ASSERT_TRUE(reached_side_wall);
-    std::cout << "  [NPC can traverse SideWallN from allowed direction (north→south)]\n";
+    std::cout << "  [NPC can traverse SideWallN from allowed direction (northâ†’south)]\n";
 }
 
 TEST(connection_newbark_to_route29) {
@@ -5557,7 +5557,7 @@ TEST(connection_landing_math) {
 }
 
 // =============================================================================
-// CONNECTION SEMANTIC TESTS — Vanilla cases with nonzero asymmetric offsets
+// CONNECTION SEMANTIC TESTS â€” Vanilla cases with nonzero asymmetric offsets
 //
 // All expected values are hand-authored from pokecrystal/data/maps/attributes.asm
 // and pokecrystal/constants/map_constants.asm.
@@ -5581,13 +5581,13 @@ TEST(connection_semantic_cherrygrove_north_to_route30) {
     // offset = +5, direction = north
     //
     // Crystal macro (north):
-    //   _x = offset * -2 = 5 * -2 = -10  → coord_adjust_tiles = -10
-    //   _src = max(0, -(5 + 3)) = max(0, -8) = 0  → src_skip_blocks = 0
+    //   _x = offset * -2 = 5 * -2 = -10  â†’ coord_adjust_tiles = -10
+    //   _src = max(0, -(5 + 3)) = max(0, -8) = 0  â†’ src_skip_blocks = 0
     //   _len = CHERRYGROVE_W + PAD - offset = 20 + 3 - 5 = 18
     //   clamped to min(18, ROUTE_30_W=10) = 10
-    //   data[6] = _len - _src = 10 - 0 = 10  → strip_length_blocks = 10
+    //   data[6] = _len - _src = 10 - 0 = 10  â†’ strip_length_blocks = 10
     //
-    // PROOF: positive offset → coord_adjust_tiles negative, src_skip_blocks zero.
+    // PROOF: positive offset â†’ coord_adjust_tiles negative, src_skip_blocks zero.
     if (!g_rom) {
         std::cout << "  [SKIP: ROM not loaded]\n";
         return;
@@ -5607,7 +5607,7 @@ TEST(connection_semantic_cherrygrove_north_to_route30) {
 
     // coord_adjust_tiles: offset*-2 = 5*-2 = -10 (already tiles, no *2 needed)
     ASSERT_EQ(north_conn->coord_adjust_tiles, -10);
-    // src_skip_blocks: max(0, -(5+3)) = 0 (positive offset → no source-edge skip)
+    // src_skip_blocks: max(0, -(5+3)) = 0 (positive offset â†’ no source-edge skip)
     ASSERT_EQ(north_conn->src_skip_blocks, 0);
     // strip_length_blocks: min(CHERRYGROVE_W+PAD-offset, ROUTE_30_W) - _src = 10 - 0 = 10
     ASSERT_EQ(north_conn->strip_length_blocks, 10u);
@@ -5616,8 +5616,8 @@ TEST(connection_semantic_cherrygrove_north_to_route30) {
     ASSERT_TRUE(north_conn->coord_adjust_tiles != 0);
     ASSERT_TRUE(north_conn->coord_adjust_tiles != -20);  // old bug: -10 * 2 = -20
 
-    std::cout << "  [Cherrygrove→Route30 (north, offset=+5): "
-              << "coord_adjust=-10, src_skip=0, len=10 ✓]\n";
+    std::cout << "  [Cherrygroveâ†’Route30 (north, offset=+5): "
+              << "coord_adjust=-10, src_skip=0, len=10 âœ“]\n";
 }
 
 TEST(connection_semantic_azalea_west_to_route34) {
@@ -5630,13 +5630,13 @@ TEST(connection_semantic_azalea_west_to_route34) {
     // offset = -18, direction = west
     //
     // Crystal macro (west):
-    //   _y = offset * -2 = (-18) * -2 = +36  → coord_adjust_tiles = +36
-    //   _src = max(0, -(-18 + 3)) = max(0, 15) = 15  → src_skip_blocks = 15
+    //   _y = offset * -2 = (-18) * -2 = +36  â†’ coord_adjust_tiles = +36
+    //   _src = max(0, -(-18 + 3)) = max(0, 15) = 15  â†’ src_skip_blocks = 15
     //   _len = AZALEA_H + PAD - offset = 9 + 3 - (-18) = 30
     //   clamped to min(30, ROUTE_34_H=27) = 27
-    //   data[6] = _len - _src = 27 - 15 = 12  → strip_length_blocks = 12
+    //   data[6] = _len - _src = 27 - 15 = 12  â†’ strip_length_blocks = 12
     //
-    // PROOF: negative offset → coord_adjust_tiles positive, src_skip_blocks nonzero.
+    // PROOF: negative offset â†’ coord_adjust_tiles positive, src_skip_blocks nonzero.
     if (!g_rom) {
         std::cout << "  [SKIP: ROM not loaded]\n";
         return;
@@ -5658,7 +5658,7 @@ TEST(connection_semantic_azalea_west_to_route34) {
 
     // coord_adjust_tiles: offset*-2 = (-18)*-2 = +36 (already tiles)
     ASSERT_EQ(west_conn->coord_adjust_tiles, 36);
-    // src_skip_blocks: max(0, -(-18+3)) = max(0, 15) = 15 (negative offset → large skip)
+    // src_skip_blocks: max(0, -(-18+3)) = max(0, 15) = 15 (negative offset â†’ large skip)
     ASSERT_EQ(west_conn->src_skip_blocks, 15);
     // strip_length_blocks: min(AZALEA_H+PAD-offset, ROUTE_34_H) - _src = 27 - 15 = 12
     ASSERT_EQ(west_conn->strip_length_blocks, 12u);
@@ -5669,8 +5669,8 @@ TEST(connection_semantic_azalea_west_to_route34) {
     // MUTATION: src_skip_blocks must not be zero (negative offset drives this nonzero)
     ASSERT_TRUE(west_conn->src_skip_blocks != 0);
 
-    std::cout << "  [Azalea→Route34 (west, offset=-18): "
-              << "coord_adjust=+36, src_skip=15, len=12 ✓]\n";
+    std::cout << "  [Azaleaâ†’Route34 (west, offset=-18): "
+              << "coord_adjust=+36, src_skip=15, len=12 âœ“]\n";
 }
 
 TEST(connection_semantic_route26_west_to_route27) {
@@ -5680,16 +5680,16 @@ TEST(connection_semantic_route26_west_to_route27) {
     //
     // ROUTE_26: 10w x 54h  (map_constants.asm)
     // ROUTE_27: 40w x 9h
-    // offset = +45, direction = west (large positive — extreme alignment shift)
+    // offset = +45, direction = west (large positive â€” extreme alignment shift)
     //
     // Crystal macro (west):
-    //   _y = offset * -2 = 45 * -2 = -90  → coord_adjust_tiles = -90
-    //   _src = max(0, -(45 + 3)) = max(0, -48) = 0  → src_skip_blocks = 0
+    //   _y = offset * -2 = 45 * -2 = -90  â†’ coord_adjust_tiles = -90
+    //   _src = max(0, -(45 + 3)) = max(0, -48) = 0  â†’ src_skip_blocks = 0
     //   _len = ROUTE_26_H + PAD - offset = 54 + 3 - 45 = 12
     //   clamped to min(12, ROUTE_27_H=9) = 9
-    //   data[6] = _len - _src = 9 - 0 = 9  → strip_length_blocks = 9
+    //   data[6] = _len - _src = 9 - 0 = 9  â†’ strip_length_blocks = 9
     //
-    // PROOF: large positive offset → large negative coord_adjust_tiles, src_skip_blocks zero.
+    // PROOF: large positive offset â†’ large negative coord_adjust_tiles, src_skip_blocks zero.
     // Also tests that coord_adjust_tiles=-90 is NOT confused with the old strip_offset*2=-180.
     if (!g_rom) {
         std::cout << "  [SKIP: ROM not loaded]\n";
@@ -5711,9 +5711,9 @@ TEST(connection_semantic_route26_west_to_route27) {
     ASSERT_TRUE(west_conn != nullptr);
     ASSERT_STR_EQ(west_conn->target_map_id.c_str(), "route_27");
 
-    // coord_adjust_tiles: offset*-2 = 45*-2 = -90 (already tiles — large negative)
+    // coord_adjust_tiles: offset*-2 = 45*-2 = -90 (already tiles â€” large negative)
     ASSERT_EQ(west_conn->coord_adjust_tiles, -90);
-    // src_skip_blocks: max(0, -(45+3)) = 0 (large positive offset → no source skip)
+    // src_skip_blocks: max(0, -(45+3)) = 0 (large positive offset â†’ no source skip)
     ASSERT_EQ(west_conn->src_skip_blocks, 0);
     // strip_length_blocks: min(ROUTE_26_H+PAD-offset, ROUTE_27_H) - _src = 9 - 0 = 9
     ASSERT_EQ(west_conn->strip_length_blocks, 9u);
@@ -5722,8 +5722,8 @@ TEST(connection_semantic_route26_west_to_route27) {
     ASSERT_TRUE(west_conn->coord_adjust_tiles != -180);  // old bug: -90 * 2 = -180
     ASSERT_TRUE(west_conn->src_skip_blocks != 48);       // would be wrong: -(45+3)
 
-    std::cout << "  [Route26→Route27 (west, offset=+45): "
-              << "coord_adjust=-90, src_skip=0, len=9 ✓]\n";
+    std::cout << "  [Route26â†’Route27 (west, offset=+45): "
+              << "coord_adjust=-90, src_skip=0, len=9 âœ“]\n";
 }
 
 TEST(connection_semantic_route27_east_to_route26) {
@@ -5733,16 +5733,16 @@ TEST(connection_semantic_route27_east_to_route26) {
     //
     // ROUTE_27: 40w x 9h  (map_constants.asm)
     // ROUTE_26: 10w x 54h
-    // offset = -45, direction = east (mirror of Route26→Route27)
+    // offset = -45, direction = east (mirror of Route26â†’Route27)
     //
     // Crystal macro (east):
-    //   _y = offset * -2 = (-45) * -2 = +90  → coord_adjust_tiles = +90
-    //   _src = max(0, -(-45 + 3)) = max(0, 42) = 42  → src_skip_blocks = 42
+    //   _y = offset * -2 = (-45) * -2 = +90  â†’ coord_adjust_tiles = +90
+    //   _src = max(0, -(-45 + 3)) = max(0, 42) = 42  â†’ src_skip_blocks = 42
     //   _len = ROUTE_27_H + PAD - offset = 9 + 3 - (-45) = 57
     //   clamped to min(57, ROUTE_26_H=54) = 54
-    //   data[6] = _len - _src = 54 - 42 = 12  → strip_length_blocks = 12
+    //   data[6] = _len - _src = 54 - 42 = 12  â†’ strip_length_blocks = 12
     //
-    // PROOF: large negative offset → large positive coord_adjust and large src_skip.
+    // PROOF: large negative offset â†’ large positive coord_adjust and large src_skip.
     if (!g_rom) {
         std::cout << "  [SKIP: ROM not loaded]\n";
         return;
@@ -5768,11 +5768,11 @@ TEST(connection_semantic_route27_east_to_route26) {
 
     // MUTATION: coord_adjust_tiles != old strip_offset*2 error value
     ASSERT_TRUE(east_conn->coord_adjust_tiles != 180);  // old bug: 90 * 2 = 180
-    // MUTATION: src_skip_blocks is large — must not be zero
+    // MUTATION: src_skip_blocks is large â€” must not be zero
     ASSERT_TRUE(east_conn->src_skip_blocks != 0);
 
-    std::cout << "  [Route27→Route26 (east, offset=-45): "
-              << "coord_adjust=+90, src_skip=42, len=12 ✓]\n";
+    std::cout << "  [Route27â†’Route26 (east, offset=-45): "
+              << "coord_adjust=+90, src_skip=42, len=12 âœ“]\n";
 }
 
 // =============================================================================
@@ -5780,7 +5780,7 @@ TEST(connection_semantic_route27_east_to_route26) {
 // =============================================================================
 
 TEST(gamestate_serialize_roundtrip) {
-    // Basic roundtrip: serialize → deserialize → identical
+    // Basic roundtrip: serialize â†’ deserialize â†’ identical
     GameState original;
     original.player.current_map_id = "new_bark_town";
     original.player.x = 10;
@@ -5848,11 +5848,11 @@ TEST(gamestate_variables_persist) {
     std::cout << "  [Variables persisted correctly]\n";
 }
 
-// Save/load regression: Lua-set flags and vars survive serialize → deserialize
+// Save/load regression: Lua-set flags and vars survive serialize â†’ deserialize
 // Verifies that ctx.flags write-through to GameState is complete end-to-end.
 TEST(lua_flags_vars_persist_through_gamestate_save_load) {
     // Script that sets a flag, clears another, sets a var, and adds to a var.
-    // All operations go through ctx.flags → GameState (when bound).
+    // All operations go through ctx.flags â†’ GameState (when bound).
     const char* script = R"(
 script = (function()
   local function main()
@@ -5879,7 +5879,7 @@ end)()
 
     // GameState must reflect script mutations
     ASSERT_TRUE(gs.check_flag("flag_7"));      // set(7) fired
-    ASSERT_FALSE(gs.check_flag("flag_42"));    // set(42) then clear(42) → absent
+    ASSERT_FALSE(gs.check_flag("flag_42"));    // set(42) then clear(42) â†’ absent
     ASSERT_EQ(gs.get_var("var_3"), 125);       // set_var(3,100) + add_var(3,25)
 
     // Serialize and deserialize
@@ -5893,10 +5893,10 @@ end)()
     ASSERT_FALSE(restored.check_flag("flag_42"));
     ASSERT_EQ(restored.get_var("var_3"), 125);
 
-    std::cout << "  [Lua flags/vars → GameState → serialize → deserialize: all correct ✓]\n";
+    std::cout << "  [Lua flags/vars â†’ GameState â†’ serialize â†’ deserialize: all correct âœ“]\n";
 }
 
-// Isolated test mode: no GameState bound → stubs absorb ops, GameState unaffected
+// Isolated test mode: no GameState bound â†’ stubs absorb ops, GameState unaffected
 TEST(lua_flags_without_gamestate_uses_stubs_only) {
     const char* script = R"(
 script = (function()
@@ -5909,7 +5909,7 @@ end)()
 )";
 
     LuaRuntime runtime;
-    // No set_game_state call — stub-only mode
+    // No set_game_state call â€” stub-only mode
     runtime.execute_string(script, "test_stub_isolation");
     runtime.start_script("script");
 
@@ -5919,8 +5919,8 @@ end)()
     ASSERT_TRUE(it != runtime.get_stub_services().vars.end());
     ASSERT_EQ(it->second, 777);
 
-    // No GameState was mutated (no pointer was set — nothing to check)
-    std::cout << "  [No GameState bound → stubs absorb, no side-effects ✓]\n";
+    // No GameState was mutated (no pointer was set â€” nothing to check)
+    std::cout << "  [No GameState bound â†’ stubs absorb, no side-effects âœ“]\n";
 }
 
 TEST(gamestate_warp_memory_persist) {
@@ -5965,7 +5965,7 @@ TEST(gamestate_rng_persist) {
 }
 
 TEST(save_mutate_load_identical) {
-    // save → mutate → load restores identical gameplay state
+    // save â†’ mutate â†’ load restores identical gameplay state
     GameState state1;
     state1.player.current_map_id = "new_bark_town";
     state1.player.x = 5;
@@ -5995,11 +5995,11 @@ TEST(save_mutate_load_identical) {
     ASSERT_FALSE(state2.check_flag("FLAG_B"));
     ASSERT_EQ(state2.get_var("VAR_X"), 100);
     
-    std::cout << "  [Save→mutate→load restores original state]\n";
+    std::cout << "  [Saveâ†’mutateâ†’load restores original state]\n";
 }
 
 TEST(gamestate_serialize_insertion_order_determinism) {
-    // CRITICAL (Audit 8): Same logical state inserted in different order → byte-identical output
+    // CRITICAL (Audit 8): Same logical state inserted in different order â†’ byte-identical output
     // This tests that serialization uses canonical (sorted) ordering, not hash table iteration order.
     
     // State A: Insert flags/vars in order A, B, C
@@ -6032,16 +6032,16 @@ TEST(gamestate_serialize_insertion_order_determinism) {
     bool identical = (bytes_a == bytes_b);
     ASSERT_TRUE(identical);
     
-    std::cout << "  [Same state, different insertion order → byte-identical serialization ✓]\n";
+    std::cout << "  [Same state, different insertion order â†’ byte-identical serialization âœ“]\n";
 }
 
 // =============================================================================
-// F3: GameState::player single authority — direct sync, no callback needed
+// F3: GameState::player single authority â€” direct sync, no callback needed
 // =============================================================================
 TEST(f3_player_authority_step_syncs_gamestate) {
     // Prove: HeadlessGameLoop directly writes game_state_->player.x/y/facing
     // at spawn_player, handle_movement (facing), and complete_player_movement.
-    // No external callback is required — the loop IS the single write path.
+    // No external callback is required â€” the loop IS the single write path.
     GameState gs;
     gs.player.x = 5;
     gs.player.y = 5;
@@ -6049,7 +6049,7 @@ TEST(f3_player_authority_step_syncs_gamestate) {
 
     HeadlessGameLoop loop;
     loop.set_game_state(&gs);
-    // No movement callback registered — direct sync is sufficient.
+    // No movement callback registered â€” direct sync is sufficient.
 
     RuntimeMap map;
     map.map_id = "f3_test";
@@ -6079,7 +6079,7 @@ TEST(f3_player_authority_step_syncs_gamestate) {
     for (int i = 0; i < 16; ++i) loop.tick();
     ASSERT_EQ(loop.player().x, 4);
     ASSERT_EQ(loop.player().y, 7);
-    ASSERT_EQ(gs.player.x, 4);  // Direct sync — not deferred callback
+    ASSERT_EQ(gs.player.x, 4);  // Direct sync â€” not deferred callback
     ASSERT_EQ(gs.player.y, 7);
     ASSERT_EQ(gs.player.facing, enginemon::Direction::Right);
 
@@ -6090,7 +6090,7 @@ TEST(f3_player_authority_step_syncs_gamestate) {
     ASSERT_EQ(loop.player().y,      gs.player.y);
     ASSERT_EQ(loop.player().facing, gs.player.facing);
 
-    std::cout << "  [F3: spawn/facing/step all directly sync GameState::player — no callback ✓]\n";
+    std::cout << "  [F3: spawn/facing/step all directly sync GameState::player â€” no callback âœ“]\n";
 }
 
 TEST(f3_player_authority_warp_uses_latest_position) {
@@ -6104,7 +6104,7 @@ TEST(f3_player_authority_warp_uses_latest_position) {
 
     HeadlessGameLoop loop;
     loop.set_game_state(&gs);
-    // No callback needed — direct sync is the mechanism.
+    // No callback needed â€” direct sync is the mechanism.
 
     RuntimeMap map;
     map.map_id = "test_outdoor";
@@ -6116,11 +6116,11 @@ TEST(f3_player_authority_warp_uses_latest_position) {
 
     loop.spawn_player(3, 3, enginemon::Direction::Right);
 
-    // ORACLE: spawn immediately syncs — no step needed
+    // ORACLE: spawn immediately syncs â€” no step needed
     ASSERT_EQ(gs.player.x, 3);
     ASSERT_EQ(gs.player.y, 3);
 
-    // Take one step right → player moves to (4,3)
+    // Take one step right â†’ player moves to (4,3)
     loop.process_input(InputAction::MoveRight);
     for (int i = 0; i < 16; ++i) loop.tick();
     ASSERT_EQ(gs.player.x, 4);
@@ -6135,10 +6135,10 @@ TEST(f3_player_authority_warp_uses_latest_position) {
     ASSERT_EQ(gs.player.y, 3);
 
     // If execute_warp uses gs.player for remember_outdoor, it would write (4,3)
-    // If it had used the old stale value it would write (3,3) — this proves correctness.
+    // If it had used the old stale value it would write (3,3) â€” this proves correctness.
     ASSERT_TRUE(gs.player.x != 3 || gs.player.y != 3 || gs.player.x == 4);
 
-    std::cout << "  [F3: GameState::player reflects latest step position for warp memory ✓]\n";
+    std::cout << "  [F3: GameState::player reflects latest step position for warp memory âœ“]\n";
 }
 
 // =============================================================================
@@ -6170,7 +6170,7 @@ TEST(f4_transition_failure_leaves_old_world_coherent) {
     w.add_map(old_map);
     ASSERT_TRUE(w.write(tmp_old));
 
-    // Load the old map — this is our "currently loaded" world
+    // Load the old map â€” this is our "currently loaded" world
     // crystal::PackageReader::load_full_map returns enginemon::RuntimeMap
     auto reader_old = PackageReader::open(tmp_old);
     ASSERT_TRUE(reader_old != nullptr);
@@ -6180,16 +6180,16 @@ TEST(f4_transition_failure_leaves_old_world_coherent) {
     // Attempt to load a nonexistent destination map
     auto dest_opt = reader_old->load_full_map("nonexistent_destination_map");
 
-    // ORACLE: the failed load returns nullopt — the old map data is never overwritten
+    // ORACLE: the failed load returns nullopt â€” the old map data is never overwritten
     ASSERT_FALSE(dest_opt.has_value());
 
-    // The old map opt still valid — it was not corrupted by the failed load
+    // The old map opt still valid â€” it was not corrupted by the failed load
     ASSERT_STR_EQ(old_map_opt->map_id, "f4_old_map");
     ASSERT_EQ(old_map_opt->blocks.size(), 9u);
     ASSERT_EQ(old_map_opt->blocks[0], static_cast<uint8_t>(0x07));
 
     std::filesystem::remove(tmp_old);
-    std::cout << "  [F4: failed destination load returns nullopt; old map data coherent ✓]\n";
+    std::cout << "  [F4: failed destination load returns nullopt; old map data coherent âœ“]\n";
 }
 
 TEST(f4_transition_staged_world_state_separate) {
@@ -6220,7 +6220,7 @@ TEST(f4_transition_staged_world_state_separate) {
     auto reader = PackageReader::open(tmp_live);
     ASSERT_TRUE(reader != nullptr);
 
-    // Load the live map into live_result — this is our authoritative runtime state
+    // Load the live map into live_result â€” this is our authoritative runtime state
     auto live_result = reader->load_full_map("f4_live_map");
     ASSERT_TRUE(live_result.has_value());
 
@@ -6235,7 +6235,7 @@ TEST(f4_transition_staged_world_state_separate) {
     ASSERT_STR_EQ(live_result->map_id, "f4_live_map");
     ASSERT_EQ(live_result->blocks[0], static_cast<uint8_t>(0x0A));
 
-    // The commit only happens when staging succeeds — proving the staged pattern works:
+    // The commit only happens when staging succeeds â€” proving the staged pattern works:
     // if (staged_result) { live_result = std::move(*staged_result); }
     // Since staging failed, we never commit, live_result stays old.
     if (staged_result.has_value()) {
@@ -6245,7 +6245,7 @@ TEST(f4_transition_staged_world_state_separate) {
     ASSERT_STR_EQ(live_result->map_id, "f4_live_map");
 
     std::filesystem::remove(tmp_live);
-    std::cout << "  [F4: staged pattern preserves live state when destination fails ✓]\n";
+    std::cout << "  [F4: staged pattern preserves live state when destination fails âœ“]\n";
 }
 
 // =============================================================================
@@ -6285,7 +6285,7 @@ TEST(renderer_staged_prepare_worldstate_unchanged_on_load_failure) {
     ASSERT_TRUE(live.has_value());
     ASSERT_STR_EQ(live->map_id, "stage_test_map");
 
-    // Attempt to load a nonexistent destination — simulates prepare failing
+    // Attempt to load a nonexistent destination â€” simulates prepare failing
     auto dest = reader->load_full_map("nonexistent_destination");
     ASSERT_FALSE(dest.has_value());  // load fails
 
@@ -6295,7 +6295,7 @@ TEST(renderer_staged_prepare_worldstate_unchanged_on_load_failure) {
     ASSERT_EQ(live->blocks[0], 0u);
 
     std::filesystem::remove(tmp);
-    std::cout << "  [renderer staging: load failure before renderer prepare → live map unchanged ✓]\n";
+    std::cout << "  [renderer staging: load failure before renderer prepare â†’ live map unchanged âœ“]\n";
 }
 
 TEST(renderer_staged_prepare_isolates_cross_operation_failure) {
@@ -6304,7 +6304,7 @@ TEST(renderer_staged_prepare_isolates_cross_operation_failure) {
     // no live renderer state should be touched.
     //
     // At the logic level (without Vulkan): verify the optional chaining
-    // pattern — a nullopt from any prepare_* prevents the commit path.
+    // pattern â€” a nullopt from any prepare_* prevents the commit path.
     // This structural test proves the conditional chain is correct.
 
     // Simulate: tileset_prepared=true, map_prepared=false, atlas_prepared=false
@@ -6313,14 +6313,14 @@ TEST(renderer_staged_prepare_isolates_cross_operation_failure) {
     bool atlas_ok = false;
 
     // In transition_to_map, the code is:
-    //   auto pt = prepare_tileset(...)  → success
-    //   if (!pt) return false           → would stop here if tileset failed
-    //   auto pm = prepare_map(...)      → FAILS HERE
-    //   if (!pm) return false           → stops; pt's dtor frees staged texture
-    //   auto pa = prepare_atlas(...)    → never reached
-    //   if (!pa) return false           → never reached
-    //   world_state = std::move(staged) → never reached
-    //   tile_renderer.commit(...)       → never reached
+    //   auto pt = prepare_tileset(...)  â†’ success
+    //   if (!pt) return false           â†’ would stop here if tileset failed
+    //   auto pm = prepare_map(...)      â†’ FAILS HERE
+    //   if (!pm) return false           â†’ stops; pt's dtor frees staged texture
+    //   auto pa = prepare_atlas(...)    â†’ never reached
+    //   if (!pa) return false           â†’ never reached
+    //   world_state = std::move(staged) â†’ never reached
+    //   tile_renderer.commit(...)       â†’ never reached
 
     // This simulates the control flow:
     bool reached_commit = false;
@@ -6371,11 +6371,11 @@ TEST(renderer_staged_prepare_isolates_cross_operation_failure) {
     ASSERT_TRUE(reached_commit);
     ASSERT_TRUE(reached_world_commit);
 
-    std::cout << "  [renderer staging: prepare-only gates all commit paths correctly ✓]\n";
+    std::cout << "  [renderer staging: prepare-only gates all commit paths correctly âœ“]\n";
 }
 
 // =============================================================================
-// F3 adversarial: no second writable authority — all paths use same GameState
+// F3 adversarial: no second writable authority â€” all paths use same GameState
 // =============================================================================
 TEST(f3_no_second_player_authority) {
     // Adversarial: mutate through EVERY player-state write path and verify
@@ -6409,7 +6409,7 @@ TEST(f3_no_second_player_authority) {
     ASSERT_EQ(gs.player.x, 10); ASSERT_EQ(gs.player.y, 10);
     ASSERT_EQ(gs.player.facing, enginemon::Direction::Right);
 
-    // Path 4: step in each direction — all directly update GameState
+    // Path 4: step in each direction â€” all directly update GameState
     loop.process_input(InputAction::MoveRight);
     for (int i = 0; i < 16; ++i) loop.tick();
     ASSERT_EQ(gs.player.x, 11);
@@ -6431,7 +6431,7 @@ TEST(f3_no_second_player_authority) {
     ASSERT_EQ(loop.player().y,      gs.player.y);
     ASSERT_EQ(loop.player().facing, gs.player.facing);
 
-    std::cout << "  [F3 adversarial: all move paths (spawn/facing/step) keep single GameState authority ✓]\n";
+    std::cout << "  [F3 adversarial: all move paths (spawn/facing/step) keep single GameState authority âœ“]\n";
 }
 
 // =============================================================================
@@ -6496,7 +6496,7 @@ TEST(f4_prepare_warp_does_not_mutate_player) {
     ASSERT_EQ(gs.player.y, 6);
     ASSERT_STR_EQ(gs.player.current_map_id, "source_map");
 
-    // ORACLE: warp_memory NOT written during prepare — still holds old values
+    // ORACLE: warp_memory NOT written during prepare â€” still holds old values
     ASSERT_STR_EQ(gs.warp_memory.map_id, "previous_outdoor");
     ASSERT_EQ(gs.warp_memory.x, 99);
     ASSERT_STR_EQ(gs.warp_memory.backup_map_id, "old_backup");
@@ -6512,7 +6512,7 @@ TEST(f4_prepare_warp_does_not_mutate_player) {
     ASSERT_EQ(gs.warp_memory.backup_x, 4);
     ASSERT_EQ(gs.warp_memory.backup_y, 6);
 
-    std::cout << "  [F4: prepare_warp preserves player+warp_memory; commit_warp applies staged values ✓]\n";
+    std::cout << "  [F4: prepare_warp preserves player+warp_memory; commit_warp applies staged values âœ“]\n";
 }
 
 // =============================================================================
@@ -6551,7 +6551,7 @@ TEST(f4_failed_prepare_warp_leaves_everything_unchanged) {
     // map loader: "old_map" exists, "missing_dest" does NOT
     wm.set_map_loader([&](const std::string& id) -> std::optional<RuntimeMap> {
         if (id == "old_map") return old;
-        return std::nullopt;  // missing_dest not found → load_map fails
+        return std::nullopt;  // missing_dest not found â†’ load_map fails
     });
     wm.load_map("old_map");
     std::string old_wm_map_id = wm.current_map_id();  // "old_map"
@@ -6560,7 +6560,7 @@ TEST(f4_failed_prepare_warp_leaves_everything_unchanged) {
     auto result = wm.prepare_warp(warp_out, gs);
     ASSERT_FALSE(result.success);
 
-    // ORACLE — warp_memory unchanged
+    // ORACLE â€” warp_memory unchanged
     ASSERT_STR_EQ(gs.warp_memory.map_id,        "last_outdoor");
     ASSERT_EQ(gs.warp_memory.x,                  11);
     ASSERT_EQ(gs.warp_memory.y,                  22);
@@ -6568,20 +6568,20 @@ TEST(f4_failed_prepare_warp_leaves_everything_unchanged) {
     ASSERT_EQ(gs.warp_memory.backup_x,            33);
     ASSERT_EQ(gs.warp_memory.backup_y,            44);
 
-    // ORACLE — WorldManager current map unchanged
+    // ORACLE â€” WorldManager current map unchanged
     ASSERT_STR_EQ(wm.current_map_id(), old_wm_map_id);
 
-    // ORACLE — GameState.player unchanged
+    // ORACLE â€” GameState.player unchanged
     ASSERT_EQ(gs.player.x, 3);
     ASSERT_EQ(gs.player.y, 5);
     ASSERT_EQ(gs.player.facing, enginemon::Direction::Right);
     ASSERT_STR_EQ(gs.player.current_map_id, "old_map");
 
-    std::cout << "  [F4 injected failure: failed prepare_warp leaves warp_memory/WorldManager/GameState.player all unchanged ✓]\n";
+    std::cout << "  [F4 injected failure: failed prepare_warp leaves warp_memory/WorldManager/GameState.player all unchanged âœ“]\n";
 }
 
 // =============================================================================
-// F5: NPC map_count is mandatory in v2 — truncation before/inside it must fail
+// F5: NPC map_count is mandatory in v2 â€” truncation before/inside it must fail
 // =============================================================================
 TEST(f5_save_v2_npc_section_mandatory_truncations) {
     // Build a minimal valid v2 save, then truncate it at various byte offsets
@@ -6592,29 +6592,29 @@ TEST(f5_save_v2_npc_section_mandatory_truncations) {
     gs.player.y = 7;
     gs.player.facing = enginemon::Direction::Down;
 
-    // Serialize the canonical v2 state — this includes map_count = 0
+    // Serialize the canonical v2 state â€” this includes map_count = 0
     auto bytes = gs.serialize();
     ASSERT_TRUE(bytes.size() >= 8u);  // At minimum header
 
-    // Find the last 4 bytes — that's map_count (0x00 0x00 0x00 0x00 for 0 maps)
+    // Find the last 4 bytes â€” that's map_count (0x00 0x00 0x00 0x00 for 0 maps)
     // Actually find the exact offset by locating the end of the playtime field.
     // Layout: ... playtime(8 bytes) ... map_count(4 bytes)
     // Total size = N.  Last 4 bytes = map_count.
     const size_t full_size = bytes.size();
 
-    // Case 5: Full bytes with map_count=0 — must succeed
+    // Case 5: Full bytes with map_count=0 â€” must succeed
     {
         auto result = GameState::try_deserialize(bytes);
         ASSERT_TRUE(result.ok());
         ASSERT_STR_EQ(result.state.player.current_map_id, "test_map");
-        std::cout << "    Case 5 (complete zero map_count): Success ✓\n";
+        std::cout << "    Case 5 (complete zero map_count): Success âœ“\n";
     }
 
-    // Cases 1–4: truncate before/inside map_count
+    // Cases 1â€“4: truncate before/inside map_count
     for (int bytes_missing = 4; bytes_missing >= 1; --bytes_missing) {
         std::vector<uint8_t> truncated(bytes.begin(), bytes.begin() + full_size - bytes_missing);
         auto result = GameState::try_deserialize(truncated);
-        // ORACLE: must NOT be Success — must be TruncatedData or CorruptedPayload
+        // ORACLE: must NOT be Success â€” must be TruncatedData or CorruptedPayload
         ASSERT_FALSE(result.ok());
         // Must be a hard failure, not Success
         bool is_data_error =
@@ -6622,10 +6622,10 @@ TEST(f5_save_v2_npc_section_mandatory_truncations) {
             (result.error == DeserializeError::CorruptedPayload);
         ASSERT_TRUE(is_data_error);
         std::cout << "    Case " << (5 - bytes_missing) << " (missing " << bytes_missing
-                  << " byte(s) of map_count): rejected ✓\n";
+                  << " byte(s) of map_count): rejected âœ“\n";
     }
 
-    std::cout << "  [F5: v2 NPC map_count mandatory — 4 truncations rejected, complete zero-count succeeds ✓]\n";
+    std::cout << "  [F5: v2 NPC map_count mandatory â€” 4 truncations rejected, complete zero-count succeeds âœ“]\n";
 }
 
 // =============================================================================
@@ -6645,7 +6645,7 @@ TEST(f6_simultaneous_wakeup_deterministic_order) {
     // Shared counter in Lua global state
     rt.execute_string("shared_counter = 0", "init");
 
-    // Script A (lower ID — allocated first): multiply counter by 10 then add 100
+    // Script A (lower ID â€” allocated first): multiply counter by 10 then add 100
     rt.execute_string(R"(
 script_a_tbl = {}
 function script_a_tbl.main(ctx)
@@ -6655,7 +6655,7 @@ end
 )", "script_a_code");
     uint32_t id_a = rt.start_script("script_a_tbl");
 
-    // Script B (higher ID — allocated second): add 1
+    // Script B (higher ID â€” allocated second): add 1
     rt.execute_string(R"(
 script_b_tbl = {}
 function script_b_tbl.main(ctx)
@@ -6668,8 +6668,8 @@ end
     ASSERT_TRUE(id_a < id_b);  // IDs are monotonically allocated
 
     // Tick 2 frames to expire both waits
-    rt.update(1.0f / 60.0f);  // tick 1 (wait_ticks: 2→1)
-    rt.update(1.0f / 60.0f);  // tick 2 (wait_ticks: 1→0) → both expire
+    rt.update(1.0f / 60.0f);  // tick 1 (wait_ticks: 2â†’1)
+    rt.update(1.0f / 60.0f);  // tick 2 (wait_ticks: 1â†’0) â†’ both expire
 
     // ORACLE: With F6 sorting by ID (ascending), A runs before B.
     // A: shared_counter = 0 * 10 + 100 = 100
@@ -6682,12 +6682,12 @@ end
     // Manually verify the ordering is consistent with sorted IDs
     // by confirming id_a < id_b was already asserted above.
     // The test passes iff the assert inside execute_string doesn't throw.
-    std::cout << "  [F6: simultaneous wakeup — A(id=" << id_a << ") before B(id=" << id_b
-              << ") → counter=101 deterministic ✓]\n";
+    std::cout << "  [F6: simultaneous wakeup â€” A(id=" << id_a << ") before B(id=" << id_b
+              << ") â†’ counter=101 deterministic âœ“]\n";
 }
 
 // =============================================================================
-// F7: Text sequence ordering via lua_rawgeti — Text("A"), Line, Text("B"), Prompt
+// F7: Text sequence ordering via lua_rawgeti â€” Text("A"), Line, Text("B"), Prompt
 // =============================================================================
 TEST(f7_text_sequence_ordered_consumption) {
     // Test that the text_sequence Lua API processes elements in numeric array order.
@@ -6737,7 +6737,7 @@ end
     ASSERT_TRUE(captured.elements[1].op != RuntimeTextOp::Text);
     ASSERT_TRUE(captured.elements[1].op != RuntimeTextOp::Prompt);
 
-    std::cout << "  [F7: Text(A),Line,Text(B),Prompt — exact ordered consumption via lua_rawgeti ✓]\n";
+    std::cout << "  [F7: Text(A),Line,Text(B),Prompt â€” exact ordered consumption via lua_rawgeti âœ“]\n";
 }
 
 TEST(gamestate_deserialize_malformed_rejects) {
@@ -6773,7 +6773,7 @@ TEST(gamestate_deserialize_malformed_rejects) {
     ASSERT_EQ(static_cast<int>(result_empty.error), 
               static_cast<int>(DeserializeError::TruncatedData));
     
-    std::cout << "  [Malformed input rejected in all cases: truncated, bad_magic, bad_version, empty ✓]\n";
+    std::cout << "  [Malformed input rejected in all cases: truncated, bad_magic, bad_version, empty âœ“]\n";
 }
 
 TEST(scheduler_interpolation_alpha_clamped) {
@@ -6808,7 +6808,7 @@ TEST(scheduler_interpolation_alpha_clamped) {
     ASSERT_TRUE(clamped_alpha <= 1.0);
     
     std::cout << "  [Debt=" << debt_ticks << " ticks, naive_alpha=" << naive_alpha 
-              << ", clamped_alpha=" << clamped_alpha << " ✓]\n";
+              << ", clamped_alpha=" << clamped_alpha << " âœ“]\n";
 }
 
 // =============================================================================
@@ -7659,14 +7659,14 @@ TEST(newbark_npc_behaviors_extracted) {
 }
 
 TEST(npc_rng_determinism_via_gamestate) {
-    // Proves same canonical GameState RNG seed → same NPC movement sequence.
+    // Proves same canonical GameState RNG seed â†’ same NPC movement sequence.
     // After NPC-RNG migration: NPC movement draws from game_state_->rng (canonical PCG).
-    // Same seed → same movement; different seed → different movement.
+    // Same seed â†’ same movement; different seed â†’ different movement.
 
     auto run_simulation = [](uint64_t seed) -> std::vector<std::pair<int32_t, int32_t>> {
         HeadlessGameLoop loop;
         GameState game_state;
-        game_state.rng.seed(seed);  // Seed canonical RNG — NPC movement will draw from this
+        game_state.rng.seed(seed);  // Seed canonical RNG â€” NPC movement will draw from this
 
         RuntimeMap rtmap;
         rtmap.width = 20;
@@ -7707,7 +7707,7 @@ TEST(npc_rng_determinism_via_gamestate) {
         return positions;
     };
 
-    // Same seed → identical NPC movement
+    // Same seed â†’ identical NPC movement
     auto run1 = run_simulation(0xDEADBEEFULL);
     auto run2 = run_simulation(0xDEADBEEFULL);
     ASSERT_EQ(run1.size(), run2.size());
@@ -7716,7 +7716,7 @@ TEST(npc_rng_determinism_via_gamestate) {
         ASSERT_EQ(run1[i].second, run2[i].second);
     }
 
-    // Different seed → diverging movement
+    // Different seed â†’ diverging movement
     auto run3 = run_simulation(0x12345678ULL);
     bool diverged = false;
     for (size_t i = 0; i < run1.size(); i++) {
@@ -7727,13 +7727,13 @@ TEST(npc_rng_determinism_via_gamestate) {
     }
     ASSERT_TRUE(diverged);
 
-    std::cout << "  [NPC movement: same canonical seed → identical sequence; different seed → diverges]\n";
+    std::cout << "  [NPC movement: same canonical seed â†’ identical sequence; different seed â†’ diverges]\n";
 }
 
 TEST(npc_rng_save_restore_determinism) {
     // AUDIT 7 STRONG TEST: Proves save/load restores deterministic NPC simulation
-    // seed → initialize NPCs → advance until nontrivial state → snapshot → advance N
-    // → record behavior → restore → advance N → must match exactly
+    // seed â†’ initialize NPCs â†’ advance until nontrivial state â†’ snapshot â†’ advance N
+    // â†’ record behavior â†’ restore â†’ advance N â†’ must match exactly
     //
     // This tests FULL simulation state restoration, not just RNG.
     
@@ -7768,7 +7768,7 @@ TEST(npc_rng_save_restore_determinism) {
     
     loop.spawn_player(0, 0, enginemon::Direction::Down);
     
-    // Seed canonical RNG — NPC movement now draws from this stream
+    // Seed canonical RNG â€” NPC movement now draws from this stream
     game_state.rng.seed(0xCAFEBABEULL);
     game_state.player.current_map_id = "test_map";
     loop.set_game_state(&game_state);
@@ -7847,7 +7847,7 @@ TEST(npc_rng_save_restore_determinism) {
     
     // Restore NPC states from GameState (positions, idle_timers, etc.)
     loop2.restore_npc_states("test_map");
-    // No separate map_rng_ to restore — the canonical RNG state is already in restored_state.rng
+    // No separate map_rng_ to restore â€” the canonical RNG state is already in restored_state.rng
     
     // Verify NPC state was restored
     const NpcState* restored_npc = loop2.get_npc(1);
@@ -7855,7 +7855,7 @@ TEST(npc_rng_save_restore_determinism) {
     ASSERT_EQ(restored_npc->y, save_y);
     ASSERT_EQ(restored_npc->idle_timer, save_idle);
     
-    // Run same N ticks — MUST match exactly because canonical RNG was restored
+    // Run same N ticks â€” MUST match exactly because canonical RNG was restored
     std::vector<std::tuple<int32_t, int32_t, Direction, int32_t>> restored_future_states;
     for (int i = 0; i < N_TICKS; i++) {
         loop2.tick();
@@ -8792,7 +8792,7 @@ TEST(batch1_screen_fade_variants) {
     ASSERT_EQ(static_cast<int>(fade_in_black.color), static_cast<int>(FadeColor::Black));
     ASSERT_FALSE(fade_in_black.prefill);
     
-    std::cout << "  [All 4 screen fade variants correctly parameterized: direction×color×prefill]\n";
+    std::cout << "  [All 4 screen fade variants correctly parameterized: directionÃ—colorÃ—prefill]\n";
 }
 
 TEST(batch1_sync_palettes_variants) {
@@ -8823,9 +8823,9 @@ TEST(batch1_sync_palettes_variants) {
 
 TEST(batch1_sprite_ops_distinct) {
     // Verify sprite refresh operations are distinct types
-    // 56 (UpdatePlayerSprite) → Sem_RefreshPlayerSprite
-    // 94 (LoadUsedSpritesGFX) → Sem_SyncSprites
-    // 158 (RefreshSprites) → Sem_RebuildSprites
+    // 56 (UpdatePlayerSprite) â†’ Sem_RefreshPlayerSprite
+    // 94 (LoadUsedSpritesGFX) â†’ Sem_SyncSprites
+    // 158 (RefreshSprites) â†’ Sem_RebuildSprites
     
     using namespace enginemon;
     
@@ -8845,8 +8845,8 @@ TEST(batch1_sprite_ops_distinct) {
 
 TEST(batch1_audio_ops_distinct) {
     // Verify audio operations are correctly typed
-    // 61 (RestartMapMusic) → Sem_RestartMapMusic (no params)
-    // 106 (FadeOutMusic) → Sem_FadeToSilence (no params, fixed behavior)
+    // 61 (RestartMapMusic) â†’ Sem_RestartMapMusic (no params)
+    // 106 (FadeOutMusic) â†’ Sem_FadeToSilence (no params, fixed behavior)
     
     using namespace enginemon;
     
@@ -8907,7 +8907,7 @@ TEST(batch2_special_59_waits_sfx) {
     Sem_WaitSound wait_op{};
     (void)wait_op;  // Suppress unused warning
     
-    std::cout << "  [Special 59 → Sem_WaitSound: no Crystal ID, correct contract]\n";
+    std::cout << "  [Special 59 â†’ Sem_WaitSound: no Crystal ID, correct contract]\n";
 }
 
 TEST(batch2_special_60_plays_map_music) {
@@ -8928,7 +8928,7 @@ TEST(batch2_special_60_plays_map_music) {
     Sem_PlayMapMusic play_op{};
     (void)play_op;  // Suppress unused warning
     
-    std::cout << "  [Special 60 → Sem_PlayMapMusic: no Crystal ID, correct contract]\n";
+    std::cout << "  [Special 60 â†’ Sem_PlayMapMusic: no Crystal ID, correct contract]\n";
 }
 
 TEST(batch2_no_sem_special_for_59_60) {
@@ -8954,7 +8954,7 @@ TEST(batch2_59_not_60_60_not_61) {
     using namespace enginemon;
     
     // These are structurally identical (empty structs) but semantically distinct
-    // The lowering must route 59→WaitSound, 60→PlayMapMusic, 61→RestartMapMusic
+    // The lowering must route 59â†’WaitSound, 60â†’PlayMapMusic, 61â†’RestartMapMusic
     
     // Type system enforces distinctness
     static_assert(!std::is_same_v<Sem_WaitSound, Sem_PlayMapMusic>);
@@ -8975,12 +8975,12 @@ TEST(batch2_59_not_60_60_not_61) {
     ASSERT_FALSE(std::holds_alternative<Sem_RestartMapMusic>(op_play));
     ASSERT_FALSE(std::holds_alternative<Sem_WaitSound>(op_restart));
     
-    std::cout << "  [Verified: 59≠60≠61 - each maps to distinct semantic op]\n";
+    std::cout << "  [Verified: 59â‰ 60â‰ 61 - each maps to distinct semantic op]\n";
 }
 
 //=============================================================================
 // BATCH 3 SPECIAL SEMANTIC OP TESTS - HealParty (ID 27)
-// Proves: Special 27 → Sem_HealParty with correct contract
+// Proves: Special 27 â†’ Sem_HealParty with correct contract
 // These must NOT produce Sem_Special and must NOT carry raw Crystal Special IDs.
 //=============================================================================
 
@@ -9003,7 +9003,7 @@ TEST(batch3_special_27_heals_party) {
     Sem_HealParty heal_op{};
     (void)heal_op;  // Suppress unused warning
     
-    std::cout << "  [Special 27 → Sem_HealParty: no Crystal ID, correct contract]\n";
+    std::cout << "  [Special 27 â†’ Sem_HealParty: no Crystal ID, correct contract]\n";
 }
 
 TEST(batch3_no_sem_special_for_27) {
@@ -9023,7 +9023,7 @@ TEST(batch3_no_sem_special_for_27) {
     ASSERT_TRUE(std::holds_alternative<Sem_HealParty>(op_heal));
     ASSERT_FALSE(std::holds_alternative<Sem_Special>(op_heal));
     
-    std::cout << "  [Verified: Special 27 → Sem_HealParty, NOT Sem_Special]\n";
+    std::cout << "  [Verified: Special 27 â†’ Sem_HealParty, NOT Sem_Special]\n";
 }
 
 TEST(batch3_heal_party_pp_formula) {
@@ -9032,10 +9032,10 @@ TEST(batch3_heal_party_pp_formula) {
     using namespace enginemon;
     
     // Test cases for PP formula
-    // base_pp=35, pp_ups=0 → 35 + (35/5)*0 = 35
-    // base_pp=35, pp_ups=1 → 35 + (35/5)*1 = 35 + 7 = 42
-    // base_pp=35, pp_ups=2 → 35 + (35/5)*2 = 35 + 14 = 49
-    // base_pp=35, pp_ups=3 → 35 + (35/5)*3 = 35 + 21 = 56
+    // base_pp=35, pp_ups=0 â†’ 35 + (35/5)*0 = 35
+    // base_pp=35, pp_ups=1 â†’ 35 + (35/5)*1 = 35 + 7 = 42
+    // base_pp=35, pp_ups=2 â†’ 35 + (35/5)*2 = 35 + 14 = 49
+    // base_pp=35, pp_ups=3 â†’ 35 + (35/5)*3 = 35 + 21 = 56
     
     auto calc_max_pp = [](uint8_t base_pp, uint8_t pp_ups) -> uint8_t {
         return base_pp + (base_pp / 5) * pp_ups;
@@ -9192,7 +9192,7 @@ TEST(batch3_special_27_production_lowering) {
     // 8. ASSERT: no Special ID 27 survives in SemanticOp
     // (This is implicit since Sem_HealParty has no special_id field)
     
-    std::cout << "  [Production lowering: Cmd_Special{27} → Sem_HealParty VERIFIED]\n";
+    std::cout << "  [Production lowering: Cmd_Special{27} â†’ Sem_HealParty VERIFIED]\n";
 }
 
 TEST(batch3_heal_party_pp_restoration) {
@@ -9382,7 +9382,7 @@ TEST(batch4_special_79_production_lowering) {
     const auto& balance_op = std::get<Sem_ShowBalanceOverlay>(op);
     ASSERT_EQ(static_cast<int>(balance_op.contents), static_cast<int>(BalanceContent::Coins));
     
-    std::cout << "  [Production lowering: Cmd_Special{79} → Sem_ShowBalanceOverlay{Coins} VERIFIED]\n";
+    std::cout << "  [Production lowering: Cmd_Special{79} â†’ Sem_ShowBalanceOverlay{Coins} VERIFIED]\n";
 }
 
 TEST(batch4_special_80_production_lowering) {
@@ -9435,7 +9435,7 @@ TEST(batch4_special_80_production_lowering) {
     const auto& balance_op = std::get<Sem_ShowBalanceOverlay>(op);
     ASSERT_EQ(static_cast<int>(balance_op.contents), static_cast<int>(BalanceContent::MoneyAndCoins));
     
-    std::cout << "  [Production lowering: Cmd_Special{80} → Sem_ShowBalanceOverlay{MoneyAndCoins} VERIFIED]\n";
+    std::cout << "  [Production lowering: Cmd_Special{80} â†’ Sem_ShowBalanceOverlay{MoneyAndCoins} VERIFIED]\n";
 }
 
 TEST(batch4_special_81_production_lowering) {
@@ -9488,7 +9488,7 @@ TEST(batch4_special_81_production_lowering) {
     const auto& balance_op = std::get<Sem_ShowBalanceOverlay>(op);
     ASSERT_EQ(static_cast<int>(balance_op.contents), static_cast<int>(BalanceContent::Money));
     
-    std::cout << "  [Production lowering: Cmd_Special{81} → Sem_ShowBalanceOverlay{Money} VERIFIED]\n";
+    std::cout << "  [Production lowering: Cmd_Special{81} â†’ Sem_ShowBalanceOverlay{Money} VERIFIED]\n";
 }
 
 TEST(batch4_balance_overlay_semantic_distinctions) {
@@ -9558,7 +9558,7 @@ TEST(batch4_balance_overlay_semantic_distinctions) {
     ASSERT_EQ(static_cast<int>(*content_80), static_cast<int>(BalanceContent::MoneyAndCoins));
     ASSERT_EQ(static_cast<int>(*content_81), static_cast<int>(BalanceContent::Money));
     
-    std::cout << "  [Semantic distinctions: 79≠80, 80≠81, 79≠81 VERIFIED]\n";
+    std::cout << "  [Semantic distinctions: 79â‰ 80, 80â‰ 81, 79â‰ 81 VERIFIED]\n";
 }
 
 TEST(batch4_no_sem_special_for_79_80_81) {
@@ -9646,9 +9646,9 @@ TEST(batch4_balance_overlay_no_script_result) {
 //=============================================================================
 // BATCH 5 SPECIAL SEMANTIC OP TESTS - CheckPokerus (ID 78), GameboyCheck (ID 102)
 // Verifies:
-//   - Special 78 → Sem_CheckPartyPokerus{} (no Sem_Special)
-//   - Special 102 → Sem_SetVar (frontend absorption, no hardware query)
-//   - Special 144 → remains Sem_Special (NOT generalized)
+//   - Special 78 â†’ Sem_CheckPartyPokerus{} (no Sem_Special)
+//   - Special 102 â†’ Sem_SetVar (frontend absorption, no hardware query)
+//   - Special 144 â†’ remains Sem_Special (NOT generalized)
 //=============================================================================
 
 TEST(batch5_special_78_production_lowering) {
@@ -9701,7 +9701,7 @@ TEST(batch5_special_78_production_lowering) {
     bool is_check_pokerus = std::holds_alternative<Sem_CheckPartyPokerus>(op);
     ASSERT_TRUE(is_check_pokerus);
     
-    std::cout << "  [Special 78 → Sem_CheckPartyPokerus VERIFIED]\n";
+    std::cout << "  [Special 78 â†’ Sem_CheckPartyPokerus VERIFIED]\n";
 }
 
 TEST(batch5_special_102_production_lowering) {
@@ -9762,13 +9762,13 @@ TEST(batch5_special_102_production_lowering) {
     ASSERT_TRUE(set_var.source.is_literal());
     ASSERT_EQ(set_var.source.value, 2);  // GBCHECK_CGB
     
-    std::cout << "  [Special 102 → Sem_SetVar(literal=2) ABSORBED]\n";
+    std::cout << "  [Special 102 â†’ Sem_SetVar(literal=2) ABSORBED]\n";
 }
 
 TEST(batch5_special_144_remains_sem_special) {
     // UPDATED: Special 144 (CheckCaughtCelebi) is now lowered to Sem_GameSpecificEvent
     // via the game-specific behaviors table. It writes wScriptVar (writes_var=true).
-    // This is NOT a Pokédex check - it checks whether Celebi was caught.
+    // This is NOT a PokÃ©dex check - it checks whether Celebi was caught.
     using namespace crystal;
     using namespace enginemon;
     using namespace lowering_rules;
@@ -9817,7 +9817,7 @@ TEST(batch5_special_144_remains_sem_special) {
     ASSERT_STR_EQ(gse->behavior_name.c_str(), "CheckCaughtCelebi");
     ASSERT_TRUE(gse->writes_script_var);  // writes wScriptVar
 
-    std::cout << "  [Special 144 → Sem_GameSpecificEvent{CheckCaughtCelebi} (writes_var=true) ✓]\n";
+    std::cout << "  [Special 144 â†’ Sem_GameSpecificEvent{CheckCaughtCelebi} (writes_var=true) âœ“]\n";
 }
 
 TEST(batch5_no_sem_special_for_78_102) {
@@ -9882,7 +9882,7 @@ TEST(batch5_gameboy_check_absorption_proof) {
     
     // The absorption sets wScriptVar to GBCHECK_CGB (2)
     // The subsequent ifnotequal GBCHECK_CGB branch condition:
-    //   wScriptVar != 2 → 2 != 2 → FALSE → branch not taken → CGB path
+    //   wScriptVar != 2 â†’ 2 != 2 â†’ FALSE â†’ branch not taken â†’ CGB path
     
     // This proves the absorption is semantically equivalent:
     // Original: hardware query returns CGB on real Crystal hardware
@@ -9896,8 +9896,8 @@ TEST(batch5_gameboy_check_absorption_proof) {
     // Branch should NOT be taken (CGB path continues)
     ASSERT_FALSE(branch_taken);
     
-    std::cout << "  [GameboyCheck absorption: wScriptVar=2, ifnotequal 2 → false]\n";
-    std::cout << "  [CGB branch correctly selected, non-CGB branch dead ✓]\n";
+    std::cout << "  [GameboyCheck absorption: wScriptVar=2, ifnotequal 2 â†’ false]\n";
+    std::cout << "  [CGB branch correctly selected, non-CGB branch dead âœ“]\n";
 }
 
 TEST(batch5_check_pokerus_script_result) {
@@ -9909,12 +9909,12 @@ TEST(batch5_check_pokerus_script_result) {
     // This test verifies the contract, not the runtime implementation
     
     // Contract: script_var receives boolean result
-    // 1 = at least one party member has ACTIVE Pokérus (days > 0)
+    // 1 = at least one party member has ACTIVE PokÃ©rus (days > 0)
     // 0 = no active infections
     
     // The runtime implementation will:
     // 1. Iterate all party members (no egg exclusion per source)
-    // 2. Check lower nibble of Pokérus byte (days remaining)
+    // 2. Check lower nibble of PokÃ©rus byte (days remaining)
     // 3. Return true if any > 0
     
     // This is a Stage 7 concern (runtime execution)
@@ -9927,7 +9927,7 @@ TEST(batch5_check_pokerus_script_result) {
 //=============================================================================
 // BATCH 6 SPECIAL SEMANTIC OP TESTS - StubbedTrainerRankings_Healings (ID 157)
 // Verifies:
-//   - Special 157 → frontend-absorbed no-op (zero semantic instructions)
+//   - Special 157 â†’ frontend-absorbed no-op (zero semantic instructions)
 //   - Source command fully accounted via absorbed_opcodes
 //   - Unknown/unhandled specials still produce Sem_Special (negative control)
 //=============================================================================
@@ -9980,7 +9980,7 @@ TEST(batch6_special_157_production_absorption) {
     ASSERT_EQ(result.absorbed_opcodes.size(), 1);
     ASSERT_EQ(result.absorbed_opcodes[0], 0x0F);  // special opcode
     
-    std::cout << "  [Special 157 → ABSORBED (0 instructions, 1 absorbed_opcode)]\n";
+    std::cout << "  [Special 157 â†’ ABSORBED (0 instructions, 1 absorbed_opcode)]\n";
 }
 
 TEST(batch6_special_157_no_sem_special) {
@@ -10075,7 +10075,7 @@ TEST(batch6_unhandled_special_produces_sem_special) {
     ASSERT_TRUE(gse != nullptr);
     ASSERT_STR_EQ(gse->behavior_name.c_str(), "SetBitsForLinkTradeRequest");
     
-    std::cout << "  [Special 1 → Sem_GameSpecificEvent{SetBitsForLinkTradeRequest} (not Sem_Special) ✓]\n";
+    std::cout << "  [Special 1 â†’ Sem_GameSpecificEvent{SetBitsForLinkTradeRequest} (not Sem_Special) âœ“]\n";
     std::cout << "  [All non-explicit-rule specials now produce Sem_GameSpecificEvent, not unlowered]\n";
 }
 
@@ -10138,13 +10138,13 @@ TEST(batch6_absorption_accounting_invariant) {
     ASSERT_EQ(result.absorbed_by_opcode.at(0x0F), 1);
     
     std::cout << "  [Accounting: consumed=1, lowered=0, unlowered=0, absorbed=1]\n";
-    std::cout << "  [Invariant: 1 = 0 + 0 + 1 ✓]\n";
+    std::cout << "  [Invariant: 1 = 0 + 0 + 1 âœ“]\n";
 }
 
 //=============================================================================
 // BATCH 7 SPECIAL SEMANTIC OP TESTS - CheckMobileAdapterStatusSpecial (ID 160)
 // Verifies:
-//   - Special 160 → Sem_SetVar{var=0, source=literal(0)}
+//   - Special 160 â†’ Sem_SetVar{var=0, source=literal(0)}
 //   - Result is explicitly written (not absorbed to zero instructions)
 //   - Previous script_var value is overwritten
 //   - Branch behavior matches source FALSE result
@@ -10208,7 +10208,7 @@ TEST(batch7_special_160_production_lowering) {
     ASSERT_TRUE(set_var.source.is_literal());
     ASSERT_EQ(set_var.source.value, 0);  // FALSE
     
-    std::cout << "  [Special 160 → Sem_SetVar{var=0, literal=0} (verified)]\n";
+    std::cout << "  [Special 160 â†’ Sem_SetVar{var=0, literal=0} (verified)]\n";
 }
 
 TEST(batch7_special_160_no_sem_special) {
@@ -10295,7 +10295,7 @@ TEST(batch7_special_160_not_zero_instructions) {
     // ASSERT: NOT tracked as absorbed (it's lowered, not absorbed)
     ASSERT_EQ(result.absorbed_opcodes.size(), 0);
     
-    std::cout << "  [Special 160 → 1 instruction (NOT absorbed to zero)]\n";
+    std::cout << "  [Special 160 â†’ 1 instruction (NOT absorbed to zero)]\n";
 }
 
 TEST(batch7_special_160_overwrites_stale_script_var) {
@@ -10355,7 +10355,7 @@ TEST(batch7_special_160_overwrites_stale_script_var) {
     // This proves: regardless of prior script_var value, we WRITE 0
     ASSERT_EQ(set_var.source.value, 0);
     
-    std::cout << "  [Sem_SetVar writes literal 0 → overwrites any stale value]\n";
+    std::cout << "  [Sem_SetVar writes literal 0 â†’ overwrites any stale value]\n";
     std::cout << "  [Previous script_var state is irrelevant - we WRITE 0]\n";
 }
 
@@ -10411,17 +10411,17 @@ TEST(batch7_special_160_branch_equivalence) {
     ASSERT_FALSE(iftrue_taken);   // "iftrue .mobile" is NOT taken
     
     std::cout << "  [wScriptVar = 0 (FALSE)]\n";
-    std::cout << "  [iffalse .NoMobile → TAKEN (mobile features skipped)]\n";
-    std::cout << "  [iftrue .mobile → NOT TAKEN (mobile text skipped)]\n";
+    std::cout << "  [iffalse .NoMobile â†’ TAKEN (mobile features skipped)]\n";
+    std::cout << "  [iftrue .mobile â†’ NOT TAKEN (mobile text skipped)]\n";
     std::cout << "  [Branch equivalence with source: VERIFIED]\n";
 }
 
 //=============================================================================
 // CORPUS CLOSURE: BATTLE TOWER DEFERRED SCRIPT TESTS
 // Verifies the 3 Battle Tower corpus closure lowerings:
-//   - battletowertext (0xa4) → Sem_TrainerText{domain=BattleTower}
-//   - readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)
-//   - callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)
+//   - battletowertext (0xa4) â†’ Sem_TrainerText{domain=BattleTower}
+//   - readmem 0xcf64 â†’ Sem_ReadStateVar(BattleTowerBeatenTrainers)
+//   - callasm 0x9f5cb â†’ Sem_ReadStateVar(BattleTowerLevelGroup)
 // Plus adversarial tests proving nearby unknown addresses are still rejected.
 //=============================================================================
 
@@ -10472,7 +10472,7 @@ TEST(corpus_battletowertext_produces_trainer_text) {
         ASSERT_EQ(trainer_text.text_id, bttext_id);
     }
     
-    std::cout << "  [battletowertext → Sem_TrainerText{BattleTower} for IDs 1,2,3]\n";
+    std::cout << "  [battletowertext â†’ Sem_TrainerText{BattleTower} for IDs 1,2,3]\n";
 }
 
 TEST(corpus_battletowertext_no_sem_special) {
@@ -10591,11 +10591,11 @@ TEST(corpus_battletowertext_distinct_from_normal_trainer_text) {
     ASSERT_EQ(normal_op.domain, TrainerTextDomain::Normal);
     ASSERT_TRUE(bt_op.domain != normal_op.domain);
     
-    std::cout << "  [BattleTower ≠ Normal domain: PROVEN]\n";
+    std::cout << "  [BattleTower â‰  Normal domain: PROVEN]\n";
 }
 
 TEST(corpus_readmem_0xcf64_produces_read_state_var) {
-    // CRITICAL: readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)
+    // CRITICAL: readmem 0xcf64 â†’ Sem_ReadStateVar(BattleTowerBeatenTrainers)
     using namespace crystal;
     using namespace enginemon;
     using namespace lowering_rules;
@@ -10636,7 +10636,7 @@ TEST(corpus_readmem_0xcf64_produces_read_state_var) {
     ASSERT_EQ(static_cast<uint16_t>(read_state.state_var), 
               crystal_state_var_id(CrystalStateVar::BattleTowerBeatenTrainers));
     
-    std::cout << "  [readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)]\n";
+    std::cout << "  [readmem 0xcf64 â†’ Sem_ReadStateVar(BattleTowerBeatenTrainers)]\n";
 }
 
 TEST(corpus_readmem_nearby_addresses_rejected) {
@@ -10685,7 +10685,7 @@ TEST(corpus_readmem_nearby_addresses_rejected) {
 }
 
 TEST(corpus_callasm_0x9f5cb_produces_read_state_var) {
-    // CRITICAL: callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)
+    // CRITICAL: callasm 0x9f5cb â†’ Sem_ReadStateVar(BattleTowerLevelGroup)
     using namespace crystal;
     using namespace enginemon;
     using namespace lowering_rules;
@@ -10736,7 +10736,7 @@ TEST(corpus_callasm_0x9f5cb_produces_read_state_var) {
     ASSERT_EQ(static_cast<uint16_t>(read_state.state_var), 
               crystal_state_var_id(CrystalStateVar::BattleTowerLevelGroup));
     
-    std::cout << "  [callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)]\n";
+    std::cout << "  [callasm 0x9f5cb â†’ Sem_ReadStateVar(BattleTowerLevelGroup)]\n";
 }
 
 TEST(corpus_callasm_nearby_addresses_rejected) {
@@ -10793,9 +10793,9 @@ TEST(corpus_callasm_nearby_addresses_rejected) {
 //=============================================================================
 // BATCH 8 SPECIAL SEMANTIC OP TESTS
 // Verifies:
-//   - Special 163 (AskRememberPassword) → Sem_YesNo{}
-//   - Special 166 (InitialSetDSTFlag) → Sem_SetDaylightSaving{enabled=true}
-//   - Special 167 (InitialClearDSTFlag) → Sem_SetDaylightSaving{enabled=false}
+//   - Special 163 (AskRememberPassword) â†’ Sem_YesNo{}
+//   - Special 166 (InitialSetDSTFlag) â†’ Sem_SetDaylightSaving{enabled=true}
+//   - Special 167 (InitialClearDSTFlag) â†’ Sem_SetDaylightSaving{enabled=false}
 //   - None produce Sem_Special
 //   - 163 is semantically equivalent to ordinary yesorno opcode
 //   - 166 and 167 differ only by enabled flag
@@ -10850,7 +10850,7 @@ TEST(batch8_special_163_emits_sem_yesno) {
     bool is_yes_no = std::holds_alternative<Sem_YesNo>(op);
     ASSERT_TRUE(is_yes_no);
     
-    std::cout << "  [Special 163 → Sem_YesNo{} (verified)]\n";
+    std::cout << "  [Special 163 â†’ Sem_YesNo{} (verified)]\n";
 }
 
 TEST(batch8_special_163_no_sem_special) {
@@ -10968,8 +10968,8 @@ TEST(batch8_special_163_yesorno_equivalence) {
     ASSERT_TRUE(std::holds_alternative<Sem_YesNo>(special_op));
     
     // 5. Sem_YesNo is an empty struct, so type equality is sufficient
-    std::cout << "  [yesorno opcode → Sem_YesNo{}]\n";
-    std::cout << "  [Special 163 → Sem_YesNo{}]\n";
+    std::cout << "  [yesorno opcode â†’ Sem_YesNo{}]\n";
+    std::cout << "  [Special 163 â†’ Sem_YesNo{}]\n";
     std::cout << "  [Semantic equivalence: PROVEN]\n";
 }
 
@@ -11017,7 +11017,7 @@ TEST(batch8_special_166_emits_dst_true) {
     const auto& dst_op = std::get<Sem_SetDaylightSaving>(op);
     ASSERT_TRUE(dst_op.enabled);
     
-    std::cout << "  [Special 166 → Sem_SetDaylightSaving{enabled=true} (verified)]\n";
+    std::cout << "  [Special 166 â†’ Sem_SetDaylightSaving{enabled=true} (verified)]\n";
 }
 
 TEST(batch8_special_167_emits_dst_false) {
@@ -11064,7 +11064,7 @@ TEST(batch8_special_167_emits_dst_false) {
     const auto& dst_op = std::get<Sem_SetDaylightSaving>(op);
     ASSERT_FALSE(dst_op.enabled);
     
-    std::cout << "  [Special 167 → Sem_SetDaylightSaving{enabled=false} (verified)]\n";
+    std::cout << "  [Special 167 â†’ Sem_SetDaylightSaving{enabled=false} (verified)]\n";
 }
 
 TEST(batch8_special_166_167_differ_by_enabled) {
@@ -11288,7 +11288,7 @@ TEST(batch9_setval_establishes_context) {
     ASSERT_TRUE(ctx.block_ctx.has_value());
     ASSERT_EQ(ctx.block_ctx.value(), 25);
     
-    std::cout << "  [setval establishes known_script_var = 25 ✓]\n";
+    std::cout << "  [setval establishes known_script_var = 25 âœ“]\n";
 }
 
 TEST(batch9_special_40_with_context) {
@@ -11329,7 +11329,7 @@ TEST(batch9_special_40_with_context) {
     ASSERT_TRUE(play_radio != nullptr);
     ASSERT_EQ(play_radio->channel, 4);
     
-    std::cout << "  [Special 40 + context → Sem_PlayRadio{channel=4} ✓]\n";
+    std::cout << "  [Special 40 + context â†’ Sem_PlayRadio{channel=4} âœ“]\n";
 }
 
 TEST(batch9_special_40_no_context_fallback) {
@@ -11364,13 +11364,13 @@ TEST(batch9_special_40_no_context_fallback) {
     ASSERT_FALSE(ctx.block_ctx.has_value());
     RuleResult result = rule_special(ctx);
 
-    // Without context, Special 40 cannot be lowered → returns {} (unmatched).
+    // Without context, Special 40 cannot be lowered â†’ returns {} (unmatched).
     // The Sem_Special fallback is gone; context-dependent specials produce
     // UnloweredDiagnostic via the outer lower() loop and fail legality.
     ASSERT_FALSE(result.matched);
     ASSERT_EQ(result.instructions.size(), 0u);
 
-    std::cout << "  [Special 40 no context → unmatched (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [Special 40 no context â†’ unmatched (no Sem_Special fallback) âœ“]\n";
 }
 
 TEST(batch9_special_152_palette_normalization) {
@@ -11378,7 +11378,7 @@ TEST(batch9_special_152_palette_normalization) {
     using namespace enginemon;
     using namespace lowering_rules;
     
-    // Test mapping: Crystal encoding → palette selector
+    // Test mapping: Crystal encoding â†’ palette selector
     // Source-proven: ALL selectors 0-7 are valid (from _SetPlayerPalette: swap & 0x07)
     // Vanilla corpus uses only 0 and 1, but we must accept all source-valid selectors
     for (auto [crystal_val, expected_selector] : {
@@ -11423,11 +11423,11 @@ TEST(batch9_special_152_palette_normalization) {
         ASSERT_EQ(set_pal->selector, expected_selector);
     }
     
-    std::cout << "  [Special 152: selectors 0-7 ALL accepted ✓]\n";
+    std::cout << "  [Special 152: selectors 0-7 ALL accepted âœ“]\n";
 }
 
 TEST(batch9_special_152_invalid_encoding_rejected) {
-    // ADVERSARIAL TEST: Bit 7 not set → source routine is no-op
+    // ADVERSARIAL TEST: Bit 7 not set â†’ source routine is no-op
     // Source: _SetPlayerPalette does `and 1 << 7; ret z` at entry
     // Values without bit 7 set are source-invalid, should fall through to Sem_Special
     using namespace crystal;
@@ -11463,14 +11463,14 @@ TEST(batch9_special_152_invalid_encoding_rejected) {
         ctx.current_block = &block;
         
         RuleResult result = rule_special(ctx);
-        // Invalid encoding (bit7 clear) → no lowering rule for this encoding.
-        // Returns {} (unmatched) — Sem_Special fallback has been removed.
+        // Invalid encoding (bit7 clear) â†’ no lowering rule for this encoding.
+        // Returns {} (unmatched) â€” Sem_Special fallback has been removed.
         // These encodings are source-invalid (routine returns immediately).
         ASSERT_FALSE(result.matched);
         ASSERT_EQ(result.instructions.size(), 0u);
     }
     
-    std::cout << "  [Special 152 bit7-clear values → unmatched (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [Special 152 bit7-clear values â†’ unmatched (no Sem_Special fallback) âœ“]\n";
 }
 
 TEST(batch9_special_152_all_source_valid_selectors_accepted) {
@@ -11522,7 +11522,7 @@ TEST(batch9_special_152_all_source_valid_selectors_accepted) {
         ASSERT_EQ(set_pal->selector, expected_selector);
     }
     
-    std::cout << "  [All source-valid selectors 0-7 produce Sem_SetPlayerPalette ✓]\n";
+    std::cout << "  [All source-valid selectors 0-7 produce Sem_SetPlayerPalette âœ“]\n";
 }
 
 TEST(batch9_species_domain_from_profile_not_hardcoded) {
@@ -11572,43 +11572,43 @@ TEST(batch9_species_domain_from_profile_not_hardcoded) {
         return ctx;
     };
     
-    // Test 1: Species 200 with vanilla profile (num_pokemon=251) → should succeed
+    // Test 1: Species 200 with vanilla profile (num_pokemon=251) â†’ should succeed
     {
         auto* ctx = make_context(200, 251);
         RuleResult result = rule_special(*ctx);
         auto* sem_find = std::get_if<Sem_FindPartyMon>(&result.instructions[0].op);
         ASSERT_TRUE(sem_find != nullptr);
         ASSERT_EQ(sem_find->species, 200);
-        std::cout << "  [Species 200 + num_pokemon=251 → Sem_FindPartyMon ✓]\n";
+        std::cout << "  [Species 200 + num_pokemon=251 â†’ Sem_FindPartyMon âœ“]\n";
     }
     
-    // Test 2: Species 252 with vanilla profile (num_pokemon=251) → should REJECT
+    // Test 2: Species 252 with vanilla profile (num_pokemon=251) â†’ should REJECT
     {
         auto* ctx = make_context(252, 251);  // 252 > 251
         RuleResult result = rule_special(*ctx);
-        // Out-of-domain species → no lowering rule matches → returns {} (unmatched).
+        // Out-of-domain species â†’ no lowering rule matches â†’ returns {} (unmatched).
         // Sem_Special fallback has been removed; unlowered path used instead.
         ASSERT_FALSE(result.matched);
         ASSERT_EQ(result.instructions.size(), 0u);
-        std::cout << "  [Species 252 + num_pokemon=251 → unmatched (out of domain, no Sem_Special) ✓]\n";
+        std::cout << "  [Species 252 + num_pokemon=251 â†’ unmatched (out of domain, no Sem_Special) âœ“]\n";
     }
     
-    // Test 3: Species 252 with extended profile (num_pokemon=256) → should SUCCEED
+    // Test 3: Species 252 with extended profile (num_pokemon=256) â†’ should SUCCEED
     {
         auto* ctx = make_context(252, 256);  // 252 <= 256
         RuleResult result = rule_special(*ctx);
         auto* sem_find = std::get_if<Sem_FindPartyMon>(&result.instructions[0].op);
         ASSERT_TRUE(sem_find != nullptr);
         ASSERT_EQ(sem_find->species, 252);
-        std::cout << "  [Species 252 + num_pokemon=256 → Sem_FindPartyMon ✓]\n";
+        std::cout << "  [Species 252 + num_pokemon=256 â†’ Sem_FindPartyMon âœ“]\n";
     }
     
-    std::cout << "  [Species domain validated from profile, not hardcoded 251 ✓]\n";
+    std::cout << "  [Species domain validated from profile, not hardcoded 251 âœ“]\n";
 }
 
 //=============================================================================
 // DECODER UNIQUE COMMAND IDENTITY TESTS
-// Verifies: one ROM instruction → one decoded CrystalCommand
+// Verifies: one ROM instruction â†’ one decoded CrystalCommand
 // This tests the fix for the duplicate command identity bug where loops
 // caused the same ROM instruction to be decoded multiple times.
 //=============================================================================
@@ -11638,7 +11638,7 @@ TEST(decoder_unique_command_identity_loop) {
     uint32_t script_addr = 0x7a582;  // PlayersHouse1F MeetMomScript
     auto ir = decoder.decode_script(script_addr, "MeetMomScript");
     
-    // Build address → index map to check uniqueness
+    // Build address â†’ index map to check uniqueness
     std::map<uint32_t, std::vector<size_t>> addr_to_indices;
     for (size_t i = 0; i < ir.commands.size(); ++i) {
         addr_to_indices[ir.commands[i].span.rom_address].push_back(i);
@@ -11670,8 +11670,8 @@ TEST(decoder_unique_command_identity_loop) {
     ASSERT_EQ(special_166_count, 1);
     
     std::cout << "  [" << ir.commands.size() << " commands, " 
-              << addr_to_indices.size() << " unique ROM addresses ✓]\n";
-    std::cout << "  [Special 166 @ 0x7a520 decoded exactly once ✓]\n";
+              << addr_to_indices.size() << " unique ROM addresses âœ“]\n";
+    std::cout << "  [Special 166 @ 0x7a520 decoded exactly once âœ“]\n";
 }
 
 TEST(decoder_unique_command_identity_cfg_integrity) {
@@ -11724,9 +11724,9 @@ TEST(decoder_unique_command_identity_cfg_integrity) {
     // Note: The exact block entry address depends on CFG construction
     // The key invariant is no duplicate commands, which we verified above
     
-    std::cout << "  [CFG valid: " << cfg.blocks.size() << " blocks ✓]\n";
-    std::cout << "  [No overlapping commands ✓]\n";
-    std::cout << "  [All " << cfg.validation.commands_covered << " commands covered ✓]\n";
+    std::cout << "  [CFG valid: " << cfg.blocks.size() << " blocks âœ“]\n";
+    std::cout << "  [No overlapping commands âœ“]\n";
+    std::cout << "  [All " << cfg.validation.commands_covered << " commands covered âœ“]\n";
 }
 
 TEST(decoder_unique_command_identity_semantic_ir) {
@@ -11788,9 +11788,9 @@ TEST(decoder_unique_command_identity_semantic_ir) {
     // ASSERT: Exactly one Sem_SetDaylightSaving{false} (Special 167)
     ASSERT_EQ(dst_false_count, 1);
     
-    std::cout << "  [Sem_SetDaylightSaving{true} count = 1 ✓]\n";
-    std::cout << "  [Sem_SetDaylightSaving{false} count = 1 ✓]\n";
-    std::cout << "  [No SemanticIR instruction duplication ✓]\n";
+    std::cout << "  [Sem_SetDaylightSaving{true} count = 1 âœ“]\n";
+    std::cout << "  [Sem_SetDaylightSaving{false} count = 1 âœ“]\n";
+    std::cout << "  [No SemanticIR instruction duplication âœ“]\n";
 }
 
 //=============================================================================
@@ -11846,7 +11846,7 @@ TEST(timing_60hz_rendering_produces_consistent_ticks) {
     ASSERT_EQ(total_ticks, 60);
     ASSERT_EQ(scheduler.total_ticks(), 60);
     
-    std::cout << "  [60Hz rendering → 60 ticks per second]\n";
+    std::cout << "  [60Hz rendering â†’ 60 ticks per second]\n";
 }
 
 TEST(timing_144hz_rendering_produces_same_ticks) {
@@ -11863,10 +11863,10 @@ TEST(timing_144hz_rendering_produces_same_ticks) {
         total_ticks += result.ticks_to_run;
     }
     
-    // Should produce approximately 60 ticks (±1 due to rounding)
+    // Should produce approximately 60 ticks (Â±1 due to rounding)
     ASSERT_TRUE(total_ticks >= 59 && total_ticks <= 61);
     
-    std::cout << "  [144Hz rendering → ~60 simulation ticks (got " << total_ticks << ")]\n";
+    std::cout << "  [144Hz rendering â†’ ~60 simulation ticks (got " << total_ticks << ")]\n";
 }
 
 TEST(timing_irregular_frames_same_result) {
@@ -11902,7 +11902,7 @@ TEST(timing_irregular_frames_same_result) {
     // 500ms at 60Hz = 30 ticks
     ASSERT_TRUE(total_ticks >= 28 && total_ticks <= 32);
     
-    std::cout << "  [Irregular frame times → " << total_ticks << " ticks for 500ms]\n";
+    std::cout << "  [Irregular frame times â†’ " << total_ticks << " ticks for 500ms]\n";
 }
 
 TEST(timing_equivalent_elapsed_same_tick_count) {
@@ -11941,26 +11941,26 @@ TEST(timing_equivalent_elapsed_same_tick_count) {
         ticks_irregular += sched_irregular.advance(dt).ticks_to_run;
     }
     
-    // All three should produce ~30 ticks (±1 for rounding)
+    // All three should produce ~30 ticks (Â±1 for rounding)
     ASSERT_TRUE(ticks_60hz >= 29 && ticks_60hz <= 31);
     ASSERT_TRUE(ticks_144hz >= 29 && ticks_144hz <= 31);
     ASSERT_TRUE(ticks_irregular >= 29 && ticks_irregular <= 31);
     
     std::cout << "  [60Hz=" << ticks_60hz << ", 144Hz=" << ticks_144hz 
               << ", irregular=" << ticks_irregular << " ticks for 500ms]\n";
-    std::cout << "  [Simulation cadence independent of render rate ✓]\n";
+    std::cout << "  [Simulation cadence independent of render rate âœ“]\n";
 }
 
 //=============================================================================
 // INPUT EDGE CONSUMPTION ADVERSARIAL TESTS (Audit 8)
-// Proves: one physical rising edge → at most one simulation edge event
+// Proves: one physical rising edge â†’ at most one simulation edge event
 //=============================================================================
 
 TEST(input_edge_one_press_one_tick_consumed_once) {
-    // One physical press + 1 simulation tick → pressed observed exactly once
+    // One physical press + 1 simulation tick â†’ pressed observed exactly once
     InputSystem input;
     
-    // Simulate: host polls events → key_down
+    // Simulate: host polls events â†’ key_down
     input.begin_frame();
     input.on_key_down(Sdl3Scancode::Z);  // A button
     
@@ -11974,15 +11974,15 @@ TEST(input_edge_one_press_one_tick_consumed_once) {
     // Key is still held
     ASSERT_TRUE(input.snapshot().is_held(InputButton::A));
     
-    std::cout << "  [1 press + 1 tick → pressed consumed once ✓]\n";
+    std::cout << "  [1 press + 1 tick â†’ pressed consumed once âœ“]\n";
 }
 
 TEST(input_edge_one_press_four_ticks_consumed_once) {
     // ADVERSARIAL: One physical press + 4 catch-up simulation ticks
-    // → pressed observed by exactly ONE tick, not all four
+    // â†’ pressed observed by exactly ONE tick, not all four
     InputSystem input;
     
-    // Simulate: host polls events → key_down
+    // Simulate: host polls events â†’ key_down
     input.begin_frame();
     input.on_key_down(Sdl3Scancode::Z);  // A button
     
@@ -11999,7 +11999,7 @@ TEST(input_edge_one_press_four_ticks_consumed_once) {
     // CRITICAL: Pressed must be consumed exactly ONCE, not 4 times
     ASSERT_EQ(pressed_count, 1);
     
-    std::cout << "  [1 press + 4 catch-up ticks → pressed consumed exactly 1 time ✓]\n";
+    std::cout << "  [1 press + 4 catch-up ticks â†’ pressed consumed exactly 1 time âœ“]\n";
 }
 
 TEST(input_edge_held_across_multiple_ticks) {
@@ -12014,7 +12014,7 @@ TEST(input_edge_held_across_multiple_ticks) {
         ASSERT_TRUE(input.snapshot().is_held(InputButton::Up));
     }
     
-    std::cout << "  [Held input across 4 ticks → is_held true on all ticks ✓]\n";
+    std::cout << "  [Held input across 4 ticks â†’ is_held true on all ticks âœ“]\n";
 }
 
 TEST(input_edge_release_consumed_once) {
@@ -12040,16 +12040,16 @@ TEST(input_edge_release_consumed_once) {
     
     ASSERT_EQ(released_count, 1);
     
-    std::cout << "  [Release edge consumed exactly 1 time ✓]\n";
+    std::cout << "  [Release edge consumed exactly 1 time âœ“]\n";
 }
 
 TEST(input_edge_zero_tick_frame_preserves_press) {
     // CRITICAL ADVERSARIAL TEST: Zero-tick frame must NOT lose pending press
     // Scenario:
-    //   Frame 1: host key_down → pending_pressed = true
+    //   Frame 1: host key_down â†’ pending_pressed = true
     //   Frame 1: scheduler returns 0 ticks (no simulation)
     //   Frame 2: begin_frame() called
-    //   Frame 2: scheduler returns 1 tick → consume_pressed must return TRUE
+    //   Frame 2: scheduler returns 1 tick â†’ consume_pressed must return TRUE
     InputSystem input;
     
     // Frame 1: Press arrives
@@ -12072,7 +12072,7 @@ TEST(input_edge_zero_tick_frame_preserves_press) {
     // After consumption, no longer pending
     ASSERT_FALSE(input.has_pending_pressed(InputButton::A));
     
-    std::cout << "  [Press + 0-tick frame + 1-tick frame → press observed ✓]\n";
+    std::cout << "  [Press + 0-tick frame + 1-tick frame â†’ press observed âœ“]\n";
 }
 
 TEST(input_edge_zero_tick_frame_preserves_release) {
@@ -12103,11 +12103,11 @@ TEST(input_edge_zero_tick_frame_preserves_release) {
     // After consumption, no longer pending
     ASSERT_FALSE(input.has_pending_released(InputButton::A));
     
-    std::cout << "  [Release + 0-tick frame + 1-tick frame → release observed ✓]\n";
+    std::cout << "  [Release + 0-tick frame + 1-tick frame â†’ release observed âœ“]\n";
 }
 
 TEST(input_edge_press_release_before_tick) {
-    // Test: press → release before any simulation tick
+    // Test: press â†’ release before any simulation tick
     // For Crystal semantics, the press may be lost (key released before observed)
     // This is acceptable - we're testing the final state is correct
     InputSystem input;
@@ -12134,11 +12134,11 @@ TEST(input_edge_press_release_before_tick) {
     bool release_consumed = input.consume_released(InputButton::A);
     ASSERT_TRUE(release_consumed);
     
-    std::cout << "  [Press→release before tick → release observed, held=false ✓]\n";
+    std::cout << "  [Pressâ†’release before tick â†’ release observed, held=false âœ“]\n";
 }
 
 TEST(input_edge_new_press_after_release) {
-    // Test: press → release → press (tap-tap) before simulation tick
+    // Test: press â†’ release â†’ press (tap-tap) before simulation tick
     // The second press should be observable
     InputSystem input;
     
@@ -12158,7 +12158,7 @@ TEST(input_edge_new_press_after_release) {
     bool pressed = input.consume_pressed(InputButton::A);
     ASSERT_TRUE(pressed);
     
-    std::cout << "  [Press→release→press before tick → press observed, held=true ✓]\n";
+    std::cout << "  [Pressâ†’releaseâ†’press before tick â†’ press observed, held=true âœ“]\n";
 }
 
 TEST(input_edge_multiple_render_frames_preserves_press) {
@@ -12186,7 +12186,7 @@ TEST(input_edge_multiple_render_frames_preserves_press) {
     bool pressed = input.consume_pressed(InputButton::A);
     ASSERT_TRUE(pressed);
     
-    std::cout << "  [Press survives 4 zero-tick render frames ✓]\n";
+    std::cout << "  [Press survives 4 zero-tick render frames âœ“]\n";
 }
 
 //=============================================================================
@@ -12215,7 +12215,7 @@ TEST(scheduler_500ms_hitch_retains_debt) {
     ASSERT_TRUE(scheduler.accumulator_ns() >= 15 * TICK_60HZ);
     
     std::cout << "  [500ms hitch: ran 10 ticks, retained ~" 
-              << scheduler.accumulator_ns() / 1'000'000 << "ms debt ✓]\n";
+              << scheduler.accumulator_ns() / 1'000'000 << "ms debt âœ“]\n";
 }
 
 TEST(scheduler_2_second_hitch_retains_debt) {
@@ -12238,7 +12238,7 @@ TEST(scheduler_2_second_hitch_retains_debt) {
     ASSERT_TRUE(scheduler.accumulator_ns() >= 100 * TICK_60HZ);
     
     std::cout << "  [2s hitch: ran 10 ticks, retained ~" 
-              << scheduler.accumulator_ns() / 1'000'000 << "ms debt ✓]\n";
+              << scheduler.accumulator_ns() / 1'000'000 << "ms debt âœ“]\n";
 }
 
 TEST(scheduler_repeated_updates_catch_up) {
@@ -12262,7 +12262,7 @@ TEST(scheduler_repeated_updates_catch_up) {
     ASSERT_TRUE(total_ticks >= 29 && total_ticks <= 31);
     ASSERT_EQ(scheduler.total_ticks(), total_ticks);
     
-    std::cout << "  [After 500ms hitch + catch-up: " << total_ticks << " total ticks ✓]\n";
+    std::cout << "  [After 500ms hitch + catch-up: " << total_ticks << " total ticks âœ“]\n";
 }
 
 TEST(scheduler_total_ticks_equals_elapsed_time) {
@@ -12295,9 +12295,9 @@ TEST(scheduler_total_ticks_equals_elapsed_time) {
     ASSERT_TRUE(total_ticks >= expected_ticks - 1 && total_ticks <= expected_ticks + 1);
     ASSERT_EQ(scheduler.total_ticks(), total_ticks);
     
-    std::cout << "  [700ms total → " << total_ticks << " ticks (expected ~" 
-              << expected_ticks << ") ✓]\n";
-    std::cout << "  [No simulation time discarded ✓]\n";
+    std::cout << "  [700ms total â†’ " << total_ticks << " ticks (expected ~" 
+              << expected_ticks << ") âœ“]\n";
+    std::cout << "  [No simulation time discarded âœ“]\n";
 }
 
 //=============================================================================
@@ -12329,7 +12329,7 @@ TEST(lua_coroutine_cleanup_via_resume) {
     // Verify no active coroutine entries remain (has_active_scripts should be false)
     ASSERT_FALSE(runtime.has_active_scripts());
     
-    std::cout << "  [Immediate completion cleans up ✓]\n";
+    std::cout << "  [Immediate completion cleans up âœ“]\n";
     
     // Script that yields once then finishes
     const char* yield_once_script = R"lua(
@@ -12356,7 +12356,7 @@ TEST(lua_coroutine_cleanup_via_resume) {
     ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Finished));
     ASSERT_FALSE(runtime.has_active_scripts());
     
-    std::cout << "  [Yield+resume completion cleans up ✓]\n";
+    std::cout << "  [Yield+resume completion cleans up âœ“]\n";
 }
 
 TEST(lua_coroutine_cleanup_via_resume_with_result) {
@@ -12393,7 +12393,7 @@ TEST(lua_coroutine_cleanup_via_resume_with_result) {
     // CRITICAL: No stale active entry should remain
     ASSERT_FALSE(runtime.has_active_scripts());
     
-    std::cout << "  [resume_with_result() cleans up on completion ✓]\n";
+    std::cout << "  [resume_with_result() cleans up on completion âœ“]\n";
     
     // Test error path via resume_with_error
     const char* error_script = R"lua(
@@ -12419,7 +12419,7 @@ TEST(lua_coroutine_cleanup_via_resume_with_result) {
     ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Error));
     ASSERT_FALSE(runtime.has_active_scripts());
     
-    std::cout << "  [resume_with_error() cleans up on error ✓]\n";
+    std::cout << "  [resume_with_error() cleans up on error âœ“]\n";
 }
 
 TEST(npc_destination_occupancy_blocks_conflicting_movement) {
@@ -12466,7 +12466,7 @@ TEST(npc_destination_occupancy_blocks_conflicting_movement) {
     ASSERT_TRUE(result.blocked);
     ASSERT_STR_EQ(result.block_reason, "entity");
     
-    std::cout << "  [Player blocked by NPC moving toward same tile ✓]\n";
+    std::cout << "  [Player blocked by NPC moving toward same tile âœ“]\n";
     
     // Now test that the NPC's current position (5,5) is also blocked
     loop.spawn_player(4, 5, enginemon::Direction::Right);
@@ -12477,7 +12477,7 @@ TEST(npc_destination_occupancy_blocks_conflicting_movement) {
     ASSERT_TRUE(result.blocked);
     ASSERT_STR_EQ(result.block_reason, "entity");
     
-    std::cout << "  [Player blocked by NPC's current position ✓]\n";
+    std::cout << "  [Player blocked by NPC's current position âœ“]\n";
     
     // Test: NPC not moving - target_x/y equals x/y, only current position blocked
     loop.clear_npcs();
@@ -12502,7 +12502,7 @@ TEST(npc_destination_occupancy_blocks_conflicting_movement) {
     ASSERT_TRUE(result.accepted);
     ASSERT_FALSE(result.blocked);
     
-    std::cout << "  [Player allowed when NPC not targeting destination ✓]\n";
+    std::cout << "  [Player allowed when NPC not targeting destination âœ“]\n";
 }
 
 //=============================================================================
@@ -12534,7 +12534,7 @@ TEST(coord_event_field_decode) {
         ASSERT_TRUE(evt.y < result.map.height * 2);
         ASSERT_TRUE(evt.script_rom_address >= 0x4000);  // Should be resolved flat address
         
-        std::cout << "  [coord_event fields decoded correctly ✓]\n";
+        std::cout << "  [coord_event fields decoded correctly âœ“]\n";
         std::cout << "    scene_id=" << (int)evt.scene_id 
                   << ", x=" << (int)evt.x 
                   << ", y=" << (int)evt.y << "\n";
@@ -12549,10 +12549,10 @@ TEST(coord_event_field_decode) {
             ASSERT_TRUE(evt.y < result.map.height * 2);
             ASSERT_TRUE(evt.script_rom_address >= 0x4000);
             
-            std::cout << "  [coord_event fields decoded correctly ✓]\n";
+            std::cout << "  [coord_event fields decoded correctly âœ“]\n";
         } else {
             // Just verify the extraction code runs without crash
-            std::cout << "  [No coord events found to verify, extraction runs ✓]\n";
+            std::cout << "  [No coord events found to verify, extraction runs âœ“]\n";
         }
     }
 }
@@ -12578,7 +12578,7 @@ TEST(bg_event_directional_types_preserved) {
             ASSERT_TRUE(bg.type != BgEventType::Read);
             
             std::cout << "  [Found directional BG event type: " 
-                      << static_cast<int>(bg.type) << " ✓]\n";
+                      << static_cast<int>(bg.type) << " âœ“]\n";
             break;
         }
     }
@@ -12589,7 +12589,7 @@ TEST(bg_event_directional_types_preserved) {
     ASSERT_TRUE(static_cast<int>(BgEventType::FacingLeft) != static_cast<int>(BgEventType::Read));
     ASSERT_TRUE(static_cast<int>(BgEventType::FacingRight) != static_cast<int>(BgEventType::Read));
     
-    std::cout << "  [BG event directional types are distinct ✓]\n";
+    std::cout << "  [BG event directional types are distinct âœ“]\n";
 }
 
 // Hidden item flag/item preserved (not pointer bytes as item_id/quantity)
@@ -12615,14 +12615,14 @@ TEST(bg_event_hidden_item_semantic_decode) {
             ASSERT_FALSE(bg.condition_flag.empty());
             
             std::cout << "  [Hidden item decoded: item=" << bg.item_id 
-                      << ", flag=" << bg.condition_flag << " ✓]\n";
+                      << ", flag=" << bg.condition_flag << " âœ“]\n";
             return;
         }
     }
     
     // If no hidden items found, just verify the enum value exists
     ASSERT_TRUE(static_cast<int>(BgEventType::HiddenItem) == 7);
-    std::cout << "  [HiddenItem type defined correctly ✓]\n";
+    std::cout << "  [HiddenItem type defined correctly âœ“]\n";
 }
 
 // IFSET/IFNOTSET flag/script preserved
@@ -12654,14 +12654,14 @@ TEST(bg_event_conditional_script_decode) {
                     std::cout << "  [Conditional BG event: type=" << static_cast<int>(bg.type)
                               << ", flag=" << bg.condition_flag 
                               << ", script_addr=0x" << std::hex << bg.script_rom_address 
-                              << std::dec << " ✓]\n";
+                              << std::dec << " âœ“]\n";
                     return;
                 }
             }
         }
     }
     
-    std::cout << "  [Conditional BG event types defined correctly ✓]\n";
+    std::cout << "  [Conditional BG event types defined correctly âœ“]\n";
 }
 
 // Object palette extracted from high nibble, type from low nibble
@@ -12696,7 +12696,7 @@ TEST(object_event_palette_type_decode) {
         ASSERT_TRUE(obj.hour_end <= 23 || obj.hour_end == 255);
     }
     
-    std::cout << "  [Object palette/type extracted correctly ✓]\n";
+    std::cout << "  [Object palette/type extracted correctly âœ“]\n";
     if (found_nonzero_palette) {
         std::cout << "    (Found non-default palette values)\n";
     }
@@ -12721,10 +12721,10 @@ TEST(script_resumed_no_resume_attempt) {
     TickResult tick2 = loop.tick();
     ASSERT_FALSE(tick2.script_resumed);
     
-    std::cout << "  [script_resumed=false when no script running ✓]\n";
+    std::cout << "  [script_resumed=false when no script running âœ“]\n";
 }
 
-// script_resumed: Yielded → resume → Completed => true
+// script_resumed: Yielded â†’ resume â†’ Completed => true
 TEST(script_resumed_yielded_to_completed) {
     // script_resumed should be true when a yielded script is resumed and completes
     
@@ -12766,10 +12766,10 @@ TEST(script_resumed_yielded_to_completed) {
     ASSERT_TRUE(tick1.script_complete);  // Script finished after resume
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Yielded → resume → Completed: script_resumed=true ✓]\n";
+    std::cout << "  [Yielded â†’ resume â†’ Completed: script_resumed=true âœ“]\n";
 }
 
-// script_resumed: Yielded → resume → Yielded => true
+// script_resumed: Yielded â†’ resume â†’ Yielded => true
 TEST(script_resumed_yielded_to_yielded) {
     // script_resumed should be true when a yielded script is resumed but yields again
     
@@ -12811,7 +12811,7 @@ TEST(script_resumed_yielded_to_yielded) {
     ASSERT_FALSE(tick1.script_complete);
     ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
     
-    std::cout << "  [Yielded → resume → Yielded: script_resumed=true ✓]\n";
+    std::cout << "  [Yielded â†’ resume â†’ Yielded: script_resumed=true âœ“]\n";
     
     // Third tick - resume again, should complete
     TickResult tick2 = loop.tick();
@@ -12819,7 +12819,7 @@ TEST(script_resumed_yielded_to_yielded) {
     ASSERT_TRUE(tick2.script_complete);
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Second resume completes script ✓]\n";
+    std::cout << "  [Second resume completes script âœ“]\n";
 }
 
 //=============================================================================
@@ -12827,18 +12827,16 @@ TEST(script_resumed_yielded_to_yielded) {
 //=============================================================================
 
 // Helper to create a loop with collision callback for timed yield tests
-static HeadlessGameLoop create_timed_test_loop() {
-    HeadlessGameLoop loop;
+static void init_timed_test_loop(HeadlessGameLoop& loop) {
     loop.spawn_player(5, 5, enginemon::Direction::Down);
-    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass { 
-        return CollisionClass::Floor; 
+    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass {
+        return CollisionClass::Floor;
     });
-    return loop;
 }
 
 // WaitFrames before expiry: script_resumed == false
 TEST(wait_frames_before_expiry_no_resume) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -12850,12 +12848,12 @@ TEST(wait_frames_before_expiry_no_resume) {
         TickResult r = loop.tick();
         ASSERT_FALSE(r.script_resumed);
     }
-    std::cout << "  [WaitFrames before expiry: script_resumed=false ✓]\n";
+    std::cout << "  [WaitFrames before expiry: script_resumed=false âœ“]\n";
 }
 
 // WaitFrames expiry: script_resumed == true
 TEST(wait_frames_expiry_sets_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -12867,12 +12865,12 @@ TEST(wait_frames_expiry_sets_resumed) {
     TickResult r = loop.tick();
     ASSERT_TRUE(r.script_resumed);
     ASSERT_TRUE(r.script_complete);
-    std::cout << "  [WaitFrames expiry: script_resumed=true ✓]\n";
+    std::cout << "  [WaitFrames expiry: script_resumed=true âœ“]\n";
 }
 
 // WaitFrames expiry + immediate re-yield: script_resumed == true
 TEST(wait_frames_expiry_reyield_sets_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -12884,12 +12882,12 @@ TEST(wait_frames_expiry_reyield_sets_resumed) {
     TickResult r2 = loop.tick();
     ASSERT_TRUE(r2.script_resumed);
     ASSERT_FALSE(r2.script_complete);
-    std::cout << "  [WaitFrames re-yield: script_resumed=true, complete=false ✓]\n";
+    std::cout << "  [WaitFrames re-yield: script_resumed=true, complete=false âœ“]\n";
 }
 
 // WaitSeconds does NOT resume on next tick
 TEST(wait_seconds_not_immediate_resume) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -12901,12 +12899,12 @@ TEST(wait_seconds_not_immediate_resume) {
         TickResult r = loop.tick();
         ASSERT_FALSE(r.script_resumed);
     }
-    std::cout << "  [WaitSeconds(0.5s): not resumed in first 10 ticks ✓]\n";
+    std::cout << "  [WaitSeconds(0.5s): not resumed in first 10 ticks âœ“]\n";
 }
 
 // WaitSeconds resumes after duration (60 FPS)
 TEST(wait_seconds_resumes_after_duration) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -12919,12 +12917,12 @@ TEST(wait_seconds_resumes_after_duration) {
     TickResult r3 = loop.tick();
     ASSERT_TRUE(r3.script_resumed);
     ASSERT_TRUE(r3.script_complete);
-    std::cout << "  [WaitSeconds(0.05s) resumes after 3 ticks ✓]\n";
+    std::cout << "  [WaitSeconds(0.05s) resumes after 3 ticks âœ“]\n";
 }
 
 // WaitSeconds resume sets script_resumed flag
 TEST(wait_seconds_resume_sets_flag) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -12936,12 +12934,12 @@ TEST(wait_seconds_resume_sets_flag) {
     loop.tick();
     TickResult r2 = loop.tick();
     ASSERT_TRUE(r2.script_resumed);
-    std::cout << "  [WaitSeconds resume sets script_resumed=true ✓]\n";
+    std::cout << "  [WaitSeconds resume sets script_resumed=true âœ“]\n";
 }
 
 // Zero-duration WaitSeconds resumes on first tick
 TEST(wait_seconds_zero_duration) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -12952,7 +12950,7 @@ TEST(wait_seconds_zero_duration) {
     TickResult r1 = loop.tick();
     ASSERT_TRUE(r1.script_resumed);
     ASSERT_TRUE(r1.script_complete);
-    std::cout << "  [WaitSeconds(0) resumes on first tick ✓]\n";
+    std::cout << "  [WaitSeconds(0) resumes on first tick âœ“]\n";
 }
 
 //=============================================================================
@@ -12963,7 +12961,7 @@ TEST(wait_seconds_zero_duration) {
 
 // WaitSeconds(0.05) = ceil(0.05 * 60) = 3 ticks exactly
 TEST(wait_seconds_precision_0_05s_is_3_ticks) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -12982,12 +12980,12 @@ TEST(wait_seconds_precision_0_05s_is_3_ticks) {
     TickResult r3 = loop.tick();
     ASSERT_TRUE(r3.script_resumed);
     ASSERT_TRUE(r3.script_complete);
-    std::cout << "  [WaitSeconds(0.05s) = 3 ticks exactly ✓]\n";
+    std::cout << "  [WaitSeconds(0.05s) = 3 ticks exactly âœ“]\n";
 }
 
 // WaitSeconds(0.1) = ceil(0.1 * 60) = 6 ticks exactly
 TEST(wait_seconds_precision_0_1s_is_6_ticks) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13006,12 +13004,12 @@ TEST(wait_seconds_precision_0_1s_is_6_ticks) {
     TickResult r6 = loop.tick();
     ASSERT_TRUE(r6.script_resumed);
     ASSERT_TRUE(r6.script_complete);
-    std::cout << "  [WaitSeconds(0.1s) = 6 ticks exactly ✓]\n";
+    std::cout << "  [WaitSeconds(0.1s) = 6 ticks exactly âœ“]\n";
 }
 
 // WaitSeconds(1.0) = ceil(1.0 * 60) = 60 ticks exactly
 TEST(wait_seconds_precision_1_0s_is_60_ticks) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13030,7 +13028,7 @@ TEST(wait_seconds_precision_1_0s_is_60_ticks) {
     TickResult r60 = loop.tick();
     ASSERT_TRUE(r60.script_resumed);
     ASSERT_TRUE(r60.script_complete);
-    std::cout << "  [WaitSeconds(1.0s) = 60 ticks exactly ✓]\n";
+    std::cout << "  [WaitSeconds(1.0s) = 60 ticks exactly âœ“]\n";
 }
 
 //=============================================================================
@@ -13040,7 +13038,7 @@ TEST(wait_seconds_precision_1_0s_is_60_ticks) {
 
 // Unrelated coroutine resumes -> active script_resumed == false
 TEST(unrelated_coroutine_resume_does_not_set_script_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13067,12 +13065,12 @@ TEST(unrelated_coroutine_resume_does_not_set_script_resumed) {
     ASSERT_TRUE(runtime.get_state(unrelated_id) == ScriptState::Finished);
     ASSERT_TRUE(runtime.get_state(active_id) == ScriptState::Yielded);
     
-    std::cout << "  [Unrelated coroutine resume: script_resumed=false ✓]\n";
+    std::cout << "  [Unrelated coroutine resume: script_resumed=false âœ“]\n";
 }
 
 // Active timed coroutine resumes -> script_resumed == true
 TEST(active_coroutine_timed_resume_sets_script_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13091,12 +13089,12 @@ TEST(active_coroutine_timed_resume_sets_script_resumed) {
     ASSERT_TRUE(r2.script_resumed);
     ASSERT_TRUE(r2.script_complete);
     
-    std::cout << "  [Active coroutine timed resume: script_resumed=true ✓]\n";
+    std::cout << "  [Active coroutine timed resume: script_resumed=true âœ“]\n";
 }
 
 // Active coroutine resumes and re-yields -> script_resumed == true
 TEST(active_coroutine_resume_reyield_sets_script_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13118,7 +13116,7 @@ TEST(active_coroutine_resume_reyield_sets_script_resumed) {
     // Verify still yielded
     ASSERT_TRUE(runtime.get_state(loop.active_coroutine()) == ScriptState::Yielded);
     
-    std::cout << "  [Active coroutine resume+re-yield: script_resumed=true ✓]\n";
+    std::cout << "  [Active coroutine resume+re-yield: script_resumed=true âœ“]\n";
 }
 
 //=============================================================================
@@ -13127,7 +13125,7 @@ TEST(active_coroutine_resume_reyield_sets_script_resumed) {
 
 // Script finishes normally: script_complete=true, script_error=false
 TEST(script_finishes_normally_sets_complete) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13139,12 +13137,12 @@ TEST(script_finishes_normally_sets_complete) {
     // Script completed immediately during start
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Normal completion: start_script returns true ✓]\n";
+    std::cout << "  [Normal completion: start_script returns true âœ“]\n";
 }
 
 // Script errors after resume: script_complete=false, script_error=true
 TEST(script_errors_after_resume_sets_error) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13166,12 +13164,12 @@ TEST(script_errors_after_resume_sets_error) {
     ASSERT_TRUE(r.script_error);       // Error occurred
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Error after resume: script_error=true, script_complete=false ✓]\n";
+    std::cout << "  [Error after resume: script_error=true, script_complete=false âœ“]\n";
 }
 
 // Script errors immediately during start: start_script returns false
 TEST(script_errors_immediately_returns_false) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13185,12 +13183,12 @@ TEST(script_errors_immediately_returns_false) {
     ASSERT_FALSE(started);  // Should return false on immediate error
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Immediate syntax error: start_script returns false ✓]\n";
+    std::cout << "  [Immediate syntax error: start_script returns false âœ“]\n";
 }
 
 // Script runtime error during start: start_script returns false
 TEST(script_runtime_error_during_start_returns_false) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13202,12 +13200,12 @@ TEST(script_runtime_error_during_start_returns_false) {
     ASSERT_FALSE(started);  // Should return false on runtime error during start
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Immediate runtime error: start_script returns false ✓]\n";
+    std::cout << "  [Immediate runtime error: start_script returns false âœ“]\n";
 }
 
 // Yielded script remains non-terminal
 TEST(yielded_script_remains_nonterminal) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13226,12 +13224,12 @@ TEST(yielded_script_remains_nonterminal) {
         ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
     }
     
-    std::cout << "  [Yielded script: script_complete=false, script_error=false ✓]\n";
+    std::cout << "  [Yielded script: script_complete=false, script_error=false âœ“]\n";
 }
 
 // Reset cancels active coroutine - no later timed resume
 TEST(reset_cancels_active_coroutine_no_timed_resume) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13274,12 +13272,12 @@ TEST(reset_cancels_active_coroutine_no_timed_resume) {
     
     ASSERT_FALSE(side_effect_occurred);
     
-    std::cout << "  [Reset cancels coroutine: no timed resume occurs ✓]\n";
+    std::cout << "  [Reset cancels coroutine: no timed resume occurs âœ“]\n";
 }
 
 // Reset when no script active
 TEST(reset_when_no_script_active) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13293,12 +13291,12 @@ TEST(reset_when_no_script_active) {
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     ASSERT_TRUE(loop.active_coroutine() == 0);
     
-    std::cout << "  [Reset when no script: succeeds safely ✓]\n";
+    std::cout << "  [Reset when no script: succeeds safely âœ“]\n";
 }
 
 // Reset when script already completed
 TEST(reset_after_script_completed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13316,12 +13314,12 @@ TEST(reset_after_script_completed) {
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     ASSERT_TRUE(loop.active_coroutine() == 0);
     
-    std::cout << "  [Reset after completion: succeeds safely ✓]\n";
+    std::cout << "  [Reset after completion: succeeds safely âœ“]\n";
 }
 
 // Reset when script currently yielded
 TEST(reset_when_script_yielded) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -13345,7 +13343,7 @@ TEST(reset_when_script_yielded) {
     // Cancelled coroutines end in Finished state
     ASSERT_TRUE(state == ScriptState::Finished || state == ScriptState::Error);
     
-    std::cout << "  [Reset when yielded: coroutine cancelled ✓]\n";
+    std::cout << "  [Reset when yielded: coroutine cancelled âœ“]\n";
 }
 
 // Coord event script roots appear in corpus
@@ -13367,7 +13365,7 @@ TEST(coord_event_scripts_in_corpus) {
         }
     }
     
-    std::cout << "  [Total coord events found: " << total_coord_events << " ✓]\n";
+    std::cout << "  [Total coord events found: " << total_coord_events << " âœ“]\n";
     
     // Verify coord events have valid script addresses
     auto result = extractor.extract_map(7, 1);  // IlexForest
@@ -13378,11 +13376,11 @@ TEST(coord_event_scripts_in_corpus) {
         }
     }
     
-    std::cout << "  [Coord event script addresses resolved to flat ✓]\n";
+    std::cout << "  [Coord event script addresses resolved to flat âœ“]\n";
 }
 
 //=============================================================================
-// CANONICAL BANK ADDRESS HELPER TESTS — August 2026
+// CANONICAL BANK ADDRESS HELPER TESTS â€” August 2026
 // Verifies crystal_flat_to_bank, crystal_bank_to_flat, crystal_local_ptr_to_flat
 // from crystal/rom/bank_utils.hpp.
 //
@@ -13390,31 +13388,31 @@ TEST(coord_event_scripts_in_corpus) {
 // Each call site that previously inlined the formula delegates to them.
 //
 // Source authority:
-//   pokecrystal scripting.asm:1389  Script_sdefer   — uses wScriptBank
-//   pokecrystal scripting.asm:1688  Script_getstring — uses wScriptBank
+//   pokecrystal scripting.asm:1389  Script_sdefer   â€” uses wScriptBank
+//   pokecrystal scripting.asm:1688  Script_getstring â€” uses wScriptBank
 //=============================================================================
 
-// Helper: crystal_flat_to_bank — bank 0 boundary
+// Helper: crystal_flat_to_bank â€” bank 0 boundary
 TEST(bank_utils_flat_to_bank_zero) {
     using namespace crystal;
-    // Bank 0 spans flat 0x0000–0x3FFF
+    // Bank 0 spans flat 0x0000â€“0x3FFF
     ASSERT_EQ(crystal_flat_to_bank(0x0000), 0);
     ASSERT_EQ(crystal_flat_to_bank(0x0001), 0);
     ASSERT_EQ(crystal_flat_to_bank(0x3FFF), 0);
-    std::cout << "  [flat_to_bank: bank 0 range ✓]\n";
+    std::cout << "  [flat_to_bank: bank 0 range âœ“]\n";
 }
 
-// Helper: crystal_flat_to_bank — first switchable bank
+// Helper: crystal_flat_to_bank â€” first switchable bank
 TEST(bank_utils_flat_to_bank_one) {
     using namespace crystal;
-    // Bank 1 spans flat 0x4000–0x7FFF
+    // Bank 1 spans flat 0x4000â€“0x7FFF
     ASSERT_EQ(crystal_flat_to_bank(0x4000), 1);
     ASSERT_EQ(crystal_flat_to_bank(0x4001), 1);
     ASSERT_EQ(crystal_flat_to_bank(0x7FFF), 1);
-    std::cout << "  [flat_to_bank: bank 1 range ✓]\n";
+    std::cout << "  [flat_to_bank: bank 1 range âœ“]\n";
 }
 
-// Helper: crystal_flat_to_bank — later bank (0x1A = 26, used by sdefer test)
+// Helper: crystal_flat_to_bank â€” later bank (0x1A = 26, used by sdefer test)
 TEST(bank_utils_flat_to_bank_nonzero) {
     using namespace crystal;
     // Bank 0x1A spans flat 0x1A*0x4000 = 0x68000 to 0x6BFFF
@@ -13423,38 +13421,38 @@ TEST(bank_utils_flat_to_bank_nonzero) {
     ASSERT_EQ(crystal_flat_to_bank(0x6BFFF), 0x1A);
     // Bank 0x1B starts at 0x6C000
     ASSERT_EQ(crystal_flat_to_bank(0x6C000), 0x1B);
-    std::cout << "  [flat_to_bank: bank 0x1A/0x1B boundary ✓]\n";
+    std::cout << "  [flat_to_bank: bank 0x1A/0x1B boundary âœ“]\n";
 }
 
-// Helper: crystal_bank_to_flat — local ptr 0x4000 (start of banked window)
+// Helper: crystal_bank_to_flat â€” local ptr 0x4000 (start of banked window)
 TEST(bank_utils_bank_to_flat_ptr_at_4000) {
     using namespace crystal;
-    // ptr = 0x4000, bank = 0x1A → flat = 0x1A * 0x4000 + 0 = 0x68000
+    // ptr = 0x4000, bank = 0x1A â†’ flat = 0x1A * 0x4000 + 0 = 0x68000
     ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x4000), 0x68000);
-    // ptr = 0x4000, bank = 1 → flat = 0x4000
+    // ptr = 0x4000, bank = 1 â†’ flat = 0x4000
     ASSERT_EQ(crystal_bank_to_flat(1, 0x4000), 0x4000);
-    std::cout << "  [bank_to_flat: ptr=0x4000 ✓]\n";
+    std::cout << "  [bank_to_flat: ptr=0x4000 âœ“]\n";
 }
 
-// Helper: crystal_bank_to_flat — local ptr 0x7FFF (end of banked window)
+// Helper: crystal_bank_to_flat â€” local ptr 0x7FFF (end of banked window)
 TEST(bank_utils_bank_to_flat_ptr_at_7fff) {
     using namespace crystal;
-    // ptr = 0x7FFF, bank = 0x1A → flat = 0x1A*0x4000 + 0x3FFF = 0x6BFFF
+    // ptr = 0x7FFF, bank = 0x1A â†’ flat = 0x1A*0x4000 + 0x3FFF = 0x6BFFF
     ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x7FFF), 0x6BFFF);
-    std::cout << "  [bank_to_flat: ptr=0x7FFF ✓]\n";
+    std::cout << "  [bank_to_flat: ptr=0x7FFF âœ“]\n";
 }
 
-// Helper: crystal_bank_to_flat — local ptr < 0x4000 (ROM0 region)
+// Helper: crystal_bank_to_flat â€” local ptr < 0x4000 (ROM0 region)
 TEST(bank_utils_bank_to_flat_ptr_in_rom0) {
     using namespace crystal;
-    // ptr < 0x4000 → ROM0; bank is irrelevant, flat = ptr
+    // ptr < 0x4000 â†’ ROM0; bank is irrelevant, flat = ptr
     ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x0100), 0x0100);
     ASSERT_EQ(crystal_bank_to_flat(0x00, 0x0100), 0x0100);
     ASSERT_EQ(crystal_bank_to_flat(0xFF, 0x3FFF), 0x3FFF);
-    std::cout << "  [bank_to_flat: ROM0 ptr → flat=ptr ✓]\n";
+    std::cout << "  [bank_to_flat: ROM0 ptr â†’ flat=ptr âœ“]\n";
 }
 
-// Helper: round-trip flat→bank→flat
+// Helper: round-trip flatâ†’bankâ†’flat
 TEST(bank_utils_round_trip) {
     using namespace crystal;
     // For a flat address in a non-zero bank, bank_to_flat(flat_to_bank(addr), local)
@@ -13464,10 +13462,10 @@ TEST(bank_utils_round_trip) {
     // Local ptr = 0x4000 + (flat - bank*0x4000) = 0x4000 + 0x500 = 0x4500
     uint16_t local_ptr = static_cast<uint16_t>(0x4000 + (flat - bank * 0x4000u));
     ASSERT_EQ(crystal_bank_to_flat(bank, local_ptr), flat);
-    std::cout << "  [round-trip flat=0x68500 → bank=0x1A, ptr=0x4500 → flat=0x68500 ✓]\n";
+    std::cout << "  [round-trip flat=0x68500 â†’ bank=0x1A, ptr=0x4500 â†’ flat=0x68500 âœ“]\n";
 }
 
-// crystal_local_ptr_to_flat — sdefer nonzero-bank case
+// crystal_local_ptr_to_flat â€” sdefer nonzero-bank case
 // Proves the helper matches the expected result and asymmetry rules out raw-ptr mistake.
 // Raw ptr 0x4500 != flat 0x68500, so a raw16-as-flat bug would produce wrong result.
 TEST(bank_utils_local_ptr_to_flat_sdefer_nonzero_bank) {
@@ -13478,10 +13476,10 @@ TEST(bank_utils_local_ptr_to_flat_sdefer_nonzero_bank) {
     ASSERT_EQ(flat, 0x68500u);
     // Prove asymmetry: raw ptr 0x4500 != flat result 0x68500
     ASSERT_TRUE(flat != 0x4500);
-    std::cout << "  [local_ptr_to_flat sdefer: 0x4500 @ entry 0x68100 → 0x68500 ✓]\n";
+    std::cout << "  [local_ptr_to_flat sdefer: 0x4500 @ entry 0x68100 â†’ 0x68500 âœ“]\n";
 }
 
-// crystal_local_ptr_to_flat — getstring nonzero-bank case
+// crystal_local_ptr_to_flat â€” getstring nonzero-bank case
 // getstring carries the same bank semantics as sdefer: uses wScriptBank.
 // Use a different bank (0x06) and ptr to prove this is independent.
 TEST(bank_utils_local_ptr_to_flat_getstring_nonzero_bank) {
@@ -13492,10 +13490,10 @@ TEST(bank_utils_local_ptr_to_flat_getstring_nonzero_bank) {
     ASSERT_EQ(flat, 0x19100u);
     // Prove asymmetry: raw ptr 0x5100 != flat result 0x19100
     ASSERT_TRUE(flat != 0x5100);
-    std::cout << "  [local_ptr_to_flat getstring: 0x5100 @ entry 0x18080 → 0x19100 ✓]\n";
+    std::cout << "  [local_ptr_to_flat getstring: 0x5100 @ entry 0x18080 â†’ 0x19100 âœ“]\n";
 }
 
-// sdefer lowering now uses crystal_local_ptr_to_flat — prove via canonical helper
+// sdefer lowering now uses crystal_local_ptr_to_flat â€” prove via canonical helper
 // This regression test replaces the older semantic_fix_sdefer_bank_resolution test's
 // implicit formula with an explicit canonical helper comparison.
 TEST(bank_utils_sdefer_lowering_matches_canonical_helper) {
@@ -13546,17 +13544,17 @@ TEST(bank_utils_sdefer_lowering_matches_canonical_helper) {
     ss << "deferred_" << std::hex << expected_flat;
     ASSERT_STR_EQ(sdef_op->target_script_id, ss.str());
 
-    std::cout << "  [sdefer lowering == canonical helper result 0x68500 ✓]\n";
+    std::cout << "  [sdefer lowering == canonical helper result 0x68500 âœ“]\n";
 }
 
-// getstring lowering now uses cmd->span.rom_address — prove via canonical helper
+// getstring lowering now uses cmd->span.rom_address â€” prove via canonical helper
 // The resolved text content is stored in str_value, not a raw ROM address.
 TEST(bank_utils_getstring_lowering_matches_canonical_helper) {
     using namespace crystal;
     using namespace enginemon;
 
     // Script at bank 0x06 (entry=0x18080), getstring ptr=0x5100
-    // Command is also in bank 0x06 → cmd.span.rom_address must be in that bank.
+    // Command is also in bank 0x06 â†’ cmd.span.rom_address must be in that bank.
     CrystalCommand cmd;
     Cmd_Getstring gs;
     gs.text_pointer = 0x5100;
@@ -13593,20 +13591,20 @@ TEST(bank_utils_getstring_lowering_matches_canonical_helper) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
     ASSERT_TRUE(pta != nullptr);
 
-    // No raw ROM address survives — str_value holds the resolved text
+    // No raw ROM address survives â€” str_value holds the resolved text
     ASSERT_EQ(pta->arg_type, TextArgType::String);
     ASSERT_EQ(pta->buffer_slot, 0u);
 
-    std::cout << "  [getstring lowering produces String arg with buffer_slot=0 ✓]\n";
+    std::cout << "  [getstring lowering produces String arg with buffer_slot=0 âœ“]\n";
 }
 
 //=============================================================================
 // SEMANTIC CORRECTNESS FIX TESTS - August 2026
 // Verifies fixes for confirmed active vanilla semantic corruption:
 //   - Finding 3: String formatting operands preserved
-//   - Finding 7: encountermusic ≠ playmapmusic
+//   - Finding 7: encountermusic â‰  playmapmusic
 //   - Finding 8: newloadmap method preserved
-//   - Finding 9: reanchormap ≠ refreshmap
+//   - Finding 9: reanchormap â‰  refreshmap
 //   - Finding 5: sdefer bank resolution
 //=============================================================================
 
@@ -13663,7 +13661,7 @@ TEST(semantic_fix_gettrainername_preserves_both_operands) {
     ASSERT_EQ(pta->arg_type, TextArgType::TrainerName);
     
     std::cout << "  [gettrainername preserves group=" << (int)pta->trainer_group 
-              << ", id=" << (int)pta->id2 << " ✓]\n";
+              << ", id=" << (int)pta->id2 << " âœ“]\n";
 }
 
 // Finding 3: getstring buffer_slot and str_value are preserved (no raw ROM address)
@@ -13710,12 +13708,12 @@ TEST(semantic_fix_getstring_preserves_text_pointer) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
     ASSERT_TRUE(pta != nullptr);
     
-    // No raw ROM address survives — str_value and buffer_slot are the semantic outputs
+    // No raw ROM address survives â€” str_value and buffer_slot are the semantic outputs
     ASSERT_EQ(pta->buffer_slot, 1u);
     ASSERT_EQ(pta->arg_type, TextArgType::String);
-    // str_value is empty since no text_registry was provided — that's fine
+    // str_value is empty since no text_registry was provided â€” that's fine
     
-    std::cout << "  [getstring preserves buffer_slot=1, arg_type=String, no ROM address ✓]\n";
+    std::cout << "  [getstring preserves buffer_slot=1, arg_type=String, no ROM address âœ“]\n";
 }
 
 // Finding 3: getmoney preserves account operand
@@ -13763,7 +13761,7 @@ TEST(semantic_fix_getmoney_preserves_account) {
     ASSERT_EQ(pta->account, enginemon::MoneyAccount::Mom);
     ASSERT_EQ(pta->buffer_slot, 3);
     
-    std::cout << "  [getmoney preserves account=" << (int)static_cast<uint8_t>(pta->account) << " ✓]\n";
+    std::cout << "  [getmoney preserves account=" << (int)static_cast<uint8_t>(pta->account) << " âœ“]\n";
 }
 
 // Finding 7: encountermusic produces Sem_PlayEncounterMusic, NOT Sem_PlayMapMusic
@@ -13812,7 +13810,7 @@ TEST(semantic_fix_encountermusic_distinct_from_playmapmusic) {
     auto* map = std::get_if<Sem_PlayMapMusic>(&inst.op);
     ASSERT_TRUE(map == nullptr);
     
-    std::cout << "  [encountermusic → Sem_PlayEncounterMusic (not PlayMapMusic) ✓]\n";
+    std::cout << "  [encountermusic â†’ Sem_PlayEncounterMusic (not PlayMapMusic) âœ“]\n";
 }
 
 // Finding 8: newloadmap preserves method operand
@@ -13861,7 +13859,7 @@ TEST(semantic_fix_newloadmap_preserves_method) {
         ASSERT_EQ(static_cast<uint8_t>(nlm_op->method), method);
     }
     
-    std::cout << "  [newloadmap preserves method (0xF1..0xFC tested) ✓]\n";
+    std::cout << "  [newloadmap preserves method (0xF1..0xFC tested) âœ“]\n";
 }
 
 // Finding 9: reanchormap produces Sem_ReanchorMap, NOT Sem_RefreshMap
@@ -13914,7 +13912,7 @@ TEST(semantic_fix_reanchormap_distinct_from_refreshmap) {
     auto* refresh = std::get_if<Sem_RefreshMap>(&inst.op);
     ASSERT_TRUE(refresh == nullptr);
     
-    std::cout << "  [reanchormap → Sem_ReanchorMap (not RefreshMap), dummy=0x42 ✓]\n";
+    std::cout << "  [reanchormap â†’ Sem_ReanchorMap (not RefreshMap), dummy=0x42 âœ“]\n";
 }
 
 // Finding 9: refreshmap produces Sem_RefreshMap (distinct from reanchormap)
@@ -13961,7 +13959,7 @@ TEST(semantic_fix_refreshmap_distinct_from_reanchormap) {
     auto* reanchor = std::get_if<Sem_ReanchorMap>(&inst.op);
     ASSERT_TRUE(reanchor == nullptr);
     
-    std::cout << "  [refreshmap → Sem_RefreshMap (not ReanchorMap) ✓]\n";
+    std::cout << "  [refreshmap â†’ Sem_RefreshMap (not ReanchorMap) âœ“]\n";
 }
 
 // Finding 5: sdefer resolves bank-relative pointer correctly
@@ -14010,7 +14008,7 @@ TEST(semantic_fix_sdefer_bank_resolution) {
     // "deferred_68500" (hex for 0x1A * 0x4000 + (0x4500 - 0x4000))
     ASSERT_STR_EQ(sdef->target_script_id, "deferred_68500");
     
-    std::cout << "  [sdefer bank resolution: 0x4500 @ bank 0x1A → deferred_68500 ✓]\n";
+    std::cout << "  [sdefer bank resolution: 0x4500 @ bank 0x1A â†’ deferred_68500 âœ“]\n";
 }
 
 // Finding 2: TextDefinition identity_string distinguishes control codes
@@ -14049,7 +14047,7 @@ TEST(semantic_fix_text_identity_distinguishes_controls) {
     ASSERT_STR_CONTAINS(id1, "<LINE>");
     ASSERT_STR_CONTAINS(id2, "<PARA>");
     
-    std::cout << "  [TextDefinition: LINE vs PARA → distinct identities ✓]\n";
+    std::cout << "  [TextDefinition: LINE vs PARA â†’ distinct identities âœ“]\n";
 }
 
 // Finding 2: TextDefinition identity distinguishes TX_RAM addresses
@@ -14078,11 +14076,11 @@ TEST(semantic_fix_text_identity_distinguishes_ram_addresses) {
     ASSERT_STR_CONTAINS(id1, "<RAM:");
     ASSERT_STR_CONTAINS(id2, "<RAM:");
     
-    std::cout << "  [TextDefinition: RAM(0xD47D) vs RAM(0xD47E) → distinct ✓]\n";
+    std::cout << "  [TextDefinition: RAM(0xD47D) vs RAM(0xD47E) â†’ distinct âœ“]\n";
 }
 
 // =============================================================================
-// TEXT SEMANTIC TESTS — TextStringBuffer → SemanticTextOp::Arg
+// TEXT SEMANTIC TESTS â€” TextStringBuffer â†’ SemanticTextOp::Arg
 // =============================================================================
 // Verifies that TX_STRINGBUFFER (0x14) correctly maps to
 // SemanticTextElement::make_arg(slot) using the SOURCE-PROVEN 0-indexed
@@ -14093,11 +14091,11 @@ TEST(semantic_fix_text_identity_distinguishes_ram_addresses) {
 //   5: wEnemyMonNickname  6: wBattleMonNickname
 //
 // The encoded byte IS the direct 0-indexed table slot (no subtraction).
-// Valid range: 0–6.  Index >= 7 → hard-fail (empty sequence).
+// Valid range: 0â€“6.  Index >= 7 â†’ hard-fail (empty sequence).
 // =============================================================================
 
 TEST(text_string_buffer_id4_maps_to_arg_slot4) {
-    // buffer_id=4 → wStringBuffer1 (most common slot, slot 4 in StringBufferPointers)
+    // buffer_id=4 â†’ wStringBuffer1 (most common slot, slot 4 in StringBufferPointers)
     using namespace crystal;
     using namespace enginemon;
 
@@ -14124,30 +14122,30 @@ TEST(text_string_buffer_id4_maps_to_arg_slot4) {
     // Must NOT be empty text placeholder
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_STRINGBUFFER(4=wStringBuffer1) → SemanticTextOp::Arg(slot=4) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(4=wStringBuffer1) â†’ SemanticTextOp::Arg(slot=4) âœ“]\n";
 }
 
 TEST(text_string_buffer_id0_maps_to_arg_slot0) {
-    // buffer_id=0 → wStringBuffer3 (first entry in StringBufferPointers)
+    // buffer_id=0 â†’ wStringBuffer3 (first entry in StringBufferPointers)
     using namespace crystal;
     using namespace enginemon;
 
     TextDefinition def;
     def.source_rom_address = 0x2000;
-    // wStringBuffer3 (buffer_id=0) → slot 0
+    // wStringBuffer3 (buffer_id=0) â†’ slot 0
     def.sequence.elements.push_back(TextElement::make_text_string_buffer(0));  // wStringBuffer3
 
     auto sem = def.to_semantic_sequence();
 
     ASSERT_EQ(sem.elements.size(), 1u);
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
-    ASSERT_EQ(sem.elements[0].arg_index, 0u);  // direct: id=0 → slot=0
+    ASSERT_EQ(sem.elements[0].arg_index, 0u);  // direct: id=0 â†’ slot=0
 
-    std::cout << "  [TX_STRINGBUFFER(0=wStringBuffer3) → SemanticTextOp::Arg(slot=0) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(0=wStringBuffer3) â†’ SemanticTextOp::Arg(slot=0) âœ“]\n";
 }
 
 TEST(text_string_buffer_id6_maps_to_arg_slot6) {
-    // buffer_id=6 → wBattleMonNickname (last valid entry)
+    // buffer_id=6 â†’ wBattleMonNickname (last valid entry)
     using namespace crystal;
     using namespace enginemon;
 
@@ -14161,12 +14159,12 @@ TEST(text_string_buffer_id6_maps_to_arg_slot6) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].arg_index, 6u);
 
-    std::cout << "  [TX_STRINGBUFFER(6=wBattleMonNickname) → SemanticTextOp::Arg(slot=6) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(6=wBattleMonNickname) â†’ SemanticTextOp::Arg(slot=6) âœ“]\n";
 }
 
 TEST(text_string_buffer_invalid_id7_hard_fails) {
     // buffer_id=7 is outside StringBufferPointers (only 7 entries: 0-6).
-    // to_semantic_sequence() must return empty sequence → legality gate rejects.
+    // to_semantic_sequence() must return empty sequence â†’ legality gate rejects.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14181,11 +14179,11 @@ TEST(text_string_buffer_invalid_id7_hard_fails) {
     // Hard-fail: empty sequence
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_STRINGBUFFER(7=INVALID) → empty SemanticTextSequence (hard-fail) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(7=INVALID) â†’ empty SemanticTextSequence (hard-fail) âœ“]\n";
 }
 
 TEST(text_string_buffer_invalid_id255_hard_fails) {
-    // buffer_id=255 — far out of range, must also hard-fail.
+    // buffer_id=255 â€” far out of range, must also hard-fail.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14197,12 +14195,12 @@ TEST(text_string_buffer_invalid_id255_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_STRINGBUFFER(255=INVALID) → empty SemanticTextSequence (hard-fail) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(255=INVALID) â†’ empty SemanticTextSequence (hard-fail) âœ“]\n";
 }
 
 TEST(text_tx_ram_wstringbuffer3_maps_to_arg_slot0) {
-    // TX_RAM wStringBuffer3 (0xD099) → Arg(slot=0)
-    // Source: GetStringBuffer: ld hl, wStringBuffer3; strbuf=0 → wStringBuffer3
+    // TX_RAM wStringBuffer3 (0xD099) â†’ Arg(slot=0)
+    // Source: GetStringBuffer: ld hl, wStringBuffer3; strbuf=0 â†’ wStringBuffer3
     using namespace crystal;
     using namespace enginemon;
 
@@ -14219,11 +14217,11 @@ TEST(text_tx_ram_wstringbuffer3_maps_to_arg_slot0) {
     ASSERT_EQ(sem.elements[1].arg_index, 0u);  // slot 0 = wStringBuffer3
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_RAM(0xD099=wStringBuffer3) → Arg(slot=0) ✓]\n";
+    std::cout << "  [TX_RAM(0xD099=wStringBuffer3) â†’ Arg(slot=0) âœ“]\n";
 }
 
 TEST(text_tx_ram_wstringbuffer4_maps_to_arg_slot1) {
-    // TX_RAM wStringBuffer4 (0xD0AC) → Arg(slot=1)
+    // TX_RAM wStringBuffer4 (0xD0AC) â†’ Arg(slot=1)
     using namespace crystal;
     using namespace enginemon;
 
@@ -14237,11 +14235,11 @@ TEST(text_tx_ram_wstringbuffer4_maps_to_arg_slot1) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].arg_index, 1u);
 
-    std::cout << "  [TX_RAM(0xD0AC=wStringBuffer4) → Arg(slot=1) ✓]\n";
+    std::cout << "  [TX_RAM(0xD0AC=wStringBuffer4) â†’ Arg(slot=1) âœ“]\n";
 }
 
 TEST(text_tx_ram_wstringbuffer5_maps_to_arg_slot2) {
-    // TX_RAM wStringBuffer5 (0xD0BF) → Arg(slot=2)
+    // TX_RAM wStringBuffer5 (0xD0BF) â†’ Arg(slot=2)
     using namespace crystal;
     using namespace enginemon;
 
@@ -14255,11 +14253,11 @@ TEST(text_tx_ram_wstringbuffer5_maps_to_arg_slot2) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].arg_index, 2u);
 
-    std::cout << "  [TX_RAM(0xD0BF=wStringBuffer5) → Arg(slot=2) ✓]\n";
+    std::cout << "  [TX_RAM(0xD0BF=wStringBuffer5) â†’ Arg(slot=2) âœ“]\n";
 }
 
 TEST(text_tx_ram_unknown_address_hard_fails) {
-    // TX_RAM with unknown address (e.g. wPlayerName 0xD47D) → hard-fail empty sequence.
+    // TX_RAM with unknown address (e.g. wPlayerName 0xD47D) â†’ hard-fail empty sequence.
     // Only wStringBuffer3/4/5 are valid script text buffer slots.
     using namespace crystal;
     using namespace enginemon;
@@ -14267,19 +14265,19 @@ TEST(text_tx_ram_unknown_address_hard_fails) {
     TextDefinition def;
     def.source_rom_address = 0x4300;
     def.sequence.elements.push_back(TextElement::make_text("Player: "));
-    def.sequence.elements.push_back(TextElement::make_text_ram(0xD47D));  // wPlayerName — not a buffer slot
+    def.sequence.elements.push_back(TextElement::make_text_ram(0xD47D));  // wPlayerName â€” not a buffer slot
 
     auto sem = def.to_semantic_sequence();
 
     // Hard-fail: wPlayerName is not a valid strbuf slot
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_RAM(0xD47D=wPlayerName) → hard-fail (not a script buffer slot) ✓]\n";
+    std::cout << "  [TX_RAM(0xD47D=wPlayerName) â†’ hard-fail (not a script buffer slot) âœ“]\n";
 }
 
 TEST(text_tx_bcd_hard_fails) {
     // TX_BCD is not used in script text corpus (only in battle text engine internals).
-    // Any TX_BCD in a script text sequence is an error → hard-fail.
+    // Any TX_BCD in a script text sequence is an error â†’ hard-fail.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14291,13 +14289,13 @@ TEST(text_tx_bcd_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_BCD → hard-fail (no script text corpus uses) ✓]\n";
+    std::cout << "  [TX_BCD â†’ hard-fail (no script text corpus uses) âœ“]\n";
 }
 
 TEST(text_tx_decimal_wscriptvar_produces_script_var_decimal) {
-    // TX_DECIMAL wScriptVar (0xC2DD) → ScriptVarDecimal(bytes_digits).
-    // Source: BattleTower1F.asm text_decimal wScriptVar, 1, 3 → param=0x13.
-    // No WRAM address survives — runtime reads ScriptVar context.
+    // TX_DECIMAL wScriptVar (0xC2DD) â†’ ScriptVarDecimal(bytes_digits).
+    // Source: BattleTower1F.asm text_decimal wScriptVar, 1, 3 â†’ param=0x13.
+    // No WRAM address survives â€” runtime reads ScriptVar context.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14312,11 +14310,11 @@ TEST(text_tx_decimal_wscriptvar_produces_script_var_decimal) {
     ASSERT_EQ(sem.elements[0].param1, 0x13u);  // bytes_digits preserved
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_DECIMAL(0xC2DD=wScriptVar, param=0x13) → ScriptVarDecimal(0x13) ✓]\n";
+    std::cout << "  [TX_DECIMAL(0xC2DD=wScriptVar, param=0x13) â†’ ScriptVarDecimal(0x13) âœ“]\n";
 }
 
 TEST(text_tx_decimal_unknown_address_hard_fails) {
-    // TX_DECIMAL with address other than wScriptVar → hard-fail.
+    // TX_DECIMAL with address other than wScriptVar â†’ hard-fail.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14328,7 +14326,7 @@ TEST(text_tx_decimal_unknown_address_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_DECIMAL(non-wScriptVar) → hard-fail ✓]\n";
+    std::cout << "  [TX_DECIMAL(non-wScriptVar) â†’ hard-fail âœ“]\n";
 }
 
 TEST(text_tx_far_inlines_referenced_text) {
@@ -14353,11 +14351,11 @@ TEST(text_tx_far_inlines_referenced_text) {
     reg.extract(0x18000);
 
     // Build text with TX_FAR pointing to 0x18000
-    // TX_FAR: bank=6, local_ptr=0x4000 → flat = 6*0x4000 + (0x4000-0x4000) = 0x18000
+    // TX_FAR: bank=6, local_ptr=0x4000 â†’ flat = 6*0x4000 + (0x4000-0x4000) = 0x18000
     TextDefinition def;
     def.source_rom_address = 0x6000;
     def.sequence.elements.push_back(TextElement::make_text("Before "));
-    def.sequence.elements.push_back(TextElement::make_text_far(0x4000, 0x06));  // → flat 0x18000
+    def.sequence.elements.push_back(TextElement::make_text_far(0x4000, 0x06));  // â†’ flat 0x18000
     def.sequence.elements.push_back(TextElement::make_text(" After"));
 
     auto sem = def.to_semantic_sequence(&reg);
@@ -14377,7 +14375,7 @@ TEST(text_tx_far_inlines_referenced_text) {
     }
     ASSERT_TRUE(found_hello);
 
-    // No FarText element survives — the old FarText op no longer exists in SemanticTextOp.
+    // No FarText element survives â€” the old FarText op no longer exists in SemanticTextOp.
     // All elements must be Text, Arg, Line, Para, Cont, Scroll, Done, Prompt, Day, Sound, or ScriptVarDecimal.
     for (const auto& e : sem.elements) {
         ASSERT_TRUE(e.op == SemanticTextOp::Text ||
@@ -14394,11 +14392,11 @@ TEST(text_tx_far_inlines_referenced_text) {
                     e.op == SemanticTextOp::ScriptVarDecimal);
     }
 
-    std::cout << "  [TX_FAR(bank=6,ptr=0x4000→flat=0x18000) → inlined 'HELLO' ✓]\n";
+    std::cout << "  [TX_FAR(bank=6,ptr=0x4000â†’flat=0x18000) â†’ inlined 'HELLO' âœ“]\n";
 }
 
 TEST(text_tx_far_without_registry_hard_fails) {
-    // TX_FAR without registry → hard-fail (cannot resolve target).
+    // TX_FAR without registry â†’ hard-fail (cannot resolve target).
     using namespace crystal;
     using namespace enginemon;
 
@@ -14411,11 +14409,11 @@ TEST(text_tx_far_without_registry_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_FAR without registry → hard-fail ✓]\n";
+    std::cout << "  [TX_FAR without registry â†’ hard-fail âœ“]\n";
 }
 
 TEST(text_tx_day_produces_day_op) {
-    // TX_DAY → SemanticTextOp::Day (no operands, runtime queries calendar).
+    // TX_DAY â†’ SemanticTextOp::Day (no operands, runtime queries calendar).
     using namespace crystal;
     using namespace enginemon;
 
@@ -14430,12 +14428,12 @@ TEST(text_tx_day_produces_day_op) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Day);
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_DAY → SemanticTextOp::Day ✓]\n";
+    std::cout << "  [TX_DAY â†’ SemanticTextOp::Day âœ“]\n";
 }
 
 TEST(text_tx_sound_item_produces_typed_sound_kind) {
-    // TX_SOUND_ITEM (0x0f) → Sound(TextSoundKind::ItemJingle).
-    // No raw opcode 0x0f survives — TextSoundKind is the semantic identity.
+    // TX_SOUND_ITEM (0x0f) â†’ Sound(TextSoundKind::ItemJingle).
+    // No raw opcode 0x0f survives â€” TextSoundKind is the semantic identity.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14450,11 +14448,11 @@ TEST(text_tx_sound_item_produces_typed_sound_kind) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Sound);
     ASSERT_EQ(sem.elements[0].sound_kind(), TextSoundKind::ItemJingle);
 
-    std::cout << "  [TX_SOUND_ITEM → Sound(ItemJingle) ✓]\n";
+    std::cout << "  [TX_SOUND_ITEM â†’ Sound(ItemJingle) âœ“]\n";
 }
 
 TEST(text_tx_sound_fanfare_produces_typed_sound_kind) {
-    // TX_SOUND_FANFARE (0x12) → Sound(TextSoundKind::Fanfare).
+    // TX_SOUND_FANFARE (0x12) â†’ Sound(TextSoundKind::Fanfare).
     using namespace crystal;
     using namespace enginemon;
 
@@ -14469,14 +14467,14 @@ TEST(text_tx_sound_fanfare_produces_typed_sound_kind) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Sound);
     ASSERT_EQ(sem.elements[0].sound_kind(), TextSoundKind::Fanfare);
 
-    std::cout << "  [TX_SOUND_FANFARE → Sound(Fanfare) ✓]\n";
+    std::cout << "  [TX_SOUND_FANFARE â†’ Sound(Fanfare) âœ“]\n";
 }
 
 TEST(text_presentation_ops_dropped_not_failed) {
-    // TX_MOVE/BOX/LOW/SCROLL/ASM are presentation-only with 0 corpus uses — dropped.
+    // TX_MOVE/BOX/LOW/SCROLL/ASM are presentation-only with 0 corpus uses â€” dropped.
     // TX_PAUSE and TX_PROMPT_BUTTON are now preserved as typed semantic elements.
-    // TX_LOW has 3 corpus-reachable uses but only repositions cursor — safely dropped.
-    // The sequence is NOT hard-failed — surrounding text content is preserved.
+    // TX_LOW has 3 corpus-reachable uses but only repositions cursor â€” safely dropped.
+    // The sequence is NOT hard-failed â€” surrounding text content is preserved.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14498,11 +14496,11 @@ TEST(text_presentation_ops_dropped_not_failed) {
     ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Text);
     ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
 
-    std::cout << "  [TX_LOW + TX_MOVE dropped; surrounding text preserved ✓]\n";
+    std::cout << "  [TX_LOW + TX_MOVE dropped; surrounding text preserved âœ“]\n";
 }
 
 TEST(text_tx_raw_unknown_opcode_hard_fails) {
-    // TextRaw with unknown opcode → hard-fail.
+    // TextRaw with unknown opcode â†’ hard-fail.
     // Unknown TX commands must not silently pass.
     using namespace crystal;
     using namespace enginemon;
@@ -14516,16 +14514,16 @@ TEST(text_tx_raw_unknown_opcode_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TextRaw(opcode=0xAB) → hard-fail ✓]\n";
+    std::cout << "  [TextRaw(opcode=0xAB) â†’ hard-fail âœ“]\n";
 }
 
-// Arg-slot mapping — proves the 3 valid GetStringBuffer TX_RAM slots.
+// Arg-slot mapping â€” proves the 3 valid GetStringBuffer TX_RAM slots.
 TEST(text_arg_slot_numbering_table_driven) {
     // Source: GetStringBuffer in scripting.asm:
     //   ld hl, wStringBuffer3; ld bc, STRING_BUFFER_LENGTH (19); AddNTimes(strbuf)
-    //   strbuf=0 → wStringBuffer3 (0xD099) → Arg(0)
-    //   strbuf=1 → wStringBuffer4 (0xD0AC) → Arg(1)
-    //   strbuf=2 → wStringBuffer5 (0xD0BF) → Arg(2)
+    //   strbuf=0 â†’ wStringBuffer3 (0xD099) â†’ Arg(0)
+    //   strbuf=1 â†’ wStringBuffer4 (0xD0AC) â†’ Arg(1)
+    //   strbuf=2 â†’ wStringBuffer5 (0xD0BF) â†’ Arg(2)
     //   NUM_STRING_BUFFERS = 3. Only slots 0/1/2 are valid GetStringBuffer destinations.
     //   These match Sem_PrepareTextArg::buffer_slot which uses the same 0-based index.
     using namespace crystal;
@@ -14555,20 +14553,20 @@ TEST(text_arg_slot_numbering_table_driven) {
         ASSERT_EQ(sem.elements[0].arg_index, tc.expected_slot);
 
         std::cout << "  [TX_RAM(0x" << std::hex << tc.wram_addr << "=" << tc.symbol
-                  << ") → Arg(" << std::dec << (int)tc.expected_slot << ") ✓]\n";
+                  << ") â†’ Arg(" << std::dec << (int)tc.expected_slot << ") âœ“]\n";
     }
 }
 
-// RamSource mapping — proves TX_RAM slots 3-6 produce typed RamSource, NOT Arg.
+// RamSource mapping â€” proves TX_RAM slots 3-6 produce typed RamSource, NOT Arg.
 // These buffers are direct WRAM reads with no Sem_PrepareTextArg producer.
 TEST(text_ram_source_domain_distinct_from_arg_domain) {
     // Source: StringBufferPointers[3..6] + corpus TX_RAM analysis.
-    //   wStringBuffer2  (0xD086) → RamSource(PreparedString2)
-    //   wStringBuffer1  (0xD073) → RamSource(PreparedString1)
-    //   wEnemyMonNickname (0xC616) → RamSource(EnemyNickname)
-    //   wBattleMonNickname (0xC621) → RamSource(BattleNickname)
+    //   wStringBuffer2  (0xD086) â†’ RamSource(PreparedString2)
+    //   wStringBuffer1  (0xD073) â†’ RamSource(PreparedString1)
+    //   wEnemyMonNickname (0xC616) â†’ RamSource(EnemyNickname)
+    //   wBattleMonNickname (0xC621) â†’ RamSource(BattleNickname)
     //
-    // These are NOT Arg(3/4/5/6) — no Sem_PrepareTextArg writes buffer_slot 3-6
+    // These are NOT Arg(3/4/5/6) â€” no Sem_PrepareTextArg writes buffer_slot 3-6
     // in vanilla Crystal (GetStringBuffer clamps to NUM_STRING_BUFFERS=3 max).
     using namespace crystal;
     using namespace enginemon;
@@ -14594,19 +14592,19 @@ TEST(text_ram_source_domain_distinct_from_arg_domain) {
         auto sem = def.to_semantic_sequence();
 
         ASSERT_EQ(sem.elements.size(), 1u);
-        // Must be RamSource, NOT Arg — different semantic domain
+        // Must be RamSource, NOT Arg â€” different semantic domain
         ASSERT_EQ(sem.elements[0].op, SemanticTextOp::RamSource);
         ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
         ASSERT_EQ(sem.elements[0].ram_source(), tc.expected_source);
 
         std::cout << "  [TX_RAM(0x" << std::hex << tc.wram_addr << "=" << tc.symbol
-                  << ") → RamSource (not Arg) ✓]\n";
+                  << ") â†’ RamSource (not Arg) âœ“]\n";
     }
 }
 
 // Confirm wPlayerName is NOT a valid script buffer slot (not in StringBufferPointers).
 TEST(text_arg_slot_wplayername_hard_fails) {
-    // wPlayerName (0xD47D) is not in StringBufferPointers — hard-fail.
+    // wPlayerName (0xD47D) is not in StringBufferPointers â€” hard-fail.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14618,20 +14616,20 @@ TEST(text_arg_slot_wplayername_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_RAM(0xD47D=wPlayerName) → hard-fail (not in StringBufferPointers) ✓]\n";
+    std::cout << "  [TX_RAM(0xD47D=wPlayerName) â†’ hard-fail (not in StringBufferPointers) âœ“]\n";
 }
 
 // =============================================================================
-// INLINE PROMPT BUTTON + PAUSE — Bounded text control cleanup tests
+// INLINE PROMPT BUTTON + PAUSE â€” Bounded text control cleanup tests
 // =============================================================================
 
 TEST(text_tx_prompt_button_produces_inline_prompt_button_not_dropped) {
     // TX_PROMPT_BUTTON (0x06) must produce SemanticTextOp::InlinePromptButton.
-    // It must NOT be silently dropped — it gates player progression mid-sequence.
+    // It must NOT be silently dropped â€” it gates player progression mid-sequence.
     //
     // Source: home/text.asm TextCommand_PROMPT_BUTTON:
-    //   LoadBlinkingCursor → PromptButton (waits A/B) → UnloadBlinkingCursor
-    //   DISTINCT from Prompt (terminating) — text continues after the wait.
+    //   LoadBlinkingCursor â†’ PromptButton (waits A/B) â†’ UnloadBlinkingCursor
+    //   DISTINCT from Prompt (terminating) â€” text continues after the wait.
     //
     // Corpus-reachable: 11 occurrences including maps/BattleTower1F.asm.
     using namespace crystal;
@@ -14652,18 +14650,18 @@ TEST(text_tx_prompt_button_produces_inline_prompt_button_not_dropped) {
     ASSERT_EQ(sem.elements[1].op, SemanticTextOp::InlinePromptButton);
     ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
 
-    // Must NOT be Prompt (terminating) — text continues after
+    // Must NOT be Prompt (terminating) â€” text continues after
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Prompt);
     // Must NOT be Text (silently dropped to empty string)
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
-    // Sequence is non-empty — legality gate accepts it
+    // Sequence is non-empty â€” legality gate accepts it
     ASSERT_FALSE(sem.empty());
 
-    std::cout << "  [TX_PROMPT_BUTTON → InlinePromptButton (not dropped, not Prompt) ✓]\n";
+    std::cout << "  [TX_PROMPT_BUTTON â†’ InlinePromptButton (not dropped, not Prompt) âœ“]\n";
 }
 
 TEST(text_tx_prompt_button_standalone_produces_single_element) {
-    // TX_PROMPT_BUTTON in isolation → exactly one InlinePromptButton element.
+    // TX_PROMPT_BUTTON in isolation â†’ exactly one InlinePromptButton element.
     // This matches the Battle Tower corpus case where prompt appears mid-text.
     using namespace crystal;
     using namespace enginemon;
@@ -14679,21 +14677,21 @@ TEST(text_tx_prompt_button_standalone_produces_single_element) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::InlinePromptButton);
     ASSERT_FALSE(sem.empty());
 
-    std::cout << "  [TX_PROMPT_BUTTON standalone → InlinePromptButton (non-empty) ✓]\n";
+    std::cout << "  [TX_PROMPT_BUTTON standalone â†’ InlinePromptButton (non-empty) âœ“]\n";
 }
 
 TEST(text_tx_pause_produces_pause_with_30_frames) {
     // TX_PAUSE (0x0a) must produce SemanticTextOp::Pause with frames=30.
-    // It must NOT be silently dropped — it provides observable ~0.5s pacing.
+    // It must NOT be silently dropped â€” it provides observable ~0.5s pacing.
     //
     // Source: home/text.asm TextCommand_PAUSE:
-    //   GetJoypad; if A|B held → immediate; else DelayFrames(30)
+    //   GetJoypad; if A|B held â†’ immediate; else DelayFrames(30)
     //
     // Corpus-reachable: 12 occurrences in Radio Tower, Lucky Channel,
     //   level-up move-learning, NPC trade fanfare text.
     //
     // frames = 30: the ONLY value used in all vanilla Crystal occurrences.
-    // Preserved explicitly — not encoded as a magic runtime default.
+    // Preserved explicitly â€” not encoded as a magic runtime default.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14712,12 +14710,12 @@ TEST(text_tx_pause_produces_pause_with_30_frames) {
     ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Pause);
     ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
 
-    // Frame count must be exactly 30 — source-proven value
+    // Frame count must be exactly 30 â€” source-proven value
     ASSERT_EQ(sem.elements[1].pause_frames(), 30u);
     // Must NOT be Text (silently dropped)
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_PAUSE → Pause(frames=30), not dropped ✓]\n";
+    std::cout << "  [TX_PAUSE â†’ Pause(frames=30), not dropped âœ“]\n";
 }
 
 TEST(text_tx_pause_frame_count_preserved_explicitly) {
@@ -14740,12 +14738,12 @@ TEST(text_tx_pause_frame_count_preserved_explicitly) {
     // Verify it's not zero (dropped/no-op)
     ASSERT_TRUE(sem.elements[0].pause_frames() > 0u);
 
-    std::cout << "  [TX_PAUSE frame count = 30 (explicit, source-proven) ✓]\n";
+    std::cout << "  [TX_PAUSE frame count = 30 (explicit, source-proven) âœ“]\n";
 }
 
 TEST(text_enemy_nickname_is_ram_source_not_arg) {
-    // TX_RAM wEnemyMonNickname (0xC616) → RamSource(EnemyNickname).
-    // Must NOT produce Arg(5) — no Sem_PrepareTextArg(buffer_slot=5) exists.
+    // TX_RAM wEnemyMonNickname (0xC616) â†’ RamSource(EnemyNickname).
+    // Must NOT produce Arg(5) â€” no Sem_PrepareTextArg(buffer_slot=5) exists.
     // RamSource is a typed direct-WRAM read identity, not a prepared-slot reference.
     using namespace crystal;
     using namespace enginemon;
@@ -14761,12 +14759,12 @@ TEST(text_enemy_nickname_is_ram_source_not_arg) {
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::EnemyNickname);
 
-    std::cout << "  [TX_RAM(wEnemyMonNickname) → RamSource(EnemyNickname), not Arg ✓]\n";
+    std::cout << "  [TX_RAM(wEnemyMonNickname) â†’ RamSource(EnemyNickname), not Arg âœ“]\n";
 }
 
 TEST(text_battle_nickname_is_ram_source_not_arg) {
-    // TX_RAM wBattleMonNickname (0xC621) → RamSource(BattleNickname).
-    // Must NOT produce Arg(6) — no such prepared-slot producer in vanilla Crystal.
+    // TX_RAM wBattleMonNickname (0xC621) â†’ RamSource(BattleNickname).
+    // Must NOT produce Arg(6) â€” no such prepared-slot producer in vanilla Crystal.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14781,13 +14779,13 @@ TEST(text_battle_nickname_is_ram_source_not_arg) {
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::BattleNickname);
 
-    std::cout << "  [TX_RAM(wBattleMonNickname) → RamSource(BattleNickname), not Arg ✓]\n";
+    std::cout << "  [TX_RAM(wBattleMonNickname) â†’ RamSource(BattleNickname), not Arg âœ“]\n";
 }
 
 TEST(text_prepared_string2_is_ram_source_not_arg) {
-    // TX_RAM wStringBuffer2 (0xD086) → RamSource(PreparedString2).
+    // TX_RAM wStringBuffer2 (0xD086) â†’ RamSource(PreparedString2).
     // This is the direct-WRAM read used in Strength/RockSmash texts via TX_FAR.
-    // NOT Arg(3) — GetStringBuffer only addresses slots 0-2.
+    // NOT Arg(3) â€” GetStringBuffer only addresses slots 0-2.
     using namespace crystal;
     using namespace enginemon;
 
@@ -14802,7 +14800,7 @@ TEST(text_prepared_string2_is_ram_source_not_arg) {
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::PreparedString2);
 
-    std::cout << "  [TX_RAM(wStringBuffer2) → RamSource(PreparedString2), not Arg ✓]\n";
+    std::cout << "  [TX_RAM(wStringBuffer2) â†’ RamSource(PreparedString2), not Arg âœ“]\n";
 }
 
 TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
@@ -14814,7 +14812,7 @@ TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
     using namespace lowering_rules;
     
     // Build: setval(5), special(BugContestJudging=20), special(MapRadio=40)
-    // BugContestJudging writes wScriptVar → context invalidated → MapRadio cannot fold
+    // BugContestJudging writes wScriptVar â†’ context invalidated â†’ MapRadio cannot fold
     Cmd_Setval sv; sv.value = 5;
     CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 5};
     
@@ -14840,7 +14838,7 @@ TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
     auto result = legalizer.lower(ir, cfg);
     
     // BugContestJudging (writes_var=true) should invalidate context
-    // → MapRadio has no context → unlowered
+    // â†’ MapRadio has no context â†’ unlowered
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
     
@@ -14858,7 +14856,7 @@ TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
     }
     ASSERT_TRUE(found_gse);
     
-    std::cout << "  [BugContestJudging(writes_var=true) invalidates → MapRadio unlowered ✓]\n";
+    std::cout << "  [BugContestJudging(writes_var=true) invalidates â†’ MapRadio unlowered âœ“]\n";
 }
 
 TEST(sem_game_specific_event_no_write_preserves_context) {
@@ -14869,7 +14867,7 @@ TEST(sem_game_specific_event_no_write_preserves_context) {
     using namespace lowering_rules;
     
     // Build: setval(3), special(OverworldTownMap=38), special(MapRadio=40)
-    // OverworldTownMap does NOT write wScriptVar → context preserved → MapRadio folds to channel 3
+    // OverworldTownMap does NOT write wScriptVar â†’ context preserved â†’ MapRadio folds to channel 3
     Cmd_Setval sv; sv.value = 3;
     CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 3};
     
@@ -14895,7 +14893,7 @@ TEST(sem_game_specific_event_no_write_preserves_context) {
     auto result = legalizer.lower(ir, cfg);
     
     // OverworldTownMap (writes_var=false) should NOT invalidate context
-    // → MapRadio still has context (channel=3) → lowered to Sem_PlayRadio{channel=3}
+    // â†’ MapRadio still has context (channel=3) â†’ lowered to Sem_PlayRadio{channel=3}
     ASSERT_TRUE(result.success);
     
     // Verify OverworldTownMap produced Sem_GameSpecificEvent with writes_var=false
@@ -14915,9 +14913,9 @@ TEST(sem_game_specific_event_no_write_preserves_context) {
         }
     }
     ASSERT_TRUE(found_townmap);
-    ASSERT_TRUE(found_radio_ch3);  // context preserved → MapRadio folded with channel=3
+    ASSERT_TRUE(found_radio_ch3);  // context preserved â†’ MapRadio folded with channel=3
     
-    std::cout << "  [OverworldTownMap(writes_var=false) preserves context → MapRadio(3) folded ✓]\n";
+    std::cout << "  [OverworldTownMap(writes_var=false) preserves context â†’ MapRadio(3) folded âœ“]\n";
 }
 
 TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id) {
@@ -14969,11 +14967,11 @@ TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id) {
         ASSERT_TRUE(found);
     }
     
-    std::cout << "  [Sem_GameSpecificEvent carries source name not raw numeric ID ✓]\n";
+    std::cout << "  [Sem_GameSpecificEvent carries source name not raw numeric ID âœ“]\n";
 }
 
 // =============================================================================
-// SHARED TEST HELPER — build a minimal single-command IR for lowering tests
+// SHARED TEST HELPER â€” build a minimal single-command IR for lowering tests
 // Defined here so it's available to all test blocks that follow.
 // =============================================================================
 static std::pair<crystal::CrystalScriptIR, crystal::CrystalCFG>
@@ -15005,7 +15003,7 @@ make_single_cmd_ir(crystal::CrystalCommandData data, uint32_t entry_address,
 }
 
 //=============================================================================
-// SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS — August 2026
+// SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS â€” August 2026
 // Verifies all 5 findings from the hostile audit:
 //   Finding 1: wScriptVar block_ctx invalidation
 //   Finding 2: cry 0 dynamic species
@@ -15014,7 +15012,7 @@ make_single_cmd_ir(crystal::CrystalCommandData data, uint32_t entry_address,
 //   Finding 5: pokepic 0 dynamic species
 //=============================================================================
 
-// Finding 1: setval 5 → yesorno → MapRadio must NOT fold channel=5
+// Finding 1: setval 5 â†’ yesorno â†’ MapRadio must NOT fold channel=5
 // yesorno writes wScriptVar, so block_ctx must be invalidated before MapRadio
 TEST(stale_script_var_yesorno_invalidates_before_map_radio) {
     using namespace crystal;
@@ -15044,7 +15042,7 @@ TEST(stale_script_var_yesorno_invalidates_before_map_radio) {
     auto result = legalizer.lower(ir, cfg);
 
     // After yesorno invalidates context, MapRadio (Special 40) has no producer.
-    // rule_special returns {} (unmatched) → outer loop records unlowered command.
+    // rule_special returns {} (unmatched) â†’ outer loop records unlowered command.
     // result.success = false (unlowered command present)
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
@@ -15053,14 +15051,14 @@ TEST(stale_script_var_yesorno_invalidates_before_map_radio) {
     for (const auto& block : result.ir.blocks) {
         for (const auto& inst : block.instructions) {
             auto* radio = std::get_if<Sem_PlayRadio>(&inst.op);
-            ASSERT_TRUE(radio == nullptr);  // Must NOT be PlayRadio — context was invalidated
+            ASSERT_TRUE(radio == nullptr);  // Must NOT be PlayRadio â€” context was invalidated
         }
     }
 
-    std::cout << "  [setval(5)->yesorno->MapRadio: unlowered (invalidated, no Sem_Special fallback) ✓]\n";
+    std::cout << "  [setval(5)->yesorno->MapRadio: unlowered (invalidated, no Sem_Special fallback) âœ“]\n";
 }
 
-// Finding 1: setval 5 → non-writer → MapRadio SHOULD fold channel=5 (legitimate propagation)
+// Finding 1: setval 5 â†’ non-writer â†’ MapRadio SHOULD fold channel=5 (legitimate propagation)
 TEST(script_var_propagates_across_non_writer) {
     using namespace crystal;
     using namespace enginemon;
@@ -15093,15 +15091,15 @@ TEST(script_var_propagates_across_non_writer) {
     // Should produce: Sem_SetVar{3}, Sem_FacePlayer{}, Sem_PlayRadio{3}
     ASSERT_TRUE(insts.size() >= 3);
 
-    // Third instruction should be Sem_PlayRadio{3} — context still valid
+    // Third instruction should be Sem_PlayRadio{3} â€” context still valid
     auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
     ASSERT_TRUE(radio != nullptr);
     ASSERT_EQ(radio->channel, 3);
 
-    std::cout << "  [setval(3)->faceplayer->MapRadio: channel=3 (propagated) ✓]\n";
+    std::cout << "  [setval(3)->faceplayer->MapRadio: channel=3 (propagated) âœ“]\n";
 }
 
-// Finding 1: giveitem writes wScriptVar → invalidates context
+// Finding 1: giveitem writes wScriptVar â†’ invalidates context
 TEST(stale_script_var_giveitem_invalidates) {
     using namespace crystal;
     using namespace enginemon;
@@ -15128,11 +15126,11 @@ TEST(stale_script_var_giveitem_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    // giveitem invalidates context → MapRadio (Special 40) has no producer → unlowered
+    // giveitem invalidates context â†’ MapRadio (Special 40) has no producer â†’ unlowered
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
 
-    // MapRadio must NOT get channel=2 — giveitem invalidated block_ctx
+    // MapRadio must NOT get channel=2 â€” giveitem invalidated block_ctx
     bool found_radio = false;
     for (const auto& b : result.ir.blocks) {
         for (const auto& i : b.instructions) {
@@ -15143,7 +15141,7 @@ TEST(stale_script_var_giveitem_invalidates) {
     }
     ASSERT_FALSE(found_radio);  // No PlayRadio: context was invalidated by giveitem
 
-    std::cout << "  [setval(2)->giveitem->MapRadio: unlowered (invalidated by giveitem, no Sem_Special) ✓]\n";
+    std::cout << "  [setval(2)->giveitem->MapRadio: unlowered (invalidated by giveitem, no Sem_Special) âœ“]\n";
 }
 
 // Finding 2: cry literal species
@@ -15151,7 +15149,7 @@ TEST(cry_literal_species) {
     using namespace crystal;
     using namespace enginemon;
 
-    Cmd_Cry cry; cry.cry_id = 25;  // Pikachu — low byte nonzero = literal
+    Cmd_Cry cry; cry.cry_id = 25;  // Pikachu â€” low byte nonzero = literal
     auto [ir, cfg] = make_single_cmd_ir(cry, 0x10000, "test_cry_lit", {0x84, 25, 0});
 
     SemanticLegalizer legalizer;
@@ -15164,7 +15162,7 @@ TEST(cry_literal_species) {
     ASSERT_EQ(op->source.species, SpeciesId{25});
     ASSERT_EQ(op->variant, CryVariant::Normal);
 
-    std::cout << "  [cry(25): Literal(25) ✓]\n";
+    std::cout << "  [cry(25): Literal(25) âœ“]\n";
 }
 
 // Finding 2: cry 0 = dynamic species from wScriptVar (NOT Literal(0))
@@ -15172,7 +15170,7 @@ TEST(cry_zero_dynamic_species) {
     using namespace crystal;
     using namespace enginemon;
 
-    Cmd_Cry cry; cry.cry_id = 0;  // 0 = dynamic — must NOT be Literal(0)
+    Cmd_Cry cry; cry.cry_id = 0;  // 0 = dynamic â€” must NOT be Literal(0)
     auto [ir, cfg] = make_single_cmd_ir(cry, 0x10000, "test_cry_dyn", {0x84, 0, 0});
 
     SemanticLegalizer legalizer;
@@ -15186,7 +15184,7 @@ TEST(cry_zero_dynamic_species) {
     ASSERT_TRUE(op->source.is_script_var());
     ASSERT_FALSE(op->source.is_literal());
 
-    std::cout << "  [cry(0): ScriptVar (not Literal(0)) ✓]\n";
+    std::cout << "  [cry(0): ScriptVar (not Literal(0)) âœ“]\n";
 }
 
 // Finding 2: cry{ScriptVar} != cry{Literal(25)}
@@ -15202,7 +15200,7 @@ TEST(cry_script_var_distinct_from_literal) {
     dynamic_cry.variant = CryVariant::Normal;
 
     ASSERT_FALSE(literal_cry.source == dynamic_cry.source);
-    std::cout << "  [Cry{Literal(25)} != Cry{ScriptVar} ✓]\n";
+    std::cout << "  [Cry{Literal(25)} != Cry{ScriptVar} âœ“]\n";
 }
 
 // Finding 5: pokepic literal species
@@ -15222,7 +15220,7 @@ TEST(pokepic_literal_species) {
     ASSERT_TRUE(op->source.is_literal());
     ASSERT_EQ(op->source.species, SpeciesId{25});
 
-    std::cout << "  [pokepic(25): Literal(25) ✓]\n";
+    std::cout << "  [pokepic(25): Literal(25) âœ“]\n";
 }
 
 // Finding 5: pokepic 0 = dynamic species (NOT Literal(0))
@@ -15244,7 +15242,7 @@ TEST(pokepic_zero_dynamic_species) {
     ASSERT_TRUE(op->source.is_script_var());
     ASSERT_FALSE(op->source.is_literal());
 
-    std::cout << "  [pokepic(0): ScriptVar (not Literal(0)) ✓]\n";
+    std::cout << "  [pokepic(0): ScriptVar (not Literal(0)) âœ“]\n";
 }
 
 // Findings 2+5: cry and pokepic share the same SpeciesSource model
@@ -15269,11 +15267,11 @@ TEST(cry_and_pokepic_same_source_semantics) {
     auto* pp_op = std::get_if<Sem_Pokepic>(&r_p.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(pp_op && pp_op->source.is_script_var());
 
-    std::cout << "  [cry(0) and pokepic(0) both produce ScriptVar source ✓]\n";
+    std::cout << "  [cry(0) and pokepic(0) both produce ScriptVar source âœ“]\n";
 }
 
 // Finding 4: writecmdqueue resolves bank-local pointer to flat address
-// Asymmetric: same raw $5000 in two different banks → different flat addresses
+// Asymmetric: same raw $5000 in two different banks â†’ different flat addresses
 TEST(writecmdqueue_same_ptr_different_banks_distinct) {
     using namespace crystal;
     using namespace enginemon;
@@ -15302,10 +15300,10 @@ TEST(writecmdqueue_same_ptr_different_banks_distinct) {
     ASSERT_TRUE(op2 != nullptr);
     ASSERT_EQ(op2->queue_flat_address, 0x31000u);
 
-    // Different banks, same raw pointer → different flat addresses (no collision)
+    // Different banks, same raw pointer â†’ different flat addresses (no collision)
     ASSERT_TRUE(op1->queue_flat_address != op2->queue_flat_address);
 
-    std::cout << "  [writecmdqueue: bank 0x0A,ptr=0x5000→0x29000 | bank 0x0C→0x31000 ✓]\n";
+    std::cout << "  [writecmdqueue: bank 0x0A,ptr=0x5000â†’0x29000 | bank 0x0Câ†’0x31000 âœ“]\n";
 }
 
 // Finding 3: valid movement terminates correctly
@@ -15314,7 +15312,7 @@ TEST(movement_valid_terminates_correctly) {
     // parse_movement_commands succeeds for well-formed data
     using namespace crystal;
 
-    std::vector<uint8_t> raw = {0x0E, 0x0E, 0x0E, 0x0E, 0x47};  // 4×step-left + step_end
+    std::vector<uint8_t> raw = {0x0E, 0x0E, 0x0E, 0x0E, 0x47};  // 4Ã—step-left + step_end
     // parse_movement_commands is testable without ROM
     SymbolMap symbols;
     ScriptDecoder decoder(*g_rom, symbols);
@@ -15322,10 +15320,10 @@ TEST(movement_valid_terminates_correctly) {
     ASSERT_EQ(cmds.size(), 5);
     ASSERT_EQ(static_cast<int>(cmds.back().type), static_cast<int>(MovementType::StepEnd));
 
-    std::cout << "  [valid movement: 4 steps + step_end = 5 commands ✓]\n";
+    std::cout << "  [valid movement: 4 steps + step_end = 5 commands âœ“]\n";
 }
 
-// Finding 3: movement with invalid opcode → throws (hard failure, not silent truncation)
+// Finding 3: movement with invalid opcode â†’ throws (hard failure, not silent truncation)
 TEST(movement_no_terminator_throws) {
     using namespace crystal;
 
@@ -15342,7 +15340,7 @@ TEST(movement_no_terminator_throws) {
     }
     ASSERT_TRUE(threw);
 
-    std::cout << "  [invalid movement opcode 0xFF: throws (not silent) ✓]\n";
+    std::cout << "  [invalid movement opcode 0xFF: throws (not silent) âœ“]\n";
 }
 
 //=============================================================================
@@ -15350,12 +15348,12 @@ TEST(movement_no_terminator_throws) {
 //=============================================================================
 
 //=============================================================================
-// SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS — August 2026
+// SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS â€” August 2026
 // Verifies all 5 confirmed script state bugs are fixed, plus adjacent fixes.
 //=============================================================================
 
 // Finding 1: setval followed by yesorno must not use stale setval fact
-// setval 5 → yesorno → MapRadio must NOT produce Sem_PlayRadio{5}
+// setval 5 â†’ yesorno â†’ MapRadio must NOT produce Sem_PlayRadio{5}
 TEST(script_state_setval_yesorno_invalidates_context) {
     using namespace crystal;
     using namespace enginemon;
@@ -15371,7 +15369,7 @@ TEST(script_state_setval_yesorno_invalidates_context) {
 
     CrystalCommand c2; c2.data = Cmd_Yesorno{}; c2.span.raw_bytes = {0x4E};
 
-    Cmd_Special sp; sp.special_id = 40;  // MapRadio — reads wScriptVar
+    Cmd_Special sp; sp.special_id = 40;  // MapRadio â€” reads wScriptVar
     CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
 
     ir.commands = {c1, c2, c3};
@@ -15389,8 +15387,8 @@ TEST(script_state_setval_yesorno_invalidates_context) {
     SemanticLegalizer legalizer;
     LoweringResult result = legalizer.lower(ir, cfg);
 
-    // After yesorno, MapRadio (Special 40) has no valid context → unlowered.
-    // No Sem_Special fallback — result.commands_unlowered > 0.
+    // After yesorno, MapRadio (Special 40) has no valid context â†’ unlowered.
+    // No Sem_Special fallback â€” result.commands_unlowered > 0.
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
 
@@ -15405,7 +15403,7 @@ TEST(script_state_setval_yesorno_invalidates_context) {
     }
     ASSERT_FALSE(found_radio_with_5);
 
-    std::cout << "  [setval 5 → yesorno invalidates → MapRadio falls to Sem_Special ✓]\n";
+    std::cout << "  [setval 5 â†’ yesorno invalidates â†’ MapRadio falls to Sem_Special âœ“]\n";
 }
 
 // Finding 1: setval followed by a non-wScriptVar-writing command preserves the fact
@@ -15423,7 +15421,7 @@ TEST(script_state_setval_preserved_across_noop_command) {
 
     CrystalCommand c2; c2.data = Cmd_Faceplayer{}; c2.span.raw_bytes = {0x6B};
 
-    Cmd_Special sp; sp.special_id = 40;  // MapRadio — channel 3 should be used
+    Cmd_Special sp; sp.special_id = 40;  // MapRadio â€” channel 3 should be used
     CrystalCommand c3; c3.data = sp; c3.span.raw_bytes = {0x0F, 40, 0};
 
     ir.commands = {c1, c2, c3};
@@ -15451,10 +15449,10 @@ TEST(script_state_setval_preserved_across_noop_command) {
         }
     }
     ASSERT_TRUE(found_radio_3);
-    std::cout << "  [setval 3 → faceplayer (noop) → MapRadio{3} preserved ✓]\n";
+    std::cout << "  [setval 3 â†’ faceplayer (noop) â†’ MapRadio{3} preserved âœ“]\n";
 }
 
-// Finding 2: cry 0 → ScriptVar (NOT literal SpeciesId{0})
+// Finding 2: cry 0 â†’ ScriptVar (NOT literal SpeciesId{0})
 TEST(script_state_cry_zero_is_script_var_not_literal) {
     using namespace crystal;
     using namespace enginemon;
@@ -15485,10 +15483,10 @@ TEST(script_state_cry_zero_is_script_var_not_literal) {
     ASSERT_TRUE(cry_op->source.is_script_var());
     ASSERT_FALSE(cry_op->source.is_literal());
 
-    std::cout << "  [cry 0 → Sem_PlayCry{ScriptVar} (not literal SpeciesId{0}) ✓]\n";
+    std::cout << "  [cry 0 â†’ Sem_PlayCry{ScriptVar} (not literal SpeciesId{0}) âœ“]\n";
 }
 
-// Finding 2: cry nonzero → literal species
+// Finding 2: cry nonzero â†’ literal species
 TEST(script_state_cry_nonzero_is_literal) {
     using namespace crystal;
     using namespace enginemon;
@@ -15519,10 +15517,10 @@ TEST(script_state_cry_nonzero_is_literal) {
     ASSERT_TRUE(cry_op->source.is_literal());
     ASSERT_EQ(cry_op->source.species, SpeciesId{25});
 
-    std::cout << "  [cry 25 → Sem_PlayCry{Literal(25)} ✓]\n";
+    std::cout << "  [cry 25 â†’ Sem_PlayCry{Literal(25)} âœ“]\n";
 }
 
-// Finding 5: pokepic 0 → ScriptVar
+// Finding 5: pokepic 0 â†’ ScriptVar
 TEST(script_state_pokepic_zero_is_script_var_not_literal) {
     using namespace crystal;
     using namespace enginemon;
@@ -15553,10 +15551,10 @@ TEST(script_state_pokepic_zero_is_script_var_not_literal) {
     ASSERT_TRUE(pp_op->source.is_script_var());
     ASSERT_FALSE(pp_op->source.is_literal());
 
-    std::cout << "  [pokepic 0 → Sem_Pokepic{ScriptVar} (not literal SpeciesId{0}) ✓]\n";
+    std::cout << "  [pokepic 0 â†’ Sem_Pokepic{ScriptVar} (not literal SpeciesId{0}) âœ“]\n";
 }
 
-// Finding 5: pokepic nonzero → literal
+// Finding 5: pokepic nonzero â†’ literal
 TEST(script_state_pokepic_nonzero_is_literal) {
     using namespace crystal;
     using namespace enginemon;
@@ -15587,7 +15585,7 @@ TEST(script_state_pokepic_nonzero_is_literal) {
     ASSERT_TRUE(pp_op->source.is_literal());
     ASSERT_EQ(pp_op->source.species, SpeciesId{149});
 
-    std::cout << "  [pokepic 149 → Sem_Pokepic{Literal(149)} ✓]\n";
+    std::cout << "  [pokepic 149 â†’ Sem_Pokepic{Literal(149)} âœ“]\n";
 }
 
 // Findings 2 & 5: cry and pokepic share identical SpeciesSource semantics
@@ -15608,12 +15606,12 @@ TEST(script_state_cry_and_pokepic_same_source_semantics) {
     SpeciesSource e = SpeciesSource::literal(SpeciesId{26});
     ASSERT_TRUE(!(c == e));
 
-    // ScriptVar != Literal(0) — the key invariant
+    // ScriptVar != Literal(0) â€” the key invariant
     SpeciesSource sv = SpeciesSource::from_script_var();
     SpeciesSource lit0 = SpeciesSource::literal(SpeciesId{0});
     ASSERT_TRUE(!(sv == lit0));
 
-    std::cout << "  [SpeciesSource: ScriptVar != Literal(0), identical literals match ✓]\n";
+    std::cout << "  [SpeciesSource: ScriptVar != Literal(0), identical literals match âœ“]\n";
 }
 
 // Adjacent fix: verbosegiveitemvar invalidates wScriptVar context
@@ -15646,7 +15644,7 @@ TEST(script_state_verbosegiveitemvar_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_FALSE(result.success);  // MapRadio with invalidated context → unlowered
+    ASSERT_FALSE(result.success);  // MapRadio with invalidated context â†’ unlowered
     ASSERT_TRUE(result.commands_unlowered > 0);
 
     bool found_radio_3 = false;
@@ -15657,16 +15655,16 @@ TEST(script_state_verbosegiveitemvar_invalidates) {
             }
         }
     }
-    // verbosegiveitemvar should have invalidated — MapRadio must NOT get channel 3
+    // verbosegiveitemvar should have invalidated â€” MapRadio must NOT get channel 3
     ASSERT_FALSE(found_radio_3);
-    std::cout << "  [verbosegiveitemvar invalidates: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [verbosegiveitemvar invalidates: MapRadio unlowered (no Sem_Special fallback) âœ“]\n";
 }
 
 // Adjacent fix: checkcellnum invalidates
 TEST(script_state_checkcellnum_invalidates) {
     using namespace crystal;
     using namespace enginemon;
-    // setval 2, checkcellnum(7), special MapRadio(40) — must not get channel 2
+    // setval 2, checkcellnum(7), special MapRadio(40) â€” must not get channel 2
     Cmd_Setval sv; sv.value = 2;
     CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 2};
 
@@ -15691,7 +15689,7 @@ TEST(script_state_checkcellnum_invalidates) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_FALSE(result.success);  // MapRadio with invalidated context → unlowered
+    ASSERT_FALSE(result.success);  // MapRadio with invalidated context â†’ unlowered
     ASSERT_TRUE(result.commands_unlowered > 0);
 
     bool found_radio_2 = false;
@@ -15701,7 +15699,7 @@ TEST(script_state_checkcellnum_invalidates) {
                 if (r->channel == 2) found_radio_2 = true;
 
     ASSERT_FALSE(found_radio_2);
-    std::cout << "  [checkcellnum invalidates wScriptVar context ✓]\n";
+    std::cout << "  [checkcellnum invalidates wScriptVar context âœ“]\n";
 }
 
 // Adjacent fix: delcmdqueue invalidates
@@ -15742,7 +15740,7 @@ TEST(script_state_delcmdqueue_invalidates) {
                 if (r->channel == 1) found_radio_1 = true;
 
     ASSERT_FALSE(found_radio_1);
-    std::cout << "  [delcmdqueue invalidates wScriptVar context ✓]\n";
+    std::cout << "  [delcmdqueue invalidates wScriptVar context âœ“]\n";
 }
 
 // Adjacent fix: checkphonecall invalidates
@@ -15782,7 +15780,7 @@ TEST(script_state_checkphonecall_invalidates) {
                 if (r->channel == 4) found_radio_4 = true;
 
     ASSERT_FALSE(found_radio_4);
-    std::cout << "  [checkphonecall invalidates wScriptVar context ✓]\n";
+    std::cout << "  [checkphonecall invalidates wScriptVar context âœ“]\n";
 }
 
 // Adjacent fix: checktime invalidates
@@ -15823,17 +15821,17 @@ TEST(script_state_checktime_invalidates) {
                 if (r->channel == 6) found_radio_6 = true;
 
     ASSERT_FALSE(found_radio_6);
-    std::cout << "  [checktime invalidates wScriptVar context ✓]\n";
+    std::cout << "  [checktime invalidates wScriptVar context âœ“]\n";
 }
 
 // Adjacent fix: checkver establishes context = 1 (GS_VERSION)
 TEST(script_state_checkver_establishes_context) {
     using namespace crystal;
     using namespace enginemon;
-    // checkver always sets wScriptVar = 1. After it, a setval-0 → checkver → MapRadio
+    // checkver always sets wScriptVar = 1. After it, a setval-0 â†’ checkver â†’ MapRadio
     // should use channel 1 (from checkver), not channel 0 (from setval).
     // Actually: checkver replaces the context. Let's verify:
-    //   setval 0, checkver, MapRadio — MapRadio should NOT get channel 0
+    //   setval 0, checkver, MapRadio â€” MapRadio should NOT get channel 0
     // (checkver sets it to 1, then MapRadio gets channel 1, but 1 is valid for radio)
     // So just verify checkver establishes known_script_var = 1.
     Cmd_Setval sv; sv.value = 0;
@@ -15876,7 +15874,7 @@ TEST(script_state_checkver_establishes_context) {
     ASSERT_FALSE(found_radio_0);
     // checkver set context to 1
     ASSERT_TRUE(found_radio_1);
-    std::cout << "  [checkver establishes context=1: MapRadio{1} ✓]\n";
+    std::cout << "  [checkver establishes context=1: MapRadio{1} âœ“]\n";
 }
 
 //=============================================================================
@@ -15884,7 +15882,7 @@ TEST(script_state_checkver_establishes_context) {
 //=============================================================================
 
 //=============================================================================
-// CRYSTAL TEXT FRONTEND FIDELITY TESTS — August 2026
+// CRYSTAL TEXT FRONTEND FIDELITY TESTS â€” August 2026
 // Verifies all 4 confirmed text bugs are fixed:
 //   Finding 1: parser mode (TX_START/PlaceString outer vs literal)
 //   Finding 2: TX_BOX height/width field semantics
@@ -15892,7 +15890,7 @@ TEST(script_state_checkver_establishes_context) {
 //   Finding 4: TextRaw identity includes actual byte content
 //=============================================================================
 
-// Finding 1: TX_START enters literal body — 0x14 inside literal is <PLAY_G>, not TX_STRINGBUFFER
+// Finding 1: TX_START enters literal body â€” 0x14 inside literal is <PLAY_G>, not TX_STRINGBUFFER
 // Adversarial: byte 0x14 appears inside a text literal where it is a charmap character.
 // Without the mode fix, 0x14 would be consumed as TX_STRINGBUFFER and the next byte eaten.
 TEST(text_literal_tx_opcode_overlap_0x14) {
@@ -15912,7 +15910,7 @@ TEST(text_literal_tx_opcode_overlap_0x14) {
     // identity from a TextStringBuffer (which would be produced by the wrong parser).
     TextDefinition def_correct, def_wrong;
 
-    // Correct parse: literal 0x14 → <PLAYER> text content
+    // Correct parse: literal 0x14 â†’ <PLAYER> text content
     def_correct.source_rom_address = 0x10000;
     def_correct.sequence.elements.push_back(TextElement::make_text("A<PLAYER>B"));
     def_correct.sequence.elements.push_back(TextElement::make_done());
@@ -15936,7 +15934,7 @@ TEST(text_literal_tx_opcode_overlap_0x14) {
     // Wrong parse contains a buffer reference
     ASSERT_STR_CONTAINS(id_wrong, "<BUF:");
 
-    std::cout << "  [literal 0x14: correct='T[A<PLAYER>B]' vs wrong='T[A]<BUF:129>' ✓]\n";
+    std::cout << "  [literal 0x14: correct='T[A<PLAYER>B]' vs wrong='T[A]<BUF:129>' âœ“]\n";
 }
 
 // Finding 1: '@' returns to outer stream, not resource termination
@@ -15957,7 +15955,7 @@ TEST(text_literal_at_returns_to_outer_stream) {
     def_two_segments.sequence.elements.push_back(TextElement::make_text("bar"));
     def_two_segments.sequence.elements.push_back(TextElement::make_done());
 
-    // One segment: "foo" [Done] — if '@' terminated the resource
+    // One segment: "foo" [Done] â€” if '@' terminated the resource
     def_one_segment.source_rom_address = 0x20000;
     def_one_segment.sequence.elements.push_back(TextElement::make_text("foo"));
     def_one_segment.sequence.elements.push_back(TextElement::make_done());
@@ -15969,7 +15967,7 @@ TEST(text_literal_at_returns_to_outer_stream) {
     ASSERT_STR_CONTAINS(def_two_segments.identity_string(), "bar");
     ASSERT_STR_CONTAINS(def_two_segments.identity_string(), "<RAM:");
 
-    std::cout << "  ['@' returns to outer: two-segment != one-segment ✓]\n";
+    std::cout << "  ['@' returns to outer: two-segment != one-segment âœ“]\n";
 }
 
 // Finding 1: resource can begin directly with a dynamic TX command (no leading TX_START)
@@ -15988,15 +15986,15 @@ TEST(text_resource_can_begin_with_dynamic_command) {
     ASSERT_STR_CONTAINS(id, "<RAM:1234>");
     ASSERT_STR_CONTAINS(id, "T[text]");
 
-    std::cout << "  [resource beginning with TX_RAM: valid identity ✓]\n";
+    std::cout << "  [resource beginning with TX_RAM: valid identity âœ“]\n";
 }
 
 // Finding 2: TX_BOX param1=height, param2=width (asymmetric: height=3, width=11)
 TEST(tx_box_height_width_semantics) {
     using namespace crystal;
     // Source: home/text.asm TextCommand_BOX comment "(height, width)"
-    // third byte → B register = HEIGHT
-    // fourth byte → C register = WIDTH
+    // third byte â†’ B register = HEIGHT
+    // fourth byte â†’ C register = WIDTH
     TextElement elem{TextOp::TextBox, ""};
     elem.addr   = 0x1000;
     elem.param1 = 3;   // height
@@ -16026,15 +16024,15 @@ TEST(tx_box_height_width_semantics) {
 
     // Identity must contain both dimension values
     // Note: identity uses hex notation (following the stream state from addr output)
-    // height=3 → "3", width=11 → "b" (0x0b in hex)
+    // height=3 â†’ "3", width=11 â†’ "b" (0x0b in hex)
     ASSERT_STR_CONTAINS(def_hw.identity_string(), "3");
     ASSERT_STR_CONTAINS(def_hw.identity_string(), "b");  // 11 decimal = 0xb hex
 
-    std::cout << "  [TX_BOX height=3,width=11 != height=11,width=3 ✓]\n";
+    std::cout << "  [TX_BOX height=3,width=11 != height=11,width=3 âœ“]\n";
 }
 
 // Finding 3: TX_FAR identity distinguishes bank
-// Adversarial: same address, different bank → different TextId
+// Adversarial: same address, different bank â†’ different TextId
 TEST(tx_far_identity_distinguishes_bank) {
     using namespace crystal;
     // TX_FAR bank=3, addr=0x5678
@@ -16067,7 +16065,7 @@ TEST(tx_far_identity_distinguishes_bank) {
     ASSERT_STR_CONTAINS(id_a, "3");
     ASSERT_STR_CONTAINS(id_b, "7");
 
-    std::cout << "  [TX_FAR bank=3,addr=0x5678 != bank=7,addr=0x5678 ✓]\n";
+    std::cout << "  [TX_FAR bank=3,addr=0x5678 != bank=7,addr=0x5678 âœ“]\n";
 }
 
 // Finding 3: TX_FAR identity distinguishes address (same bank, different address)
@@ -16083,10 +16081,10 @@ TEST(tx_far_identity_distinguishes_address) {
     def_b.sequence.elements.push_back(far_b);
 
     ASSERT_TRUE(def_a.identity_string() != def_b.identity_string());
-    std::cout << "  [TX_FAR bank=5,addr=0x5678 != bank=5,addr=0x1234 ✓]\n";
+    std::cout << "  [TX_FAR bank=5,addr=0x5678 != bank=5,addr=0x1234 âœ“]\n";
 }
 
-// Finding 3: TX_FAR dedup via TextRegistry — different bank → different TextId
+// Finding 3: TX_FAR dedup via TextRegistry â€” different bank â†’ different TextId
 TEST(tx_far_dedup_different_bank_gets_different_id) {
     using namespace crystal;
     // Two definitions: same addr, different bank
@@ -16099,19 +16097,19 @@ TEST(tx_far_dedup_different_bank_gets_different_id) {
     def_b.sequence.elements.push_back(TextElement::make_text_far(0x5678, 7));
 
     // Use TextRegistry to verify no collision
-    // We can test this directly: identity_string must differ → hash keys differ → different IDs
+    // We can test this directly: identity_string must differ â†’ hash keys differ â†’ different IDs
     ASSERT_TRUE(def_a.identity_string() != def_b.identity_string());
     ASSERT_TRUE(!(def_a == def_b));  // operator== uses identity_string
 
-    std::cout << "  [TX_FAR dedup: different bank → different TextId ✓]\n";
+    std::cout << "  [TX_FAR dedup: different bank â†’ different TextId âœ“]\n";
 }
 
 // Finding 4: TextRaw identity distinguishes contents (not just length)
-// Adversarial: text_dots 2 vs text_dots 7 — same length (2 bytes), different content
+// Adversarial: text_dots 2 vs text_dots 7 â€” same length (2 bytes), different content
 TEST(textraw_identity_distinguishes_contents) {
     using namespace crystal;
-    // text_dots 2 → {0x0c, 0x02}, text_dots 7 → {0x0c, 0x07}
-    // Same length (2 bytes), different content → must NOT collide
+    // text_dots 2 â†’ {0x0c, 0x02}, text_dots 7 â†’ {0x0c, 0x07}
+    // Same length (2 bytes), different content â†’ must NOT collide
     TextElement raw_2 = TextElement::make_text_raw({0x0c, 0x02});
     TextElement raw_7 = TextElement::make_text_raw({0x0c, 0x07});
 
@@ -16125,7 +16123,7 @@ TEST(textraw_identity_distinguishes_contents) {
     std::string id_2 = def_2.identity_string();
     std::string id_7 = def_7.identity_string();
 
-    // CRITICAL: different raw bytes → different identity even at same length
+    // CRITICAL: different raw bytes â†’ different identity even at same length
     ASSERT_TRUE(id_2 != id_7);
 
     // Identities must contain the actual byte values
@@ -16144,7 +16142,7 @@ TEST(textraw_identity_distinguishes_contents) {
 
     ASSERT_TRUE(def_0b.identity_string() != def_0e.identity_string());
 
-    std::cout << "  [TextRaw: dots(2) != dots(7), raw_0b != raw_0e ✓]\n";
+    std::cout << "  [TextRaw: dots(2) != dots(7), raw_0b != raw_0e âœ“]\n";
 }
 
 // Finding 4: TextRaw identical contents match
@@ -16158,11 +16156,11 @@ TEST(textraw_identity_identical_contents_match) {
     def_b.source_rom_address = 0x20000;
     def_b.sequence.elements.push_back(TextElement::make_text_raw({0x0c, 0x05}));
 
-    // Same content → same identity (legitimate dedup)
+    // Same content â†’ same identity (legitimate dedup)
     ASSERT_STR_EQ(def_a.identity_string(), def_b.identity_string());
     ASSERT_TRUE(def_a == def_b);
 
-    std::cout << "  [TextRaw: same bytes → same identity (legitimate dedup) ✓]\n";
+    std::cout << "  [TextRaw: same bytes â†’ same identity (legitimate dedup) âœ“]\n";
 }
 
 // Finding 4: empty TextRaw handled deterministically
@@ -16176,7 +16174,7 @@ TEST(textraw_empty_raw_handled) {
     ASSERT_FALSE(id.empty());
     ASSERT_STR_CONTAINS(id, "<RAW:");
 
-    std::cout << "  [TextRaw: empty raw → deterministic identity ✓]\n";
+    std::cout << "  [TextRaw: empty raw â†’ deterministic identity âœ“]\n";
 }
 
 //=============================================================================
@@ -16184,31 +16182,31 @@ TEST(textraw_empty_raw_handled) {
 //=============================================================================
 
 //=============================================================================
-// 11-FINDING SEMANTIC FIDELITY PASS TESTS — August 2026
+// 11-FINDING SEMANTIC FIDELITY PASS TESTS â€” August 2026
 // Adversarial tests proving each finding is fixed.
 // Uses asymmetric values so a lossy rule cannot accidentally pass.
 //=============================================================================
 
 // =============================================================================
-// 11-FINDING SEMANTIC FIDELITY PASS TESTS — August 2026
+// 11-FINDING SEMANTIC FIDELITY PASS TESTS â€” August 2026
 // Adversarial tests proving each finding is fixed.
 // Uses asymmetric values so a lossy rule cannot accidentally pass.
 // Note: make_single_cmd_ir helper is defined earlier in this file.
 //=============================================================================
 
-// Finding 1: writetext with two different pointers → distinct non-empty sequences
+// Finding 1: writetext with two different pointers â†’ distinct non-empty sequences
 TEST(fidelity11_writetext_distinct_pointers_distinct_sequences) {
     using namespace crystal;
     using namespace enginemon;
 
     // Two writetext commands pointing at known vanilla text addresses in bank 0x6A
-    // NewBarkTownSign = 0x6A:0x40C8 → flat 0x6A*0x4000 + (0x40C8-0x4000) = 0x680C8
+    // NewBarkTownSign = 0x6A:0x40C8 â†’ flat 0x6A*0x4000 + (0x40C8-0x4000) = 0x680C8
     // We use synthetic pointers in a synthetic bank (bank 1 = 0x4000)
-    // Pointer A = 0x5000 in bank 0x10 → flat = 0x40000 + 0x1000 = 0x41000
-    // Pointer B = 0x5100 in bank 0x10 → flat = 0x40000 + 0x1100 = 0x41100
-    // The text registry will extract from ROM at these addresses — we test with real ROM data.
+    // Pointer A = 0x5000 in bank 0x10 â†’ flat = 0x40000 + 0x1000 = 0x41000
+    // Pointer B = 0x5100 in bank 0x10 â†’ flat = 0x40000 + 0x1100 = 0x41100
+    // The text registry will extract from ROM at these addresses â€” we test with real ROM data.
 
-    // Just verify the IR types are correct — the text resolution needs real ROM.
+    // Just verify the IR types are correct â€” the text resolution needs real ROM.
     // For this structural test: verify writetext produces Sem_ShowText (not empty on matched=true)
     // We lower with no text_registry (simulating absent registry) and just check typed op is correct.
     
@@ -16237,7 +16235,7 @@ TEST(fidelity11_writetext_distinct_pointers_distinct_sequences) {
     auto* st2 = std::get_if<Sem_ShowText>(&result2.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(st2 != nullptr);
 
-    std::cout << "  [writetext/farwritetext both produce Sem_ShowText ✓]\n";
+    std::cout << "  [writetext/farwritetext both produce Sem_ShowText âœ“]\n";
 }
 
 // Finding 1: jumptext produces Sem_ShowTextAndEnd (not Sem_ShowText)
@@ -16258,7 +16256,7 @@ TEST(fidelity11_jumptext_distinct_from_writetext) {
     ASSERT_TRUE(st_end != nullptr);
     auto* st = std::get_if<Sem_ShowText>(&inst.op);
     ASSERT_TRUE(st == nullptr);
-    std::cout << "  [jumptext → Sem_ShowTextAndEnd (not Sem_ShowText) ✓]\n";
+    std::cout << "  [jumptext â†’ Sem_ShowTextAndEnd (not Sem_ShowText) âœ“]\n";
 }
 
 // Finding 1: jumptextfaceplayer produces Sem_FacePlayerAndShowText
@@ -16276,15 +16274,15 @@ TEST(fidelity11_jumptextfaceplayer_preserves_text) {
     const auto& inst = result.ir.blocks[0].instructions[0];
     auto* fp = std::get_if<Sem_FacePlayerAndShowText>(&inst.op);
     ASSERT_TRUE(fp != nullptr);
-    std::cout << "  [jumptextfaceplayer → Sem_FacePlayerAndShowText ✓]\n";
+    std::cout << "  [jumptextfaceplayer â†’ Sem_FacePlayerAndShowText âœ“]\n";
 }
 
-// Finding 4: endall → Sem_EndAll (distinct from Sem_End)
+// Finding 4: endall â†’ Sem_EndAll (distinct from Sem_End)
 TEST(fidelity11_endall_distinct_from_end) {
     using namespace crystal;
     using namespace enginemon;
 
-    // Test Cmd_End → Sem_End
+    // Test Cmd_End â†’ Sem_End
     auto [ir_end, cfg_end] = make_single_cmd_ir(Cmd_End{}, 0x10000, "test_end", {0x91});
     SemanticLegalizer leg_end;
     auto r_end = leg_end.lower(ir_end, cfg_end);
@@ -16294,7 +16292,7 @@ TEST(fidelity11_endall_distinct_from_end) {
     auto* sem_endall = std::get_if<Sem_EndAll>(&r_end.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(sem_endall == nullptr);
 
-    // Test Cmd_Endall → Sem_EndAll
+    // Test Cmd_Endall â†’ Sem_EndAll
     auto [ir_all, cfg_all] = make_single_cmd_ir(Cmd_Endall{}, 0x10000, "test_endall", {0x93});
     SemanticLegalizer leg_all;
     auto r_all = leg_all.lower(ir_all, cfg_all);
@@ -16304,10 +16302,10 @@ TEST(fidelity11_endall_distinct_from_end) {
     auto* sem_end2 = std::get_if<Sem_End>(&r_all.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(sem_end2 == nullptr);
 
-    std::cout << "  [end → Sem_End, endall → Sem_EndAll (distinct) ✓]\n";
+    std::cout << "  [end â†’ Sem_End, endall â†’ Sem_EndAll (distinct) âœ“]\n";
 }
 
-// Finding 3: catchtutorial → Sem_CatchTutorial (NOT Sem_StartBattle)
+// Finding 3: catchtutorial â†’ Sem_CatchTutorial (NOT Sem_StartBattle)
 TEST(fidelity11_catchtutorial_distinct_from_startbattle) {
     using namespace crystal;
     using namespace enginemon;
@@ -16327,7 +16325,7 @@ TEST(fidelity11_catchtutorial_distinct_from_startbattle) {
     auto* sb = std::get_if<Sem_StartBattle>(&inst.op);
     ASSERT_TRUE(sb == nullptr);
 
-    std::cout << "  [catchtutorial → Sem_CatchTutorial (not Sem_StartBattle) ✓]\n";
+    std::cout << "  [catchtutorial â†’ Sem_CatchTutorial (not Sem_StartBattle) âœ“]\n";
 }
 
 // Finding 3: catchtutorial preserves type byte (0x01 != 0x02)
@@ -16346,7 +16344,7 @@ TEST(fidelity11_catchtutorial_preserves_type_byte) {
         ASSERT_TRUE(ct_op != nullptr);
         ASSERT_EQ(ct_op->tutorial_type, type_byte);
     }
-    std::cout << "  [catchtutorial preserves tutorial_type byte ✓]\n";
+    std::cout << "  [catchtutorial preserves tutorial_type byte âœ“]\n";
 }
 
 // Finding 5: loadmenu preserves header_pointer (not zero, asymmetric)
@@ -16372,10 +16370,10 @@ TEST(fidelity11_loadmenu_preserves_header_pointer) {
     auto* ch = std::get_if<Sem_Choice>(&inst.op);
     ASSERT_TRUE(ch == nullptr);
 
-    std::cout << "  [loadmenu preserves header_pointer=0x40500 (not Sem_Choice) ✓]\n";
+    std::cout << "  [loadmenu preserves header_pointer=0x40500 (not Sem_Choice) âœ“]\n";
 }
 
-// Finding 5: verticalmenu → Sem_VerticalMenu, _2dmenu → Sem_2DMenu (distinct)
+// Finding 5: verticalmenu â†’ Sem_VerticalMenu, _2dmenu â†’ Sem_2DMenu (distinct)
 TEST(fidelity11_verticalmenu_distinct_from_2dmenu) {
     using namespace crystal;
     using namespace enginemon;
@@ -16400,10 +16398,10 @@ TEST(fidelity11_verticalmenu_distinct_from_2dmenu) {
     auto* vm2 = std::get_if<Sem_VerticalMenu>(&r_d.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(vm2 == nullptr);
 
-    std::cout << "  [verticalmenu → Sem_VerticalMenu, _2dmenu → Sem_2DMenu (distinct) ✓]\n";
+    std::cout << "  [verticalmenu â†’ Sem_VerticalMenu, _2dmenu â†’ Sem_2DMenu (distinct) âœ“]\n";
 }
 
-// Finding 6: deactivatefacing → Sem_DeactivateFacing (NOT Sem_Pause)
+// Finding 6: deactivatefacing â†’ Sem_DeactivateFacing (NOT Sem_Pause)
 TEST(fidelity11_deactivatefacing_distinct_from_pause) {
     using namespace crystal;
     using namespace enginemon;
@@ -16423,15 +16421,15 @@ TEST(fidelity11_deactivatefacing_distinct_from_pause) {
         auto* pause = std::get_if<Sem_Pause>(&inst.op);
         ASSERT_TRUE(pause == nullptr);
     }
-    std::cout << "  [deactivatefacing → Sem_DeactivateFacing (not Sem_Pause) ✓]\n";
+    std::cout << "  [deactivatefacing â†’ Sem_DeactivateFacing (not Sem_Pause) âœ“]\n";
 }
 
-// Finding 7: verbosegiveitemvar with var != quantity — variable semantics preserved
+// Finding 7: verbosegiveitemvar with var != quantity â€” variable semantics preserved
 TEST(fidelity11_verbosegiveitemvar_variable_semantics) {
     using namespace crystal;
     using namespace enginemon;
 
-    // item=5 (literal), var=3 (variable index — quantity comes from var, NOT literal 3)
+    // item=5 (literal), var=3 (variable index â€” quantity comes from var, NOT literal 3)
     Cmd_Verbosegiveitemvar vgiv;
     vgiv.item = 5;
     vgiv.var = 3;
@@ -16449,7 +16447,7 @@ TEST(fidelity11_verbosegiveitemvar_variable_semantics) {
     ASSERT_EQ(var_op->item, ItemId{5});
     ASSERT_EQ(var_op->quantity_var, 3);  // 3 is the variable INDEX, not a literal quantity
 
-    // ITEM_FROM_MEM case: item=0 → FromScriptVar
+    // ITEM_FROM_MEM case: item=0 â†’ FromScriptVar
     Cmd_Verbosegiveitemvar vgiv2;
     vgiv2.item = 0;  // ITEM_FROM_MEM
     vgiv2.var = 1;
@@ -16461,10 +16459,10 @@ TEST(fidelity11_verbosegiveitemvar_variable_semantics) {
     ASSERT_TRUE(var_op2 != nullptr);
     ASSERT_EQ(var_op2->item_source, ItemSource::FromScriptVar);
 
-    std::cout << "  [verbosegiveitemvar: Literal item=5,var=3 and FromScriptVar item=0 ✓]\n";
+    std::cout << "  [verbosegiveitemvar: Literal item=5,var=3 and FromScriptVar item=0 âœ“]\n";
 }
 
-// Finding 8: askforphonenumber → Sem_AskForPhoneNumber (NOT Sem_AddPhoneNumber)
+// Finding 8: askforphonenumber â†’ Sem_AskForPhoneNumber (NOT Sem_AddPhoneNumber)
 TEST(fidelity11_askforphonenumber_distinct_from_addphonenumber) {
     using namespace crystal;
     using namespace enginemon;
@@ -16485,15 +16483,15 @@ TEST(fidelity11_askforphonenumber_distinct_from_addphonenumber) {
     auto* add_op = std::get_if<Sem_AddPhoneNumber>(&inst.op);
     ASSERT_TRUE(add_op == nullptr);
 
-    std::cout << "  [askforphonenumber → Sem_AskForPhoneNumber (not Sem_AddPhoneNumber) ✓]\n";
+    std::cout << "  [askforphonenumber â†’ Sem_AskForPhoneNumber (not Sem_AddPhoneNumber) âœ“]\n";
 }
 
-// Finding 9: promptbutton → Sem_PromptButton (distinct from Sem_WaitButton)
+// Finding 9: promptbutton â†’ Sem_PromptButton (distinct from Sem_WaitButton)
 TEST(fidelity11_promptbutton_distinct_from_waitbutton) {
     using namespace crystal;
     using namespace enginemon;
 
-    // waitbutton → Sem_WaitButton
+    // waitbutton â†’ Sem_WaitButton
     auto [ir_w, cfg_w] = make_single_cmd_ir(Cmd_Waitbutton{}, 0x10000, "test_wb", {0x54});
     SemanticLegalizer leg_w;
     auto r_w = leg_w.lower(ir_w, cfg_w);
@@ -16503,7 +16501,7 @@ TEST(fidelity11_promptbutton_distinct_from_waitbutton) {
     auto* pb = std::get_if<Sem_PromptButton>(&r_w.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(pb == nullptr);
 
-    // promptbutton → Sem_PromptButton
+    // promptbutton â†’ Sem_PromptButton
     auto [ir_p, cfg_p] = make_single_cmd_ir(Cmd_Promptbutton{}, 0x10000, "test_pb", {0x55});
     SemanticLegalizer leg_p;
     auto r_p = leg_p.lower(ir_p, cfg_p);
@@ -16513,10 +16511,10 @@ TEST(fidelity11_promptbutton_distinct_from_waitbutton) {
     auto* wb2 = std::get_if<Sem_WaitButton>(&r_p.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(wb2 == nullptr);
 
-    std::cout << "  [waitbutton → Sem_WaitButton, promptbutton → Sem_PromptButton (distinct) ✓]\n";
+    std::cout << "  [waitbutton â†’ Sem_WaitButton, promptbutton â†’ Sem_PromptButton (distinct) âœ“]\n";
 }
 
-// Finding 11: getname type=1 → Pokemon
+// Finding 11: getname type=1 â†’ Pokemon
 TEST(fidelity11_getname_type1_pokemon) {
     using namespace crystal;
     using namespace enginemon;
@@ -16527,10 +16525,10 @@ TEST(fidelity11_getname_type1_pokemon) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&r.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(pta != nullptr);
     ASSERT_EQ(pta->name_type, NameSourceType::Pokemon);
-    std::cout << "  [getname type=1 → Pokemon ✓]\n";
+    std::cout << "  [getname type=1 â†’ Pokemon âœ“]\n";
 }
 
-// Finding 11: getname type=2 → Move
+// Finding 11: getname type=2 â†’ Move
 TEST(fidelity11_getname_type2_move) {
     using namespace crystal;
     using namespace enginemon;
@@ -16541,10 +16539,10 @@ TEST(fidelity11_getname_type2_move) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&r.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(pta != nullptr);
     ASSERT_EQ(pta->name_type, NameSourceType::Move);
-    std::cout << "  [getname type=2 → Move ✓]\n";
+    std::cout << "  [getname type=2 â†’ Move âœ“]\n";
 }
 
-// Finding 11: getname type=3 → Dummy (NOT Item) — key asymmetric test
+// Finding 11: getname type=3 â†’ Dummy (NOT Item) â€” key asymmetric test
 TEST(fidelity11_getname_type3_dummy_not_item) {
     using namespace crystal;
     using namespace enginemon;
@@ -16554,13 +16552,13 @@ TEST(fidelity11_getname_type3_dummy_not_item) {
     ASSERT_TRUE(r.success);
     auto* pta = std::get_if<Sem_PrepareTextArg>(&r.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(pta != nullptr);
-    // Crystal type 3 = DUMMY_NAME — must NOT map to Item (4 in Crystal)
+    // Crystal type 3 = DUMMY_NAME â€” must NOT map to Item (4 in Crystal)
     ASSERT_EQ(pta->name_type, NameSourceType::Dummy);
     ASSERT_TRUE(pta->name_type != NameSourceType::Item);
-    std::cout << "  [getname type=3 → Dummy (not Item) ✓]\n";
+    std::cout << "  [getname type=3 â†’ Dummy (not Item) âœ“]\n";
 }
 
-// Finding 11: getname type=4 → Item (NOT Trainer) — key asymmetric test
+// Finding 11: getname type=4 â†’ Item (NOT Trainer) â€” key asymmetric test
 TEST(fidelity11_getname_type4_item_not_trainer) {
     using namespace crystal;
     using namespace enginemon;
@@ -16570,13 +16568,13 @@ TEST(fidelity11_getname_type4_item_not_trainer) {
     ASSERT_TRUE(r.success);
     auto* pta = std::get_if<Sem_PrepareTextArg>(&r.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(pta != nullptr);
-    // Crystal type 4 = ITEM_NAME — must NOT map to Trainer (7 in Crystal)
+    // Crystal type 4 = ITEM_NAME â€” must NOT map to Trainer (7 in Crystal)
     ASSERT_EQ(pta->name_type, NameSourceType::Item);
     ASSERT_TRUE(pta->name_type != NameSourceType::Trainer);
-    std::cout << "  [getname type=4 → Item (not Trainer) ✓]\n";
+    std::cout << "  [getname type=4 â†’ Item (not Trainer) âœ“]\n";
 }
 
-// Finding 11: getname type=5 → PartyOT
+// Finding 11: getname type=5 â†’ PartyOT
 TEST(fidelity11_getname_type5_partyot) {
     using namespace crystal;
     using namespace enginemon;
@@ -16587,10 +16585,10 @@ TEST(fidelity11_getname_type5_partyot) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&r.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(pta != nullptr);
     ASSERT_EQ(pta->name_type, NameSourceType::PartyOT);
-    std::cout << "  [getname type=5 → PartyOT ✓]\n";
+    std::cout << "  [getname type=5 â†’ PartyOT âœ“]\n";
 }
 
-// Finding 11: getname type=7 → Trainer (NOT a default/wrong value)
+// Finding 11: getname type=7 â†’ Trainer (NOT a default/wrong value)
 TEST(fidelity11_getname_type7_trainer) {
     using namespace crystal;
     using namespace enginemon;
@@ -16600,13 +16598,13 @@ TEST(fidelity11_getname_type7_trainer) {
     ASSERT_TRUE(r.success);
     auto* pta = std::get_if<Sem_PrepareTextArg>(&r.ir.blocks[0].instructions[0].op);
     ASSERT_TRUE(pta != nullptr);
-    // Crystal type 7 = TRAINER_NAME — NOT default/Pokemon
+    // Crystal type 7 = TRAINER_NAME â€” NOT default/Pokemon
     ASSERT_EQ(pta->name_type, NameSourceType::Trainer);
     ASSERT_TRUE(pta->name_type != NameSourceType::Pokemon);
-    std::cout << "  [getname type=7 → Trainer (not Pokemon fallback) ✓]\n";
+    std::cout << "  [getname type=7 â†’ Trainer (not Pokemon fallback) âœ“]\n";
 }
 
-// Finding 10: InvalidDomain is a hard linker gate — structural proof
+// Finding 10: InvalidDomain is a hard linker gate â€” structural proof
 // The actual adversarial linker test (with full corpus) lives in linker_test.cpp.
 // Here we prove the semantic_linker.hpp definition is consistent:
 // total_errors() = unresolved + invalid_ownership + wrong_type + invalid_domain
@@ -16630,8 +16628,8 @@ TEST(fidelity11_invalid_domain_gates_linker) {
     SemanticOp op3 = Sem_CatchTutorial{0x01};
     auto* ct = std::get_if<Sem_CatchTutorial>(&op3);
     ASSERT_TRUE(ct != nullptr);
-    std::cout << "  [InvalidDomain gate fix structural proof: new types compile ✓]\n";
-    std::cout << "  [Full adversarial linker test in linker_test.cpp ✓]\n";
+    std::cout << "  [InvalidDomain gate fix structural proof: new types compile âœ“]\n";
+    std::cout << "  [Full adversarial linker test in linker_test.cpp âœ“]\n";
 }
 
 //=============================================================================
@@ -16639,10 +16637,10 @@ TEST(fidelity11_invalid_domain_gates_linker) {
 //=============================================================================
 
 // =============================================================================
-// BATCH 10: PRE-ORACLE SEMANTIC CLEANUP TESTS — August 2026
+// BATCH 10: PRE-ORACLE SEMANTIC CLEANUP TESTS â€” August 2026
 // Verifies all 6 fixes from the pre-Oracle audit:
-//   Fix 1: checksave, startbattle, checkpoke, givepoke, giveegg, CheckPokerus → invalidate ctx
-//   Fix 2: pocketisfull → Sem_PocketFullNotify (not absorbed)
+//   Fix 1: checksave, startbattle, checkpoke, givepoke, giveegg, CheckPokerus â†’ invalidate ctx
+//   Fix 2: pocketisfull â†’ Sem_PocketFullNotify (not absorbed)
 //   Fix 3: Sem_ShowText empty sequence fails legality gate
 //   Fix 4: Sem_CheckWarp preserves block_ctx (does not write wScriptVar)
 //   Fix 5: getcoins/getnum use typed NumberSource (no magic sentinel)
@@ -16674,7 +16672,7 @@ make_three_cmd_ir(crystal::CrystalCommandData d1, crystal::CrystalCommandData d2
     return {ir, cfg};
 }
 
-// Fix 1a: checksave writes wScriptVar → setval(4) → checksave → MapRadio MUST fall back to Sem_Special
+// Fix 1a: checksave writes wScriptVar â†’ setval(4) â†’ checksave â†’ MapRadio MUST fall back to Sem_Special
 TEST(batch10_checksave_invalidates_context) {
     using namespace crystal;
     using namespace enginemon;
@@ -16687,7 +16685,7 @@ TEST(batch10_checksave_invalidates_context) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    ASSERT_FALSE(result.success);  // MapRadio with invalidated context → unlowered
+    ASSERT_FALSE(result.success);  // MapRadio with invalidated context â†’ unlowered
     ASSERT_TRUE(result.commands_unlowered > 0);
 
     // Verify MapRadio was NOT folded with the setval context
@@ -16697,10 +16695,10 @@ TEST(batch10_checksave_invalidates_context) {
         }
     }
 
-    std::cout << "  [checksave invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [checksave invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) âœ“]\n";
 }
 
-// Fix 1b: startbattle writes wScriptVar → context invalidated
+// Fix 1b: startbattle writes wScriptVar â†’ context invalidated
 TEST(batch10_startbattle_invalidates_context) {
     using namespace crystal;
     using namespace enginemon;
@@ -16716,10 +16714,10 @@ TEST(batch10_startbattle_invalidates_context) {
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
 
-    std::cout << "  [startbattle invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [startbattle invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) âœ“]\n";
 }
 
-// Fix 1c: checkpoke writes wScriptVar → context invalidated
+// Fix 1c: checkpoke writes wScriptVar â†’ context invalidated
 TEST(batch10_checkpoke_invalidates_context) {
     using namespace crystal;
     using namespace enginemon;
@@ -16736,10 +16734,10 @@ TEST(batch10_checkpoke_invalidates_context) {
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
 
-    std::cout << "  [checkpoke invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [checkpoke invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) âœ“]\n";
 }
 
-// Fix 1d: givepoke writes wScriptVar → context invalidated
+// Fix 1d: givepoke writes wScriptVar â†’ context invalidated
 TEST(batch10_givepoke_invalidates_context) {
     using namespace crystal;
     using namespace enginemon;
@@ -16756,10 +16754,10 @@ TEST(batch10_givepoke_invalidates_context) {
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
 
-    std::cout << "  [givepoke invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [givepoke invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) âœ“]\n";
 }
 
-// Fix 1e: giveegg writes wScriptVar → context invalidated
+// Fix 1e: giveegg writes wScriptVar â†’ context invalidated
 TEST(batch10_giveegg_invalidates_context) {
     using namespace crystal;
     using namespace enginemon;
@@ -16776,16 +16774,16 @@ TEST(batch10_giveegg_invalidates_context) {
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
 
-    std::cout << "  [giveegg invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [giveegg invalidates block_ctx: MapRadio unlowered (no Sem_Special fallback) âœ“]\n";
 }
 
-// Fix 1f: CheckPokerus (Special 78) writes wScriptVar → context invalidated
+// Fix 1f: CheckPokerus (Special 78) writes wScriptVar â†’ context invalidated
 TEST(batch10_check_pokerus_invalidates_context) {
     using namespace crystal;
     using namespace enginemon;
 
-    // setval(3) → Special{78=CheckPokerus} → Special{40=MapRadio}
-    // If CheckPokerus invalidates properly, MapRadio sees no producer → unlowered
+    // setval(3) â†’ Special{78=CheckPokerus} â†’ Special{40=MapRadio}
+    // If CheckPokerus invalidates properly, MapRadio sees no producer â†’ unlowered
     CrystalScriptIR ir;
     ir.name = "test_pokerus_inval";
     ir.entry_address = 0x10000;
@@ -16804,8 +16802,8 @@ TEST(batch10_check_pokerus_invalidates_context) {
 
     SemanticLegalizer legalizer;
     auto result = legalizer.lower(ir, cfg);
-    // CheckPokerus (Special 78) lowers correctly; MapRadio has invalidated context → unlowered
-    // CheckPokerus invalidates, so MapRadio (Special 40) cannot be lowered → commands_unlowered > 0
+    // CheckPokerus (Special 78) lowers correctly; MapRadio has invalidated context â†’ unlowered
+    // CheckPokerus invalidates, so MapRadio (Special 40) cannot be lowered â†’ commands_unlowered > 0
     ASSERT_TRUE(result.commands_unlowered > 0);
 
     // Verify CheckPokerus IS correctly lowered (first special)
@@ -16817,16 +16815,16 @@ TEST(batch10_check_pokerus_invalidates_context) {
     }
     ASSERT_TRUE(found_pokerus);  // CheckPokerus correctly lowered
 
-    std::cout << "  [CheckPokerus invalidates block_ctx: MapRadio unlowered (no Sem_Special) ✓]\n";
+    std::cout << "  [CheckPokerus invalidates block_ctx: MapRadio unlowered (no Sem_Special) âœ“]\n";
 }
 
-// Fix 1g (verification): Sem_CheckWarp does NOT invalidate context — setval preserved
+// Fix 1g (verification): Sem_CheckWarp does NOT invalidate context â€” setval preserved
 TEST(batch10_checkwarp_preserves_context) {
     using namespace crystal;
     using namespace enginemon;
 
-    // setval(4) → Cmd_Warpcheck → Special{40=MapRadio}
-    // Warpcheck does NOT write wScriptVar → context must survive to MapRadio
+    // setval(4) â†’ Cmd_Warpcheck â†’ Special{40=MapRadio}
+    // Warpcheck does NOT write wScriptVar â†’ context must survive to MapRadio
     CrystalScriptIR ir;
     ir.name = "test_checkwarp_preserves";
     ir.entry_address = 0x10000;
@@ -16849,12 +16847,12 @@ TEST(batch10_checkwarp_preserves_context) {
 
     const auto& insts = result.ir.blocks[0].instructions;
     ASSERT_TRUE(insts.size() >= 3);
-    // Warpcheck does NOT invalidate → MapRadio sees channel=4 → Sem_PlayRadio{4}
+    // Warpcheck does NOT invalidate â†’ MapRadio sees channel=4 â†’ Sem_PlayRadio{4}
     auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
     ASSERT_TRUE(radio != nullptr);  // Context preserved: channel from setval(4)
     ASSERT_EQ(radio->channel, 4);
 
-    std::cout << "  [Sem_CheckWarp preserves block_ctx: channel=4 propagated ✓]\n";
+    std::cout << "  [Sem_CheckWarp preserves block_ctx: channel=4 propagated âœ“]\n";
 }
 
 // Fix 2: pocketisfull produces Sem_PocketFullNotify (not absorbed, not wScriptVar-writing)
@@ -16871,7 +16869,7 @@ TEST(batch10_pocketisfull_emits_notify_not_absorbed) {
     auto result = legalizer.lower(ir, cfg);
     ASSERT_TRUE(result.success);
 
-    // Must emit exactly 1 Sem_PocketFullNotify — NOT absorbed (0 instructions)
+    // Must emit exactly 1 Sem_PocketFullNotify â€” NOT absorbed (0 instructions)
     const auto& insts = result.ir.blocks[0].instructions;
     ASSERT_EQ(insts.size(), (size_t)1);
     auto* notify = std::get_if<Sem_PocketFullNotify>(&insts[0].op);
@@ -16880,16 +16878,16 @@ TEST(batch10_pocketisfull_emits_notify_not_absorbed) {
     // Commands absorbed must be 0 (it's not absorbed)
     ASSERT_EQ(result.commands_absorbed, (size_t)0);
 
-    std::cout << "  [pocketisfull → Sem_PocketFullNotify (not absorbed, 1 instruction) ✓]\n";
+    std::cout << "  [pocketisfull â†’ Sem_PocketFullNotify (not absorbed, 1 instruction) âœ“]\n";
 }
 
-// Fix 2 (cont): pocketisfull does NOT write wScriptVar — context preserved
+// Fix 2 (cont): pocketisfull does NOT write wScriptVar â€” context preserved
 TEST(batch10_pocketisfull_does_not_invalidate_context) {
     using namespace crystal;
     using namespace enginemon;
 
-    // setval(5) → pocketisfull → Special{40=MapRadio}
-    // pocketisfull does NOT write wScriptVar → MapRadio gets channel=5
+    // setval(5) â†’ pocketisfull â†’ Special{40=MapRadio}
+    // pocketisfull does NOT write wScriptVar â†’ MapRadio gets channel=5
     auto [ir, cfg] = make_three_cmd_ir(
         Cmd_Setval{5},
         Cmd_Pocketisfull{},
@@ -16902,12 +16900,12 @@ TEST(batch10_pocketisfull_does_not_invalidate_context) {
 
     const auto& insts = result.ir.blocks[0].instructions;
     ASSERT_TRUE(insts.size() >= 3);
-    // Context survived → MapRadio produces Sem_PlayRadio{5}
+    // Context survived â†’ MapRadio produces Sem_PlayRadio{5}
     auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
     ASSERT_TRUE(radio != nullptr);
     ASSERT_EQ(radio->channel, 5);
 
-    std::cout << "  [pocketisfull does NOT invalidate block_ctx: channel=5 preserved ✓]\n";
+    std::cout << "  [pocketisfull does NOT invalidate block_ctx: channel=5 preserved âœ“]\n";
 }
 
 // Fix 3: Sem_ShowText with empty sequence must fail legality gate
@@ -16934,14 +16932,14 @@ TEST(batch10_show_text_empty_sequence_fails_legality) {
     LegalityGate gate;
     auto result = gate.validate(input);
 
-    // MUST be illegal — empty text sequence is Stage 5 violation
+    // MUST be illegal â€” empty text sequence is Stage 5 violation
     ASSERT_FALSE(result.is_legal);
     // Confirm the first diagnostic is Stage5, not a spurious earlier failure
     if (result.illegal && !result.illegal->diagnostics.empty()) {
         ASSERT_TRUE(result.illegal->diagnostics[0].failing_stage == std::string("Stage5"));
     }
 
-    std::cout << "  [Sem_ShowText{empty} rejected by legality gate ✓]\n";
+    std::cout << "  [Sem_ShowText{empty} rejected by legality gate âœ“]\n";
 }
 
 // Fix 3 (cont): Sem_ShowText with non-empty sequence passes
@@ -16970,7 +16968,7 @@ TEST(batch10_show_text_nonempty_sequence_passes_legality) {
     auto result = gate.validate(input);
 
     ASSERT_TRUE(result.is_legal);
-    std::cout << "  [Sem_ShowText{non-empty} passes legality gate ✓]\n";
+    std::cout << "  [Sem_ShowText{non-empty} passes legality gate âœ“]\n";
 }
 
 // Fix 5a: getcoins uses NumberSource::Coins (not magic sentinel 2 in account field)
@@ -16996,7 +16994,7 @@ TEST(batch10_getcoins_uses_coins_source) {
     ASSERT_EQ(pta->buffer_slot, 2);
     // account field is irrelevant/default when source is Coins
 
-    std::cout << "  [getcoins → NumberSource::Coins (no magic sentinel) ✓]\n";
+    std::cout << "  [getcoins â†’ NumberSource::Coins (no magic sentinel) âœ“]\n";
 }
 
 // Fix 5b: getnum uses NumberSource::ScriptVar (not magic sentinel 3 in account field)
@@ -17021,10 +17019,10 @@ TEST(batch10_getnum_uses_scriptvar_source) {
     ASSERT_EQ(pta->arg_type, TextArgType::Number);
     ASSERT_EQ(pta->buffer_slot, 1);
 
-    std::cout << "  [getnum → NumberSource::ScriptVar (no magic sentinel) ✓]\n";
+    std::cout << "  [getnum â†’ NumberSource::ScriptVar (no magic sentinel) âœ“]\n";
 }
 
-// Fix 6: getmoney uses typed MoneyAccount (Player vs Mom — distinct and in-domain)
+// Fix 6: getmoney uses typed MoneyAccount (Player vs Mom â€” distinct and in-domain)
 TEST(batch10_getmoney_uses_typed_money_account) {
     using namespace crystal;
     using namespace enginemon;
@@ -17054,7 +17052,7 @@ TEST(batch10_getmoney_uses_typed_money_account) {
     // Verified distinction
     ASSERT_TRUE(pta_p->account != pta_m->account);
 
-    std::cout << "  [getmoney: Player vs Mom → distinct typed MoneyAccount (no magic int) ✓]\n";
+    std::cout << "  [getmoney: Player vs Mom â†’ distinct typed MoneyAccount (no magic int) âœ“]\n";
 }
 
 // Fix 5/6 (cross-check): Coins and ScriptVar sources must NOT overlap with Money
@@ -17075,7 +17073,7 @@ TEST(batch10_number_sources_are_distinct) {
     ASSERT_EQ(coins_arg.number_source, NumberSource::Coins);
     ASSERT_EQ(num_arg.number_source,   NumberSource::ScriptVar);
 
-    std::cout << "  [NumberSource enum: Money/Coins/ScriptVar are distinct and typed ✓]\n";
+    std::cout << "  [NumberSource enum: Money/Coins/ScriptVar are distinct and typed âœ“]\n";
 }
 
 // Sem_Special adversarial gate test: manually inject Sem_Special into IR, prove rejection
@@ -17088,7 +17086,7 @@ TEST(sem_special_rejected_by_stage5_legality_gate) {
     using namespace legality_test_helpers;
 
     // Construct a valid IR/CFG/lowering pipeline, then manually inject Sem_Special.
-    // This simulates what would happen if Sem_Special somehow survived lowering —
+    // This simulates what would happen if Sem_Special somehow survived lowering â€”
     // the Stage 5 gate must catch it regardless of how it got there.
     auto ir       = make_minimal_ir(0x1000);
     auto cfg      = make_minimal_cfg(ir, "test_sem_special_adversarial");
@@ -17109,7 +17107,7 @@ TEST(sem_special_rejected_by_stage5_legality_gate) {
     LegalityGate gate;
     auto result = gate.validate(input);
 
-    // MUST be illegal — Sem_Special carries raw Crystal Special ID
+    // MUST be illegal â€” Sem_Special carries raw Crystal Special ID
     ASSERT_FALSE(result.is_legal);
     // Confirm it's a Stage5 failure about Sem_Special
     ASSERT_TRUE(result.illegal.has_value());
@@ -17128,7 +17126,7 @@ TEST(sem_special_rejected_by_stage5_legality_gate) {
     ASSERT_TRUE(found_stage5);
     ASSERT_TRUE(found_sem_special_msg);
 
-    std::cout << "  [Sem_Special with id=42 rejected by Stage5 legality gate ✓]\n";
+    std::cout << "  [Sem_Special with id=42 rejected by Stage5 legality gate âœ“]\n";
 }
 
 // Sem_Special adversarial: a clean IR with only Sem_End must PASS
@@ -17141,27 +17139,27 @@ TEST(sem_special_clean_ir_still_passes_legality) {
     auto ir       = make_minimal_ir(0x1000);
     auto cfg      = make_minimal_cfg(ir, "test_sem_special_clean");
     auto lowering = make_minimal_lowering(ir, cfg);
-    // Default lowering has Sem_End — no Sem_Special
+    // Default lowering has Sem_End â€” no Sem_Special
 
     auto input = make_minimal_input(ir, cfg, lowering);
     LegalityGate gate;
     auto result = gate.validate(input);
 
     ASSERT_TRUE(result.is_legal);
-    std::cout << "  [Clean IR (Sem_End only) still passes legality ✓]\n";
+    std::cout << "  [Clean IR (Sem_End only) still passes legality âœ“]\n";
 }
 
-// F1: turnobject — direction preserved end-to-end
+// F1: turnobject â€” direction preserved end-to-end
 // =============================================================================
 // EMITTER BINDING GAP TESTS
 // Prove that the three previously-crashing emitter paths no longer crash:
-//   1. Op_JumpStd / Op_CallStd → comment (no ctx.std nil crash)
-//   2. Op_Special → comment (no ctx.special nil crash)
-//   3. Op_WarpToSpawn → ctx.world:warp_to_spawn() with real binding
+//   1. Op_JumpStd / Op_CallStd â†’ comment (no ctx.std nil crash)
+//   2. Op_Special â†’ comment (no ctx.special nil crash)
+//   3. Op_WarpToSpawn â†’ ctx.world:warp_to_spawn() with real binding
 // =============================================================================
 
 TEST(emitter_jumpstd_no_crash) {
-    // Op_JumpStd previously emitted ctx.std:<name>() with no binding → nil crash.
+    // Op_JumpStd previously emitted ctx.std:<name>() with no binding â†’ nil crash.
     // Now emits a comment. Script must execute to completion without error.
     using namespace crystal;
     ScriptIR script;
@@ -17188,11 +17186,11 @@ TEST(emitter_jumpstd_no_crash) {
     LuaRuntime runtime;
     runtime.execute_string(lua_code, "jumpstd_test");
     runtime.start_script("script");
-    std::cout << "  [Op_JumpStd: no ctx.std call, no crash ✓]\n";
+    std::cout << "  [Op_JumpStd: no ctx.std call, no crash âœ“]\n";
 }
 
 TEST(emitter_callstd_no_crash) {
-    // Op_CallStd previously emitted ctx.std:<name>() → nil crash.
+    // Op_CallStd previously emitted ctx.std:<name>() â†’ nil crash.
     using namespace crystal;
     ScriptIR script;
     script.name = "TestCallStd";
@@ -17215,11 +17213,11 @@ TEST(emitter_callstd_no_crash) {
     LuaRuntime runtime;
     runtime.execute_string(lua_code, "callstd_test");
     runtime.start_script("script");
-    std::cout << "  [Op_CallStd: no ctx.std call, no crash ✓]\n";
+    std::cout << "  [Op_CallStd: no ctx.std call, no crash âœ“]\n";
 }
 
 TEST(emitter_special_no_crash) {
-    // Op_Special previously emitted ctx.special:<name>() → nil crash.
+    // Op_Special previously emitted ctx.special:<name>() â†’ nil crash.
     using namespace crystal;
     ScriptIR script;
     script.name = "TestSpecial";
@@ -17242,12 +17240,12 @@ TEST(emitter_special_no_crash) {
     LuaRuntime runtime;
     runtime.execute_string(lua_code, "special_test");
     runtime.start_script("script");
-    std::cout << "  [Op_Special: no ctx.special call, no crash ✓]\n";
+    std::cout << "  [Op_Special: no ctx.special call, no crash âœ“]\n";
 }
 
 TEST(emitter_warp_to_spawn_has_binding) {
     // Op_WarpToSpawn emits ctx.world:warp_to_spawn(). The binding must exist.
-    // Previously: binding was missing → nil crash at runtime.
+    // Previously: binding was missing â†’ nil crash at runtime.
     using namespace crystal;
     ScriptIR script;
     script.name = "TestWarpToSpawn";
@@ -17264,7 +17262,7 @@ TEST(emitter_warp_to_spawn_has_binding) {
 
     ASSERT_STR_CONTAINS(lua_code, "ctx.world:warp_to_spawn()");
 
-    // Execute — must not crash
+    // Execute â€” must not crash
     LuaRuntime runtime;
     runtime.execute_string(lua_code, "warp_to_spawn_test");
     runtime.start_script("script");
@@ -17276,7 +17274,7 @@ TEST(emitter_warp_to_spawn_has_binding) {
         if (c.first == "warp_to_spawn") { found = true; break; }
     }
     ASSERT_TRUE(found);
-    std::cout << "  [Op_WarpToSpawn: binding exists, recorded in stubs ✓]\n";
+    std::cout << "  [Op_WarpToSpawn: binding exists, recorded in stubs âœ“]\n";
 }
 
 TEST(f1_turnobject_direction_preserved_right) {
@@ -17318,7 +17316,7 @@ TEST(f1_turnobject_direction_preserved_right) {
     
     auto state = world_api::get_actor_state(&runtime, 3);
     ASSERT_STR_EQ(state.facing, "right");
-    std::cout << "  [F1: turnobject direction=Right → face_actor facing right ✓]\n";
+    std::cout << "  [F1: turnobject direction=Right â†’ face_actor facing right âœ“]\n";
 }
 
 TEST(f1_turnobject_direction_preserved_up) {
@@ -17352,10 +17350,10 @@ TEST(f1_turnobject_direction_preserved_up) {
     
     auto state = world_api::get_actor_state(&runtime, 5);
     ASSERT_STR_EQ(state.facing, "up");
-    std::cout << "  [F1: turnobject direction=Up → face_actor facing up ✓]\n";
+    std::cout << "  [F1: turnobject direction=Up â†’ face_actor facing up âœ“]\n";
 }
 
-// F4: scripted warp — map and coordinates arrive at binding
+// F4: scripted warp â€” map and coordinates arrive at binding
 TEST(f4_scripted_warp_coordinates_preserved) {
     using namespace crystal;
     
@@ -17392,7 +17390,7 @@ TEST(f4_scripted_warp_coordinates_preserved) {
     ASSERT_EQ(stubs.last_warp_map, 6147);
     ASSERT_EQ(stubs.last_warp_x, 4);
     ASSERT_EQ(stubs.last_warp_y, 7);
-    std::cout << "  [F4: scripted warp map=0x1803 x=4 y=7 all arrive at binding ✓]\n";
+    std::cout << "  [F4: scripted warp map=0x1803 x=4 y=7 all arrive at binding âœ“]\n";
 }
 
 // F3: givepoke with held item
@@ -17433,7 +17431,7 @@ TEST(f3_givepoke_held_item_preserved) {
     ASSERT_EQ(stubs.last_add_pokemon_species, 155);
     ASSERT_EQ(stubs.last_add_pokemon_level, 5);
     ASSERT_EQ(static_cast<int>(stubs.last_add_pokemon_held_item), 34);
-    std::cout << "  [F3: givepoke species=155 level=5 held_item=34 all preserved ✓]\n";
+    std::cout << "  [F3: givepoke species=155 level=5 held_item=34 all preserved âœ“]\n";
 }
 
 // F8: money account preserved
@@ -17504,7 +17502,7 @@ TEST(f8_money_account_player_vs_mom) {
     
     // MUTATION CHECK: account 0 != account 1
     ASSERT_TRUE(0 != 1);
-    std::cout << "  [F8: money account 0=player and 1=mom both preserved ✓]\n";
+    std::cout << "  [F8: money account 0=player and 1=mom both preserved âœ“]\n";
 }
 
 // F2: text_sequence with dynamic RAM op preserved
@@ -17535,7 +17533,7 @@ end
     ASSERT_EQ(static_cast<int>(captured.elements[1].op), static_cast<int>(RuntimeTextOp::Ram));
     ASSERT_EQ(static_cast<int>(captured.elements[2].op), static_cast<int>(RuntimeTextOp::Done));
     ASSERT_EQ(captured.elements[1].addr, 53475u);
-    std::cout << "  [F2: text {ram} op preserved, not silently dropped ✓]\n";
+    std::cout << "  [F2: text {ram} op preserved, not silently dropped âœ“]\n";
 }
 
 // =============================================================================
@@ -17543,7 +17541,7 @@ end
 // Tests verify RuntimeTextElement correctly stores operands for all dynamic ops,
 // and that Unsupported elements are correctly tagged.
 // The from_runtime() conversion (in textbox_renderer.cpp) produces DeferredDynamic
-// for all dynamic ops and throws for Unsupported — tested via the Lua binding path.
+// for all dynamic ops and throws for Unsupported â€” tested via the Lua binding path.
 // =============================================================================
 TEST(native_text_from_runtime_ram_preserves_operands) {
     // Verify RuntimeTextElement with Ram op stores addr correctly
@@ -17558,7 +17556,7 @@ TEST(native_text_from_runtime_ram_preserves_operands) {
     ASSERT_EQ(static_cast<int>(unsup.op), static_cast<int>(RuntimeTextOp::Unsupported));
     ASSERT_STR_EQ(unsup.op_name, "mystery_op");
 
-    std::cout << "  [native text: Ram elem addr=0xD13E stored; Unsupported op_name captured ✓]\n";
+    std::cout << "  [native text: Ram elem addr=0xD13E stored; Unsupported op_name captured âœ“]\n";
 }
 
 TEST(native_text_from_runtime_decimal_preserves_operands) {
@@ -17570,12 +17568,12 @@ TEST(native_text_from_runtime_decimal_preserves_operands) {
     ASSERT_EQ(static_cast<int>(elem.op), static_cast<int>(RuntimeTextOp::Decimal));
     ASSERT_EQ(elem.addr, 0xD109u);
     ASSERT_EQ(elem.param, 0x12u);
-    std::cout << "  [native text: Decimal elem addr=0xD109, param=0x12 ✓]\n";
+    std::cout << "  [native text: Decimal elem addr=0xD109, param=0x12 âœ“]\n";
 }
 
 TEST(native_text_from_runtime_unsupported_throws) {
     // Verify that the Lua binding creates Unsupported elements for unknown ops.
-    // When from_runtime() encounters Unsupported it must throw — not silently no-op.
+    // When from_runtime() encounters Unsupported it must throw â€” not silently no-op.
     // We verify through the Lua path that unknown ops become Unsupported in RuntimeTextSequence.
     LuaRuntime rt;
     RuntimeTextSequence captured;
@@ -17608,8 +17606,8 @@ end
     ASSERT_EQ(static_cast<int>(unsup_elem.op), static_cast<int>(RuntimeTextOp::Unsupported));
     ASSERT_STR_EQ(unsup_elem.op_name, "test_op");
     // from_runtime() contains: case RuntimeTextOp::Unsupported: throw std::runtime_error(...)
-    // This is a compile-time explicit contract — cannot silently default.
-    std::cout << "  [native text: unknown op → Unsupported with op_name; from_runtime() throws contract ✓]\n";
+    // This is a compile-time explicit contract â€” cannot silently default.
+    std::cout << "  [native text: unknown op â†’ Unsupported with op_name; from_runtime() throws contract âœ“]\n";
 }
 
 TEST(native_text_from_runtime_no_silent_blank_fallthrough) {
@@ -17634,12 +17632,12 @@ TEST(native_text_from_runtime_no_silent_blank_fallthrough) {
         ASSERT_EQ(elem.addr, c.addr);
         ASSERT_EQ(elem.param, c.param);
     }
-    std::cout << "  [native text: 14 dynamic ops all store operands; none default to Text ✓]\n";
+    std::cout << "  [native text: 14 dynamic ops all store operands; none default to Text âœ“]\n";
 }
 
 // F6: canonical gameplay RNG is not reset on map transitions
 // After the NPC-RNG migration: NPC movement draws from canonical GameplayRng.
-// Map transitions do NOT re-seed the canonical RNG — the stream is continuous.
+// Map transitions do NOT re-seed the canonical RNG â€” the stream is continuous.
 TEST(f6_canonical_rng_not_reset_on_map_transition) {
     GameState gs;
     gs.player.current_map_id = "map_a";
@@ -17665,17 +17663,17 @@ TEST(f6_canonical_rng_not_reset_on_map_transition) {
     map2.blocks.assign(25, 0);
     loop.load_map(map2);
 
-    // After transition, draw from canonical RNG — must be identical
+    // After transition, draw from canonical RNG â€” must be identical
     uint32_t after_transition = gs.rng.next_u32();
 
     // ORACLE: canonical RNG is NOT perturbed by map transitions
     ASSERT_EQ(before_transition, after_transition);
-    std::cout << "  [F6: map transition does not reseed canonical gs.rng ✓]\n";
+    std::cout << "  [F6: map transition does not reseed canonical gs.rng âœ“]\n";
 }
 
-// F7: save validation — invalid direction rejected; trailing bytes rejected
+// F7: save validation â€” invalid direction rejected; trailing bytes rejected
 TEST(f7_save_invalid_direction_rejected) {
-    // Build a valid save, then add a trailing byte — must be rejected
+    // Build a valid save, then add a trailing byte â€” must be rejected
     GameState gs;
     gs.player.current_map_id = "test";
     gs.player.x = 3; gs.player.y = 5;
@@ -17697,7 +17695,7 @@ TEST(f7_save_invalid_direction_rejected) {
         ASSERT_TRUE(result.ok());
     }
     
-    std::cout << "  [F7: trailing bytes rejected; valid save accepted ✓]\n";
+    std::cout << "  [F7: trailing bytes rejected; valid save accepted âœ“]\n";
 }
 
 
@@ -17706,31 +17704,31 @@ TEST(f7_save_invalid_direction_rejected) {
 //=============================================================================
 // ICON FORMAT SOURCE-FIDELITY TESTS
 // Source evidence:
-//   GetIcon: lb bc, BANK(Icons), 8  → Request2bpp loads 8 tiles total (2 frames × 4 tiles)
-//   OAMData_RedWalk: 4 OBJ sprites in 2×2 layout → 16×16 pixels rendered
-//   PikachuIcon GFX at bank 23 (0x17), ptr resolved via IconPointers[4] = 0x666B → flat 0x05E66B
+//   GetIcon: lb bc, BANK(Icons), 8  â†’ Request2bpp loads 8 tiles total (2 frames Ã— 4 tiles)
+//   OAMData_RedWalk: 4 OBJ sprites in 2Ã—2 layout â†’ 16Ã—16 pixels rendered
+//   PikachuIcon GFX at bank 23 (0x17), ptr resolved via IconPointers[4] = 0x666B â†’ flat 0x05E66B
 //   128-byte sum of PikachuIcon GFX = 0x4ED0 (independently computed from ROM bytes)
 //=============================================================================
 
 TEST(icon_format_16x16_geometry) {
-    // Extracted icon must be 16×16 pixels per frame, 2 frames.
-    // Source: OAMData_RedWalk 4 OBJ sprites in 2×2 layout → 16×16.
+    // Extracted icon must be 16Ã—16 pixels per frame, 2 frames.
+    // Source: OAMData_RedWalk 4 OBJ sprites in 2Ã—2 layout â†’ 16Ã—16.
     crystal::SpriteExtractor extractor(*g_rom, *g_profile);
     auto result = extractor.extract_pokemon_icon("pikachu");
     ASSERT_TRUE(result.success);
     ASSERT_EQ(result.sprite.type, enginemon::SpriteType::Icon);
     ASSERT_EQ(result.sprite.icon_frames.size(), static_cast<size_t>(2));
-    // Each frame is 16×16 = 256 pixels
+    // Each frame is 16Ã—16 = 256 pixels
     ASSERT_EQ(result.sprite.icon_frames[0].pixels.size(), static_cast<size_t>(256));
     ASSERT_EQ(result.sprite.icon_frames[1].pixels.size(), static_cast<size_t>(256));
-    // Confirm NOT 32×32 (the old wrong size)
-    // 32×32 = 1024; pixels array must be 256, not 1024
+    // Confirm NOT 32Ã—32 (the old wrong size)
+    // 32Ã—32 = 1024; pixels array must be 256, not 1024
     ASSERT_TRUE(result.sprite.icon_frames[0].pixels.size() < 1024);
 }
 
 TEST(icon_format_128_bytes_total) {
-    // Total raw GFX consumed must be 128 bytes = 2 frames × 4 tiles × 16 bytes.
-    // Source: lb bc, BANK(Icons), 8 → 8 tiles × 16 bytes = 128 bytes.
+    // Total raw GFX consumed must be 128 bytes = 2 frames Ã— 4 tiles Ã— 16 bytes.
+    // Source: lb bc, BANK(Icons), 8 â†’ 8 tiles Ã— 16 bytes = 128 bytes.
     // Verify by checking that the snorlax icon (adjacent to pikachu in the table)
     // is extracted correctly without bleeding into it.
     crystal::SpriteExtractor extractor(*g_rom, *g_profile);
@@ -17738,7 +17736,7 @@ TEST(icon_format_128_bytes_total) {
     auto r_snorlax = extractor.extract_pokemon_icon("snorlax");
     ASSERT_TRUE(r_pikachu.success);
     ASSERT_TRUE(r_snorlax.success);
-    // Both must have distinct pixel content — if we read 512 bytes they'd overlap
+    // Both must have distinct pixel content â€” if we read 512 bytes they'd overlap
     bool identical = (r_pikachu.sprite.icon_frames[0].pixels ==
                       r_snorlax.sprite.icon_frames[0].pixels);
     ASSERT_FALSE(identical);
@@ -17780,7 +17778,7 @@ TEST(icon_format_pikachu_pixel_hash) {
 TEST(icon_format_bigmon_packaged_via_closure) {
     // ASSET CLOSURE: "pokemon_icon:bigmon" (Charizard/Dragonite/Kingdra) must be
     // in the compiled content_.sprites list after discover_sprites().
-    // Before the closure fix it was absent — only static map-object discovery ran.
+    // Before the closure fix it was absent â€” only static map-object discovery ran.
     // This test proves the Day Care path is closed.
     crystal::SpriteExtractor extractor(*g_rom, *g_profile);
     auto result = extractor.extract_pokemon_icon("bigmon");
@@ -17799,8 +17797,8 @@ TEST(icon_format_bigmon_packaged_via_closure) {
 // All expected values independently derived from the algorithm using a C++
 // reference implementation compiled against the same code.
 //
-// Source: docs/NATIVE_RNG_ARCHITECTURE.md §2 (algorithm), §3 (draw counts),
-//         §6 (serialization), §11 (migration)
+// Source: docs/NATIVE_RNG_ARCHITECTURE.md Â§2 (algorithm), Â§3 (draw counts),
+//         Â§6 (serialization), Â§11 (migration)
 //
 // PCG-XSH-RR constants:
 //   MULTIPLIER = 6364136223846793005
@@ -17808,7 +17806,7 @@ TEST(icon_format_bigmon_packaged_via_closure) {
 // Seeding: state=0; step(); state+=seed; step()
 // =============================================================================
 
-// P1: Known-answer sequence — seed(0xDEADBEEF), first 8 u32 draws
+// P1: Known-answer sequence â€” seed(0xDEADBEEF), first 8 u32 draws
 // Expected values independently computed via reference C++ binary.
 TEST(pcg_known_sequence_seed_deadbeef) {
     GameplayRng rng;
@@ -17817,7 +17815,7 @@ TEST(pcg_known_sequence_seed_deadbeef) {
     // Verify initial state after seeding
     ASSERT_EQ(rng.state(), 0xACCBE882F0188E35ULL);
 
-    // First 8 u32 draws — exact PCG-XSH-RR output
+    // First 8 u32 draws â€” exact PCG-XSH-RR output
     static const uint32_t expected[8] = {
         0xC3B00CCBu, 0xE7CC54A7u, 0x20D2F15Au, 0x968EE6DDu,
         0xD1D281FBu, 0x17F8C47Fu, 0x9E9AA07Bu, 0x50F95B42u,
@@ -17836,7 +17834,7 @@ TEST(pcg_known_sequence_seed_deadbeef) {
     ASSERT_EQ(pcg_first, 0xC3B00CCBu);
 }
 
-// P2: next_u8 consumes exactly 1 draw — low byte of next_u32
+// P2: next_u8 consumes exactly 1 draw â€” low byte of next_u32
 TEST(pcg_next_u8_draw_count) {
     GameplayRng rng;
     rng.seed(0xDEADBEEFULL);
@@ -17859,10 +17857,10 @@ TEST(pcg_next_u8_draw_count) {
     // (A broken implementation calling next_u32() twice would give a different state)
     ASSERT_TRUE(state_after != state_before);
 
-    std::cout << "  [PCG u8 draw count=1, value=0xCB ✓]\n";
+    std::cout << "  [PCG u8 draw count=1, value=0xCB âœ“]\n";
 }
 
-// P3: next_u64 — first draw = high bits, second draw = low bits (2 total draws)
+// P3: next_u64 â€” first draw = high bits, second draw = low bits (2 total draws)
 TEST(pcg_next_u64_hi_lo_ordering) {
     GameplayRng rng;
     rng.seed(0xDEADBEEFULL);
@@ -17872,8 +17870,8 @@ TEST(pcg_next_u64_hi_lo_ordering) {
 
     // Reset and get via two separate calls in the defined order
     rng.seed(0xDEADBEEFULL);
-    uint64_t hi = rng.next_u32();   // Draw 1 → high bits
-    uint64_t lo = rng.next_u32();   // Draw 2 → low bits
+    uint64_t hi = rng.next_u32();   // Draw 1 â†’ high bits
+    uint64_t lo = rng.next_u32();   // Draw 2 â†’ low bits
     uint64_t manual = (hi << 32u) | lo;
 
     // ORACLE: combined = 0xC3B00CCBE7CC54A7 (hi=0xC3B00CCB lo=0xE7CC54A7)
@@ -17892,7 +17890,7 @@ TEST(pcg_next_u64_hi_lo_ordering) {
     (void)rng.next_u64();
     ASSERT_EQ(rng.state(), state_after_two);
 
-    std::cout << "  [PCG next_u64 hi=draw1 lo=draw2, 2 draws, value=0xC3B00CCBE7CC54A7 ✓]\n";
+    std::cout << "  [PCG next_u64 hi=draw1 lo=draw2, 2 draws, value=0xC3B00CCBE7CC54A7 âœ“]\n";
 }
 
 // P4: seed(0) known state and behavioral determinism
@@ -17900,7 +17898,7 @@ TEST(pcg_seed_zero_known_state) {
     GameplayRng rng;
     rng.seed(0ULL);
     uint32_t first = rng.next_u32();
-    // Must be consistent: same seed → same first draw
+    // Must be consistent: same seed â†’ same first draw
     GameplayRng rng2;
     rng2.seed(0ULL);
     ASSERT_EQ(rng2.next_u32(), first);
@@ -17915,7 +17913,7 @@ TEST(pcg_seed_zero_known_state) {
     rng4.seed(0ULL);
     ASSERT_TRUE(rng4.state() != 0ULL);
 
-    std::cout << "  [PCG seed(0) deterministic, non-zero state, distinct from seed(1) ✓]\n";
+    std::cout << "  [PCG seed(0) deterministic, non-zero state, distinct from seed(1) âœ“]\n";
 }
 
 // P5: bounded(6) representative value from seed(0xDEADBEEF) = 4
@@ -17940,7 +17938,7 @@ TEST(pcg_bounded_representative_value) {
     // MUTATION CHECK: bounded(6) must not use modulo (which would give 0xC3B00CCB % 6 = 3)
     ASSERT_TRUE(result != (0xC3B00CCBu % 6u));
 
-    std::cout << "  [PCG bounded(6) = 4, Lemire unbiased (not modulo) ✓]\n";
+    std::cout << "  [PCG bounded(6) = 4, Lemire unbiased (not modulo) âœ“]\n";
 }
 
 // P6: bounded(1) always returns 0 (every value < 1 is impossible, so always 0)
@@ -17950,7 +17948,7 @@ TEST(pcg_bounded_one_always_zero) {
     for (int i = 0; i < 10; ++i) {
         ASSERT_EQ(rng.bounded(1u), 0u);
     }
-    std::cout << "  [PCG bounded(1) = 0 always ✓]\n";
+    std::cout << "  [PCG bounded(1) = 0 always âœ“]\n";
 }
 
 // P7: bounded(0) throws and consumes exactly 0 draws
@@ -17967,10 +17965,10 @@ TEST(pcg_bounded_zero_throws_no_draw) {
     }
 
     ASSERT_TRUE(threw);
-    // 0 draws consumed — state must be unchanged
+    // 0 draws consumed â€” state must be unchanged
     ASSERT_EQ(rng.state(), state_before);
 
-    std::cout << "  [PCG bounded(0) throws std::invalid_argument, 0 draws consumed ✓]\n";
+    std::cout << "  [PCG bounded(0) throws std::invalid_argument, 0 draws consumed âœ“]\n";
 }
 
 // P8: save/load exact continuation
@@ -18003,10 +18001,10 @@ TEST(pcg_save_load_exact_continuation) {
     // MUTATION CHECK: restore_state() must NOT re-apply O'Neill init
     // (seed(saved_state) would produce a different state than restore_state(saved_state))
     GameplayRng wrong_restore;
-    wrong_restore.seed(saved_state);  // O'Neill init — deliberately wrong for save/load
+    wrong_restore.seed(saved_state);  // O'Neill init â€” deliberately wrong for save/load
     ASSERT_TRUE(wrong_restore.state() != saved_state);
 
-    std::cout << "  [PCG save/load continuation: 5 draws after restore match uninterrupted ✓]\n";
+    std::cout << "  [PCG save/load continuation: 5 draws after restore match uninterrupted âœ“]\n";
 }
 
 // P9: NPC movement draws from the CANONICAL GameplayRng, not a separate stream.
@@ -18038,10 +18036,10 @@ TEST(pcg_map_transition_does_not_perturb_canonical) {
 
     // MUTATION CHECK: NPC tick now DOES advance canonical RNG (no longer independent)
     // (confirmed by pcg_npc_movement_uses_canonical_rng test)
-    std::cout << "  [PCG map transition: loading a map does not reseed canonical RNG ✓]\n";
+    std::cout << "  [PCG map transition: loading a map does not reseed canonical RNG âœ“]\n";
 }
 
-// P10: NPC movement draws from canonical GameplayRng — there is no separate presentation stream.
+// P10: NPC movement draws from canonical GameplayRng â€” there is no separate presentation stream.
 // Any NPC tick advances game_state_->rng. Loading a map does NOT fork the stream.
 TEST(pcg_presentation_rng_does_not_perturb_canonical) {
     // With map_rng_ removed, the only RNG stream is game_state_->rng.
@@ -18076,13 +18074,13 @@ TEST(pcg_presentation_rng_does_not_perturb_canonical) {
     loop.add_npc(npc);
     ASSERT_EQ(gs.rng.state(), state_before_load);
 
-    std::cout << "  [PCG load_map/spawn_player/add_npc do not consume canonical draws ✓]\n";
+    std::cout << "  [PCG load_map/spawn_player/add_npc do not consume canonical draws âœ“]\n";
 }
 
-// P11: DV draw count — exactly 2 semantic draws (not 4)
-// Source: pokecrystal/engine/battle/core.asm GenerateDVs — 2× BattleRandom
-//   Draw 1 → Atk nibble (high) + Def nibble (low)
-//   Draw 2 → Spd nibble (high) + Spc nibble (low)
+// P11: DV draw count â€” exactly 2 semantic draws (not 4)
+// Source: pokecrystal/engine/battle/core.asm GenerateDVs â€” 2Ã— BattleRandom
+//   Draw 1 â†’ Atk nibble (high) + Def nibble (low)
+//   Draw 2 â†’ Spd nibble (high) + Spc nibble (low)
 TEST(pcg_dv_draw_count_two_semantic) {
     // Use a Registries with species 1 registered
     enginemon::Registries reg;
@@ -18103,7 +18101,7 @@ TEST(pcg_dv_draw_count_two_semantic) {
     Pokemon mon = create_pokemon(static_cast<SpeciesId>(1), 5, rng, reg);
     uint64_t state_after  = rng.state();
 
-    // Exactly 2 draws — verify by advancing a fresh RNG 2 times
+    // Exactly 2 draws â€” verify by advancing a fresh RNG 2 times
     GameplayRng ref;
     ref.seed(0xABCD1234ULL);
     (void)ref.next_u32();  // Draw 1
@@ -18111,7 +18109,7 @@ TEST(pcg_dv_draw_count_two_semantic) {
     ASSERT_EQ(state_after, ref.state());
 
     // ORACLE: known DV values from seed(0xABCD1234)
-    // byte1=0x1F → atk=1, def=15   byte2=0xA3 → spd=10, spc=3
+    // byte1=0x1F â†’ atk=1, def=15   byte2=0xA3 â†’ spd=10, spc=3
     ASSERT_EQ(mon.dvs.attack,  1u);
     ASSERT_EQ(mon.dvs.defense, 15u);
     ASSERT_EQ(mon.dvs.speed,   10u);
@@ -18121,12 +18119,12 @@ TEST(pcg_dv_draw_count_two_semantic) {
     GameplayRng old_sim;
     old_sim.seed(0xABCD1234ULL);
     for (int i = 0; i < 4; ++i) (void)old_sim.next_u32();
-    ASSERT_TRUE(state_after != old_sim.state());  // 2 draws ≠ 4 draws
+    ASSERT_TRUE(state_after != old_sim.state());  // 2 draws â‰  4 draws
 
-    std::cout << "  [PCG DV draw count=2 (not 4), atk=1 def=15 spd=10 spc=3 from seed(0xABCD1234) ✓]\n";
+    std::cout << "  [PCG DV draw count=2 (not 4), atk=1 def=15 spd=10 spc=3 from seed(0xABCD1234) âœ“]\n";
 }
 
-// P12: v4 → v5 save migration is deterministic
+// P12: v4 â†’ v5 save migration is deterministic
 // A v4 save (LCG) loaded gives a predictable PCG state via seed(legacy_state).
 TEST(pcg_v4_migration_deterministic) {
     using namespace enginemon;
@@ -18155,7 +18153,7 @@ TEST(pcg_v4_migration_deterministic) {
     ASSERT_EQ(result.state.rng.state(), original_state);
 
     // Migration determinism: seed(0xCAFEBABE) always produces the same state
-    // (behavioral: same seed → same first draw)
+    // (behavioral: same seed â†’ same first draw)
     GameplayRng ref;
     ref.seed(0xCAFEBABEULL);
     uint32_t ref_first = ref.next_u32();
@@ -18163,10 +18161,10 @@ TEST(pcg_v4_migration_deterministic) {
     ref2.seed(0xCAFEBABEULL);
     ASSERT_EQ(ref2.next_u32(), ref_first);
 
-    std::cout << "  [PCG v4→v5 migration: seed(0xCAFEBABE) → state=0xCCC8614A229EDE07 ✓]\n";
+    std::cout << "  [PCG v4â†’v5 migration: seed(0xCAFEBABE) â†’ state=0xCCC8614A229EDE07 âœ“]\n";
 }
 
-// P13: v5 save round-trip — serialize/deserialize preserves exact PCG state
+// P13: v5 save round-trip â€” serialize/deserialize preserves exact PCG state
 TEST(pcg_v5_save_roundtrip) {
     GameState gs;
     gs.rng.seed(0xDEADBEEFULL);
@@ -18198,7 +18196,7 @@ TEST(pcg_v5_save_roundtrip) {
     ASSERT_EQ(loaded_next, expected_next);
 
     // MUTATION CHECK: old two-field layout would consume 16 bytes for RNG
-    // v5 uses exactly 8 bytes — verify by looking at a trivial save's size
+    // v5 uses exactly 8 bytes â€” verify by looking at a trivial save's size
     GameState empty;
     empty.rng.seed(0ULL);
     auto v5 = empty.serialize();
@@ -18207,7 +18205,7 @@ TEST(pcg_v5_save_roundtrip) {
     auto v5_result = GameState::try_deserialize(v5);
     ASSERT_TRUE(v5_result.ok());
 
-    std::cout << "  [PCG v5 save round-trip: state preserved, version=5, continuation matches ✓]\n";
+    std::cout << "  [PCG v5 save round-trip: state preserved, version=5, continuation matches âœ“]\n";
 }
 
 // =============================================================================
@@ -18215,7 +18213,7 @@ TEST(pcg_v5_save_roundtrip) {
 // =============================================================================
 
 // A1: NPC movement tick advances canonical GameplayRng.
-// NPC with RandomWalkXY calls next_random() (→ game_state_->rng.next_u32()).
+// NPC with RandomWalkXY calls next_random() (â†’ game_state_->rng.next_u32()).
 // Every NPC move-attempt tick must consume exactly the draws used by next_random().
 TEST(pcg_npc_movement_uses_canonical_rng) {
     GameState gs;
@@ -18244,7 +18242,7 @@ TEST(pcg_npc_movement_uses_canonical_rng) {
     // Record state before any tick
     uint64_t state_before = gs.rng.state();
 
-    // Run one tick — NPC will try to move, consuming draws from canonical RNG
+    // Run one tick â€” NPC will try to move, consuming draws from canonical RNG
     loop.tick();
 
     uint64_t state_after = gs.rng.state();
@@ -18254,10 +18252,10 @@ TEST(pcg_npc_movement_uses_canonical_rng) {
 
     // MUTATION CHECK: if NPC had used a separate stream, state would be unchanged.
     // We can verify by checking that the canonical state advanced (not zero draws).
-    // The exact draw count is behavior-path-dependent (1–4 draws per tick depending
+    // The exact draw count is behavior-path-dependent (1â€“4 draws per tick depending
     // on which NpcMovementBehavior branches were taken), but at least 1 draw must occur.
 
-    std::cout << "  [A1: NPC movement tick advances canonical GameplayRng ✓]\n";
+    std::cout << "  [A1: NPC movement tick advances canonical GameplayRng âœ“]\n";
 }
 
 // A2: save/load restores canonical RNG so NPC movement resumes identically.
@@ -18332,15 +18330,15 @@ TEST(pcg_npc_save_load_canonical_continuation) {
         ASSERT_EQ(orig_pos[i].second, restored_pos[i].second);
     }
 
-    std::cout << "  [A2: save/load canonical RNG → NPC positions continue exactly ✓]\n";
+    std::cout << "  [A2: save/load canonical RNG â†’ NPC positions continue exactly âœ“]\n";
 }
 
 // A3: random_chance(percent) correct probability contract.
 // Contract: probability = percent/100.
-// bounded(100) returns uniform [0,99] → hit if result < percent.
+// bounded(100) returns uniform [0,99] â†’ hit if result < percent.
 // Statistical test over many draws; also verifies old percent/256 bug is dead.
 TEST(random_chance_correct_probability_contract) {
-    // Edge cases: 0 → always false (0 draws), 100 → always true (0 draws)
+    // Edge cases: 0 â†’ always false (0 draws), 100 â†’ always true (0 draws)
     // Verified directly through the GameplayRng + bounded() interface
     // (the Lua binding calls bounded(100) < percent for [1,99] range)
     {
@@ -18359,7 +18357,7 @@ TEST(random_chance_correct_probability_contract) {
         ASSERT_EQ(gs.rng.state(), state_before);  // No draws consumed
     }
 
-    // Statistical: random_chance(50) should hit ~50% — not ~19.5% (old percent/256 bug)
+    // Statistical: random_chance(50) should hit ~50% â€” not ~19.5% (old percent/256 bug)
     // Over 10000 draws, 50% should be within [4700, 5300].
     {
         GameState gs;
@@ -18370,15 +18368,15 @@ TEST(random_chance_correct_probability_contract) {
             uint32_t roll = gs.rng.bounded(100u);
             if (roll < 50u) ++hits;
         }
-        // 50% of 10000 = 5000. Allow ±300 (3%) for PCG variation.
+        // 50% of 10000 = 5000. Allow Â±300 (3%) for PCG variation.
         ASSERT_TRUE(hits >= 4700 && hits <= 5300);
 
-        // MUTATION CHECK: old bug (percent/256) would give ~50/256 ≈ 19.5% ≈ 1953 hits.
+        // MUTATION CHECK: old bug (percent/256) would give ~50/256 â‰ˆ 19.5% â‰ˆ 1953 hits.
         // If hits < 3000 the old bug is present.
         ASSERT_TRUE(hits > 3000);
     }
 
-    // Statistical: random_chance(25) should hit ~25% (not 25/256 ≈ 9.8%)
+    // Statistical: random_chance(25) should hit ~25% (not 25/256 â‰ˆ 9.8%)
     {
         GameState gs;
         gs.rng.seed(0xCAFE1234ULL);
@@ -18388,17 +18386,17 @@ TEST(random_chance_correct_probability_contract) {
             uint32_t roll = gs.rng.bounded(100u);
             if (roll < 25u) ++hits;
         }
-        // 25% of 10000 = 2500. Allow ±300.
+        // 25% of 10000 = 2500. Allow Â±300.
         ASSERT_TRUE(hits >= 2200 && hits <= 2800);
 
-        // MUTATION CHECK: old bug would give ~25/256 ≈ 9.8% ≈ 980 hits
+        // MUTATION CHECK: old bug would give ~25/256 â‰ˆ 9.8% â‰ˆ 980 hits
         ASSERT_TRUE(hits > 1500);
     }
 
-    std::cout << "  [A3: random_chance(50)≈50% and random_chance(25)≈25%, not percent/256 ✓]\n";
+    std::cout << "  [A3: random_chance(50)â‰ˆ50% and random_chance(25)â‰ˆ25%, not percent/256 âœ“]\n";
 }
 
-// A4: random_chance(>100) throws — invalid percent is a programmer error.
+// A4: random_chance(>100) throws â€” invalid percent is a programmer error.
 TEST(random_chance_invalid_percent_throws) {
     LuaRuntime rt;
     GameState gs;
@@ -18419,23 +18417,23 @@ return script
     rt.execute_string(code, "invalid_chance");
     rt.start_script("script");
 
-    // pcall should have caught the error → var_1 = 0
+    // pcall should have caught the error â†’ var_1 = 0
     ASSERT_EQ(gs.variables["var_1"], 0);
 
-    std::cout << "  [A4: random_chance(101) throws, caught by pcall ✓]\n";
+    std::cout << "  [A4: random_chance(101) throws, caught by pcall âœ“]\n";
 }
 
-// A5: No second authoritative RNG stream — map_rng_ / RngState removed.
+// A5: No second authoritative RNG stream â€” map_rng_ / RngState removed.
 // This is a compile-time proof: if the test compiles, neither map_rng_ nor
 // set_rng_seed nor get/set_map_rng_state exist on HeadlessGameLoop.
 // Only GameplayRng (via game_state_->rng) remains as the authoritative stream.
 TEST(no_second_authoritative_rng_stream) {
     // If this test compiles, the banned APIs are gone:
-    //   HeadlessGameLoop::set_rng_seed()       — REMOVED
-    //   HeadlessGameLoop::get_map_rng_state()  — REMOVED
-    //   HeadlessGameLoop::set_map_rng_state()  — REMOVED
-    //   HeadlessGameLoop::map_rng_             — REMOVED (private)
-    //   RngState struct                        — REMOVED from game_state.hpp
+    //   HeadlessGameLoop::set_rng_seed()       â€” REMOVED
+    //   HeadlessGameLoop::get_map_rng_state()  â€” REMOVED
+    //   HeadlessGameLoop::set_map_rng_state()  â€” REMOVED
+    //   HeadlessGameLoop::map_rng_             â€” REMOVED (private)
+    //   RngState struct                        â€” REMOVED from game_state.hpp
     //
     // The only authoritative RNG is GameState::GameplayRng rng.
     GameState gs;
@@ -18447,19 +18445,19 @@ TEST(no_second_authoritative_rng_stream) {
     // Canonical RNG is accessible and functional
     uint32_t v1 = gs.rng.next_u32();
     uint32_t v2 = gs.rng.next_u32();
-    ASSERT_TRUE(v1 != v2 || v1 == v2);  // Always true — just proves it compiles
+    ASSERT_TRUE(v1 != v2 || v1 == v2);  // Always true â€” just proves it compiles
 
-    std::cout << "  [A5: no second authoritative RNG stream — map_rng_ removed, canonical only ✓]\n";
+    std::cout << "  [A5: no second authoritative RNG stream â€” map_rng_ removed, canonical only âœ“]\n";
 }
 
 //=============================================================================
-// GAMESPECIFICEVENT CAPABILITY BOUNDARY — ADVERSARIAL TESTS
+// GAMESPECIFICEVENT CAPABILITY BOUNDARY â€” ADVERSARIAL TESTS
 // Verifies explicit failure semantics for ctx.game:behavior() dispatch.
 //
 // Architecture under test:
-//   Sdefer_<id>  → deferred-script scheduler (real path)
-//   known name   → luaL_error: capability-deferred, names the behavior
-//   unknown name → luaL_error: not a registered behavior
+//   Sdefer_<id>  â†’ deferred-script scheduler (real path)
+//   known name   â†’ luaL_error: capability-deferred, names the behavior
+//   unknown name â†’ luaL_error: not a registered behavior
 //   writes_script_var behavior fails before script can branch on stale wScriptVar
 //   Sem_Special remains rejected by Stage 5 regardless of registry changes
 //=============================================================================
@@ -18475,7 +18473,7 @@ TEST(behavior_sdefer_routes_to_scheduler) {
         scheduled.push_back(id);
     };
 
-    // Script that calls ctx.game:behavior("Sdefer_target_script") — must not error.
+    // Script that calls ctx.game:behavior("Sdefer_target_script") â€” must not error.
     std::string code = R"(
 script = {}
 function script.main(ctx)
@@ -18488,7 +18486,7 @@ return script
     runtime.execute_string(code, "sdefer_test");
     uint32_t coro_id = runtime.start_script("script");
 
-    // Must not error — deferred scheduling must have fired.
+    // Must not error â€” deferred scheduling must have fired.
     ScriptState st = runtime.get_state(coro_id);
     ASSERT_TRUE(st == ScriptState::Finished);  // Normal completion, not Error
     ASSERT_EQ(scheduled.size(), 1u);
@@ -18497,7 +18495,7 @@ return script
     // var[1] set to 1 confirms execution continued past the Sdefer_ call.
     auto& vars = runtime.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 1);
-    std::cout << "  [Sdefer_target_script routed to scheduler, no error, execution continued ✓]\n";
+    std::cout << "  [Sdefer_target_script routed to scheduler, no error, execution continued âœ“]\n";
 }
 
 TEST(behavior_known_unimplemented_errors_explicitly) {
@@ -18528,13 +18526,13 @@ return script
     runtime.execute_string(code, "known_behavior_test");
     runtime.start_script("script");
 
-    // var[1] = 0 → pcall caught an error (behavior errored as expected)
+    // var[1] = 0 â†’ pcall caught an error (behavior errored as expected)
     auto& vars = runtime.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 0);
-    // var[2] = 1 → error message named "HealMachineAnim"
+    // var[2] = 1 â†’ error message named "HealMachineAnim"
     ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 1);
 
-    std::cout << "  [HealMachineAnim → explicit error naming behavior ✓]\n";
+    std::cout << "  [HealMachineAnim â†’ explicit error naming behavior âœ“]\n";
 }
 
 TEST(behavior_unknown_unregistered_errors_explicitly) {
@@ -18560,12 +18558,12 @@ return script
     runtime.start_script("script");
 
     auto& vars = runtime.get_stub_services().vars;
-    // var[1] = 0 → pcall caught an error
+    // var[1] = 0 â†’ pcall caught an error
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 0);
-    // var[2] = 1 → error message named the unknown behavior
+    // var[2] = 1 â†’ error message named the unknown behavior
     ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 1);
 
-    std::cout << "  [NotARealBehavior_XYZ → hard-fail, error names unknown behavior ✓]\n";
+    std::cout << "  [NotARealBehavior_XYZ â†’ hard-fail, error names unknown behavior âœ“]\n";
 }
 
 TEST(behavior_writes_script_var_errors_before_branch) {
@@ -18600,14 +18598,14 @@ return script
     runtime.start_script("script");
 
     auto& vars = runtime.get_stub_services().vars;
-    // var[1] = 0 → behavior() errored (pcall caught it)
+    // var[1] = 0 â†’ behavior() errored (pcall caught it)
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 0);
-    // var[2] must still be 99 — NOT 77 — proving error fired before branch
+    // var[2] must still be 99 â€” NOT 77 â€” proving error fired before branch
     ASSERT_EQ(vars.count(2) ? vars.at(2) : 99, 99);
-    // var[3] = 1 → error message named "BugContestJudging"
+    // var[3] = 1 â†’ error message named "BugContestJudging"
     ASSERT_EQ(vars.count(3) ? vars.at(3) : -1, 1);
 
-    std::cout << "  [BugContestJudging (writes_var=true) errors before branch — stale state prevented ✓]\n";
+    std::cout << "  [BugContestJudging (writes_var=true) errors before branch â€” stale state prevented âœ“]\n";
 }
 
 TEST(sem_special_still_rejected_after_registry_cleanup) {
@@ -18637,7 +18635,7 @@ TEST(sem_special_still_rejected_after_registry_cleanup) {
     LegalityGate gate;
     auto result = gate.validate(input);
 
-    // Must still be rejected — registry cleanup must not have weakened Stage 5.
+    // Must still be rejected â€” registry cleanup must not have weakened Stage 5.
     ASSERT_FALSE(result.is_legal);
     ASSERT_TRUE(result.illegal.has_value());
     bool found_rejection = false;
@@ -18649,11 +18647,11 @@ TEST(sem_special_still_rejected_after_registry_cleanup) {
     }
     ASSERT_TRUE(found_rejection);
 
-    std::cout << "  [Sem_Special still rejected at Stage 5 after registry cleanup ✓]\n";
+    std::cout << "  [Sem_Special still rejected at Stage 5 after registry cleanup âœ“]\n";
 }
 
 //=============================================================================
-// MAP EVENT ↔ SCRIPT ID NAMESPACE ADVERSARIAL TESTS
+// MAP EVENT â†” SCRIPT ID NAMESPACE ADVERSARIAL TESTS
 //
 // Verifies the required invariant:
 //   every packaged map event script reference
@@ -18663,7 +18661,7 @@ TEST(sem_special_still_rejected_after_registry_cleanup) {
 //  1. NPC (ObjectEvent) gets canonical ID matching package script key
 //  2. BG event gets canonical ID matching package script key
 //  3. CoordEvent gets canonical ID matching package script key
-//  4. Interaction with missing referenced script → explicit hard failure
+//  4. Interaction with missing referenced script â†’ explicit hard failure
 //  5. Local positional IDs (object_script_0 etc.) never survive in package
 //=============================================================================
 
@@ -18717,8 +18715,8 @@ TEST(event_script_id_canonical_format_npc) {
     ASSERT_TRUE(script_obj->script_id.find(std::to_string(rom_addr)) == std::string::npos);
 
     std::cout << "  [NPC: extractor ID='" << script_obj->script_id
-              << "' (local), canonical='" << canonical << "' (ROM-address-based) ✓]\n";
-    std::cout << "  [These differ before canonicalization — fix ensures canonical survives to package ✓]\n";
+              << "' (local), canonical='" << canonical << "' (ROM-address-based) âœ“]\n";
+    std::cout << "  [These differ before canonicalization â€” fix ensures canonical survives to package âœ“]\n";
 }
 
 // Test 2: BG event (sign) script_id uses canonical format
@@ -18741,7 +18739,7 @@ TEST(event_script_id_canonical_format_bg) {
         return;
     }
 
-    // Extractor assigns "bg_event_N" — local positional
+    // Extractor assigns "bg_event_N" â€” local positional
     ASSERT_TRUE(script_bg->script_id.find("bg_event_") != std::string::npos);
 
     // Canonical: "map_{g}_{i}_0x{addr}"
@@ -18752,7 +18750,7 @@ TEST(event_script_id_canonical_format_bg) {
     ASSERT_TRUE(script_bg->script_id.find(std::to_string(rom_addr)) == std::string::npos);
 
     std::cout << "  [BG: extractor ID='" << script_bg->script_id
-              << "' (local), canonical='" << canonical << "' ✓]\n";
+              << "' (local), canonical='" << canonical << "' âœ“]\n";
 }
 
 // Test 3: CoordEvent script_id would use canonical format
@@ -18787,7 +18785,7 @@ TEST(event_script_id_canonical_format_coord) {
     }
 
     if (!found) {
-        // CoordEvent test is advisory — coord events with scripts are uncommon in
+        // CoordEvent test is advisory â€” coord events with scripts are uncommon in
         // early-game maps.  The pattern is identical to BG events; skip gracefully.
         std::cout << "  [SKIP: no script CoordEvents with non-empty script_id in candidate maps]\n";
         return;
@@ -18800,7 +18798,7 @@ TEST(event_script_id_canonical_format_coord) {
     ASSERT_TRUE(found_coord.script_id.find(std::to_string(rom_addr)) == std::string::npos);
 
     std::cout << "  [CoordEvent: extractor ID='" << found_coord.script_id
-              << "' (local), canonical='" << canonical << "' ✓]\n";
+              << "' (local), canonical='" << canonical << "' âœ“]\n";
 }
 
 // Test 4: Interaction with a missing referenced script fails explicitly
@@ -18833,7 +18831,7 @@ TEST(event_script_id_missing_fails_explicitly) {
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
 
-    // Script loader returns empty for ALL IDs → simulates missing script in package
+    // Script loader returns empty for ALL IDs â†’ simulates missing script in package
     loop.set_script_loader([](const std::string&) -> std::string { return ""; });
 
     // Press A to interact with the NPC
@@ -18847,14 +18845,14 @@ TEST(event_script_id_missing_fails_explicitly) {
     // block_reason must name the missing script
     ASSERT_TRUE(result.block_reason.find("map_24_4_0x1a9000") != std::string::npos);
 
-    std::cout << "  [Missing script → script_start_failed=true, reason='"
-              << result.block_reason << "' ✓]\n";
+    std::cout << "  [Missing script â†’ script_start_failed=true, reason='"
+              << result.block_reason << "' âœ“]\n";
 }
 
 // Test 5: Local positional IDs must NOT survive into a package script lookup
 TEST(event_script_id_no_local_positional_survives) {
-    // Part A: NPC with OLD "object_script_0" → script_start_failed (not silent success)
-    // Part B: NPC with canonical "map_24_4_0x1a9abc" → executes without failure
+    // Part A: NPC with OLD "object_script_0" â†’ script_start_failed (not silent success)
+    // Part B: NPC with canonical "map_24_4_0x1a9abc" â†’ executes without failure
     using namespace enginemon;
 
     const std::string canonical_id = "map_24_4_0x1a9abc";
@@ -18896,7 +18894,7 @@ return script
         ASSERT_TRUE(result.interaction);
         ASSERT_TRUE(result.script_start_failed);
         ASSERT_TRUE(result.block_reason.find("object_script_0") != std::string::npos);
-        std::cout << "  [Part A: 'object_script_0' → script_start_failed ✓]\n";
+        std::cout << "  [Part A: 'object_script_0' â†’ script_start_failed âœ“]\n";
     }
 
     // --- Part B: canonical ID executes without failure ---
@@ -18930,7 +18928,7 @@ return script
         ASSERT_TRUE(result2.accepted);
         ASSERT_TRUE(result2.interaction);
         ASSERT_FALSE(result2.script_start_failed);
-        std::cout << "  [Part B: canonical '" << canonical_id << "' → executes ✓]\n";
+        std::cout << "  [Part B: canonical '" << canonical_id << "' â†’ executes âœ“]\n";
     }
 }
 
@@ -18938,9 +18936,9 @@ return script
 // MAX-COMPAT + SPECIES FINDER ADVERSARIAL TESTS
 //
 // Required test scenarios (12):
-//  1. stock Crystal exact hash → ExactHash match type
-//  2. modified-hash Crystal-compatible ROM → LayoutValidated, not rejected
-//  3. incompatible profile → explicit failure
+//  1. stock Crystal exact hash â†’ ExactHash match type
+//  2. modified-hash Crystal-compatible ROM â†’ LayoutValidated, not rejected
+//  3. incompatible profile â†’ explicit failure
 //  4. stock species count = 251 via profile
 //  5. first BaseData record (Bulbasaur) extracted correctly
 //  6. last record (Mew = 151) extracted correctly
@@ -18948,7 +18946,7 @@ return script
 //  8. linker species refs are ExactResolved (not PendingDefinition)
 //  9. unknown species ID rejected by registry (InvalidDomain)
 // 10. Day Care species 252 round-trips through save/load (not rejected at boundary)
-// 11. species→icon map covers the full configured domain
+// 11. speciesâ†’icon map covers the full configured domain
 // 12. truncated BaseData table fails extraction with a clear error
 //=============================================================================
 
@@ -18971,7 +18969,7 @@ TEST(compat_exact_hash_gives_exacthash_match) {
               static_cast<int>(crystal::ProfileRegistry::CompatMatchType::ExactHash));
     ASSERT_STR_EQ(result.profile->sha1.c_str(), g_rom->hash().c_str());
 
-    std::cout << "  [Exact hash match → ExactHash, correct profile returned ✓]\n";
+    std::cout << "  [Exact hash match â†’ ExactHash, correct profile returned âœ“]\n";
 }
 
 // Test 2: Modified-hash Crystal-compatible ROM is NOT rejected for hash mismatch alone
@@ -18998,7 +18996,7 @@ TEST(compat_modified_hash_layout_valid_not_rejected) {
               static_cast<int>(crystal::ProfileRegistry::CompatMatchType::LayoutValidated));
     ASSERT_TRUE(result.reason.empty());
 
-    std::cout << "  [Unknown hash + valid layout → LayoutValidated, not rejected ✓]\n";
+    std::cout << "  [Unknown hash + valid layout â†’ LayoutValidated, not rejected âœ“]\n";
 }
 
 // Test 3: Incompatible profile (mismatched offsets) fails with explicit error
@@ -19010,7 +19008,7 @@ TEST(compat_incompatible_profile_fails_explicitly) {
     // Build a profile with a plausible-looking but wrong base_data address
     // so the first BaseData record's dex_num comes back implausible.
     crystal::ExtractionProfile bad_profile = *registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
-    bad_profile.offsets.base_data = 0x100;  // Clearly wrong — ROM header area, not species data
+    bad_profile.offsets.base_data = 0x100;  // Clearly wrong â€” ROM header area, not species data
     bad_profile.sha1 = "0000000000000000000000000000000000000001";
 
     const std::string fake_sha1 = "0000000000000000000000000000000000000001";
@@ -19025,7 +19023,7 @@ TEST(compat_incompatible_profile_fails_explicitly) {
     ASSERT_TRUE(result.profile == nullptr);
     ASSERT_FALSE(result.reason.empty());
 
-    std::cout << "  [Incompatible profile (bad base_data) → explicit failure with reason ✓]\n";
+    std::cout << "  [Incompatible profile (bad base_data) â†’ explicit failure with reason âœ“]\n";
     std::cout << "    Reason: " << result.reason << "\n";
 }
 
@@ -19047,10 +19045,10 @@ TEST(species_finder_stock_count_is_251) {
     ASSERT_EQ(result.ordered_ids.front(), static_cast<enginemon::SpeciesId>(1));
     ASSERT_EQ(result.ordered_ids.back(),  static_cast<enginemon::SpeciesId>(251));
 
-    std::cout << "  [Stock profile → 251 species extracted ✓]\n";
+    std::cout << "  [Stock profile â†’ 251 species extracted âœ“]\n";
 }
 
-// Test 5: First BaseData record — Bulbasaur (species 1)
+// Test 5: First BaseData record â€” Bulbasaur (species 1)
 TEST(species_finder_bulbasaur_record_correct) {
     if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
 
@@ -19077,10 +19075,10 @@ TEST(species_finder_bulbasaur_record_correct) {
     ASSERT_EQ(bulbasaur.type1, 0x16u);
     ASSERT_EQ(bulbasaur.type2, 0x03u);
 
-    std::cout << "  [Bulbasaur (species 1) base stats correct ✓]\n";
+    std::cout << "  [Bulbasaur (species 1) base stats correct âœ“]\n";
 }
 
-// Test 6: Last record — Mew (species 151) and Celebi (species 251) extracted
+// Test 6: Last record â€” Mew (species 151) and Celebi (species 251) extracted
 TEST(species_finder_last_record_is_mew) {
     if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
 
@@ -19091,7 +19089,7 @@ TEST(species_finder_last_record_is_mew) {
     auto result = crystal::extract_all_species(*g_rom, *profile);
     ASSERT_TRUE(result.success);
 
-    // Mew (151) — from pokecrystal/data/pokemon/base_stats/mew.asm
+    // Mew (151) â€” from pokecrystal/data/pokemon/base_stats/mew.asm
     auto mew_it = result.species.find(151);
     ASSERT_TRUE(mew_it != result.species.end());
     const auto& mew = mew_it->second;
@@ -19100,7 +19098,7 @@ TEST(species_finder_last_record_is_mew) {
     ASSERT_EQ(mew.defense, 100u);
     ASSERT_EQ(mew.speed,   100u);
 
-    // Celebi (251) — last valid species in Gen 2
+    // Celebi (251) â€” last valid species in Gen 2
     auto celebi_it = result.species.find(251);
     ASSERT_TRUE(celebi_it != result.species.end());
     const auto& celebi = celebi_it->second;
@@ -19110,7 +19108,7 @@ TEST(species_finder_last_record_is_mew) {
     // Species 252 must NOT be present in the map
     ASSERT_EQ(result.species.count(252u), 0u);
 
-    std::cout << "  [Mew (151) and Celebi (251) extracted; species 252 absent ✓]\n";
+    std::cout << "  [Mew (151) and Celebi (251) extracted; species 252 absent âœ“]\n";
 }
 
 // Test 7: Non-251 profile uses exactly the same extraction path
@@ -19121,7 +19119,7 @@ TEST(species_finder_non251_profile_same_path) {
     const auto* base_profile = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
     ASSERT_TRUE(base_profile != nullptr);
 
-    // Create a profile claiming 100 Pokémon (truncated domain)
+    // Create a profile claiming 100 PokÃ©mon (truncated domain)
     crystal::ExtractionProfile truncated = *base_profile;
     truncated.counts.num_pokemon = 100;
 
@@ -19133,7 +19131,7 @@ TEST(species_finder_non251_profile_same_path) {
     ASSERT_TRUE(result.species.contains(100));  // Voltorb
     ASSERT_FALSE(result.species.contains(101)); // Electrode not included
 
-    std::cout << "  [Non-251 profile (count=100) extracts exactly 100 species ✓]\n";
+    std::cout << "  [Non-251 profile (count=100) extracts exactly 100 species âœ“]\n";
 }
 
 // Test 8: Linker species refs are ExactResolved after extraction
@@ -19163,7 +19161,7 @@ TEST(species_linker_refs_are_exact_resolved) {
     SemanticBasicBlock block;
     block.id = 0; block.is_entry = true;
     Sem_GivePokemon give;
-    give.species = 25;  // Pikachu — must be ExactResolved
+    give.species = 25;  // Pikachu â€” must be ExactResolved
     give.level   = 5;
     give.held_item = 0;
     SemanticInstruction inst; inst.op = give;
@@ -19183,7 +19181,7 @@ TEST(species_linker_refs_are_exact_resolved) {
     }
     ASSERT_TRUE(found_species_ref);
 
-    std::cout << "  [Species 25 (Pikachu) → ExactResolved after extraction ✓]\n";
+    std::cout << "  [Species 25 (Pikachu) â†’ ExactResolved after extraction âœ“]\n";
 }
 
 // Test 9: Unknown species ID is InvalidDomain (not in extracted set)
@@ -19229,7 +19227,7 @@ TEST(species_linker_unknown_species_invalid_domain) {
     }
     ASSERT_TRUE(found_invalid);
 
-    std::cout << "  [Species 300 (not extracted) → InvalidDomain ✓]\n";
+    std::cout << "  [Species 300 (not extracted) â†’ InvalidDomain âœ“]\n";
 }
 
 // Test 10: Day Care species 252 round-trips through save/load without rejection
@@ -19247,12 +19245,12 @@ TEST(daycare_species_252_save_load_accepted) {
     ASSERT_EQ(result.state.daycare_slot[0], static_cast<enginemon::SpeciesId>(252));
     ASSERT_EQ(result.state.daycare_slot[1], static_cast<enginemon::SpeciesId>(0));
 
-    // For vanilla Crystal runtime the actual domain check is by registry membership —
+    // For vanilla Crystal runtime the actual domain check is by registry membership â€”
     // 252 would get no sprite but the save itself must not be rejected as corrupted.
-    std::cout << "  [Day Care species 252 round-trips through save/load ✓]\n";
+    std::cout << "  [Day Care species 252 round-trips through save/load âœ“]\n";
 }
 
-// Test 11: Species→icon map covers the full configured domain
+// Test 11: Speciesâ†’icon map covers the full configured domain
 TEST(species_icon_map_covers_full_domain) {
     if (!g_rom) { std::cout << "  [SKIP: no ROM]\n"; return; }
 
@@ -19289,7 +19287,7 @@ TEST(species_icon_map_covers_full_domain) {
     }
 
     std::cout << "  [Icon map: " << icon_map.size() << " entries, covers [1,"
-              << profile->counts.num_pokemon << "], Pikachu→pikachu ✓]\n";
+              << profile->counts.num_pokemon << "], Pikachuâ†’pikachu âœ“]\n";
 }
 
 // Test 12: Malformed/truncated BaseData fails extraction with a clear error
@@ -19300,7 +19298,7 @@ TEST(species_finder_truncated_base_data_fails) {
     const auto* profile = registry.get_profile(crystal::RomVersion::Crystal_USA_v1_1);
     ASSERT_TRUE(profile != nullptr);
 
-    // ── Case A: base_data = 0 → "not configured" error ──────────────────────
+    // â”€â”€ Case A: base_data = 0 â†’ "not configured" error â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     {
         crystal::ExtractionProfile bad = *profile;
         bad.offsets.base_data = 0;
@@ -19308,10 +19306,10 @@ TEST(species_finder_truncated_base_data_fails) {
         ASSERT_FALSE(result.success);
         ASSERT_FALSE(result.error.empty());
         ASSERT_EQ(result.species.size(), 0u);
-        std::cout << "  [base_data=0 → fails: " << result.error.substr(0, 50) << " ✓]\n";
+        std::cout << "  [base_data=0 â†’ fails: " << result.error.substr(0, 50) << " âœ“]\n";
     }
 
-    // ── Case B: base_data points to the very end of the ROM ──────────────────
+    // â”€â”€ Case B: base_data points to the very end of the ROM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // 251 * 32 = 8032 bytes needed; if base_data is near end, table exceeds ROM.
     {
         crystal::ExtractionProfile bad = *profile;
@@ -19321,17 +19319,17 @@ TEST(species_finder_truncated_base_data_fails) {
         ASSERT_FALSE(result.success);
         ASSERT_FALSE(result.error.empty());
         ASSERT_EQ(result.species.size(), 0u);
-        std::cout << "  [base_data at EOF-16 → fails: " << result.error.substr(0, 50) << " ✓]\n";
+        std::cout << "  [base_data at EOF-16 â†’ fails: " << result.error.substr(0, 50) << " âœ“]\n";
     }
 
-    // ── Case C: num_pokemon = 0 → "nothing to extract" error ─────────────────
+    // â”€â”€ Case C: num_pokemon = 0 â†’ "nothing to extract" error â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     {
         crystal::ExtractionProfile bad = *profile;
         bad.counts.num_pokemon = 0;
         auto result = crystal::extract_all_species(*g_rom, bad);
         ASSERT_FALSE(result.success);
         ASSERT_FALSE(result.error.empty());
-        std::cout << "  [num_pokemon=0 → fails: " << result.error.substr(0, 50) << " ✓]\n";
+        std::cout << "  [num_pokemon=0 â†’ fails: " << result.error.substr(0, 50) << " âœ“]\n";
     }
 }
 
@@ -19345,23 +19343,23 @@ TEST(species_finder_truncated_base_data_fails) {
 // Fix 5 (Deferred failure): start_script failure propagated as script_error.
 //=============================================================================
 
-// ── Fix 1: result=0 must take the false branch ────────────────────────────
+// â”€â”€ Fix 1: result=0 must take the false branch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_result_zero_takes_false_branch) {
     // The VM result variable is integer. result=0 must evaluate as false
     // (branch to the "false" target), NOT as Lua-truthy (which 0 would be
     // under native Lua semantics).
     LuaRuntime rt;
     // Emit a script that puts 0 into result then branches on it.
-    // Uses the canonical JumpIf encoding: "result == 0 → goto block_1 (false branch)"
+    // Uses the canonical JumpIf encoding: "result == 0 â†’ goto block_1 (false branch)"
     const char* code = R"(
 script = {}
 function script.main(ctx)
   local result = 0
   -- Explicit integer check as emitter now produces
   if result == 0 then
-    ctx.flags:set_var(1, 99)   -- false branch → var[1] = 99
+    ctx.flags:set_var(1, 99)   -- false branch â†’ var[1] = 99
   else
-    ctx.flags:set_var(1, 1)    -- true branch  → var[1] = 1
+    ctx.flags:set_var(1, 1)    -- true branch  â†’ var[1] = 1
   end
   return
 end
@@ -19372,10 +19370,10 @@ return script
 
     auto& vars = rt.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 99);
-    std::cout << "  [result=0 → false branch (var[1]=99) ✓]\n";
+    std::cout << "  [result=0 â†’ false branch (var[1]=99) âœ“]\n";
 }
 
-// ── Fix 1: result=1 must take the true branch ─────────────────────────────
+// â”€â”€ Fix 1: result=1 must take the true branch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_result_one_takes_true_branch) {
     LuaRuntime rt;
     const char* code = R"(
@@ -19396,10 +19394,10 @@ return script
 
     auto& vars = rt.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 77);
-    std::cout << "  [result=1 → true branch (var[1]=77) ✓]\n";
+    std::cout << "  [result=1 â†’ true branch (var[1]=77) âœ“]\n";
 }
 
-// ── Fix 1: any nonzero integer is true ───────────────────────────────────
+// â”€â”€ Fix 1: any nonzero integer is true â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_result_nonzero_integer_true) {
     LuaRuntime rt;
     // result = 5 (e.g. from find_party_mon returning slot 5)
@@ -19421,10 +19419,10 @@ return script
 
     auto& vars = rt.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 55);
-    std::cout << "  [result=5 (nonzero) → true branch ✓]\n";
+    std::cout << "  [result=5 (nonzero) â†’ true branch âœ“]\n";
 }
 
-// ── Fix 1: SetVar from ScriptVar with result=0 stores 0, not 1 ───────────
+// â”€â”€ Fix 1: SetVar from ScriptVar with result=0 stores 0, not 1 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_setvar_from_result_zero_stores_zero) {
     // Old bug: `result and 1 or 0` with result=0 (integer) would produce 1.
     // New code: `result ~= 0 and 1 or 0` correctly produces 0.
@@ -19444,14 +19442,14 @@ return script
 
     auto& vars = rt.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 0);
-    std::cout << "  [result=0 → set_var stores 0 (not 1) ✓]\n";
+    std::cout << "  [result=0 â†’ set_var stores 0 (not 1) âœ“]\n";
 }
 
-// ── Fix 2: Sem_Call returns to continuation ───────────────────────────────
+// â”€â”€ Fix 2: Sem_Call returns to continuation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_call_returns_to_continuation) {
     // Simulate the call-stack dispatch model:
     //   block_0: push continuation(2), goto block_1 (callee)
-    //   block_1 (callee): set var[1]=10, Sem_End → pop stack → goto block_2
+    //   block_1 (callee): set var[1]=10, Sem_End â†’ pop stack â†’ goto block_2
     //   block_2 (continuation): set var[2]=20, return
     LuaRuntime rt;
     // Avoid label-after-return: route all blocks through top dispatch
@@ -19494,10 +19492,10 @@ return script
     auto& vars = rt.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 10);  // callee executed
     ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 20);  // continuation executed
-    std::cout << "  [Sem_Call returns to continuation: var[1]=10, var[2]=20 ✓]\n";
+    std::cout << "  [Sem_Call returns to continuation: var[1]=10, var[2]=20 âœ“]\n";
 }
 
-// ── Fix 2: nested calls unwind correctly ─────────────────────────────────
+// â”€â”€ Fix 2: nested calls unwind correctly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_nested_calls_unwind_correctly) {
     LuaRuntime rt;
     const char* code = R"(
@@ -19557,10 +19555,10 @@ return script
     ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 2);
     ASSERT_EQ(vars.count(3) ? vars.at(3) : -1, 3);
     ASSERT_EQ(vars.count(4) ? vars.at(4) : -1, 100);
-    std::cout << "  [Nested calls unwind correctly: 1→2→3→4 all ran ✓]\n";
+    std::cout << "  [Nested calls unwind correctly: 1â†’2â†’3â†’4 all ran âœ“]\n";
 }
 
-// ── Fix 2: callee Sem_End does not exit top-level script ──────────────────
+// â”€â”€ Fix 2: callee Sem_End does not exit top-level script â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_callee_end_does_not_exit_top_level) {
     LuaRuntime rt;
     const char* code = R"(
@@ -19602,10 +19600,10 @@ return script
     auto& vars = rt.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 10);
     ASSERT_EQ(vars.count(2) ? vars.at(2) : -1, 20);
-    std::cout << "  [Callee Sem_End → continuation, not script termination ✓]\n";
+    std::cout << "  [Callee Sem_End â†’ continuation, not script termination âœ“]\n";
 }
 
-// ── Fix 3: EndAll inside nested call terminates entire script ─────────────
+// â”€â”€ Fix 3: EndAll inside nested call terminates entire script â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_endall_inside_nested_call_terminates) {
     LuaRuntime rt;
     const char* code = R"(
@@ -19643,10 +19641,10 @@ return script
     auto& vars = rt.get_stub_services().vars;
     ASSERT_EQ(vars.count(1) ? vars.at(1) : -1, 10);
     ASSERT_TRUE(vars.count(2) == 0 || vars.at(2) != 99);
-    std::cout << "  [EndAll clears call stack and terminates — continuation not reached ✓]\n";
+    std::cout << "  [EndAll clears call stack and terminates â€” continuation not reached âœ“]\n";
 }
 
-// ── Fix 4: Sdefer callback cleared on runtime rebind ─────────────────────
+// â”€â”€ Fix 4: Sdefer callback cleared on runtime rebind â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_sdefer_cleared_on_rebind) {
     // After set_lua_runtime(new_runtime), the old runtime must NOT have
     // a live callback pointing to the loop.
@@ -19657,22 +19655,22 @@ TEST(vm_sdefer_cleared_on_rebind) {
     // rt1 should now have a deferred_script_fn
     ASSERT_TRUE(rt1.get_stub_services().deferred_script_fn != nullptr);
 
-    // Rebind to rt2 — must clear rt1's callback
+    // Rebind to rt2 â€” must clear rt1's callback
     loop.set_lua_runtime(&rt2);
     ASSERT_TRUE(rt1.get_stub_services().deferred_script_fn == nullptr);
     ASSERT_TRUE(rt2.get_stub_services().deferred_script_fn != nullptr);
 
-    // Rebind to nullptr — must clear rt2's callback
+    // Rebind to nullptr â€” must clear rt2's callback
     loop.set_lua_runtime(nullptr);
     ASSERT_TRUE(rt2.get_stub_services().deferred_script_fn == nullptr);
 
-    std::cout << "  [Sdefer callback cleared on rebind: old runtime callback = null ✓]\n";
+    std::cout << "  [Sdefer callback cleared on rebind: old runtime callback = null âœ“]\n";
 }
 
-// ── Fix 4: Sdefer callback cleared on loop destruction ────────────────────
+// â”€â”€ Fix 4: Sdefer callback cleared on loop destruction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_sdefer_cleared_on_loop_destroy) {
     // After HeadlessGameLoop is destroyed, the bound LuaRuntime must have
-    // a null deferred_script_fn — no UAF possible.
+    // a null deferred_script_fn â€” no UAF possible.
     LuaRuntime rt;
     {
         HeadlessGameLoop loop;
@@ -19682,13 +19680,13 @@ TEST(vm_sdefer_cleared_on_loop_destroy) {
     }
     // After loop destruction the callback must be cleared
     ASSERT_TRUE(rt.get_stub_services().deferred_script_fn == nullptr);
-    std::cout << "  [Sdefer callback cleared on loop destroy — no UAF ✓]\n";
+    std::cout << "  [Sdefer callback cleared on loop destroy â€” no UAF âœ“]\n";
 }
 
-// ── Fix 5: failed deferred script propagates script_error ────────────────
+// â”€â”€ Fix 5: failed deferred script propagates script_error â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST(vm_deferred_failure_propagates_error) {
     // If a deferred script fails to load (missing from script store),
-    // the TickResult must reflect script_error=true — not silently succeed.
+    // the TickResult must reflect script_error=true â€” not silently succeed.
     HeadlessGameLoop loop;
     LuaRuntime rt;
     loop.set_lua_runtime(&rt);
@@ -19707,11 +19705,11 @@ TEST(vm_deferred_failure_propagates_error) {
     // Directly schedule a deferred script that will fail to load
     loop.schedule_deferred_script("nonexistent_script_id");
 
-    // Tick — deferred drain fires, start_script returns false, must set error
+    // Tick â€” deferred drain fires, start_script returns false, must set error
     TickResult tick_result = loop.tick();
 
     ASSERT_TRUE(tick_result.script_error);
-    std::cout << "  [Deferred script failure → TickResult::script_error=true ✓]\n";
+    std::cout << "  [Deferred script failure â†’ TickResult::script_error=true âœ“]\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -20180,7 +20178,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(sprite_id_mapping_authoritative);
     RUN_TEST(directional_ledge_semantic_preservation);
     
-    // Script state and dynamic resource semantics tests (August 2026 — Findings 1-5)
+    // Script state and dynamic resource semantics tests (August 2026 â€” Findings 1-5)
     RUN_TEST(stale_script_var_yesorno_invalidates_before_map_radio);
     RUN_TEST(script_var_propagates_across_non_writer);
     RUN_TEST(stale_script_var_giveitem_invalidates);
@@ -20194,7 +20192,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(movement_valid_terminates_correctly);
     RUN_TEST(movement_no_terminator_throws);
 
-    // Script state and dynamic resource semantics tests (August 2026 — 5 Findings)
+    // Script state and dynamic resource semantics tests (August 2026 â€” 5 Findings)
     RUN_TEST(script_state_setval_yesorno_invalidates_context);
     RUN_TEST(script_state_setval_preserved_across_noop_command);
     RUN_TEST(script_state_cry_zero_is_script_var_not_literal);
@@ -20209,7 +20207,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(script_state_checktime_invalidates);
     RUN_TEST(script_state_checkver_establishes_context);
 
-    // Crystal text frontend fidelity tests (August 2026 — Findings 1-4)
+    // Crystal text frontend fidelity tests (August 2026 â€” Findings 1-4)
     RUN_TEST(text_literal_tx_opcode_overlap_0x14);
     RUN_TEST(text_literal_at_returns_to_outer_stream);
     RUN_TEST(text_resource_can_begin_with_dynamic_command);
@@ -20299,7 +20297,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(fidelity11_getname_type7_trainer);
     RUN_TEST(fidelity11_invalid_domain_gates_linker);
 
-    // Pre-Oracle semantic cleanup tests (August 2026 — 6 Fixes)
+    // Pre-Oracle semantic cleanup tests (August 2026 â€” 6 Fixes)
     RUN_TEST(batch10_checksave_invalidates_context);
     RUN_TEST(batch10_startbattle_invalidates_context);
     RUN_TEST(batch10_checkpoke_invalidates_context);
@@ -20381,7 +20379,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(species_linker_unknown_species_invalid_domain);
     RUN_TEST(daycare_species_252_save_load_accepted);
     RUN_TEST(species_icon_map_covers_full_domain);
-    // Map event ↔ script ID namespace adversarial tests
+    // Map event â†” script ID namespace adversarial tests
     RUN_TEST(event_script_id_canonical_format_npc);
     RUN_TEST(event_script_id_canonical_format_bg);
     RUN_TEST(event_script_id_canonical_format_coord);

@@ -1,4 +1,4 @@
-// runtime_test_vm_state.cpp — input edge/scheduler, coroutine lifecycle, semantic_fix, bank_utils
+﻿// runtime_test_vm_state.cpp â€” input edge/scheduler, coroutine lifecycle, semantic_fix, bank_utils
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
 #include "engine/scripting/semantic_ir.hpp"
@@ -27,7 +27,7 @@
 #include "scripting/runtime_test_shared.hpp"
 
 TEST(input_edge_new_press_after_release) {
-    // Test: press → release → press (tap-tap) before simulation tick
+    // Test: press â†’ release â†’ press (tap-tap) before simulation tick
     // The second press should be observable
     InputSystem input;
     
@@ -47,7 +47,7 @@ TEST(input_edge_new_press_after_release) {
     bool pressed = input.consume_pressed(InputButton::A);
     ASSERT_TRUE(pressed);
     
-    std::cout << "  [Press→release→press before tick → press observed, held=true ✓]\n";
+    std::cout << "  [Pressâ†’releaseâ†’press before tick â†’ press observed, held=true âœ“]\n";
 }
 
 TEST(input_edge_multiple_render_frames_preserves_press) {
@@ -75,7 +75,7 @@ TEST(input_edge_multiple_render_frames_preserves_press) {
     bool pressed = input.consume_pressed(InputButton::A);
     ASSERT_TRUE(pressed);
     
-    std::cout << "  [Press survives 4 zero-tick render frames ✓]\n";
+    std::cout << "  [Press survives 4 zero-tick render frames âœ“]\n";
 }
 
 //=============================================================================
@@ -104,7 +104,7 @@ TEST(scheduler_500ms_hitch_retains_debt) {
     ASSERT_TRUE(scheduler.accumulator_ns() >= 15 * TICK_60HZ);
     
     std::cout << "  [500ms hitch: ran 10 ticks, retained ~" 
-              << scheduler.accumulator_ns() / 1'000'000 << "ms debt ✓]\n";
+              << scheduler.accumulator_ns() / 1'000'000 << "ms debt âœ“]\n";
 }
 
 TEST(scheduler_2_second_hitch_retains_debt) {
@@ -127,7 +127,7 @@ TEST(scheduler_2_second_hitch_retains_debt) {
     ASSERT_TRUE(scheduler.accumulator_ns() >= 100 * TICK_60HZ);
     
     std::cout << "  [2s hitch: ran 10 ticks, retained ~" 
-              << scheduler.accumulator_ns() / 1'000'000 << "ms debt ✓]\n";
+              << scheduler.accumulator_ns() / 1'000'000 << "ms debt âœ“]\n";
 }
 
 TEST(scheduler_repeated_updates_catch_up) {
@@ -151,7 +151,7 @@ TEST(scheduler_repeated_updates_catch_up) {
     ASSERT_TRUE(total_ticks >= 29 && total_ticks <= 31);
     ASSERT_EQ(scheduler.total_ticks(), total_ticks);
     
-    std::cout << "  [After 500ms hitch + catch-up: " << total_ticks << " total ticks ✓]\n";
+    std::cout << "  [After 500ms hitch + catch-up: " << total_ticks << " total ticks âœ“]\n";
 }
 
 TEST(scheduler_total_ticks_equals_elapsed_time) {
@@ -184,9 +184,9 @@ TEST(scheduler_total_ticks_equals_elapsed_time) {
     ASSERT_TRUE(total_ticks >= expected_ticks - 1 && total_ticks <= expected_ticks + 1);
     ASSERT_EQ(scheduler.total_ticks(), total_ticks);
     
-    std::cout << "  [700ms total → " << total_ticks << " ticks (expected ~" 
-              << expected_ticks << ") ✓]\n";
-    std::cout << "  [No simulation time discarded ✓]\n";
+    std::cout << "  [700ms total â†’ " << total_ticks << " ticks (expected ~" 
+              << expected_ticks << ") âœ“]\n";
+    std::cout << "  [No simulation time discarded âœ“]\n";
 }
 
 //=============================================================================
@@ -218,7 +218,7 @@ TEST(lua_coroutine_cleanup_via_resume) {
     // Verify no active coroutine entries remain (has_active_scripts should be false)
     ASSERT_FALSE(runtime.has_active_scripts());
     
-    std::cout << "  [Immediate completion cleans up ✓]\n";
+    std::cout << "  [Immediate completion cleans up âœ“]\n";
     
     // Script that yields once then finishes
     const char* yield_once_script = R"lua(
@@ -245,7 +245,7 @@ TEST(lua_coroutine_cleanup_via_resume) {
     ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Finished));
     ASSERT_FALSE(runtime.has_active_scripts());
     
-    std::cout << "  [Yield+resume completion cleans up ✓]\n";
+    std::cout << "  [Yield+resume completion cleans up âœ“]\n";
 }
 
 TEST(lua_coroutine_cleanup_via_resume_with_result) {
@@ -282,7 +282,7 @@ TEST(lua_coroutine_cleanup_via_resume_with_result) {
     // CRITICAL: No stale active entry should remain
     ASSERT_FALSE(runtime.has_active_scripts());
     
-    std::cout << "  [resume_with_result() cleans up on completion ✓]\n";
+    std::cout << "  [resume_with_result() cleans up on completion âœ“]\n";
     
     // Test error path via resume_with_error
     const char* error_script = R"lua(
@@ -308,7 +308,7 @@ TEST(lua_coroutine_cleanup_via_resume_with_result) {
     ASSERT_EQ(static_cast<int>(state), static_cast<int>(ScriptState::Error));
     ASSERT_FALSE(runtime.has_active_scripts());
     
-    std::cout << "  [resume_with_error() cleans up on error ✓]\n";
+    std::cout << "  [resume_with_error() cleans up on error âœ“]\n";
 }
 
 TEST(npc_destination_occupancy_blocks_conflicting_movement) {
@@ -355,7 +355,7 @@ TEST(npc_destination_occupancy_blocks_conflicting_movement) {
     ASSERT_TRUE(result.blocked);
     ASSERT_STR_EQ(result.block_reason, "entity");
     
-    std::cout << "  [Player blocked by NPC moving toward same tile ✓]\n";
+    std::cout << "  [Player blocked by NPC moving toward same tile âœ“]\n";
     
     // Now test that the NPC's current position (5,5) is also blocked
     loop.spawn_player(4, 5, enginemon::Direction::Right);
@@ -366,7 +366,7 @@ TEST(npc_destination_occupancy_blocks_conflicting_movement) {
     ASSERT_TRUE(result.blocked);
     ASSERT_STR_EQ(result.block_reason, "entity");
     
-    std::cout << "  [Player blocked by NPC's current position ✓]\n";
+    std::cout << "  [Player blocked by NPC's current position âœ“]\n";
     
     // Test: NPC not moving - target_x/y equals x/y, only current position blocked
     loop.clear_npcs();
@@ -391,7 +391,7 @@ TEST(npc_destination_occupancy_blocks_conflicting_movement) {
     ASSERT_TRUE(result.accepted);
     ASSERT_FALSE(result.blocked);
     
-    std::cout << "  [Player allowed when NPC not targeting destination ✓]\n";
+    std::cout << "  [Player allowed when NPC not targeting destination âœ“]\n";
 }
 
 //=============================================================================
@@ -423,7 +423,7 @@ TEST(coord_event_field_decode) {
         ASSERT_TRUE(evt.y < result.map.height * 2);
         ASSERT_TRUE(evt.script_rom_address >= 0x4000);  // Should be resolved flat address
         
-        std::cout << "  [coord_event fields decoded correctly ✓]\n";
+        std::cout << "  [coord_event fields decoded correctly âœ“]\n";
         std::cout << "    scene_id=" << (int)evt.scene_id 
                   << ", x=" << (int)evt.x 
                   << ", y=" << (int)evt.y << "\n";
@@ -438,10 +438,10 @@ TEST(coord_event_field_decode) {
             ASSERT_TRUE(evt.y < result.map.height * 2);
             ASSERT_TRUE(evt.script_rom_address >= 0x4000);
             
-            std::cout << "  [coord_event fields decoded correctly ✓]\n";
+            std::cout << "  [coord_event fields decoded correctly âœ“]\n";
         } else {
             // Just verify the extraction code runs without crash
-            std::cout << "  [No coord events found to verify, extraction runs ✓]\n";
+            std::cout << "  [No coord events found to verify, extraction runs âœ“]\n";
         }
     }
 }
@@ -467,7 +467,7 @@ TEST(bg_event_directional_types_preserved) {
             ASSERT_TRUE(bg.type != BgEventType::Read);
             
             std::cout << "  [Found directional BG event type: " 
-                      << static_cast<int>(bg.type) << " ✓]\n";
+                      << static_cast<int>(bg.type) << " âœ“]\n";
             break;
         }
     }
@@ -478,7 +478,7 @@ TEST(bg_event_directional_types_preserved) {
     ASSERT_TRUE(static_cast<int>(BgEventType::FacingLeft) != static_cast<int>(BgEventType::Read));
     ASSERT_TRUE(static_cast<int>(BgEventType::FacingRight) != static_cast<int>(BgEventType::Read));
     
-    std::cout << "  [BG event directional types are distinct ✓]\n";
+    std::cout << "  [BG event directional types are distinct âœ“]\n";
 }
 
 // Hidden item flag/item preserved (not pointer bytes as item_id/quantity)
@@ -504,14 +504,14 @@ TEST(bg_event_hidden_item_semantic_decode) {
             ASSERT_FALSE(bg.condition_flag.empty());
             
             std::cout << "  [Hidden item decoded: item=" << bg.item_id 
-                      << ", flag=" << bg.condition_flag << " ✓]\n";
+                      << ", flag=" << bg.condition_flag << " âœ“]\n";
             return;
         }
     }
     
     // If no hidden items found, just verify the enum value exists
     ASSERT_TRUE(static_cast<int>(BgEventType::HiddenItem) == 7);
-    std::cout << "  [HiddenItem type defined correctly ✓]\n";
+    std::cout << "  [HiddenItem type defined correctly âœ“]\n";
 }
 
 // IFSET/IFNOTSET flag/script preserved
@@ -543,14 +543,14 @@ TEST(bg_event_conditional_script_decode) {
                     std::cout << "  [Conditional BG event: type=" << static_cast<int>(bg.type)
                               << ", flag=" << bg.condition_flag 
                               << ", script_addr=0x" << std::hex << bg.script_rom_address 
-                              << std::dec << " ✓]\n";
+                              << std::dec << " âœ“]\n";
                     return;
                 }
             }
         }
     }
     
-    std::cout << "  [Conditional BG event types defined correctly ✓]\n";
+    std::cout << "  [Conditional BG event types defined correctly âœ“]\n";
 }
 
 // Object palette extracted from high nibble, type from low nibble
@@ -585,7 +585,7 @@ TEST(object_event_palette_type_decode) {
         ASSERT_TRUE(obj.hour_end <= 23 || obj.hour_end == 255);
     }
     
-    std::cout << "  [Object palette/type extracted correctly ✓]\n";
+    std::cout << "  [Object palette/type extracted correctly âœ“]\n";
     if (found_nonzero_palette) {
         std::cout << "    (Found non-default palette values)\n";
     }
@@ -610,10 +610,10 @@ TEST(script_resumed_no_resume_attempt) {
     TickResult tick2 = loop.tick();
     ASSERT_FALSE(tick2.script_resumed);
     
-    std::cout << "  [script_resumed=false when no script running ✓]\n";
+    std::cout << "  [script_resumed=false when no script running âœ“]\n";
 }
 
-// script_resumed: Yielded → resume → Completed => true
+// script_resumed: Yielded â†’ resume â†’ Completed => true
 TEST(script_resumed_yielded_to_completed) {
     // script_resumed should be true when a yielded script is resumed and completes
     
@@ -655,10 +655,10 @@ TEST(script_resumed_yielded_to_completed) {
     ASSERT_TRUE(tick1.script_complete);  // Script finished after resume
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Yielded → resume → Completed: script_resumed=true ✓]\n";
+    std::cout << "  [Yielded â†’ resume â†’ Completed: script_resumed=true âœ“]\n";
 }
 
-// script_resumed: Yielded → resume → Yielded => true
+// script_resumed: Yielded â†’ resume â†’ Yielded => true
 TEST(script_resumed_yielded_to_yielded) {
     // script_resumed should be true when a yielded script is resumed but yields again
     
@@ -700,7 +700,7 @@ TEST(script_resumed_yielded_to_yielded) {
     ASSERT_FALSE(tick1.script_complete);
     ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
     
-    std::cout << "  [Yielded → resume → Yielded: script_resumed=true ✓]\n";
+    std::cout << "  [Yielded â†’ resume â†’ Yielded: script_resumed=true âœ“]\n";
     
     // Third tick - resume again, should complete
     TickResult tick2 = loop.tick();
@@ -708,7 +708,7 @@ TEST(script_resumed_yielded_to_yielded) {
     ASSERT_TRUE(tick2.script_complete);
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Second resume completes script ✓]\n";
+    std::cout << "  [Second resume completes script âœ“]\n";
 }
 
 //=============================================================================
@@ -716,18 +716,16 @@ TEST(script_resumed_yielded_to_yielded) {
 //=============================================================================
 
 // Helper to create a loop with collision callback for timed yield tests
-static HeadlessGameLoop create_timed_test_loop() {
-    HeadlessGameLoop loop;
+static void init_timed_test_loop(HeadlessGameLoop& loop) {
     loop.spawn_player(5, 5, enginemon::Direction::Down);
-    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass { 
-        return CollisionClass::Floor; 
+    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass {
+        return CollisionClass::Floor;
     });
-    return loop;
 }
 
 // WaitFrames before expiry: script_resumed == false
 TEST(wait_frames_before_expiry_no_resume) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -739,12 +737,12 @@ TEST(wait_frames_before_expiry_no_resume) {
         TickResult r = loop.tick();
         ASSERT_FALSE(r.script_resumed);
     }
-    std::cout << "  [WaitFrames before expiry: script_resumed=false ✓]\n";
+    std::cout << "  [WaitFrames before expiry: script_resumed=false âœ“]\n";
 }
 
 // WaitFrames expiry: script_resumed == true
 TEST(wait_frames_expiry_sets_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -756,12 +754,12 @@ TEST(wait_frames_expiry_sets_resumed) {
     TickResult r = loop.tick();
     ASSERT_TRUE(r.script_resumed);
     ASSERT_TRUE(r.script_complete);
-    std::cout << "  [WaitFrames expiry: script_resumed=true ✓]\n";
+    std::cout << "  [WaitFrames expiry: script_resumed=true âœ“]\n";
 }
 
 // WaitFrames expiry + immediate re-yield: script_resumed == true
 TEST(wait_frames_expiry_reyield_sets_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -773,12 +771,12 @@ TEST(wait_frames_expiry_reyield_sets_resumed) {
     TickResult r2 = loop.tick();
     ASSERT_TRUE(r2.script_resumed);
     ASSERT_FALSE(r2.script_complete);
-    std::cout << "  [WaitFrames re-yield: script_resumed=true, complete=false ✓]\n";
+    std::cout << "  [WaitFrames re-yield: script_resumed=true, complete=false âœ“]\n";
 }
 
 // WaitSeconds does NOT resume on next tick
 TEST(wait_seconds_not_immediate_resume) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -790,12 +788,12 @@ TEST(wait_seconds_not_immediate_resume) {
         TickResult r = loop.tick();
         ASSERT_FALSE(r.script_resumed);
     }
-    std::cout << "  [WaitSeconds(0.5s): not resumed in first 10 ticks ✓]\n";
+    std::cout << "  [WaitSeconds(0.5s): not resumed in first 10 ticks âœ“]\n";
 }
 
 // WaitSeconds resumes after duration (60 FPS)
 TEST(wait_seconds_resumes_after_duration) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -808,12 +806,12 @@ TEST(wait_seconds_resumes_after_duration) {
     TickResult r3 = loop.tick();
     ASSERT_TRUE(r3.script_resumed);
     ASSERT_TRUE(r3.script_complete);
-    std::cout << "  [WaitSeconds(0.05s) resumes after 3 ticks ✓]\n";
+    std::cout << "  [WaitSeconds(0.05s) resumes after 3 ticks âœ“]\n";
 }
 
 // WaitSeconds resume sets script_resumed flag
 TEST(wait_seconds_resume_sets_flag) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -825,12 +823,12 @@ TEST(wait_seconds_resume_sets_flag) {
     loop.tick();
     TickResult r2 = loop.tick();
     ASSERT_TRUE(r2.script_resumed);
-    std::cout << "  [WaitSeconds resume sets script_resumed=true ✓]\n";
+    std::cout << "  [WaitSeconds resume sets script_resumed=true âœ“]\n";
 }
 
 // Zero-duration WaitSeconds resumes on first tick
 TEST(wait_seconds_zero_duration) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -841,7 +839,7 @@ TEST(wait_seconds_zero_duration) {
     TickResult r1 = loop.tick();
     ASSERT_TRUE(r1.script_resumed);
     ASSERT_TRUE(r1.script_complete);
-    std::cout << "  [WaitSeconds(0) resumes on first tick ✓]\n";
+    std::cout << "  [WaitSeconds(0) resumes on first tick âœ“]\n";
 }
 
 //=============================================================================
@@ -852,7 +850,7 @@ TEST(wait_seconds_zero_duration) {
 
 // WaitSeconds(0.05) = ceil(0.05 * 60) = 3 ticks exactly
 TEST(wait_seconds_precision_0_05s_is_3_ticks) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -871,12 +869,12 @@ TEST(wait_seconds_precision_0_05s_is_3_ticks) {
     TickResult r3 = loop.tick();
     ASSERT_TRUE(r3.script_resumed);
     ASSERT_TRUE(r3.script_complete);
-    std::cout << "  [WaitSeconds(0.05s) = 3 ticks exactly ✓]\n";
+    std::cout << "  [WaitSeconds(0.05s) = 3 ticks exactly âœ“]\n";
 }
 
 // WaitSeconds(0.1) = ceil(0.1 * 60) = 6 ticks exactly
 TEST(wait_seconds_precision_0_1s_is_6_ticks) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -895,12 +893,12 @@ TEST(wait_seconds_precision_0_1s_is_6_ticks) {
     TickResult r6 = loop.tick();
     ASSERT_TRUE(r6.script_resumed);
     ASSERT_TRUE(r6.script_complete);
-    std::cout << "  [WaitSeconds(0.1s) = 6 ticks exactly ✓]\n";
+    std::cout << "  [WaitSeconds(0.1s) = 6 ticks exactly âœ“]\n";
 }
 
 // WaitSeconds(1.0) = ceil(1.0 * 60) = 60 ticks exactly
 TEST(wait_seconds_precision_1_0s_is_60_ticks) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -919,7 +917,7 @@ TEST(wait_seconds_precision_1_0s_is_60_ticks) {
     TickResult r60 = loop.tick();
     ASSERT_TRUE(r60.script_resumed);
     ASSERT_TRUE(r60.script_complete);
-    std::cout << "  [WaitSeconds(1.0s) = 60 ticks exactly ✓]\n";
+    std::cout << "  [WaitSeconds(1.0s) = 60 ticks exactly âœ“]\n";
 }
 
 //=============================================================================
@@ -929,7 +927,7 @@ TEST(wait_seconds_precision_1_0s_is_60_ticks) {
 
 // Unrelated coroutine resumes -> active script_resumed == false
 TEST(unrelated_coroutine_resume_does_not_set_script_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -956,12 +954,12 @@ TEST(unrelated_coroutine_resume_does_not_set_script_resumed) {
     ASSERT_TRUE(runtime.get_state(unrelated_id) == ScriptState::Finished);
     ASSERT_TRUE(runtime.get_state(active_id) == ScriptState::Yielded);
     
-    std::cout << "  [Unrelated coroutine resume: script_resumed=false ✓]\n";
+    std::cout << "  [Unrelated coroutine resume: script_resumed=false âœ“]\n";
 }
 
 // Active timed coroutine resumes -> script_resumed == true
 TEST(active_coroutine_timed_resume_sets_script_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -980,12 +978,12 @@ TEST(active_coroutine_timed_resume_sets_script_resumed) {
     ASSERT_TRUE(r2.script_resumed);
     ASSERT_TRUE(r2.script_complete);
     
-    std::cout << "  [Active coroutine timed resume: script_resumed=true ✓]\n";
+    std::cout << "  [Active coroutine timed resume: script_resumed=true âœ“]\n";
 }
 
 // Active coroutine resumes and re-yields -> script_resumed == true
 TEST(active_coroutine_resume_reyield_sets_script_resumed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1007,7 +1005,7 @@ TEST(active_coroutine_resume_reyield_sets_script_resumed) {
     // Verify still yielded
     ASSERT_TRUE(runtime.get_state(loop.active_coroutine()) == ScriptState::Yielded);
     
-    std::cout << "  [Active coroutine resume+re-yield: script_resumed=true ✓]\n";
+    std::cout << "  [Active coroutine resume+re-yield: script_resumed=true âœ“]\n";
 }
 
 //=============================================================================
@@ -1016,7 +1014,7 @@ TEST(active_coroutine_resume_reyield_sets_script_resumed) {
 
 // Script finishes normally: script_complete=true, script_error=false
 TEST(script_finishes_normally_sets_complete) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1028,12 +1026,12 @@ TEST(script_finishes_normally_sets_complete) {
     // Script completed immediately during start
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Normal completion: start_script returns true ✓]\n";
+    std::cout << "  [Normal completion: start_script returns true âœ“]\n";
 }
 
 // Script errors after resume: script_complete=false, script_error=true
 TEST(script_errors_after_resume_sets_error) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1055,12 +1053,12 @@ TEST(script_errors_after_resume_sets_error) {
     ASSERT_TRUE(r.script_error);       // Error occurred
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Error after resume: script_error=true, script_complete=false ✓]\n";
+    std::cout << "  [Error after resume: script_error=true, script_complete=false âœ“]\n";
 }
 
 // Script errors immediately during start: start_script returns false
 TEST(script_errors_immediately_returns_false) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1074,12 +1072,12 @@ TEST(script_errors_immediately_returns_false) {
     ASSERT_FALSE(started);  // Should return false on immediate error
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Immediate syntax error: start_script returns false ✓]\n";
+    std::cout << "  [Immediate syntax error: start_script returns false âœ“]\n";
 }
 
 // Script runtime error during start: start_script returns false
 TEST(script_runtime_error_during_start_returns_false) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1091,12 +1089,12 @@ TEST(script_runtime_error_during_start_returns_false) {
     ASSERT_FALSE(started);  // Should return false on runtime error during start
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     
-    std::cout << "  [Immediate runtime error: start_script returns false ✓]\n";
+    std::cout << "  [Immediate runtime error: start_script returns false âœ“]\n";
 }
 
 // Yielded script remains non-terminal
 TEST(yielded_script_remains_nonterminal) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1115,12 +1113,12 @@ TEST(yielded_script_remains_nonterminal) {
         ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
     }
     
-    std::cout << "  [Yielded script: script_complete=false, script_error=false ✓]\n";
+    std::cout << "  [Yielded script: script_complete=false, script_error=false âœ“]\n";
 }
 
 // Reset cancels active coroutine - no later timed resume
 TEST(reset_cancels_active_coroutine_no_timed_resume) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1163,12 +1161,12 @@ TEST(reset_cancels_active_coroutine_no_timed_resume) {
     
     ASSERT_FALSE(side_effect_occurred);
     
-    std::cout << "  [Reset cancels coroutine: no timed resume occurs ✓]\n";
+    std::cout << "  [Reset cancels coroutine: no timed resume occurs âœ“]\n";
 }
 
 // Reset when no script active
 TEST(reset_when_no_script_active) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1182,12 +1180,12 @@ TEST(reset_when_no_script_active) {
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     ASSERT_TRUE(loop.active_coroutine() == 0);
     
-    std::cout << "  [Reset when no script: succeeds safely ✓]\n";
+    std::cout << "  [Reset when no script: succeeds safely âœ“]\n";
 }
 
 // Reset when script already completed
 TEST(reset_after_script_completed) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1205,12 +1203,12 @@ TEST(reset_after_script_completed) {
     ASSERT_TRUE(loop.state() == LoopState::Idle);
     ASSERT_TRUE(loop.active_coroutine() == 0);
     
-    std::cout << "  [Reset after completion: succeeds safely ✓]\n";
+    std::cout << "  [Reset after completion: succeeds safely âœ“]\n";
 }
 
 // Reset when script currently yielded
 TEST(reset_when_script_yielded) {
-    auto loop = create_timed_test_loop();
+    HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
     loop.set_lua_runtime(&runtime);
     
@@ -1234,7 +1232,7 @@ TEST(reset_when_script_yielded) {
     // Cancelled coroutines end in Finished state
     ASSERT_TRUE(state == ScriptState::Finished || state == ScriptState::Error);
     
-    std::cout << "  [Reset when yielded: coroutine cancelled ✓]\n";
+    std::cout << "  [Reset when yielded: coroutine cancelled âœ“]\n";
 }
 
 // Coord event script roots appear in corpus
@@ -1256,7 +1254,7 @@ TEST(coord_event_scripts_in_corpus) {
         }
     }
     
-    std::cout << "  [Total coord events found: " << total_coord_events << " ✓]\n";
+    std::cout << "  [Total coord events found: " << total_coord_events << " âœ“]\n";
     
     // Verify coord events have valid script addresses
     auto result = extractor.extract_map(7, 1);  // IlexForest
@@ -1267,11 +1265,11 @@ TEST(coord_event_scripts_in_corpus) {
         }
     }
     
-    std::cout << "  [Coord event script addresses resolved to flat ✓]\n";
+    std::cout << "  [Coord event script addresses resolved to flat âœ“]\n";
 }
 
 //=============================================================================
-// CANONICAL BANK ADDRESS HELPER TESTS — August 2026
+// CANONICAL BANK ADDRESS HELPER TESTS â€” August 2026
 // Verifies crystal_flat_to_bank, crystal_bank_to_flat, crystal_local_ptr_to_flat
 // from crystal/rom/bank_utils.hpp.
 //
@@ -1279,31 +1277,31 @@ TEST(coord_event_scripts_in_corpus) {
 // Each call site that previously inlined the formula delegates to them.
 //
 // Source authority:
-//   pokecrystal scripting.asm:1389  Script_sdefer   — uses wScriptBank
-//   pokecrystal scripting.asm:1688  Script_getstring — uses wScriptBank
+//   pokecrystal scripting.asm:1389  Script_sdefer   â€” uses wScriptBank
+//   pokecrystal scripting.asm:1688  Script_getstring â€” uses wScriptBank
 //=============================================================================
 
-// Helper: crystal_flat_to_bank — bank 0 boundary
+// Helper: crystal_flat_to_bank â€” bank 0 boundary
 TEST(bank_utils_flat_to_bank_zero) {
     using namespace crystal;
-    // Bank 0 spans flat 0x0000–0x3FFF
+    // Bank 0 spans flat 0x0000â€“0x3FFF
     ASSERT_EQ(crystal_flat_to_bank(0x0000), 0);
     ASSERT_EQ(crystal_flat_to_bank(0x0001), 0);
     ASSERT_EQ(crystal_flat_to_bank(0x3FFF), 0);
-    std::cout << "  [flat_to_bank: bank 0 range ✓]\n";
+    std::cout << "  [flat_to_bank: bank 0 range âœ“]\n";
 }
 
-// Helper: crystal_flat_to_bank — first switchable bank
+// Helper: crystal_flat_to_bank â€” first switchable bank
 TEST(bank_utils_flat_to_bank_one) {
     using namespace crystal;
-    // Bank 1 spans flat 0x4000–0x7FFF
+    // Bank 1 spans flat 0x4000â€“0x7FFF
     ASSERT_EQ(crystal_flat_to_bank(0x4000), 1);
     ASSERT_EQ(crystal_flat_to_bank(0x4001), 1);
     ASSERT_EQ(crystal_flat_to_bank(0x7FFF), 1);
-    std::cout << "  [flat_to_bank: bank 1 range ✓]\n";
+    std::cout << "  [flat_to_bank: bank 1 range âœ“]\n";
 }
 
-// Helper: crystal_flat_to_bank — later bank (0x1A = 26, used by sdefer test)
+// Helper: crystal_flat_to_bank â€” later bank (0x1A = 26, used by sdefer test)
 TEST(bank_utils_flat_to_bank_nonzero) {
     using namespace crystal;
     // Bank 0x1A spans flat 0x1A*0x4000 = 0x68000 to 0x6BFFF
@@ -1312,38 +1310,38 @@ TEST(bank_utils_flat_to_bank_nonzero) {
     ASSERT_EQ(crystal_flat_to_bank(0x6BFFF), 0x1A);
     // Bank 0x1B starts at 0x6C000
     ASSERT_EQ(crystal_flat_to_bank(0x6C000), 0x1B);
-    std::cout << "  [flat_to_bank: bank 0x1A/0x1B boundary ✓]\n";
+    std::cout << "  [flat_to_bank: bank 0x1A/0x1B boundary âœ“]\n";
 }
 
-// Helper: crystal_bank_to_flat — local ptr 0x4000 (start of banked window)
+// Helper: crystal_bank_to_flat â€” local ptr 0x4000 (start of banked window)
 TEST(bank_utils_bank_to_flat_ptr_at_4000) {
     using namespace crystal;
-    // ptr = 0x4000, bank = 0x1A → flat = 0x1A * 0x4000 + 0 = 0x68000
+    // ptr = 0x4000, bank = 0x1A â†’ flat = 0x1A * 0x4000 + 0 = 0x68000
     ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x4000), 0x68000);
-    // ptr = 0x4000, bank = 1 → flat = 0x4000
+    // ptr = 0x4000, bank = 1 â†’ flat = 0x4000
     ASSERT_EQ(crystal_bank_to_flat(1, 0x4000), 0x4000);
-    std::cout << "  [bank_to_flat: ptr=0x4000 ✓]\n";
+    std::cout << "  [bank_to_flat: ptr=0x4000 âœ“]\n";
 }
 
-// Helper: crystal_bank_to_flat — local ptr 0x7FFF (end of banked window)
+// Helper: crystal_bank_to_flat â€” local ptr 0x7FFF (end of banked window)
 TEST(bank_utils_bank_to_flat_ptr_at_7fff) {
     using namespace crystal;
-    // ptr = 0x7FFF, bank = 0x1A → flat = 0x1A*0x4000 + 0x3FFF = 0x6BFFF
+    // ptr = 0x7FFF, bank = 0x1A â†’ flat = 0x1A*0x4000 + 0x3FFF = 0x6BFFF
     ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x7FFF), 0x6BFFF);
-    std::cout << "  [bank_to_flat: ptr=0x7FFF ✓]\n";
+    std::cout << "  [bank_to_flat: ptr=0x7FFF âœ“]\n";
 }
 
-// Helper: crystal_bank_to_flat — local ptr < 0x4000 (ROM0 region)
+// Helper: crystal_bank_to_flat â€” local ptr < 0x4000 (ROM0 region)
 TEST(bank_utils_bank_to_flat_ptr_in_rom0) {
     using namespace crystal;
-    // ptr < 0x4000 → ROM0; bank is irrelevant, flat = ptr
+    // ptr < 0x4000 â†’ ROM0; bank is irrelevant, flat = ptr
     ASSERT_EQ(crystal_bank_to_flat(0x1A, 0x0100), 0x0100);
     ASSERT_EQ(crystal_bank_to_flat(0x00, 0x0100), 0x0100);
     ASSERT_EQ(crystal_bank_to_flat(0xFF, 0x3FFF), 0x3FFF);
-    std::cout << "  [bank_to_flat: ROM0 ptr → flat=ptr ✓]\n";
+    std::cout << "  [bank_to_flat: ROM0 ptr â†’ flat=ptr âœ“]\n";
 }
 
-// Helper: round-trip flat→bank→flat
+// Helper: round-trip flatâ†’bankâ†’flat
 TEST(bank_utils_round_trip) {
     using namespace crystal;
     // For a flat address in a non-zero bank, bank_to_flat(flat_to_bank(addr), local)
@@ -1353,10 +1351,10 @@ TEST(bank_utils_round_trip) {
     // Local ptr = 0x4000 + (flat - bank*0x4000) = 0x4000 + 0x500 = 0x4500
     uint16_t local_ptr = static_cast<uint16_t>(0x4000 + (flat - bank * 0x4000u));
     ASSERT_EQ(crystal_bank_to_flat(bank, local_ptr), flat);
-    std::cout << "  [round-trip flat=0x68500 → bank=0x1A, ptr=0x4500 → flat=0x68500 ✓]\n";
+    std::cout << "  [round-trip flat=0x68500 â†’ bank=0x1A, ptr=0x4500 â†’ flat=0x68500 âœ“]\n";
 }
 
-// crystal_local_ptr_to_flat — sdefer nonzero-bank case
+// crystal_local_ptr_to_flat â€” sdefer nonzero-bank case
 // Proves the helper matches the expected result and asymmetry rules out raw-ptr mistake.
 // Raw ptr 0x4500 != flat 0x68500, so a raw16-as-flat bug would produce wrong result.
 TEST(bank_utils_local_ptr_to_flat_sdefer_nonzero_bank) {
@@ -1367,10 +1365,10 @@ TEST(bank_utils_local_ptr_to_flat_sdefer_nonzero_bank) {
     ASSERT_EQ(flat, 0x68500u);
     // Prove asymmetry: raw ptr 0x4500 != flat result 0x68500
     ASSERT_TRUE(flat != 0x4500);
-    std::cout << "  [local_ptr_to_flat sdefer: 0x4500 @ entry 0x68100 → 0x68500 ✓]\n";
+    std::cout << "  [local_ptr_to_flat sdefer: 0x4500 @ entry 0x68100 â†’ 0x68500 âœ“]\n";
 }
 
-// crystal_local_ptr_to_flat — getstring nonzero-bank case
+// crystal_local_ptr_to_flat â€” getstring nonzero-bank case
 // getstring carries the same bank semantics as sdefer: uses wScriptBank.
 // Use a different bank (0x06) and ptr to prove this is independent.
 TEST(bank_utils_local_ptr_to_flat_getstring_nonzero_bank) {
@@ -1381,10 +1379,10 @@ TEST(bank_utils_local_ptr_to_flat_getstring_nonzero_bank) {
     ASSERT_EQ(flat, 0x19100u);
     // Prove asymmetry: raw ptr 0x5100 != flat result 0x19100
     ASSERT_TRUE(flat != 0x5100);
-    std::cout << "  [local_ptr_to_flat getstring: 0x5100 @ entry 0x18080 → 0x19100 ✓]\n";
+    std::cout << "  [local_ptr_to_flat getstring: 0x5100 @ entry 0x18080 â†’ 0x19100 âœ“]\n";
 }
 
-// sdefer lowering now uses crystal_local_ptr_to_flat — prove via canonical helper
+// sdefer lowering now uses crystal_local_ptr_to_flat â€” prove via canonical helper
 // This regression test replaces the older semantic_fix_sdefer_bank_resolution test's
 // implicit formula with an explicit canonical helper comparison.
 TEST(bank_utils_sdefer_lowering_matches_canonical_helper) {
@@ -1435,17 +1433,17 @@ TEST(bank_utils_sdefer_lowering_matches_canonical_helper) {
     ss << "deferred_" << std::hex << expected_flat;
     ASSERT_STR_EQ(sdef_op->target_script_id, ss.str());
 
-    std::cout << "  [sdefer lowering == canonical helper result 0x68500 ✓]\n";
+    std::cout << "  [sdefer lowering == canonical helper result 0x68500 âœ“]\n";
 }
 
-// getstring lowering now uses cmd->span.rom_address — prove via canonical helper
+// getstring lowering now uses cmd->span.rom_address â€” prove via canonical helper
 // The resolved text content is stored in str_value, not a raw ROM address.
 TEST(bank_utils_getstring_lowering_matches_canonical_helper) {
     using namespace crystal;
     using namespace enginemon;
 
     // Script at bank 0x06 (entry=0x18080), getstring ptr=0x5100
-    // Command is also in bank 0x06 → cmd.span.rom_address must be in that bank.
+    // Command is also in bank 0x06 â†’ cmd.span.rom_address must be in that bank.
     CrystalCommand cmd;
     Cmd_Getstring gs;
     gs.text_pointer = 0x5100;
@@ -1482,20 +1480,20 @@ TEST(bank_utils_getstring_lowering_matches_canonical_helper) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
     ASSERT_TRUE(pta != nullptr);
 
-    // No raw ROM address survives — str_value holds the resolved text
+    // No raw ROM address survives â€” str_value holds the resolved text
     ASSERT_EQ(pta->arg_type, TextArgType::String);
     ASSERT_EQ(pta->buffer_slot, 0u);
 
-    std::cout << "  [getstring lowering produces String arg with buffer_slot=0 ✓]\n";
+    std::cout << "  [getstring lowering produces String arg with buffer_slot=0 âœ“]\n";
 }
 
 //=============================================================================
 // SEMANTIC CORRECTNESS FIX TESTS - August 2026
 // Verifies fixes for confirmed active vanilla semantic corruption:
 //   - Finding 3: String formatting operands preserved
-//   - Finding 7: encountermusic ≠ playmapmusic
+//   - Finding 7: encountermusic â‰  playmapmusic
 //   - Finding 8: newloadmap method preserved
-//   - Finding 9: reanchormap ≠ refreshmap
+//   - Finding 9: reanchormap â‰  refreshmap
 //   - Finding 5: sdefer bank resolution
 //=============================================================================
 
@@ -1552,7 +1550,7 @@ TEST(semantic_fix_gettrainername_preserves_both_operands) {
     ASSERT_EQ(pta->arg_type, TextArgType::TrainerName);
     
     std::cout << "  [gettrainername preserves group=" << (int)pta->trainer_group 
-              << ", id=" << (int)pta->id2 << " ✓]\n";
+              << ", id=" << (int)pta->id2 << " âœ“]\n";
 }
 
 // Finding 3: getstring buffer_slot and str_value are preserved (no raw ROM address)
@@ -1599,12 +1597,12 @@ TEST(semantic_fix_getstring_preserves_text_pointer) {
     auto* pta = std::get_if<Sem_PrepareTextArg>(&inst.op);
     ASSERT_TRUE(pta != nullptr);
     
-    // No raw ROM address survives — str_value and buffer_slot are the semantic outputs
+    // No raw ROM address survives â€” str_value and buffer_slot are the semantic outputs
     ASSERT_EQ(pta->buffer_slot, 1u);
     ASSERT_EQ(pta->arg_type, TextArgType::String);
-    // str_value is empty since no text_registry was provided — that's fine
+    // str_value is empty since no text_registry was provided â€” that's fine
     
-    std::cout << "  [getstring preserves buffer_slot=1, arg_type=String, no ROM address ✓]\n";
+    std::cout << "  [getstring preserves buffer_slot=1, arg_type=String, no ROM address âœ“]\n";
 }
 
 // Finding 3: getmoney preserves account operand
@@ -1652,7 +1650,7 @@ TEST(semantic_fix_getmoney_preserves_account) {
     ASSERT_EQ(pta->account, enginemon::MoneyAccount::Mom);
     ASSERT_EQ(pta->buffer_slot, 3);
     
-    std::cout << "  [getmoney preserves account=" << (int)static_cast<uint8_t>(pta->account) << " ✓]\n";
+    std::cout << "  [getmoney preserves account=" << (int)static_cast<uint8_t>(pta->account) << " âœ“]\n";
 }
 
 // Finding 7: encountermusic produces Sem_PlayEncounterMusic, NOT Sem_PlayMapMusic
@@ -1701,7 +1699,7 @@ TEST(semantic_fix_encountermusic_distinct_from_playmapmusic) {
     auto* map = std::get_if<Sem_PlayMapMusic>(&inst.op);
     ASSERT_TRUE(map == nullptr);
     
-    std::cout << "  [encountermusic → Sem_PlayEncounterMusic (not PlayMapMusic) ✓]\n";
+    std::cout << "  [encountermusic â†’ Sem_PlayEncounterMusic (not PlayMapMusic) âœ“]\n";
 }
 
 // Finding 8: newloadmap preserves method operand
@@ -1750,7 +1748,7 @@ TEST(semantic_fix_newloadmap_preserves_method) {
         ASSERT_EQ(static_cast<uint8_t>(nlm_op->method), method);
     }
     
-    std::cout << "  [newloadmap preserves method (0xF1..0xFC tested) ✓]\n";
+    std::cout << "  [newloadmap preserves method (0xF1..0xFC tested) âœ“]\n";
 }
 
 // Finding 9: reanchormap produces Sem_ReanchorMap, NOT Sem_RefreshMap
@@ -1803,7 +1801,7 @@ TEST(semantic_fix_reanchormap_distinct_from_refreshmap) {
     auto* refresh = std::get_if<Sem_RefreshMap>(&inst.op);
     ASSERT_TRUE(refresh == nullptr);
     
-    std::cout << "  [reanchormap → Sem_ReanchorMap (not RefreshMap), dummy=0x42 ✓]\n";
+    std::cout << "  [reanchormap â†’ Sem_ReanchorMap (not RefreshMap), dummy=0x42 âœ“]\n";
 }
 
 // Finding 9: refreshmap produces Sem_RefreshMap (distinct from reanchormap)
@@ -1850,7 +1848,7 @@ TEST(semantic_fix_refreshmap_distinct_from_reanchormap) {
     auto* reanchor = std::get_if<Sem_ReanchorMap>(&inst.op);
     ASSERT_TRUE(reanchor == nullptr);
     
-    std::cout << "  [refreshmap → Sem_RefreshMap (not ReanchorMap) ✓]\n";
+    std::cout << "  [refreshmap â†’ Sem_RefreshMap (not ReanchorMap) âœ“]\n";
 }
 
 // Finding 5: sdefer resolves bank-relative pointer correctly
@@ -1899,7 +1897,7 @@ TEST(semantic_fix_sdefer_bank_resolution) {
     // "deferred_68500" (hex for 0x1A * 0x4000 + (0x4500 - 0x4000))
     ASSERT_STR_EQ(sdef->target_script_id, "deferred_68500");
     
-    std::cout << "  [sdefer bank resolution: 0x4500 @ bank 0x1A → deferred_68500 ✓]\n";
+    std::cout << "  [sdefer bank resolution: 0x4500 @ bank 0x1A â†’ deferred_68500 âœ“]\n";
 }
 
 // Finding 2: TextDefinition identity_string distinguishes control codes
@@ -1938,7 +1936,7 @@ TEST(semantic_fix_text_identity_distinguishes_controls) {
     ASSERT_STR_CONTAINS(id1, "<LINE>");
     ASSERT_STR_CONTAINS(id2, "<PARA>");
     
-    std::cout << "  [TextDefinition: LINE vs PARA → distinct identities ✓]\n";
+    std::cout << "  [TextDefinition: LINE vs PARA â†’ distinct identities âœ“]\n";
 }
 
 // Finding 2: TextDefinition identity distinguishes TX_RAM addresses
@@ -1967,11 +1965,11 @@ TEST(semantic_fix_text_identity_distinguishes_ram_addresses) {
     ASSERT_STR_CONTAINS(id1, "<RAM:");
     ASSERT_STR_CONTAINS(id2, "<RAM:");
     
-    std::cout << "  [TextDefinition: RAM(0xD47D) vs RAM(0xD47E) → distinct ✓]\n";
+    std::cout << "  [TextDefinition: RAM(0xD47D) vs RAM(0xD47E) â†’ distinct âœ“]\n";
 }
 
 // =============================================================================
-// TEXT SEMANTIC TESTS — TextStringBuffer → SemanticTextOp::Arg
+// TEXT SEMANTIC TESTS â€” TextStringBuffer â†’ SemanticTextOp::Arg
 // =============================================================================
 // Verifies that TX_STRINGBUFFER (0x14) correctly maps to
 // SemanticTextElement::make_arg(slot) using the SOURCE-PROVEN 0-indexed
@@ -1982,11 +1980,11 @@ TEST(semantic_fix_text_identity_distinguishes_ram_addresses) {
 //   5: wEnemyMonNickname  6: wBattleMonNickname
 //
 // The encoded byte IS the direct 0-indexed table slot (no subtraction).
-// Valid range: 0–6.  Index >= 7 → hard-fail (empty sequence).
+// Valid range: 0â€“6.  Index >= 7 â†’ hard-fail (empty sequence).
 // =============================================================================
 
 TEST(text_string_buffer_id4_maps_to_arg_slot4) {
-    // buffer_id=4 → wStringBuffer1 (most common slot, slot 4 in StringBufferPointers)
+    // buffer_id=4 â†’ wStringBuffer1 (most common slot, slot 4 in StringBufferPointers)
     using namespace crystal;
     using namespace enginemon;
 
@@ -2013,30 +2011,30 @@ TEST(text_string_buffer_id4_maps_to_arg_slot4) {
     // Must NOT be empty text placeholder
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_STRINGBUFFER(4=wStringBuffer1) → SemanticTextOp::Arg(slot=4) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(4=wStringBuffer1) â†’ SemanticTextOp::Arg(slot=4) âœ“]\n";
 }
 
 TEST(text_string_buffer_id0_maps_to_arg_slot0) {
-    // buffer_id=0 → wStringBuffer3 (first entry in StringBufferPointers)
+    // buffer_id=0 â†’ wStringBuffer3 (first entry in StringBufferPointers)
     using namespace crystal;
     using namespace enginemon;
 
     TextDefinition def;
     def.source_rom_address = 0x2000;
-    // wStringBuffer3 (buffer_id=0) → slot 0
+    // wStringBuffer3 (buffer_id=0) â†’ slot 0
     def.sequence.elements.push_back(TextElement::make_text_string_buffer(0));  // wStringBuffer3
 
     auto sem = def.to_semantic_sequence();
 
     ASSERT_EQ(sem.elements.size(), 1u);
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
-    ASSERT_EQ(sem.elements[0].arg_index, 0u);  // direct: id=0 → slot=0
+    ASSERT_EQ(sem.elements[0].arg_index, 0u);  // direct: id=0 â†’ slot=0
 
-    std::cout << "  [TX_STRINGBUFFER(0=wStringBuffer3) → SemanticTextOp::Arg(slot=0) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(0=wStringBuffer3) â†’ SemanticTextOp::Arg(slot=0) âœ“]\n";
 }
 
 TEST(text_string_buffer_id6_maps_to_arg_slot6) {
-    // buffer_id=6 → wBattleMonNickname (last valid entry)
+    // buffer_id=6 â†’ wBattleMonNickname (last valid entry)
     using namespace crystal;
     using namespace enginemon;
 
@@ -2050,12 +2048,12 @@ TEST(text_string_buffer_id6_maps_to_arg_slot6) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].arg_index, 6u);
 
-    std::cout << "  [TX_STRINGBUFFER(6=wBattleMonNickname) → SemanticTextOp::Arg(slot=6) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(6=wBattleMonNickname) â†’ SemanticTextOp::Arg(slot=6) âœ“]\n";
 }
 
 TEST(text_string_buffer_invalid_id7_hard_fails) {
     // buffer_id=7 is outside StringBufferPointers (only 7 entries: 0-6).
-    // to_semantic_sequence() must return empty sequence → legality gate rejects.
+    // to_semantic_sequence() must return empty sequence â†’ legality gate rejects.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2070,11 +2068,11 @@ TEST(text_string_buffer_invalid_id7_hard_fails) {
     // Hard-fail: empty sequence
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_STRINGBUFFER(7=INVALID) → empty SemanticTextSequence (hard-fail) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(7=INVALID) â†’ empty SemanticTextSequence (hard-fail) âœ“]\n";
 }
 
 TEST(text_string_buffer_invalid_id255_hard_fails) {
-    // buffer_id=255 — far out of range, must also hard-fail.
+    // buffer_id=255 â€” far out of range, must also hard-fail.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2086,12 +2084,12 @@ TEST(text_string_buffer_invalid_id255_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_STRINGBUFFER(255=INVALID) → empty SemanticTextSequence (hard-fail) ✓]\n";
+    std::cout << "  [TX_STRINGBUFFER(255=INVALID) â†’ empty SemanticTextSequence (hard-fail) âœ“]\n";
 }
 
 TEST(text_tx_ram_wstringbuffer3_maps_to_arg_slot0) {
-    // TX_RAM wStringBuffer3 (0xD099) → Arg(slot=0)
-    // Source: GetStringBuffer: ld hl, wStringBuffer3; strbuf=0 → wStringBuffer3
+    // TX_RAM wStringBuffer3 (0xD099) â†’ Arg(slot=0)
+    // Source: GetStringBuffer: ld hl, wStringBuffer3; strbuf=0 â†’ wStringBuffer3
     using namespace crystal;
     using namespace enginemon;
 
@@ -2108,11 +2106,11 @@ TEST(text_tx_ram_wstringbuffer3_maps_to_arg_slot0) {
     ASSERT_EQ(sem.elements[1].arg_index, 0u);  // slot 0 = wStringBuffer3
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_RAM(0xD099=wStringBuffer3) → Arg(slot=0) ✓]\n";
+    std::cout << "  [TX_RAM(0xD099=wStringBuffer3) â†’ Arg(slot=0) âœ“]\n";
 }
 
 TEST(text_tx_ram_wstringbuffer4_maps_to_arg_slot1) {
-    // TX_RAM wStringBuffer4 (0xD0AC) → Arg(slot=1)
+    // TX_RAM wStringBuffer4 (0xD0AC) â†’ Arg(slot=1)
     using namespace crystal;
     using namespace enginemon;
 
@@ -2126,11 +2124,11 @@ TEST(text_tx_ram_wstringbuffer4_maps_to_arg_slot1) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].arg_index, 1u);
 
-    std::cout << "  [TX_RAM(0xD0AC=wStringBuffer4) → Arg(slot=1) ✓]\n";
+    std::cout << "  [TX_RAM(0xD0AC=wStringBuffer4) â†’ Arg(slot=1) âœ“]\n";
 }
 
 TEST(text_tx_ram_wstringbuffer5_maps_to_arg_slot2) {
-    // TX_RAM wStringBuffer5 (0xD0BF) → Arg(slot=2)
+    // TX_RAM wStringBuffer5 (0xD0BF) â†’ Arg(slot=2)
     using namespace crystal;
     using namespace enginemon;
 
@@ -2144,11 +2142,11 @@ TEST(text_tx_ram_wstringbuffer5_maps_to_arg_slot2) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].arg_index, 2u);
 
-    std::cout << "  [TX_RAM(0xD0BF=wStringBuffer5) → Arg(slot=2) ✓]\n";
+    std::cout << "  [TX_RAM(0xD0BF=wStringBuffer5) â†’ Arg(slot=2) âœ“]\n";
 }
 
 TEST(text_tx_ram_unknown_address_hard_fails) {
-    // TX_RAM with unknown address (e.g. wPlayerName 0xD47D) → hard-fail empty sequence.
+    // TX_RAM with unknown address (e.g. wPlayerName 0xD47D) â†’ hard-fail empty sequence.
     // Only wStringBuffer3/4/5 are valid script text buffer slots.
     using namespace crystal;
     using namespace enginemon;
@@ -2156,19 +2154,19 @@ TEST(text_tx_ram_unknown_address_hard_fails) {
     TextDefinition def;
     def.source_rom_address = 0x4300;
     def.sequence.elements.push_back(TextElement::make_text("Player: "));
-    def.sequence.elements.push_back(TextElement::make_text_ram(0xD47D));  // wPlayerName — not a buffer slot
+    def.sequence.elements.push_back(TextElement::make_text_ram(0xD47D));  // wPlayerName â€” not a buffer slot
 
     auto sem = def.to_semantic_sequence();
 
     // Hard-fail: wPlayerName is not a valid strbuf slot
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_RAM(0xD47D=wPlayerName) → hard-fail (not a script buffer slot) ✓]\n";
+    std::cout << "  [TX_RAM(0xD47D=wPlayerName) â†’ hard-fail (not a script buffer slot) âœ“]\n";
 }
 
 TEST(text_tx_bcd_hard_fails) {
     // TX_BCD is not used in script text corpus (only in battle text engine internals).
-    // Any TX_BCD in a script text sequence is an error → hard-fail.
+    // Any TX_BCD in a script text sequence is an error â†’ hard-fail.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2180,13 +2178,13 @@ TEST(text_tx_bcd_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_BCD → hard-fail (no script text corpus uses) ✓]\n";
+    std::cout << "  [TX_BCD â†’ hard-fail (no script text corpus uses) âœ“]\n";
 }
 
 TEST(text_tx_decimal_wscriptvar_produces_script_var_decimal) {
-    // TX_DECIMAL wScriptVar (0xC2DD) → ScriptVarDecimal(bytes_digits).
-    // Source: BattleTower1F.asm text_decimal wScriptVar, 1, 3 → param=0x13.
-    // No WRAM address survives — runtime reads ScriptVar context.
+    // TX_DECIMAL wScriptVar (0xC2DD) â†’ ScriptVarDecimal(bytes_digits).
+    // Source: BattleTower1F.asm text_decimal wScriptVar, 1, 3 â†’ param=0x13.
+    // No WRAM address survives â€” runtime reads ScriptVar context.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2201,11 +2199,11 @@ TEST(text_tx_decimal_wscriptvar_produces_script_var_decimal) {
     ASSERT_EQ(sem.elements[0].param1, 0x13u);  // bytes_digits preserved
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_DECIMAL(0xC2DD=wScriptVar, param=0x13) → ScriptVarDecimal(0x13) ✓]\n";
+    std::cout << "  [TX_DECIMAL(0xC2DD=wScriptVar, param=0x13) â†’ ScriptVarDecimal(0x13) âœ“]\n";
 }
 
 TEST(text_tx_decimal_unknown_address_hard_fails) {
-    // TX_DECIMAL with address other than wScriptVar → hard-fail.
+    // TX_DECIMAL with address other than wScriptVar â†’ hard-fail.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2217,7 +2215,7 @@ TEST(text_tx_decimal_unknown_address_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_DECIMAL(non-wScriptVar) → hard-fail ✓]\n";
+    std::cout << "  [TX_DECIMAL(non-wScriptVar) â†’ hard-fail âœ“]\n";
 }
 
 TEST(text_tx_far_inlines_referenced_text) {
@@ -2242,11 +2240,11 @@ TEST(text_tx_far_inlines_referenced_text) {
     reg.extract(0x18000);
 
     // Build text with TX_FAR pointing to 0x18000
-    // TX_FAR: bank=6, local_ptr=0x4000 → flat = 6*0x4000 + (0x4000-0x4000) = 0x18000
+    // TX_FAR: bank=6, local_ptr=0x4000 â†’ flat = 6*0x4000 + (0x4000-0x4000) = 0x18000
     TextDefinition def;
     def.source_rom_address = 0x6000;
     def.sequence.elements.push_back(TextElement::make_text("Before "));
-    def.sequence.elements.push_back(TextElement::make_text_far(0x4000, 0x06));  // → flat 0x18000
+    def.sequence.elements.push_back(TextElement::make_text_far(0x4000, 0x06));  // â†’ flat 0x18000
     def.sequence.elements.push_back(TextElement::make_text(" After"));
 
     auto sem = def.to_semantic_sequence(&reg);
@@ -2266,7 +2264,7 @@ TEST(text_tx_far_inlines_referenced_text) {
     }
     ASSERT_TRUE(found_hello);
 
-    // No FarText element survives — the old FarText op no longer exists in SemanticTextOp.
+    // No FarText element survives â€” the old FarText op no longer exists in SemanticTextOp.
     // All elements must be Text, Arg, Line, Para, Cont, Scroll, Done, Prompt, Day, Sound, or ScriptVarDecimal.
     for (const auto& e : sem.elements) {
         ASSERT_TRUE(e.op == SemanticTextOp::Text ||
@@ -2283,11 +2281,11 @@ TEST(text_tx_far_inlines_referenced_text) {
                     e.op == SemanticTextOp::ScriptVarDecimal);
     }
 
-    std::cout << "  [TX_FAR(bank=6,ptr=0x4000→flat=0x18000) → inlined 'HELLO' ✓]\n";
+    std::cout << "  [TX_FAR(bank=6,ptr=0x4000â†’flat=0x18000) â†’ inlined 'HELLO' âœ“]\n";
 }
 
 TEST(text_tx_far_without_registry_hard_fails) {
-    // TX_FAR without registry → hard-fail (cannot resolve target).
+    // TX_FAR without registry â†’ hard-fail (cannot resolve target).
     using namespace crystal;
     using namespace enginemon;
 
@@ -2300,11 +2298,11 @@ TEST(text_tx_far_without_registry_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_FAR without registry → hard-fail ✓]\n";
+    std::cout << "  [TX_FAR without registry â†’ hard-fail âœ“]\n";
 }
 
 TEST(text_tx_day_produces_day_op) {
-    // TX_DAY → SemanticTextOp::Day (no operands, runtime queries calendar).
+    // TX_DAY â†’ SemanticTextOp::Day (no operands, runtime queries calendar).
     using namespace crystal;
     using namespace enginemon;
 
@@ -2319,12 +2317,12 @@ TEST(text_tx_day_produces_day_op) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Day);
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_DAY → SemanticTextOp::Day ✓]\n";
+    std::cout << "  [TX_DAY â†’ SemanticTextOp::Day âœ“]\n";
 }
 
 TEST(text_tx_sound_item_produces_typed_sound_kind) {
-    // TX_SOUND_ITEM (0x0f) → Sound(TextSoundKind::ItemJingle).
-    // No raw opcode 0x0f survives — TextSoundKind is the semantic identity.
+    // TX_SOUND_ITEM (0x0f) â†’ Sound(TextSoundKind::ItemJingle).
+    // No raw opcode 0x0f survives â€” TextSoundKind is the semantic identity.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2339,11 +2337,11 @@ TEST(text_tx_sound_item_produces_typed_sound_kind) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Sound);
     ASSERT_EQ(sem.elements[0].sound_kind(), TextSoundKind::ItemJingle);
 
-    std::cout << "  [TX_SOUND_ITEM → Sound(ItemJingle) ✓]\n";
+    std::cout << "  [TX_SOUND_ITEM â†’ Sound(ItemJingle) âœ“]\n";
 }
 
 TEST(text_tx_sound_fanfare_produces_typed_sound_kind) {
-    // TX_SOUND_FANFARE (0x12) → Sound(TextSoundKind::Fanfare).
+    // TX_SOUND_FANFARE (0x12) â†’ Sound(TextSoundKind::Fanfare).
     using namespace crystal;
     using namespace enginemon;
 
@@ -2358,14 +2356,14 @@ TEST(text_tx_sound_fanfare_produces_typed_sound_kind) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::Sound);
     ASSERT_EQ(sem.elements[0].sound_kind(), TextSoundKind::Fanfare);
 
-    std::cout << "  [TX_SOUND_FANFARE → Sound(Fanfare) ✓]\n";
+    std::cout << "  [TX_SOUND_FANFARE â†’ Sound(Fanfare) âœ“]\n";
 }
 
 TEST(text_presentation_ops_dropped_not_failed) {
-    // TX_MOVE/BOX/LOW/SCROLL/ASM are presentation-only with 0 corpus uses — dropped.
+    // TX_MOVE/BOX/LOW/SCROLL/ASM are presentation-only with 0 corpus uses â€” dropped.
     // TX_PAUSE and TX_PROMPT_BUTTON are now preserved as typed semantic elements.
-    // TX_LOW has 3 corpus-reachable uses but only repositions cursor — safely dropped.
-    // The sequence is NOT hard-failed — surrounding text content is preserved.
+    // TX_LOW has 3 corpus-reachable uses but only repositions cursor â€” safely dropped.
+    // The sequence is NOT hard-failed â€” surrounding text content is preserved.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2387,11 +2385,11 @@ TEST(text_presentation_ops_dropped_not_failed) {
     ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Text);
     ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
 
-    std::cout << "  [TX_LOW + TX_MOVE dropped; surrounding text preserved ✓]\n";
+    std::cout << "  [TX_LOW + TX_MOVE dropped; surrounding text preserved âœ“]\n";
 }
 
 TEST(text_tx_raw_unknown_opcode_hard_fails) {
-    // TextRaw with unknown opcode → hard-fail.
+    // TextRaw with unknown opcode â†’ hard-fail.
     // Unknown TX commands must not silently pass.
     using namespace crystal;
     using namespace enginemon;
@@ -2405,16 +2403,16 @@ TEST(text_tx_raw_unknown_opcode_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TextRaw(opcode=0xAB) → hard-fail ✓]\n";
+    std::cout << "  [TextRaw(opcode=0xAB) â†’ hard-fail âœ“]\n";
 }
 
-// Arg-slot mapping — proves the 3 valid GetStringBuffer TX_RAM slots.
+// Arg-slot mapping â€” proves the 3 valid GetStringBuffer TX_RAM slots.
 TEST(text_arg_slot_numbering_table_driven) {
     // Source: GetStringBuffer in scripting.asm:
     //   ld hl, wStringBuffer3; ld bc, STRING_BUFFER_LENGTH (19); AddNTimes(strbuf)
-    //   strbuf=0 → wStringBuffer3 (0xD099) → Arg(0)
-    //   strbuf=1 → wStringBuffer4 (0xD0AC) → Arg(1)
-    //   strbuf=2 → wStringBuffer5 (0xD0BF) → Arg(2)
+    //   strbuf=0 â†’ wStringBuffer3 (0xD099) â†’ Arg(0)
+    //   strbuf=1 â†’ wStringBuffer4 (0xD0AC) â†’ Arg(1)
+    //   strbuf=2 â†’ wStringBuffer5 (0xD0BF) â†’ Arg(2)
     //   NUM_STRING_BUFFERS = 3. Only slots 0/1/2 are valid GetStringBuffer destinations.
     //   These match Sem_PrepareTextArg::buffer_slot which uses the same 0-based index.
     using namespace crystal;
@@ -2444,20 +2442,20 @@ TEST(text_arg_slot_numbering_table_driven) {
         ASSERT_EQ(sem.elements[0].arg_index, tc.expected_slot);
 
         std::cout << "  [TX_RAM(0x" << std::hex << tc.wram_addr << "=" << tc.symbol
-                  << ") → Arg(" << std::dec << (int)tc.expected_slot << ") ✓]\n";
+                  << ") â†’ Arg(" << std::dec << (int)tc.expected_slot << ") âœ“]\n";
     }
 }
 
-// RamSource mapping — proves TX_RAM slots 3-6 produce typed RamSource, NOT Arg.
+// RamSource mapping â€” proves TX_RAM slots 3-6 produce typed RamSource, NOT Arg.
 // These buffers are direct WRAM reads with no Sem_PrepareTextArg producer.
 TEST(text_ram_source_domain_distinct_from_arg_domain) {
     // Source: StringBufferPointers[3..6] + corpus TX_RAM analysis.
-    //   wStringBuffer2  (0xD086) → RamSource(PreparedString2)
-    //   wStringBuffer1  (0xD073) → RamSource(PreparedString1)
-    //   wEnemyMonNickname (0xC616) → RamSource(EnemyNickname)
-    //   wBattleMonNickname (0xC621) → RamSource(BattleNickname)
+    //   wStringBuffer2  (0xD086) â†’ RamSource(PreparedString2)
+    //   wStringBuffer1  (0xD073) â†’ RamSource(PreparedString1)
+    //   wEnemyMonNickname (0xC616) â†’ RamSource(EnemyNickname)
+    //   wBattleMonNickname (0xC621) â†’ RamSource(BattleNickname)
     //
-    // These are NOT Arg(3/4/5/6) — no Sem_PrepareTextArg writes buffer_slot 3-6
+    // These are NOT Arg(3/4/5/6) â€” no Sem_PrepareTextArg writes buffer_slot 3-6
     // in vanilla Crystal (GetStringBuffer clamps to NUM_STRING_BUFFERS=3 max).
     using namespace crystal;
     using namespace enginemon;
@@ -2483,19 +2481,19 @@ TEST(text_ram_source_domain_distinct_from_arg_domain) {
         auto sem = def.to_semantic_sequence();
 
         ASSERT_EQ(sem.elements.size(), 1u);
-        // Must be RamSource, NOT Arg — different semantic domain
+        // Must be RamSource, NOT Arg â€” different semantic domain
         ASSERT_EQ(sem.elements[0].op, SemanticTextOp::RamSource);
         ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
         ASSERT_EQ(sem.elements[0].ram_source(), tc.expected_source);
 
         std::cout << "  [TX_RAM(0x" << std::hex << tc.wram_addr << "=" << tc.symbol
-                  << ") → RamSource (not Arg) ✓]\n";
+                  << ") â†’ RamSource (not Arg) âœ“]\n";
     }
 }
 
 // Confirm wPlayerName is NOT a valid script buffer slot (not in StringBufferPointers).
 TEST(text_arg_slot_wplayername_hard_fails) {
-    // wPlayerName (0xD47D) is not in StringBufferPointers — hard-fail.
+    // wPlayerName (0xD47D) is not in StringBufferPointers â€” hard-fail.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2507,20 +2505,20 @@ TEST(text_arg_slot_wplayername_hard_fails) {
 
     ASSERT_TRUE(sem.empty());
 
-    std::cout << "  [TX_RAM(0xD47D=wPlayerName) → hard-fail (not in StringBufferPointers) ✓]\n";
+    std::cout << "  [TX_RAM(0xD47D=wPlayerName) â†’ hard-fail (not in StringBufferPointers) âœ“]\n";
 }
 
 // =============================================================================
-// INLINE PROMPT BUTTON + PAUSE — Bounded text control cleanup tests
+// INLINE PROMPT BUTTON + PAUSE â€” Bounded text control cleanup tests
 // =============================================================================
 
 TEST(text_tx_prompt_button_produces_inline_prompt_button_not_dropped) {
     // TX_PROMPT_BUTTON (0x06) must produce SemanticTextOp::InlinePromptButton.
-    // It must NOT be silently dropped — it gates player progression mid-sequence.
+    // It must NOT be silently dropped â€” it gates player progression mid-sequence.
     //
     // Source: home/text.asm TextCommand_PROMPT_BUTTON:
-    //   LoadBlinkingCursor → PromptButton (waits A/B) → UnloadBlinkingCursor
-    //   DISTINCT from Prompt (terminating) — text continues after the wait.
+    //   LoadBlinkingCursor â†’ PromptButton (waits A/B) â†’ UnloadBlinkingCursor
+    //   DISTINCT from Prompt (terminating) â€” text continues after the wait.
     //
     // Corpus-reachable: 11 occurrences including maps/BattleTower1F.asm.
     using namespace crystal;
@@ -2541,18 +2539,18 @@ TEST(text_tx_prompt_button_produces_inline_prompt_button_not_dropped) {
     ASSERT_EQ(sem.elements[1].op, SemanticTextOp::InlinePromptButton);
     ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
 
-    // Must NOT be Prompt (terminating) — text continues after
+    // Must NOT be Prompt (terminating) â€” text continues after
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Prompt);
     // Must NOT be Text (silently dropped to empty string)
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
-    // Sequence is non-empty — legality gate accepts it
+    // Sequence is non-empty â€” legality gate accepts it
     ASSERT_FALSE(sem.empty());
 
-    std::cout << "  [TX_PROMPT_BUTTON → InlinePromptButton (not dropped, not Prompt) ✓]\n";
+    std::cout << "  [TX_PROMPT_BUTTON â†’ InlinePromptButton (not dropped, not Prompt) âœ“]\n";
 }
 
 TEST(text_tx_prompt_button_standalone_produces_single_element) {
-    // TX_PROMPT_BUTTON in isolation → exactly one InlinePromptButton element.
+    // TX_PROMPT_BUTTON in isolation â†’ exactly one InlinePromptButton element.
     // This matches the Battle Tower corpus case where prompt appears mid-text.
     using namespace crystal;
     using namespace enginemon;
@@ -2568,21 +2566,21 @@ TEST(text_tx_prompt_button_standalone_produces_single_element) {
     ASSERT_EQ(sem.elements[0].op, SemanticTextOp::InlinePromptButton);
     ASSERT_FALSE(sem.empty());
 
-    std::cout << "  [TX_PROMPT_BUTTON standalone → InlinePromptButton (non-empty) ✓]\n";
+    std::cout << "  [TX_PROMPT_BUTTON standalone â†’ InlinePromptButton (non-empty) âœ“]\n";
 }
 
 TEST(text_tx_pause_produces_pause_with_30_frames) {
     // TX_PAUSE (0x0a) must produce SemanticTextOp::Pause with frames=30.
-    // It must NOT be silently dropped — it provides observable ~0.5s pacing.
+    // It must NOT be silently dropped â€” it provides observable ~0.5s pacing.
     //
     // Source: home/text.asm TextCommand_PAUSE:
-    //   GetJoypad; if A|B held → immediate; else DelayFrames(30)
+    //   GetJoypad; if A|B held â†’ immediate; else DelayFrames(30)
     //
     // Corpus-reachable: 12 occurrences in Radio Tower, Lucky Channel,
     //   level-up move-learning, NPC trade fanfare text.
     //
     // frames = 30: the ONLY value used in all vanilla Crystal occurrences.
-    // Preserved explicitly — not encoded as a magic runtime default.
+    // Preserved explicitly â€” not encoded as a magic runtime default.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2601,12 +2599,12 @@ TEST(text_tx_pause_produces_pause_with_30_frames) {
     ASSERT_EQ(sem.elements[1].op, SemanticTextOp::Pause);
     ASSERT_EQ(sem.elements[2].op, SemanticTextOp::Text);
 
-    // Frame count must be exactly 30 — source-proven value
+    // Frame count must be exactly 30 â€” source-proven value
     ASSERT_EQ(sem.elements[1].pause_frames(), 30u);
     // Must NOT be Text (silently dropped)
     ASSERT_TRUE(sem.elements[1].op != SemanticTextOp::Text);
 
-    std::cout << "  [TX_PAUSE → Pause(frames=30), not dropped ✓]\n";
+    std::cout << "  [TX_PAUSE â†’ Pause(frames=30), not dropped âœ“]\n";
 }
 
 TEST(text_tx_pause_frame_count_preserved_explicitly) {
@@ -2629,12 +2627,12 @@ TEST(text_tx_pause_frame_count_preserved_explicitly) {
     // Verify it's not zero (dropped/no-op)
     ASSERT_TRUE(sem.elements[0].pause_frames() > 0u);
 
-    std::cout << "  [TX_PAUSE frame count = 30 (explicit, source-proven) ✓]\n";
+    std::cout << "  [TX_PAUSE frame count = 30 (explicit, source-proven) âœ“]\n";
 }
 
 TEST(text_enemy_nickname_is_ram_source_not_arg) {
-    // TX_RAM wEnemyMonNickname (0xC616) → RamSource(EnemyNickname).
-    // Must NOT produce Arg(5) — no Sem_PrepareTextArg(buffer_slot=5) exists.
+    // TX_RAM wEnemyMonNickname (0xC616) â†’ RamSource(EnemyNickname).
+    // Must NOT produce Arg(5) â€” no Sem_PrepareTextArg(buffer_slot=5) exists.
     // RamSource is a typed direct-WRAM read identity, not a prepared-slot reference.
     using namespace crystal;
     using namespace enginemon;
@@ -2650,12 +2648,12 @@ TEST(text_enemy_nickname_is_ram_source_not_arg) {
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::EnemyNickname);
 
-    std::cout << "  [TX_RAM(wEnemyMonNickname) → RamSource(EnemyNickname), not Arg ✓]\n";
+    std::cout << "  [TX_RAM(wEnemyMonNickname) â†’ RamSource(EnemyNickname), not Arg âœ“]\n";
 }
 
 TEST(text_battle_nickname_is_ram_source_not_arg) {
-    // TX_RAM wBattleMonNickname (0xC621) → RamSource(BattleNickname).
-    // Must NOT produce Arg(6) — no such prepared-slot producer in vanilla Crystal.
+    // TX_RAM wBattleMonNickname (0xC621) â†’ RamSource(BattleNickname).
+    // Must NOT produce Arg(6) â€” no such prepared-slot producer in vanilla Crystal.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2670,13 +2668,13 @@ TEST(text_battle_nickname_is_ram_source_not_arg) {
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::BattleNickname);
 
-    std::cout << "  [TX_RAM(wBattleMonNickname) → RamSource(BattleNickname), not Arg ✓]\n";
+    std::cout << "  [TX_RAM(wBattleMonNickname) â†’ RamSource(BattleNickname), not Arg âœ“]\n";
 }
 
 TEST(text_prepared_string2_is_ram_source_not_arg) {
-    // TX_RAM wStringBuffer2 (0xD086) → RamSource(PreparedString2).
+    // TX_RAM wStringBuffer2 (0xD086) â†’ RamSource(PreparedString2).
     // This is the direct-WRAM read used in Strength/RockSmash texts via TX_FAR.
-    // NOT Arg(3) — GetStringBuffer only addresses slots 0-2.
+    // NOT Arg(3) â€” GetStringBuffer only addresses slots 0-2.
     using namespace crystal;
     using namespace enginemon;
 
@@ -2691,7 +2689,7 @@ TEST(text_prepared_string2_is_ram_source_not_arg) {
     ASSERT_TRUE(sem.elements[0].op != SemanticTextOp::Arg);
     ASSERT_EQ(sem.elements[0].ram_source(), TextRamSource::PreparedString2);
 
-    std::cout << "  [TX_RAM(wStringBuffer2) → RamSource(PreparedString2), not Arg ✓]\n";
+    std::cout << "  [TX_RAM(wStringBuffer2) â†’ RamSource(PreparedString2), not Arg âœ“]\n";
 }
 
 TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
@@ -2703,7 +2701,7 @@ TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
     using namespace lowering_rules;
     
     // Build: setval(5), special(BugContestJudging=20), special(MapRadio=40)
-    // BugContestJudging writes wScriptVar → context invalidated → MapRadio cannot fold
+    // BugContestJudging writes wScriptVar â†’ context invalidated â†’ MapRadio cannot fold
     Cmd_Setval sv; sv.value = 5;
     CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 5};
     
@@ -2729,7 +2727,7 @@ TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
     auto result = legalizer.lower(ir, cfg);
     
     // BugContestJudging (writes_var=true) should invalidate context
-    // → MapRadio has no context → unlowered
+    // â†’ MapRadio has no context â†’ unlowered
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
     
@@ -2747,7 +2745,7 @@ TEST(sem_game_specific_event_writes_var_flag_blocks_constant_propagation) {
     }
     ASSERT_TRUE(found_gse);
     
-    std::cout << "  [BugContestJudging(writes_var=true) invalidates → MapRadio unlowered ✓]\n";
+    std::cout << "  [BugContestJudging(writes_var=true) invalidates â†’ MapRadio unlowered âœ“]\n";
 }
 
 TEST(sem_game_specific_event_no_write_preserves_context) {
@@ -2758,7 +2756,7 @@ TEST(sem_game_specific_event_no_write_preserves_context) {
     using namespace lowering_rules;
     
     // Build: setval(3), special(OverworldTownMap=38), special(MapRadio=40)
-    // OverworldTownMap does NOT write wScriptVar → context preserved → MapRadio folds to channel 3
+    // OverworldTownMap does NOT write wScriptVar â†’ context preserved â†’ MapRadio folds to channel 3
     Cmd_Setval sv; sv.value = 3;
     CrystalCommand c1; c1.data = sv; c1.span.raw_bytes = {0x15, 3};
     
@@ -2784,7 +2782,7 @@ TEST(sem_game_specific_event_no_write_preserves_context) {
     auto result = legalizer.lower(ir, cfg);
     
     // OverworldTownMap (writes_var=false) should NOT invalidate context
-    // → MapRadio still has context (channel=3) → lowered to Sem_PlayRadio{channel=3}
+    // â†’ MapRadio still has context (channel=3) â†’ lowered to Sem_PlayRadio{channel=3}
     ASSERT_TRUE(result.success);
     
     // Verify OverworldTownMap produced Sem_GameSpecificEvent with writes_var=false
@@ -2804,9 +2802,9 @@ TEST(sem_game_specific_event_no_write_preserves_context) {
         }
     }
     ASSERT_TRUE(found_townmap);
-    ASSERT_TRUE(found_radio_ch3);  // context preserved → MapRadio folded with channel=3
+    ASSERT_TRUE(found_radio_ch3);  // context preserved â†’ MapRadio folded with channel=3
     
-    std::cout << "  [OverworldTownMap(writes_var=false) preserves context → MapRadio(3) folded ✓]\n";
+    std::cout << "  [OverworldTownMap(writes_var=false) preserves context â†’ MapRadio(3) folded âœ“]\n";
 }
 
 TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id) {
@@ -2858,13 +2856,13 @@ TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id) {
         ASSERT_TRUE(found);
     }
     
-    std::cout << "  [Sem_GameSpecificEvent carries source name not raw numeric ID ✓]\n";
+    std::cout << "  [Sem_GameSpecificEvent carries source name not raw numeric ID âœ“]\n";
 }
 
 // make_single_cmd_ir defined in runtime_test_shared.hpp
 
 //=============================================================================
-// SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS — August 2026
+// SCRIPT STATE AND DYNAMIC RESOURCE SEMANTICS TESTS â€” August 2026
 // Verifies all 5 findings from the hostile audit:
 //   Finding 1: wScriptVar block_ctx invalidation
 //   Finding 2: cry 0 dynamic species
@@ -2873,7 +2871,7 @@ TEST(sem_game_specific_event_behavior_name_is_source_proven_not_raw_id) {
 //   Finding 5: pokepic 0 dynamic species
 //=============================================================================
 
-// Finding 1: setval 5 → yesorno → MapRadio must NOT fold channel=5
+// Finding 1: setval 5 â†’ yesorno â†’ MapRadio must NOT fold channel=5
 // yesorno writes wScriptVar, so block_ctx must be invalidated before MapRadio
 TEST(stale_script_var_yesorno_invalidates_before_map_radio) {
     using namespace crystal;
@@ -2903,7 +2901,7 @@ TEST(stale_script_var_yesorno_invalidates_before_map_radio) {
     auto result = legalizer.lower(ir, cfg);
 
     // After yesorno invalidates context, MapRadio (Special 40) has no producer.
-    // rule_special returns {} (unmatched) → outer loop records unlowered command.
+    // rule_special returns {} (unmatched) â†’ outer loop records unlowered command.
     // result.success = false (unlowered command present)
     ASSERT_FALSE(result.success);
     ASSERT_TRUE(result.commands_unlowered > 0);
@@ -2912,14 +2910,14 @@ TEST(stale_script_var_yesorno_invalidates_before_map_radio) {
     for (const auto& block : result.ir.blocks) {
         for (const auto& inst : block.instructions) {
             auto* radio = std::get_if<Sem_PlayRadio>(&inst.op);
-            ASSERT_TRUE(radio == nullptr);  // Must NOT be PlayRadio — context was invalidated
+            ASSERT_TRUE(radio == nullptr);  // Must NOT be PlayRadio â€” context was invalidated
         }
     }
 
-    std::cout << "  [setval(5)->yesorno->MapRadio: unlowered (invalidated, no Sem_Special fallback) ✓]\n";
+    std::cout << "  [setval(5)->yesorno->MapRadio: unlowered (invalidated, no Sem_Special fallback) âœ“]\n";
 }
 
-// Finding 1: setval 5 → non-writer → MapRadio SHOULD fold channel=5 (legitimate propagation)
+// Finding 1: setval 5 â†’ non-writer â†’ MapRadio SHOULD fold channel=5 (legitimate propagation)
 TEST(script_var_propagates_across_non_writer) {
     using namespace crystal;
     using namespace enginemon;
@@ -2952,12 +2950,110 @@ TEST(script_var_propagates_across_non_writer) {
     // Should produce: Sem_SetVar{3}, Sem_FacePlayer{}, Sem_PlayRadio{3}
     ASSERT_TRUE(insts.size() >= 3);
 
-    // Third instruction should be Sem_PlayRadio{3} — context still valid
+    // Third instruction should be Sem_PlayRadio{3} â€” context still valid
     auto* radio = std::get_if<Sem_PlayRadio>(&insts[2].op);
     ASSERT_TRUE(radio != nullptr);
     ASSERT_EQ(radio->channel, 3);
 
-    std::cout << "  [setval(3)->faceplayer->MapRadio: channel=3 (propagated) ✓]\n";
+    std::cout << "  [setval(3)->faceplayer->MapRadio: channel=3 (propagated) âœ“]\n";
 }
 
-// Finding 1: giveitem writes wScriptVar → invalidates context
+// Finding 1: giveitem writes wScriptVar â†’ invalidates context
+
+// =============================================================================
+// MOVE-SAFETY REGRESSION: HeadlessGameLoop callback wires to correct object
+// =============================================================================
+// HeadlessGameLoop deletes copy/move. This test proves that a loop constructed
+// in place (never moved) has its MovementManager completion callback correctly
+// wired to the enclosing object, and that the callback fires correctly when a
+// scripted NPC movement completes — updating the authoritative NpcState.
+//
+// The test explicitly exercises the path that the old NRVO-guarded factory
+// pattern relied on implicitly. It also proves that give()/take()/has() operate
+// against the authoritative GameState::items bag.
+// =============================================================================
+TEST(movement_callback_wires_to_live_object) {
+    // Construct in-place — no move, no copy.
+    // HeadlessGameLoop deletes copy and move.  This is the only valid construction.
+    //
+    // Proof: the MovementManager completion callback captures [this] at construction
+    // time.  After the movement completes, the callback must fire against the live
+    // HeadlessGameLoop — not a stale address from a hypothetical move.  We verify
+    // this by enqueuing a scripted NPC movement through the production applymovement
+    // path (script yields on movement; loop ticks drain the manager; callback fires;
+    // NpcState is updated on the live object).
+    HeadlessGameLoop loop;
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass {
+        return CollisionClass::Floor;
+    });
+
+    // Add an NPC at (3, 0).
+    NpcState npc;
+    npc.id     = 1;
+    npc.x      = 3;
+    npc.y      = 0;
+    npc.facing = enginemon::Direction::Down;
+    loop.add_npc(npc);
+
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+    loop.set_game_state(&gs);
+    loop.set_lua_runtime(&rt);
+
+    ASSERT_EQ(loop.get_npc(1)->x, 3);
+    ASSERT_EQ(loop.get_npc(1)->y, 0);
+
+    // Enqueue NPC movement via the scripted movement manager (same object as
+    // loop.movement_manager_).  A single step left: (3,0) -> (2,0).
+    std::vector<MovementCmd> cmds;
+    MovementCmd step;
+    step.type      = MovementCommandType::Step;
+    step.direction = MovementDirection::Left;
+    cmds.push_back(step);
+    MovementCmd end_cmd;
+    end_cmd.type = MovementCommandType::StepEnd;
+    cmds.push_back(end_cmd);
+
+    uint32_t fake_coroutine_id = 42;  // non-zero = NPC coroutine, not player
+    bool enqueued = rt.get_stub_services().scripted_movement_manager->enqueue_movement(
+        1, fake_coroutine_id, cmds, 3, 0, MovementDirection::Left
+    );
+    ASSERT_TRUE(enqueued);
+
+    // Use a script that yields on movement for actor 1 so the loop enters
+    // ScriptYielded state — that state causes movement_manager_.update() to be
+    // called each tick, which drains the movement and fires the callback.
+    // The script yields "movement" with actor_id=1, then ends.
+    const char* script_code = R"(
+script = {}
+function script.main(ctx)
+    coroutine.yield("movement", 1)
+    return
+end
+return script
+)";
+    loop.set_script_loader([&](const std::string&) -> std::string {
+        return script_code;
+    });
+    loop.start_script("move_test");
+
+    // Tick until the loop returns to idle (movement complete + script resumes and ends).
+    for (int i = 0; i < 40 && !loop.is_idle(); ++i) {
+        loop.tick();
+    }
+    ASSERT_TRUE(loop.is_idle());
+
+    // The completion callback fired via movement_manager_.completion_callback_,
+    // which captures [this = &loop].  It called get_npc(1) on the live object and
+    // updated npc->x/y/is_moving.
+    const NpcState* npc_after = loop.get_npc(1);
+    ASSERT_TRUE(npc_after != nullptr);
+    ASSERT_EQ(npc_after->x, 2);       // one step left: 3 -> 2
+    ASSERT_EQ(npc_after->y, 0);       // y unchanged
+    ASSERT_FALSE(npc_after->is_moving);
+
+    std::cout << "  [movement_callback_wires_to_live_object: NPC (3,0)->(2,0);"
+              << " callback fired against live in-place object]\n";
+}

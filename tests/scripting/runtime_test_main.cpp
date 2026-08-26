@@ -545,6 +545,7 @@ void test_vm_sdefer_cleared_on_loop_destroy();
 void test_vm_sdefer_cleared_on_rebind();
 void test_vm_setvar_from_result_zero_stores_zero();
 void test_wait_frames_before_expiry_no_resume();
+void test_movement_callback_wires_to_live_object();
 void test_wait_frames_expiry_reyield_sets_resumed();
 void test_wait_frames_expiry_sets_resumed();
 void test_wait_seconds_not_immediate_resume();
@@ -992,6 +993,8 @@ int main(int argc, char* argv[]) {
     
     // Timed yield tests - WaitFrames / WaitSeconds script_resumed tracking
     RUN_TEST(wait_frames_before_expiry_no_resume);
+    // Move-safety regression: callback fires against live object, not stale moved-from address
+    RUN_TEST(movement_callback_wires_to_live_object);
     RUN_TEST(wait_frames_expiry_sets_resumed);
     RUN_TEST(wait_frames_expiry_reyield_sets_resumed);
     RUN_TEST(wait_seconds_not_immediate_resume);
