@@ -15,12 +15,28 @@
 namespace enginemon {
 
 HeadlessGameLoop::HeadlessGameLoop() {
-    // Set up movement completion callback to update state
+    // Set up movement completion callback to update authoritative actor state.
+    // Called by MovementManager::update() when a movement sequence finishes.
     movement_manager_.set_completion_callback(
         [this](uint32_t actor_id, uint32_t coroutine_id) {
             if (actor_id == 0) {
-                // Player movement completed
+                // Player movement completed — commit position.
                 complete_player_movement();
+            } else {
+                // Scripted NPC movement completed — commit final position/facing
+                // from the movement manager's internal state to the authoritative
+                // NpcState so get_npc(id)->x/y reflects the post-move coordinates.
+                auto mv_state = movement_manager_.get_actor_state(actor_id);
+                if (mv_state) {
+                    NpcState* npc = get_npc(static_cast<uint16_t>(actor_id));
+                    if (npc) {
+                        npc->x       = mv_state->x;
+                        npc->y       = mv_state->y;
+                        npc->facing  = static_cast<Direction>(
+                            static_cast<uint8_t>(mv_state->facing));
+                        npc->is_moving = false;
+                    }
+                }
             }
         }
     );
@@ -31,6 +47,14 @@ HeadlessGameLoop::~HeadlessGameLoop() {
     // Prevents a surviving LuaRuntime from invoking the destroyed loop.
     if (lua_runtime_) {
         lua_runtime_->get_stub_services().deferred_script_fn = nullptr;
+        // Null the scripted_movement_manager pointer so a surviving LuaRuntime
+        // cannot dereference the now-destroyed movement_manager_ value member.
+        // This mirrors what set_lua_runtime() does on rebind.
+        lua_runtime_->get_stub_services().scripted_movement_manager = nullptr;
+        // Disable async movement — the manager it pointed to no longer exists.
+        lua_runtime_->get_stub_services().async_movement_enabled = false;
+        // Null the position query callback — it captured 'this' which is now destroyed.
+        lua_runtime_->get_stub_services().actor_pos_query = nullptr;
     }
 }
 
@@ -427,6 +451,10 @@ void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
     if (lua_runtime_ && lua_runtime_ != runtime) {
         lua_runtime_->get_stub_services().deferred_script_fn = nullptr;
         lua_runtime_->get_stub_services().scripted_movement_manager = nullptr;
+        // Disable async movement on the old runtime — it is no longer wired
+        // to a valid HeadlessGameLoop movement manager.
+        lua_runtime_->get_stub_services().async_movement_enabled = false;
+        lua_runtime_->get_stub_services().actor_pos_query = nullptr;
     }
     lua_runtime_ = runtime;
     if (runtime) {
@@ -438,8 +466,23 @@ void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
             };
         // Wire HeadlessGameLoop::movement_manager_ as the single authority for
         // scripted NPC movement.  ctx.world:move_actor uses this pointer when
-        // async movement is enabled through the HeadlessGameLoop path.
+        // async movement is enabled.
         runtime->get_stub_services().scripted_movement_manager = &movement_manager_;
+        // Enable async movement so ctx.world:move_actor enqueues into the
+        // movement manager and yields rather than applying position immediately.
+        // This is the production path — the 16-frame timed movement system must
+        // be active whenever a HeadlessGameLoop is driving the simulation.
+        runtime->get_stub_services().async_movement_enabled = true;
+        // Wire NPC position query so ctx.world:move_actor reads the authoritative
+        // NpcState starting position rather than the stub actor map (which defaults
+        // to {0,0}).  Without this, every scripted movement enqueues from the wrong
+        // start position and the final committed position would be wrong.
+        runtime->get_stub_services().actor_pos_query =
+            [this](uint32_t actor_id) -> std::pair<int32_t, int32_t> {
+                const NpcState* npc = get_npc(static_cast<uint16_t>(actor_id));
+                if (npc) return {npc->x, npc->y};
+                return {0, 0};
+            };
     }
 }
 

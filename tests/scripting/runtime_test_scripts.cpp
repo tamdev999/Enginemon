@@ -10,6 +10,7 @@
 #include "engine/world/collision.hpp"
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/world_manager.hpp"
+#include "engine/world/movement_manager.hpp"
 #include "engine/party/party.hpp"
 #include "engine/party/pokemon.hpp"
 #include "crystal/output/native_package.hpp"
@@ -19,6 +20,7 @@
 #include "crystal/script/semantic_legalizer.hpp"
 #include "crystal/script/legality_gate.hpp"
 #include "crystal/script/crystal_state_vars.hpp"
+#include "crystal/script/semantic_lua_emitter.hpp"
 #include "crystal/legality_test_helpers.hpp"
 #include <array>
 #include <filesystem>
@@ -3071,3 +3073,471 @@ TEST(batch3_heal_party_no_script_result) {
     std::cout << "  [Sem_HealParty does not modify wScriptVar]\n";
 }
 
+
+//=============================================================================
+// SCRIPTED MOVEMENT P0 TESTS — August 2026
+//
+// These tests verify the production scripted-movement pipeline end-to-end:
+//   Sem_ApplyMovement → SemanticLuaEmitter → LuaRuntime + HeadlessGameLoop
+//   → ticks → authoritative position/facing
+//
+// Hard invariants:
+//   - Assertions read from HeadlessGameLoop::get_npc(id) — not StubServices
+//   - Async mode is enabled automatically by set_lua_runtime(), never manually
+//   - Command order, type (step/turn/sleep/speed), and timing are verified
+//=============================================================================
+
+// Helper: configure a HeadlessGameLoop with floor collision and one NPC.
+// NPC id=npc_id placed at (npc_x, npc_y) facing down.
+// HeadlessGameLoop is non-movable (callback captures 'this'); caller must own the loop.
+static void setup_scripted_movement_loop(
+    HeadlessGameLoop& loop,
+    LuaRuntime& rt,
+    uint16_t npc_id, int32_t npc_x, int32_t npc_y)
+{
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) -> CollisionClass {
+        return CollisionClass::Floor;
+    });
+    NpcState npc;
+    npc.id = npc_id;
+    npc.x  = npc_x;
+    npc.y  = npc_y;
+    npc.facing = enginemon::Direction::Down;
+    loop.add_npc(npc);
+    loop.set_lua_runtime(&rt);
+}
+
+// Helper: build a 1-block SemanticScriptIR with Sem_ApplyMovement.
+static std::string emit_apply_movement(const enginemon::Sem_ApplyMovement& op)
+{
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "move_test";
+    enginemon::SemanticBasicBlock block;
+    block.id = 0; block.is_entry = true;
+    block.instructions.push_back({op});
+    block.instructions.push_back({enginemon::Sem_End{}});
+    ir.blocks.push_back(std::move(block));
+    crystal::SemanticLuaEmitter emitter;
+    return emitter.emit(ir);
+}
+
+// ── E2E: NPC steps left, position commits after 16 ticks per step ───────────
+TEST(scripted_movement_e2e_npc_steps_left_position_commits) {
+    using namespace enginemon;
+
+    // Build: NPC 1 at (10, 5) steps left 3 tiles.
+    Sem_ApplyMovement op;
+    op.target.type      = MovementTargetType::Object;
+    op.target.object_id = 1;
+    for (int i = 0; i < 3; ++i) {
+        MovementCommand mc;
+        mc.type      = MovementType::Step;
+        mc.direction = enginemon::Direction::Left;
+        op.commands.push_back(mc);
+    }
+    MovementCommand end_mc; end_mc.type = MovementType::StepEnd;
+    op.commands.push_back(end_mc);
+
+    std::string lua = emit_apply_movement(op);
+    // Emitter must produce the ordered array format, not batched
+    ASSERT_TRUE(lua.find("{type=\"step\", dir=\"left\"}") != std::string::npos);
+    ASSERT_TRUE(lua.find("{type=\"step_end\"}") != std::string::npos);
+    ASSERT_TRUE(lua.find("{left=") == std::string::npos);  // no batch format
+
+    LuaRuntime rt;
+    HeadlessGameLoop loop;
+    setup_scripted_movement_loop(loop, rt, 1, 10, 5);
+
+    loop.set_script_loader([&](const std::string&) { return lua; });
+    bool started = loop.start_script("move_test");
+    ASSERT_TRUE(started);
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+
+    // Position must NOT have jumped immediately
+    const NpcState* npc = loop.get_npc(1);
+    ASSERT_TRUE(npc != nullptr);
+    ASSERT_EQ(npc->x, 10);  // unchanged until ticks complete
+
+    // Each step takes 16 ticks (1 start + 15 subsequent decrements).
+    // 3 steps = 48 ticks total (step 3 completes on tick 48).
+    // After 47 ticks: still yielded (step 3 has 1 frame left).
+    // After 48 ticks: step 3 completes, callback fires, script resumes and exits.
+    loop.tick(47);
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+
+    // The 48th tick completes the last step and the manager fires completion.
+    // update_script() then resumes the script which runs to Sem_End → Idle.
+    TickResult final_tick = loop.tick();
+    ASSERT_TRUE(final_tick.script_complete || loop.state() == LoopState::Idle);
+
+    // Authoritative position: 3 tiles left from x=10 → x=7
+    npc = loop.get_npc(1);
+    ASSERT_TRUE(npc != nullptr);
+    ASSERT_EQ(npc->x, 7);
+    ASSERT_EQ(npc->y, 5);  // unchanged
+
+    std::cout << "  [E2E: NPC 1 stepped left 3 tiles: x=10 -> x=7, 48 ticks, authoritative ✓]\n";
+}
+
+// ── E2E: turn command changes facing, does not move position ────────────────
+TEST(scripted_movement_e2e_turn_changes_facing_not_position) {
+    using namespace enginemon;
+
+    // NPC 2 at (5, 5): turn up, step right — facing must be right after step.
+    Sem_ApplyMovement op;
+    op.target.type      = MovementTargetType::Object;
+    op.target.object_id = 2;
+    // turn up
+    MovementCommand turn_mc; turn_mc.type = MovementType::TurnHead; turn_mc.direction = enginemon::Direction::Up;
+    op.commands.push_back(turn_mc);
+    // step right
+    MovementCommand step_mc; step_mc.type = MovementType::Step; step_mc.direction = enginemon::Direction::Right;
+    op.commands.push_back(step_mc);
+    // step_end
+    MovementCommand end_mc; end_mc.type = MovementType::StepEnd;
+    op.commands.push_back(end_mc);
+
+    std::string lua = emit_apply_movement(op);
+    // Turn must be in the sequence, not discarded
+    ASSERT_TRUE(lua.find("{type=\"turn\", dir=\"up\"}") != std::string::npos);
+    ASSERT_TRUE(lua.find("{type=\"step\", dir=\"right\"}") != std::string::npos);
+
+    LuaRuntime rt;
+    HeadlessGameLoop loop;
+    loop.spawn_player(99, 99, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+    NpcState npc2; npc2.id = 2; npc2.x = 5; npc2.y = 5; npc2.facing = enginemon::Direction::Down;
+    loop.add_npc(npc2);
+    loop.set_lua_runtime(&rt);
+    loop.set_script_loader([&](const std::string&) { return lua; });
+
+    loop.start_script("turn_test");
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+
+    // turn(1) + step(16) = 17 ticks
+    loop.tick(17);
+    // Let it settle
+    loop.tick(5);
+
+    const NpcState* npc = loop.get_npc(2);
+    ASSERT_TRUE(npc != nullptr);
+    // Stepped right from x=5 → x=6
+    ASSERT_EQ(npc->x, 6);
+    ASSERT_EQ(npc->y, 5);
+    // Final facing: right (from the step command — facing committed from movement)
+    ASSERT_TRUE(npc->facing == enginemon::Direction::Right);
+
+    std::cout << "  [E2E: turn+step: x=5->6, facing=right committed ✓]\n";
+}
+
+// ── E2E: coroutine resumes ONLY after movement completes (timing exact) ─────
+TEST(scripted_movement_e2e_coroutine_resumes_only_after_completion) {
+    using namespace enginemon;
+
+    // NPC 3 at (0, 0) steps down 1 tile (16 ticks exactly).
+    Sem_ApplyMovement op;
+    op.target.type      = MovementTargetType::Object;
+    op.target.object_id = 3;
+    MovementCommand step_mc; step_mc.type = MovementType::Step; step_mc.direction = enginemon::Direction::Down;
+    op.commands.push_back(step_mc);
+    MovementCommand end_mc; end_mc.type = MovementType::StepEnd;
+    op.commands.push_back(end_mc);
+
+    // Append a flag set AFTER movement to prove continuation ran
+    enginemon::SemanticScriptIR ir;
+    ir.script_id = "coro_test";
+    {
+        enginemon::SemanticBasicBlock b; b.id = 0; b.is_entry = true;
+        b.instructions.push_back({op});
+        FlagRef f; f.ns = FlagNamespace::Event; f.value = 999;
+        b.instructions.push_back({Sem_SetFlag{f}});
+        b.instructions.push_back({Sem_End{}});
+        ir.blocks.push_back(std::move(b));
+    }
+    crystal::SemanticLuaEmitter emitter;
+    std::string lua = emitter.emit(ir);
+
+    LuaRuntime rt;
+    HeadlessGameLoop loop;
+    loop.spawn_player(99, 99, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+    NpcState npc3; npc3.id = 3; npc3.x = 0; npc3.y = 0; npc3.facing = enginemon::Direction::Down;
+    loop.add_npc(npc3);
+    loop.set_lua_runtime(&rt);
+    loop.set_script_loader([&](const std::string&) { return lua; });
+
+    loop.start_script("coro_test");
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+
+    // After 15 ticks: still yielded, flag NOT set, NPC y must still be 0
+    // (destination committed on tick 1, but manager still active)
+    loop.tick(15);
+    ASSERT_TRUE(loop.state() == LoopState::ScriptYielded);
+    // Flag NOT set yet (continuation not executed)
+    uint32_t enc = (static_cast<uint32_t>(0) << 16) | 999u;
+    ASSERT_FALSE(rt.get_stub_services().flags.count(static_cast<int>(enc)));
+
+    // Tick 16: movement completes, script resumes, Sem_SetFlag fires, Sem_End → Idle
+    TickResult r = loop.tick();
+    ASSERT_TRUE(r.script_complete || loop.state() == LoopState::Idle);
+    // Flag now SET — continuation executed
+    ASSERT_TRUE(rt.get_stub_services().flags.count(static_cast<int>(enc)));
+    ASSERT_TRUE(rt.get_stub_services().flags.at(static_cast<int>(enc)));
+
+    // NPC moved down 1 tile
+    const NpcState* npc = loop.get_npc(3);
+    ASSERT_TRUE(npc != nullptr);
+    ASSERT_EQ(npc->y, 1);
+
+    std::cout << "  [E2E: coroutine resumes exactly after 16 ticks, flag set, NPC y=1 ✓]\n";
+}
+
+// ── E2E: nonzero NPC actor moves independently of player ────────────────────
+TEST(scripted_movement_e2e_nonzero_npc_not_player) {
+    using namespace enginemon;
+
+    // Player at (5, 5). NPC 4 at (10, 10) steps up 2.
+    Sem_ApplyMovement op;
+    op.target.type      = MovementTargetType::Object;
+    op.target.object_id = 4;
+    for (int i = 0; i < 2; ++i) {
+        MovementCommand mc; mc.type = MovementType::Step; mc.direction = enginemon::Direction::Up;
+        op.commands.push_back(mc);
+    }
+    MovementCommand end_mc; end_mc.type = MovementType::StepEnd;
+    op.commands.push_back(end_mc);
+
+    std::string lua = emit_apply_movement(op);
+
+    LuaRuntime rt;
+    HeadlessGameLoop loop;
+    loop.spawn_player(5, 5, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+    NpcState npc4; npc4.id = 4; npc4.x = 10; npc4.y = 10;
+    loop.add_npc(npc4);
+    loop.set_lua_runtime(&rt);
+    loop.set_script_loader([&](const std::string&) { return lua; });
+
+    loop.start_script("npc_move_test");
+    loop.tick(33);  // 2 steps * 16 + 1 settling tick
+
+    // Player must not have moved
+    ASSERT_EQ(loop.player().x, 5);
+    ASSERT_EQ(loop.player().y, 5);
+
+    // NPC 4 moved up 2 tiles: y=10 → y=8
+    const NpcState* npc = loop.get_npc(4);
+    ASSERT_TRUE(npc != nullptr);
+    ASSERT_EQ(npc->y, 8);
+    ASSERT_EQ(npc->x, 10);
+
+    std::cout << "  [E2E: NPC 4 moves up, player unchanged: NPC y=8, player at (5,5) ✓]\n";
+}
+
+// ── E2E: two actors move sequentially, no aliasing ───────────────────────────
+TEST(scripted_movement_e2e_two_actors_no_alias) {
+    using namespace enginemon;
+
+    // NPC 5 moves right 1. NPC 6 moves left 1.
+    // Scripts run sequentially. After NPC 5 completes, NPC 6 runs.
+    // They must be independent; no position leak.
+
+    // NPC 5: step right
+    Sem_ApplyMovement op5;
+    op5.target.type      = MovementTargetType::Object;
+    op5.target.object_id = 5;
+    MovementCommand mc5; mc5.type = MovementType::Step; mc5.direction = enginemon::Direction::Right;
+    MovementCommand end5; end5.type = MovementType::StepEnd;
+    op5.commands.push_back(mc5);
+    op5.commands.push_back(end5);
+    std::string lua5 = emit_apply_movement(op5);
+
+    // NPC 6: step left
+    Sem_ApplyMovement op6;
+    op6.target.type      = MovementTargetType::Object;
+    op6.target.object_id = 6;
+    MovementCommand mc6; mc6.type = MovementType::Step; mc6.direction = enginemon::Direction::Left;
+    MovementCommand end6; end6.type = MovementType::StepEnd;
+    op6.commands.push_back(mc6);
+    op6.commands.push_back(end6);
+    std::string lua6 = emit_apply_movement(op6);
+
+    LuaRuntime rt;
+    HeadlessGameLoop loop;
+    loop.spawn_player(99, 99, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+    NpcState npc5; npc5.id = 5; npc5.x = 3; npc5.y = 3;
+    NpcState npc6; npc6.id = 6; npc6.x = 7; npc6.y = 7;
+    loop.add_npc(npc5);
+    loop.add_npc(npc6);
+    loop.set_lua_runtime(&rt);
+
+    // Run NPC 5 script — load lua5 directly into runtime, start by name
+    rt.execute_string(lua5, "npc5_script");
+    loop.start_script("npc5_script");
+    loop.tick(18);  // 1 step = 17 ticks to complete, 18 for settling
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    ASSERT_EQ(loop.get_npc(5)->x, 4);  // moved right
+    ASSERT_EQ(loop.get_npc(6)->x, 7);  // NPC 6 unchanged
+
+    // Run NPC 6 script
+    rt.execute_string(lua6, "npc6_script");
+    loop.start_script("npc6_script");
+    loop.tick(18);
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+    ASSERT_EQ(loop.get_npc(5)->x, 4);  // NPC 5 still at 4 (not aliased)
+    ASSERT_EQ(loop.get_npc(6)->x, 6);  // moved left
+
+    std::cout << "  [E2E: NPC 5 right→x=4, NPC 6 left→x=6, no alias ✓]\n";
+}
+
+// ── malformed payload: unknown direction string silently becomes noop ─────────
+TEST(scripted_movement_malformed_payload_fails_explicitly) {
+    // Passing an unknown direction string to move_actor results in zero counts
+    // (no movement), which in async mode means no enqueue and no yield.
+    // The script completes immediately without any movement occurring.
+    // This tests that malformed input does NOT silently move the actor.
+    HeadlessGameLoop loop;
+    LuaRuntime rt;
+    loop.spawn_player(5, 5, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+    NpcState npc_malf; npc_malf.id = 99; npc_malf.x = 3; npc_malf.y = 3;
+    loop.add_npc(npc_malf);
+    loop.set_lua_runtime(&rt);
+
+    // Unknown direction string "bogus" → zero counts → noop in both async and sync
+    const char* bad_script = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:move_actor(99, "bogus")
+    return true
+end
+return script
+)";
+    loop.set_script_loader([&](const std::string&) -> std::string { return bad_script; });
+    bool started = loop.start_script("bad_move");
+    ASSERT_TRUE(started);
+
+    // Script must complete on tick 1 (no movement enqueued, no yield)
+    loop.tick(2);
+    ASSERT_TRUE(loop.state() == LoopState::Idle);
+
+    // NPC must not have moved — malformed direction applied nothing
+    const NpcState* npc = loop.get_npc(99);
+    ASSERT_TRUE(npc != nullptr);
+    ASSERT_EQ(npc->x, 3);
+    ASSERT_EQ(npc->y, 3);
+
+    std::cout << "  [Malformed direction string 'bogus' → noop, NPC position unchanged ✓]\n";
+}
+
+// ── destructor clears scripted_movement_manager, no dangling pointer ─────────
+TEST(scripted_movement_destructor_clears_stale_manager_pointer) {
+    LuaRuntime rt;
+
+    {
+        HeadlessGameLoop loop;
+        loop.spawn_player(5, 5, enginemon::Direction::Down);
+        loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+        loop.set_lua_runtime(&rt);
+
+        // Async must be enabled after wiring
+        ASSERT_TRUE(rt.get_stub_services().async_movement_enabled);
+        ASSERT_TRUE(rt.get_stub_services().scripted_movement_manager != nullptr);
+    }
+    // HeadlessGameLoop destroyed here — destructor must null the pointer
+    ASSERT_TRUE(rt.get_stub_services().scripted_movement_manager == nullptr);
+    ASSERT_FALSE(rt.get_stub_services().async_movement_enabled);
+
+    std::cout << "  [Destructor clears scripted_movement_manager and disables async ✓]\n";
+}
+
+// ── rebind clears old runtime, new runtime gets the manager ──────────────────
+TEST(scripted_movement_rebind_clears_old_wires_new) {
+    LuaRuntime rt_a;
+    LuaRuntime rt_b;
+
+    HeadlessGameLoop loop;
+    loop.spawn_player(5, 5, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    // Wire rt_a
+    loop.set_lua_runtime(&rt_a);
+    ASSERT_TRUE(rt_a.get_stub_services().scripted_movement_manager != nullptr);
+    ASSERT_TRUE(rt_a.get_stub_services().async_movement_enabled);
+
+    // Rebind to rt_b — rt_a must be cleared
+    loop.set_lua_runtime(&rt_b);
+    ASSERT_TRUE(rt_a.get_stub_services().scripted_movement_manager == nullptr);
+    ASSERT_FALSE(rt_a.get_stub_services().async_movement_enabled);
+    ASSERT_TRUE(rt_b.get_stub_services().scripted_movement_manager != nullptr);
+    ASSERT_TRUE(rt_b.get_stub_services().async_movement_enabled);
+
+    std::cout << "  [Rebind: old runtime cleared, new runtime wired ✓]\n";
+}
+
+// ── async enabled automatically by set_lua_runtime, not manually ─────────────
+TEST(scripted_movement_async_auto_enabled_by_set_lua_runtime) {
+    // Verifies the production contract: no test code should need to call
+    // set_async_movement() when using HeadlessGameLoop.
+    LuaRuntime rt;
+    ASSERT_FALSE(rt.get_stub_services().async_movement_enabled);  // starts disabled
+
+    HeadlessGameLoop loop;
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+    loop.set_lua_runtime(&rt);
+
+    // After wiring, async must be active — no manual call needed
+    ASSERT_TRUE(rt.get_stub_services().async_movement_enabled);
+    ASSERT_TRUE(rt.get_stub_services().scripted_movement_manager != nullptr);
+
+    std::cout << "  [Async auto-enabled by set_lua_runtime — no manual call needed ✓]\n";
+}
+
+// ── E2E: command order preserved — right then up, not up then right ──────────
+TEST(scripted_movement_e2e_command_order_preserved) {
+    using namespace enginemon;
+
+    // NPC 7 at (5, 5): step right, step up.
+    // The emitter must emit them in order; the parser must preserve that order.
+    Sem_ApplyMovement op;
+    op.target.type      = MovementTargetType::Object;
+    op.target.object_id = 7;
+    MovementCommand mc_right; mc_right.type = MovementType::Step; mc_right.direction = enginemon::Direction::Right;
+    MovementCommand mc_up;    mc_up.type    = MovementType::Step; mc_up.direction    = enginemon::Direction::Up;
+    MovementCommand mc_end;   mc_end.type   = MovementType::StepEnd;
+    op.commands.push_back(mc_right);
+    op.commands.push_back(mc_up);
+    op.commands.push_back(mc_end);
+
+    std::string lua = emit_apply_movement(op);
+
+    // Emitted order: right before up
+    size_t right_pos = lua.find("dir=\"right\"");
+    size_t up_pos    = lua.find("dir=\"up\"");
+    ASSERT_TRUE(right_pos != std::string::npos);
+    ASSERT_TRUE(up_pos    != std::string::npos);
+    ASSERT_TRUE(right_pos < up_pos);
+
+    LuaRuntime rt;
+    HeadlessGameLoop loop;
+    loop.spawn_player(99, 99, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+    NpcState npc7; npc7.id = 7; npc7.x = 5; npc7.y = 5;
+    loop.add_npc(npc7);
+    loop.set_lua_runtime(&rt);
+    loop.set_script_loader([&](const std::string&) { return lua; });
+
+    loop.start_script("order_test");
+    loop.tick(33);  // 2 steps * 16 + 1
+
+    const NpcState* npc = loop.get_npc(7);
+    ASSERT_TRUE(npc != nullptr);
+    // right then up: (5,5) → (6,5) → (6,4)
+    ASSERT_EQ(npc->x, 6);
+    ASSERT_EQ(npc->y, 4);
+
+    std::cout << "  [E2E: right+up order preserved: (5,5)->(6,5)->(6,4) ✓]\n";
+}

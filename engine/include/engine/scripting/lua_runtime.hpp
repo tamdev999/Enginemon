@@ -16,6 +16,7 @@
 #include <vector>
 #include <optional>
 #include <any>
+#include <utility>
 
 namespace enginemon {
 
@@ -125,6 +126,13 @@ struct StubServices {
     // HeadlessGameLoop::update_script() can observe them.
     // OWNERSHIP: pointed-to manager is owned by HeadlessGameLoop, NOT by us.
     MovementManager* scripted_movement_manager = nullptr;
+
+    // Authoritative actor position query — set by HeadlessGameLoop::set_lua_runtime().
+    // Called by ctx.world:move_actor to get the canonical starting position of a
+    // non-player actor (NpcState) rather than reading from the stub actor map.
+    // Returns {x, y} for actor_id, or {0, 0} if not found.
+    // OWNERSHIP: callback captures HeadlessGameLoop* which owns its lifetime.
+    std::function<std::pair<int32_t, int32_t>(uint32_t actor_id)> actor_pos_query;
 
     // Active script coroutine ID — set by HeadlessGameLoop before each yield so
     // ctx.world:move_actor can store the real coroutine ID in the movement entry.

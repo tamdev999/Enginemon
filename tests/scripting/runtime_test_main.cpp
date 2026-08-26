@@ -378,6 +378,17 @@ void test_npc_movement_facing_conversion();
 void test_npc_respects_radius_bounds();
 void test_npc_rng_determinism_via_gamestate();
 void test_npc_rng_save_restore_determinism();
+// Scripted movement P0
+void test_scripted_movement_e2e_npc_steps_left_position_commits();
+void test_scripted_movement_e2e_turn_changes_facing_not_position();
+void test_scripted_movement_e2e_coroutine_resumes_only_after_completion();
+void test_scripted_movement_e2e_nonzero_npc_not_player();
+void test_scripted_movement_e2e_two_actors_no_alias();
+void test_scripted_movement_malformed_payload_fails_explicitly();
+void test_scripted_movement_destructor_clears_stale_manager_pointer();
+void test_scripted_movement_rebind_clears_old_wires_new();
+void test_scripted_movement_async_auto_enabled_by_set_lua_runtime();
+void test_scripted_movement_e2e_command_order_preserved();
 void test_npc_spin_changes_facing();
 void test_npc_standing_never_moves();
 void test_npc_walk_changes_position();
@@ -811,6 +822,18 @@ int main(int argc, char* argv[]) {
     // RNG ownership tests (Audit 7)
     RUN_TEST(npc_rng_determinism_via_gamestate);
     RUN_TEST(npc_rng_save_restore_determinism);
+
+    // Scripted movement P0 — production correct pipeline
+    RUN_TEST(scripted_movement_e2e_npc_steps_left_position_commits);
+    RUN_TEST(scripted_movement_e2e_turn_changes_facing_not_position);
+    RUN_TEST(scripted_movement_e2e_coroutine_resumes_only_after_completion);
+    RUN_TEST(scripted_movement_e2e_nonzero_npc_not_player);
+    RUN_TEST(scripted_movement_e2e_two_actors_no_alias);
+    RUN_TEST(scripted_movement_malformed_payload_fails_explicitly);
+    RUN_TEST(scripted_movement_destructor_clears_stale_manager_pointer);
+    RUN_TEST(scripted_movement_rebind_clears_old_wires_new);
+    RUN_TEST(scripted_movement_async_auto_enabled_by_set_lua_runtime);
+    RUN_TEST(scripted_movement_e2e_command_order_preserved);
     
     // Field-move context lifecycle tests
     RUN_TEST(field_context_strength_available_establishes_actor);

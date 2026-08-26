@@ -456,12 +456,15 @@ int move_actor(lua_State* L) {
     }
 }
 
-// Parse the emitter's {type,dir} array format into batched counts.
-// Emitter produces: {{type="step",dir="left"},{type="step",dir="down"},...}
-// Returns false if the table is not in array-of-tables format (falls back to batch).
-static bool parse_movement_command_array(lua_State* L, int table_idx,
-                                          int& down, int& up, int& left, int& right) {
-    // Detect: if t[1] exists and is a table, it's the emitter's command array.
+// Parse the emitter's {type,dir} array format into an ordered vector<MovementCmd>.
+// Emitter produces: {{type="step",dir="left"},{type="turn",dir="down"},...,{type="step_end"}}
+// Preserves command order, type, direction, speed, and sleep parameters exactly.
+// Returns true if the table is in array-of-tables format; false if it is the
+// batch format {down=N,up=N,left=N,right=N} (caller must fall back).
+static bool parse_movement_command_sequence(lua_State* L, int table_idx,
+                                            std::vector<MovementCmd>& out_cmds)
+{
+    // Detect: if t[1] exists and is a table, it's the emitter command array.
     lua_rawgeti(L, table_idx, 1);
     bool is_array = lua_istable(L, -1);
     lua_pop(L, 1);
@@ -480,17 +483,44 @@ static bool parse_movement_command_array(lua_State* L, int table_idx,
         const char* d = lua_isstring(L, -1) ? lua_tostring(L, -1) : nullptr;
         lua_pop(L, 1);
 
+        lua_getfield(L, -1, "frames");
+        int frames = lua_isinteger(L, -1) ? static_cast<int>(lua_tointeger(L, -1)) : 0;
+        lua_pop(L, 1);
+
         lua_pop(L, 1);  // pop command table
 
-        if (!t || !d) continue;
-        std::string type(t), dir(d);
-        // Only count step-type commands; turns, sleep, step_end don't move tiles.
-        if (type == "step" || type == "slow_step" || type == "big_step") {
-            if (dir == "down")        ++down;
-            else if (dir == "up")     ++up;
-            else if (dir == "left")   ++left;
-            else if (dir == "right")  ++right;
+        if (!t) continue;
+        std::string type(t);
+
+        MovementCmd cmd;
+        if (type == "step_end") {
+            cmd.type      = MovementCommandType::StepEnd;
+            cmd.direction = MovementDirection::Down;
+            out_cmds.push_back(cmd);
+            break;  // StepEnd terminates the sequence
+        } else if (type == "sleep") {
+            cmd.type      = MovementCommandType::StepSleep;
+            cmd.direction = MovementDirection::None;
+            cmd.param     = frames > 0 ? frames : 16;
+            out_cmds.push_back(cmd);
+        } else if (d) {
+            // Direction-bearing commands: step, slow_step, big_step, turn
+            std::string dir(d);
+            if      (dir == "down")  cmd.direction = MovementDirection::Down;
+            else if (dir == "up")    cmd.direction = MovementDirection::Up;
+            else if (dir == "left")  cmd.direction = MovementDirection::Left;
+            else if (dir == "right") cmd.direction = MovementDirection::Right;
+            else                     cmd.direction = MovementDirection::Down;
+
+            if      (type == "step")      cmd.type = MovementCommandType::Step;
+            else if (type == "slow_step") cmd.type = MovementCommandType::SlowStep;
+            else if (type == "big_step")  cmd.type = MovementCommandType::BigStep;
+            else if (type == "turn")      cmd.type = MovementCommandType::Turn;
+            else                          cmd.type = MovementCommandType::Step;  // unknown → step
+
+            out_cmds.push_back(cmd);
         }
+        // Unknown entries without a dir field are silently skipped.
     }
     return true;
 }
@@ -500,33 +530,123 @@ static bool parse_movement_command_array(lua_State* L, int table_idx,
 //   batch format:   {down=N, up=N, left=N, right=N}  (hand-written tests)
 int move_actor_table(lua_State* L, int actor_id, int table_idx) {
     auto& stubs = get_stubs(L);
-    
-    int down = 0, up = 0, left = 0, right = 0;
-    bool parsed_as_array = parse_movement_command_array(L, table_idx, down, up, left, right);
 
-    if (!parsed_as_array) {
-        // Batch format: {down=N, up=N, left=N, right=N}
-        lua_getfield(L, table_idx, "down");
-        if (!lua_isnil(L, -1)) down = static_cast<int>(lua_tointeger(L, -1));
-        lua_pop(L, 1);
+    // -------------------------------------------------------------------------
+    // Path A: emitter's ordered command array — preserves sequence, type, speed
+    // -------------------------------------------------------------------------
+    std::vector<MovementCmd> ordered_cmds;
+    bool parsed_as_array = parse_movement_command_sequence(L, table_idx, ordered_cmds);
 
-        lua_getfield(L, table_idx, "up");
-        if (!lua_isnil(L, -1)) up = static_cast<int>(lua_tointeger(L, -1));
-        lua_pop(L, 1);
+    if (parsed_as_array) {
+        // Determine whether there are any steps (tile-moving commands) so we
+        // know whether the sequence will actually move the actor.
+        bool has_steps = false;
+        for (const auto& c : ordered_cmds) {
+            if (c.type == MovementCommandType::Step ||
+                c.type == MovementCommandType::SlowStep ||
+                c.type == MovementCommandType::BigStep) {
+                has_steps = true;
+                break;
+            }
+        }
 
-        lua_getfield(L, table_idx, "left");
-        if (!lua_isnil(L, -1)) left = static_cast<int>(lua_tointeger(L, -1));
-        lua_pop(L, 1);
+        if (!has_steps && ordered_cmds.empty()) {
+            // Completely empty sequence — nothing to do.
+            stubs.movement_calls.push_back({"move_noop", std::to_string(actor_id)});
+            return 0;
+        }
 
-        lua_getfield(L, table_idx, "right");
-        if (!lua_isnil(L, -1)) right = static_cast<int>(lua_tointeger(L, -1));
-        lua_pop(L, 1);
+        stubs.movement_calls.push_back({"move_sequence", std::to_string(actor_id)});
+
+        if (stubs.async_movement_enabled) {
+            // Enqueue the ordered sequence directly — no rebatching.
+            MovementManager& mm = stubs.scripted_movement_manager
+                ? *stubs.scripted_movement_manager
+                : stubs.get_movement_manager();
+
+            // Get starting position: prefer authoritative NPC position from
+            // HeadlessGameLoop (via actor_pos_query) over the stub actor map,
+            // which defaults to {0,0} and would produce wrong movement trajectories.
+            int start_x, start_y;
+            if (actor_id != 0 && stubs.actor_pos_query) {
+                auto [qx, qy] = stubs.actor_pos_query(static_cast<uint32_t>(actor_id));
+                start_x = qx; start_y = qy;
+            } else {
+                StubActorState& state = (actor_id == 0)
+                    ? stubs.player : stubs.actors[actor_id];
+                start_x = state.x; start_y = state.y;
+            }
+            MovementDirection start_facing;
+            {
+                StubActorState& st2 = (actor_id == 0)
+                    ? stubs.player : stubs.actors[actor_id];
+                start_facing = direction_from_string(st2.facing);
+            }
+            uint32_t coro_id = stubs.active_script_coroutine_id;
+
+            mm.enqueue_movement(
+                static_cast<uint32_t>(actor_id),
+                coro_id,
+                ordered_cmds,
+                start_x, start_y,
+                start_facing
+            );
+
+            lua_pushstring(L, "movement");
+            lua_pushinteger(L, static_cast<lua_Integer>(actor_id));
+            return lua_yield(L, 2);
+        } else {
+            // Sync mode: apply each step immediately to stub state.
+            StubActorState& state = (actor_id == 0)
+                ? stubs.player : stubs.actors[actor_id];
+            for (const auto& c : ordered_cmds) {
+                switch (c.type) {
+                    case MovementCommandType::Step:
+                    case MovementCommandType::SlowStep:
+                    case MovementCommandType::BigStep:
+                        switch (c.direction) {
+                            case MovementDirection::Down:  state.y++; break;
+                            case MovementDirection::Up:    state.y--; break;
+                            case MovementDirection::Left:  state.x--; break;
+                            case MovementDirection::Right: state.x++; break;
+                            default: break;
+                        }
+                        state.facing = direction_to_string(c.direction);
+                        break;
+                    case MovementCommandType::Turn:
+                        state.facing = direction_to_string(c.direction);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            return 0;
+        }
     }
 
-    // Reject completely empty movement — it discards the yield and the script
-    // would resume immediately without any movement occurring.
+    // -------------------------------------------------------------------------
+    // Path B: batch format {down=N, up=N, left=N, right=N} — hand-written tests
+    // -------------------------------------------------------------------------
+    int down = 0, up = 0, left = 0, right = 0;
+
+    lua_getfield(L, table_idx, "down");
+    if (!lua_isnil(L, -1)) down = static_cast<int>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, table_idx, "up");
+    if (!lua_isnil(L, -1)) up = static_cast<int>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, table_idx, "left");
+    if (!lua_isnil(L, -1)) left = static_cast<int>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, table_idx, "right");
+    if (!lua_isnil(L, -1)) right = static_cast<int>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    // Reject completely empty movement.
     if (down == 0 && up == 0 && left == 0 && right == 0) {
-        // No-op movement (turn-only or empty sequence): apply facing, no yield.
         stubs.movement_calls.push_back({"move_noop", std::to_string(actor_id)});
         return 0;
     }
@@ -534,7 +654,7 @@ int move_actor_table(lua_State* L, int actor_id, int table_idx) {
     stubs.movement_calls.push_back({"move_table",
         std::to_string(down) + "," + std::to_string(up) + "," +
         std::to_string(left) + "," + std::to_string(right)});
-    
+
     if (stubs.async_movement_enabled) {
         MovementManager& mm = stubs.scripted_movement_manager
             ? *stubs.scripted_movement_manager
@@ -551,8 +671,8 @@ int move_actor_table(lua_State* L, int actor_id, int table_idx) {
         );
 
         lua_pushstring(L, "movement");
-        lua_pushinteger(L, static_cast<lua_Integer>(actor_id));  // yield_data[1]
-        return lua_yield(L, 2);  // yield "movement", actor_id
+        lua_pushinteger(L, static_cast<lua_Integer>(actor_id));
+        return lua_yield(L, 2);
     } else {
         apply_sync_movement(stubs, actor_id, down, up, left, right);
         return 0;
