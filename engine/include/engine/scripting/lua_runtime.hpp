@@ -396,6 +396,7 @@ private:
     void bind_ui_api();
     void bind_audio_api();
     void bind_flag_api();
+    void bind_text_buf_api();
     void bind_time_api();
     void bind_util_api();
     void bind_field_api();

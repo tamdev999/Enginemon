@@ -68,6 +68,7 @@ void LuaRuntime::bind_api() {
     bind_inventory_api();
     bind_audio_api();
     bind_flag_api();
+    bind_text_buf_api();
     bind_time_api();
     bind_util_api();
     bind_field_api();
@@ -329,6 +330,21 @@ void LuaRuntime::bind_flag_api() {
     lua_setfield(L_, -2, "add_var");
     
     lua_setfield(L_, -2, "flags");
+}
+
+void LuaRuntime::bind_text_buf_api() {
+    lua_newtable(L_);
+
+    lua_pushlightuserdata(L_, this);
+    lua_setfield(L_, -2, "_runtime");
+
+    lua_pushcfunction(L_, text_buf_api::set);
+    lua_setfield(L_, -2, "set");
+
+    lua_pushcfunction(L_, text_buf_api::get);
+    lua_setfield(L_, -2, "get");
+
+    lua_setfield(L_, -2, "text_buf");
 }
 
 void LuaRuntime::bind_time_api() {

@@ -375,6 +375,18 @@ namespace flag_api {
 }
 
 // ============================================================================
+// Text Buffer API - ctx.text_buf
+// Transient per-script text argument slots, keyed by "strbuf<N>_<type>".
+// Backed by StubServices::text_buffers (not persisted to GameState).
+// ============================================================================
+namespace text_buf_api {
+    // ctx.text_buf:set(key, value) -- write a text-buffer slot
+    int set(lua_State* L);
+    // ctx.text_buf:get(key) -> int -- read a text-buffer slot (0 if absent)
+    int get(lua_State* L);
+}
+
+// ============================================================================
 // Time API - ctx.time
 // ============================================================================
 namespace time_api {

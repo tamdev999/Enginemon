@@ -990,35 +990,44 @@ int can_use_hm(lua_State* L) {
 
 namespace inventory_api {
 
-// ctx.inventory:give(item_id, count)
-// ctx.inventory:give(item_id, count) -> int
-// Returns 1 (given) or 0 (bag full).
-// Sem_GiveItemVerbose and Sem_GiveItemVerboseVar both assign their result
-// to the VM `result` local and may forward it to set_var.  Returning 0
-// values (nil) causes the downstream luaL_checkinteger on `result` to
-// fail with "number expected, got nil".  Always return an integer.
+// ctx.inventory:give(item_id, count) -> int  (0 = not given, 1 = given)
+//
+// GameState has no item bag.  Item inventory is not yet implemented.
+// Returns 0 (item not given) — truthful: bag does not exist, so the item
+// was not placed anywhere.  Returns an integer so Sem_GiveItemVerbose and
+// Sem_GiveItemVerboseVar can assign `result = ctx.inventory:give(...)` and
+// forward the result to set_var without a "number expected, got nil" error.
+// Source contract: wScriptVar = FALSE (bag full / not given).
 int give(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
     int count   = luaL_optinteger(L, 3, 1);
     (void)item_id; (void)count;
-    lua_pushinteger(L, 1);  // stub: success (bag never full in headless)
+    // Truthful: no item bag is implemented.  Result = 0 (not given).
+    // When the bag subsystem is implemented this must be replaced with a real
+    // GameState write-through that returns 1 on success and 0 on bag-full.
+    lua_pushinteger(L, 0);
     return 1;
 }
 
-// ctx.inventory:take(item_id, count) -> bool
+// ctx.inventory:take(item_id, count) -> int  (0 = not removed, 1 = removed)
+//
+// Truthful: no item bag is implemented.  Returns 0 (item not removed).
 int take(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
-    int count = luaL_optinteger(L, 3, 1);
+    int count   = luaL_optinteger(L, 3, 1);
     (void)item_id; (void)count;
-    lua_pushinteger(L, 1);  // stub: success
+    lua_pushinteger(L, 0);
     return 1;
 }
 
-// ctx.inventory:has(item_id, count?) -> bool
+// ctx.inventory:has(item_id, count?) -> int  (0 = absent, 1 = present)
+//
+// Truthful: no item bag is implemented.  Returns 0 (item not present).
 int has(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
-    int count = luaL_optinteger(L, 3, 1);
-    lua_pushinteger(L, 0);  // stub: not found
+    int count   = luaL_optinteger(L, 3, 1);
+    (void)item_id; (void)count;
+    lua_pushinteger(L, 0);
     return 1;
 }
 
@@ -1268,53 +1277,35 @@ int check(lua_State* L) {
 }
 
 // ctx.flags:set_var(var_id, value)
-// var_id may be an integer (canonical numeric slot, stored as "var_N" in GameState)
-// or a string (text-buffer slot like "strbuf0_item", stored as-is in GameState).
-// Sem_PrepareTextArg uses string keys; Sem_SetVar uses integer keys.
-// Both must accept integer values as the VM result ABI.
+// var_id is an integer — the canonical numeric wScriptVar slot.
+// Stored as "var_N" in GameState::variables (persistent gameplay state).
+// Text-buffer preparation writes (PrepareTextArg) use ctx.text_buf:set(),
+// NOT this function — keeping script-variable and text-buffer namespaces distinct.
 int set_var(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
-    int value = luaL_checkinteger(L, 3);
-
+    int var_id = luaL_checkinteger(L, 2);
+    int value  = luaL_checkinteger(L, 3);
     if (GameState* gs = runtime->get_game_state()) {
-        if (lua_type(L, 2) == LUA_TSTRING) {
-            gs->variables[lua_tostring(L, 2)] = value;
-        } else {
-            gs->variables["var_" + std::to_string(luaL_checkinteger(L, 2))] = value;
-        }
+        gs->variables["var_" + std::to_string(var_id)] = value;
     } else {
-        // Stub path: only integer-keyed vars are tracked in StubServices.
-        // String-keyed text-buffer writes (strbuf*) are presentation side-effects
-        // with no observable impact on headless test assertions.
-        if (lua_type(L, 2) != LUA_TSTRING) {
-            runtime->get_stub_services().vars[static_cast<int>(luaL_checkinteger(L, 2))] = value;
-        }
+        runtime->get_stub_services().vars[var_id] = value;
     }
     return 0;
 }
 
 // ctx.flags:get_var(var_id) -> number
-// var_id may be an integer or a string key (see set_var).
+// var_id is an integer — the canonical numeric wScriptVar slot.
 int get_var(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
-    int value = 0;
+    int var_id = luaL_checkinteger(L, 2);
+    int value  = 0;
     if (GameState* gs = runtime->get_game_state()) {
-        std::string key;
-        if (lua_type(L, 2) == LUA_TSTRING) {
-            key = lua_tostring(L, 2);
-        } else {
-            key = "var_" + std::to_string(luaL_checkinteger(L, 2));
-        }
-        auto it = gs->variables.find(key);
+        auto it = gs->variables.find("var_" + std::to_string(var_id));
         value = (it != gs->variables.end()) ? it->second : 0;
     } else {
-        if (lua_type(L, 2) != LUA_TSTRING) {
-            int var_id = static_cast<int>(luaL_checkinteger(L, 2));
-            const auto& stubs = runtime->get_stub_services();
-            auto it = stubs.vars.find(var_id);
-            value = (it != stubs.vars.end()) ? it->second : 0;
-        }
-        // String-keyed reads in stub mode: return 0 (no stub storage for text buffers)
+        const auto& stubs = runtime->get_stub_services();
+        auto it = stubs.vars.find(var_id);
+        value = (it != stubs.vars.end()) ? it->second : 0;
     }
     lua_pushinteger(L, value);
     return 1;
@@ -1343,7 +1334,46 @@ int add_var(lua_State* L) {
 } // namespace flag_api
 
 // =============================================================================
-// Time API - ctx.time
+// Text Buffer API - ctx.text_buf
+//
+// Transient per-execution text argument buffers for PrepareTextArg operations.
+// Keys are semantic type strings: "strbuf<N>_item", "strbuf<N>_species",
+// "strbuf<N>_trainer", "strbuf<N>_str", "strbuf<N>_scriptvar".
+//
+// These are NEVER serialized to GameState.  They are regenerated each time a
+// script runs and consumed by the text renderer during the same script execution.
+//
+// Source: Crystal text-argument commands (getitemname, getmonname, gettrainername,
+//         getstring, getnum) write to text display buffers before writetext.
+//
+// Backed by StubServices::text_buffers (string key -> int32_t value).
+// =============================================================================
+
+namespace text_buf_api {
+
+// ctx.text_buf:set(key, value)
+// Write a text-buffer slot.  key is a semantic string like "strbuf0_item".
+// value is the integer payload (item ID, species ID, trainer group, etc.).
+int set(lua_State* L) {
+    const char* key = luaL_checkstring(L, 2);
+    int value       = luaL_checkinteger(L, 3);
+    LuaRuntime* runtime = get_runtime(L);
+    runtime->get_stub_services().text_buffers[key] = value;
+    return 0;
+}
+
+// ctx.text_buf:get(key) -> int
+// Read a text-buffer slot.  Returns 0 if the key has not been written.
+int get(lua_State* L) {
+    const char* key = luaL_checkstring(L, 2);
+    LuaRuntime* runtime = get_runtime(L);
+    const auto& bufs = runtime->get_stub_services().text_buffers;
+    auto it = bufs.find(key);
+    lua_pushinteger(L, it != bufs.end() ? it->second : 0);
+    return 1;
+}
+
+} // namespace text_buf_api
 // =============================================================================
 
 namespace time_api {

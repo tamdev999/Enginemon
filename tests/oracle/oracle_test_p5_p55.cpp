@@ -1,4 +1,4 @@
-#include "oracle_shared.hpp"
+﻿#include "oracle_shared.hpp"
 
 
 namespace {
@@ -1403,65 +1403,38 @@ TEST(p55_closure_scall_abc) {
         std::cout << "  [SKIP]\n"; return;
     }
 
-    // ── Part 1: Callee corpus verification + behavioral execution ─────────────
-    // AideScript_GivePotion: bank 1e, addr 4e9d → flat 495261
-    // This may be a standalone corpus entry (scall callee discovered via deferred
-    // corpus discovery) OR inlined into its parent. Scan by content if needed.
+    // ==========================================================================
+    // Part 1: Callee corpus structural oracle
+    // AideScript_GivePotion: bank 1e, addr 4e9d -> flat 495261
+    // If the canonical callee is a standalone corpus entry, verify its Lua
+    // contains set_scene(2).  No fallback scan -- script identity is canonical
+    // or it is not in corpus.
+    // ==========================================================================
     uint32_t callee_flat = g_rom->bank_to_flat(0x1e, 0x4e9d);
     std::string callee_sid = canonical_script_id(24, 5, callee_flat);
-
     auto callee_lua = g_oracle_reader->load_script(callee_sid);
 
-    // If not at the expected address, scan for any ElmsLab script with set_scene(2)
-    // (SCENE_ELMSLAB_NOOP = 2, from pokecrystal.sym) that looks like the callee.
     if (!callee_lua.has_value()) {
-        auto scripts = g_oracle_reader->list_scripts();
-        for (const auto& s : scripts) {
-            if (s.find("map_24_5_") != 0) continue;
-            auto l = g_oracle_reader->load_script(s);
-            if (l && l->find("ctx.game:set_scene(2)") != std::string::npos &&
-                     l->find("ctx.inventory:give(") != std::string::npos) {
-                callee_sid = s; callee_lua = l; break;
-            }
-        }
-    }
+        // Canonical callee not in corpus (expected: it is a scall callee inlined
+        // into its parent, not a standalone map-root entry).
+        // Behavioral call/return proof: see test_p55_closure_scall_e2e which uses
+        // a deterministic hand-crafted bytecode fixture through the full pipeline.
+        std::cout << "  [P5.5-CLOSURE-1 Part1: callee not in corpus as standalone entry"
+                  << " -- behavioral call/return proof is in p55_closure_scall_e2e]\n";
+    } else {
+        ASSERT_TRUE(!callee_lua->empty());
+        // ORACLE-STRUCTURAL: callee Lua must contain setscene(2) -- SCENE_ELMSLAB_NOOP
+        // Source: pokecrystal.sym SCENE_ELMSLAB_NOOP = 02
+        ASSERT_TRUE(callee_lua->find("ctx.game:set_scene(2)") != std::string::npos);
 
-    if (!callee_lua.has_value()) {
-        std::cout << "  [P5.5-CLOSURE-1: SKIP — AideScript_GivePotion callee "
-                  << "not in oracle corpus as standalone entry]\n";
-        // The scall structural oracle (Part 2) still runs via the caller scan.
-        // Skip the behavioral execution part.
-        goto scall_structural_only;
-    }
-
-    ASSERT_TRUE(!callee_lua->empty());
-
-    // ORACLE-STRUCTURAL: callee Lua must contain setscene(2) — SCENE_ELMSLAB_NOOP
-    // Source: pokecrystal.sym SCENE_ELMSLAB_NOOP = 02
-    ASSERT_TRUE(callee_lua->find("ctx.game:set_scene(2)") != std::string::npos);
-
-    // Behavioral execution: start the callee directly, run to idle.
-    // AideScript_GivePotion: opentext(stub) -> writetext(stub) -> promptbutton(yield)
-    //   -> auto-resume -> verbosegiveitem(stub, result=1) -> writetext(stub)
-    //   -> waitbutton(yield) -> auto-resume -> closetext(stub)
-    //   -> setscene(2) <- B mutation -> end -> idle
-    //
-    // ERROR TRACKING: idle + script_error is NOT successful completion.
-    // Additionally: if callee_sid was resolved via fallback scan (not the canonical
-    // flat 495261), the found script may have set_scene(2) guarded by a conditional
-    // branch.  In that case the structural oracle (Lua content check above) is the
-    // proof; the behavioral assertion is only attempted when the script runs cleanly
-    // all the way through and when callee_sid IS the canonical expected address.
-    {
+        // Behavioral execution of canonical callee.
+        // ERROR TRACKING: idle + script_error is NOT successful completion.
         P5Harness hB;
-        ASSERT_EQ(hB.rt.get_stub_services().current_scene, 0);  // pre: scene=0
+        ASSERT_EQ(hB.rt.get_stub_services().current_scene, 0);
         bool started = hB.loop.start_script(callee_sid);
         if (!started) {
-            // Callee errors on first resume (cap-deferred op before setscene).
-            // The structural oracle (Lua content) is proven above.
-            // B is proven by the Lua: setscene(2) IS in the compiled callee body.
-            std::cout << "  [P5.5-CLOSURE-1 B: callee Lua contains set_scene(2), "
-                      << "full behavioral execution blocked by cap-deferred op on first resume]\n";
+            std::cout << "  [P5.5-CLOSURE-1 B: Lua contains set_scene(2);"
+                      << " execution blocked by cap-deferred op on first resume]\n";
         } else {
             bool hB_had_error = false;
             for (int i = 0; i < 300 && !hB.loop.is_idle(); ++i) {
@@ -1469,29 +1442,23 @@ TEST(p55_closure_scall_abc) {
                 if (tr.script_error) hB_had_error = true;
             }
             ASSERT_TRUE(hB.loop.is_idle());
-
-            bool is_canonical = (callee_sid.find("495261") != std::string::npos);
-
             if (hB_had_error) {
-                // Script errored before reaching setscene(2).
-                // Structural proof above is sufficient: Lua contains set_scene(2).
-                std::cout << "  [P5.5-CLOSURE-1 B: structural oracle holds (set_scene(2) in Lua); "
-                          << "behavioral execution blocked by mid-run error]\n";
-            } else if (!is_canonical) {
-                // Fallback script: set_scene(2) may be on a conditional path not taken by stubs.
-                // Structural proof above confirms the callee body is correct.
-                std::cout << "  [P5.5-CLOSURE-1 B: fallback script ran cleanly; "
-                          << "structural oracle holds (set_scene(2) in Lua)]\n";
+                // Mid-execution error: idle via error is NOT successful completion.
+                // Structural oracle (Lua content) is already proven above.
+                std::cout << "  [P5.5-CLOSURE-1 B: Lua contains set_scene(2);"
+                          << " mid-run error before setscene(2) -- structural oracle holds]\n";
             } else {
-                // Canonical callee ran cleanly — behavioral assertion is valid.
+                // Canonical callee ran to clean idle -- behavioral assertion is valid.
                 ASSERT_EQ(hB.rt.get_stub_services().current_scene, 2);
-                std::cout << "  [P5.5-CLOSURE-1 B: AideScript_GivePotion -> scene=2]\n";
+                std::cout << "  [P5.5-CLOSURE-1 B: canonical callee -> scene=2]\n";
             }
         }
     }
 
-    // ── Part 2: Caller structural oracle ─────────────────────────────────────
-    // AideScript_WalkPotion1: bank 1e, addr 4e7f → flat 495231
+    // ==========================================================================
+    // Part 2: Caller structural oracle
+    // AideScript_WalkPotion1: bank 1e, addr 4e7f -> flat 495231
+    // ==========================================================================
     {
         uint32_t caller_flat = g_rom->bank_to_flat(0x1e, 0x4e7f);
         std::string caller_sid = canonical_script_id(24, 5, caller_flat);
@@ -1499,57 +1466,41 @@ TEST(p55_closure_scall_abc) {
 
         if (caller_lua.has_value()) {
             ASSERT_TRUE(caller_lua->find("table.insert(__call_stack") != std::string::npos);
-            std::cout << "  [P5.5-CLOSURE-1 caller: __call_stack push present ✓]\n";
+            std::cout << "  [P5.5-CLOSURE-1 caller: __call_stack push present]\n";
         } else {
+            // Caller also not in corpus -- scan for any ElmsLab script with scall machinery.
             auto scripts = g_oracle_reader->list_scripts();
             for (const auto& s : scripts) {
                 if (s.find("map_24_5_") != 0) continue;
                 auto l = g_oracle_reader->load_script(s);
                 if (l && l->find("table.insert(__call_stack") != std::string::npos) {
                     ASSERT_TRUE(l->find("table.insert(__call_stack") != std::string::npos);
-                    std::cout << "  [P5.5-CLOSURE-1 caller (fallback '" << s
-                              << "'): __call_stack push present ✓]\n";
+                    std::cout << "  [P5.5-CLOSURE-1 caller (" << s
+                              << "): __call_stack push present]\n";
                     break;
                 }
             }
         }
     }
 
-    scall_structural_only:
-
-    // ── Part 3: A/B/C behavioral proof via wrapper + real compiled callee ────
-    // The wrapper synthetically provides A and C. The callee body (B) is the
-    // real compiler-emitted AideScript_GivePotion Lua from the oracle package.
-    // This is the strongest provable vertical given no corpus caller starts.
-    //
-    // Protocol: wrapper injects a pre-call script (A), then loads the real
-    // callee via the package script_loader using the __call_stack mechanism,
-    // then verifies the post-call continuation ran (C).
-    //
-    // ERROR TRACKING: idle + script_error is NOT successful completion.
-    // HeadlessGameLoop moves to Idle on error, making is_idle() insufficient
-    // by itself.  TickResult::script_error is accumulated across all ticks and
-    // checked before any state assertion.
-    {
+    // ==========================================================================
+    // Part 3: Behavioral proof -- canonical callee if available
+    //         Deterministic behavioral call/return proof: p55_closure_scall_e2e
+    //         (hand-crafted bytecode, no capability-deferred gaps, deterministic
+    //          expected values: A=flag_5, B=scene(3)+flag_6, C=scene(4)).
+    // Here: if callee is executable, verify it runs without mid-execution errors.
+    // ==========================================================================
+    if (callee_lua.has_value()) {
         P5Harness h;
+        h.gs.set_flag("flag_1001");
 
-        // A: pre-call marker — set before invoking callee
-        h.gs.set_flag("flag_1001");  // arbitrary A marker
-
-        // Inject the real callee via the package loader — start it directly.
-        // This proves the full path: package load -> real Lua execution -> B state.
         bool started = h.loop.start_script(callee_sid);
         if (!started) {
-            // The callee Lua was loaded from the package (non-empty, contains set_scene(2))
-            // but errors on first resume due to a cap-deferred op before setscene.
-            // The structural proof (callee Lua contains set_scene(2)) is sufficient.
-            std::cout << "  [P5.5-CLOSURE-1 A/B/C: callee Lua verified (set_scene(2) present), "
-                      << "full behavioral execution blocked by cap-deferred op on first resume]\n";
-            // A is still proven: flag_1001 was set before the start attempt
             ASSERT_TRUE(h.gs.check_flag("flag_1001"));
+            std::cout << "  [P5.5-CLOSURE-1 Part3: callee not started on first resume"
+                      << " -- package load + structural Lua verified]\n";
             return;
         }
-        ASSERT_TRUE(started);
 
         bool had_error = false;
         for (int i = 0; i < 300 && !h.loop.is_idle(); ++i) {
@@ -1558,77 +1509,24 @@ TEST(p55_closure_scall_abc) {
         }
         ASSERT_TRUE(h.loop.is_idle());
 
-        // Fail explicitly if a mid-execution error stopped the script before setscene(2).
-        // This catches broken give() ABI, unimplemented ops, or type mismatches
-        // that make the loop idle without the script having run to completion.
+        // Explicit failure on mid-execution error.
         if (had_error) {
-            std::cerr << "  FAIL: callee script errored mid-execution before setscene(2) "
-                      << "— give() ABI or another unimplemented op fired an error. "
-                      << "Idle via error is not successful completion.\n";
+            std::cerr << "  FAIL: callee errored mid-execution; idle via script_error"
+                      << " is not successful completion.\n";
             g_current_test_failed = true;
             return;
         }
 
-        // A: pre-call marker survived (was not cleared by callee execution)
+        // Canonical callee ran cleanly: assert scene==2.
         ASSERT_TRUE(h.gs.check_flag("flag_1001"));
-
-        bool is_canonical = (callee_sid.find("495261") != std::string::npos);
-        if (is_canonical) {
-            // B: canonical callee body executed — scene mutation from compiled Lua
-            ASSERT_EQ(h.rt.get_stub_services().current_scene, 2);
-            // C: callee ran to end + loop is idle (post-callee state reached)
-            ASSERT_TRUE(h.loop.is_idle());
-
-            std::cout << "  [P5.5-CLOSURE-1 A/B/C: A=flag_1001, B=scene=2, "
-                      << "C=idle (End returned cleanly)]\n";
-            std::cout << "  [Full-pipe: ROM->compiler->package->runtime->GameState]\n";
-        } else {
-            // Fallback script: set_scene(2) may be on a conditional path not taken
-            // by the stub. Structural proof (Lua contains set_scene(2)) already passed.
-            // A is proven (flag_1001 set before start). C is proven (loop is idle).
-            // B behavioral assertion requires the canonical callee.
-            std::cout << "  [P5.5-CLOSURE-1 A/B/C: A=flag_1001 (set_flag path proven); "
-                      << "B=structural (set_scene(2) in Lua, fallback script ran cleanly); "
-                      << "C=idle]\n";
-        }
+        ASSERT_EQ(h.rt.get_stub_services().current_scene, 2);
+        ASSERT_TRUE(h.loop.is_idle());
+        std::cout << "  [P5.5-CLOSURE-1 Part3: A=flag_1001, B=scene=2, C=idle]\n";
+    } else {
+        std::cout << "  [P5.5-CLOSURE-1 Part3: callee not in corpus --"
+                  << " behavioral proof deferred to p55_closure_scall_e2e]\n";
     }
 }
-
-// ── P5.5-CLOSURE-2: farscall full-pipe proof ─────────────────────────────────
-//
-// Crystal farscall (opcode 0x1f) uses an ABSOLUTE bank:addr encoding
-// (3 bytes: bank lo hi) as opposed to scall (opcode 0x00) which uses a
-// bank-LOCAL 2-byte pointer relative to the script's own bank.
-//
-// The compiler must resolve both differently:
-//   scall target  = bank(script_entry) * 0x4000 + (ptr - 0x4000)
-//   farscall target = bank_operand * 0x4000 + (addr - 0x4000)
-//
-// Source authority: pokecrystal/engine/events/whiteout.asm
-//   Script_Whiteout (bank 04, addr 64ce) farscall Script_AbortBugContest
-//   Script_AbortBugContest (bank 04, addr 62c1):
-//     checkflag ENGINE_BUG_CONTEST_TIMER → iffalse .finish
-//     setflag ENGINE_DAILY_BUG_CONTEST   ← callee state mutation
-//     special ContestReturnMons
-//     .finish: end
-//
-// CORPUS STATUS: Script_Whiteout is NOT a corpus map-root or std entry — it is
-// only reachable via callasm from the engine's battle/overworld layers, which
-// are not compiled as semantic script roots. Script_AbortBugContest likewise is
-// not a corpus entry. Neither starts from the oracle package.
-//
-// PROOF STRATEGY: prove the farscall address resolution is DISTINCT from scall
-// resolution using the TypedScriptDecoder + SemanticLegalizer pipeline directly.
-//
-// Fixture bytes for a minimal farscall:
-//   0x1f <bank> <lo> <hi> 0x91  (farscall bank:addr + end)
-// Target: bank=0x04, addr=0x62c1 → Script_AbortBugContest (flat 74433)
-//   bank_byte = 0x04, lo = 0xc1, hi = 0x62
-//
-// The emitted Lua MUST show the correct resolved flat address in the goto label,
-// proving the cross-bank address was computed by the decoder, not from a
-// bank-local relative offset.
-// ─────────────────────────────────────────────────────────────────────────────
 TEST(p55_closure_farscall_fullpipe) {
     if (!g_rom || !g_profile) {
         std::cout << "  [SKIP]\n"; return;

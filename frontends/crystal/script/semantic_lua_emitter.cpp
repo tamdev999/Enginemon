@@ -456,34 +456,32 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I);
         switch (o->arg_type) {
             case TextArgType::ItemName:
-                out << "ctx.flags:set_var(\"strbuf" << (int)o->buffer_slot << "_item\", " << (int)o->id << ")\n"; break;
+                // Route through ctx.text_buf — text-buffer namespace, not script-var namespace.
+                out << "ctx.text_buf:set(\"strbuf" << (int)o->buffer_slot << "_item\", " << (int)o->id << ")\n"; break;
             case TextArgType::PokemonName:
-                out << "ctx.flags:set_var(\"strbuf" << (int)o->buffer_slot << "_species\", " << (int)o->id << ")\n"; break;
+                out << "ctx.text_buf:set(\"strbuf" << (int)o->buffer_slot << "_species\", " << (int)o->id << ")\n"; break;
             case TextArgType::TrainerName:
-                out << "ctx.flags:set_var(\"strbuf" << (int)o->buffer_slot << "_trainer\", " << (int)o->trainer_group << ")\n"; break;
+                out << "ctx.text_buf:set(\"strbuf" << (int)o->buffer_slot << "_trainer\", " << (int)o->trainer_group << ")\n"; break;
             case TextArgType::Number:
                 switch (o->number_source) {
                     case NumberSource::Money:
-                        // Prepare the player/mom money balance into a text buffer slot.
-                        // account: 0=player (money_player), 1=mom (money_mom).
-                        // Stores the balance in GameState::variables["strbuf<N>_money"]
-                        // for text renderer substitution.
+                        // Money balance is read from GameState by prepare_money_text
+                        // which writes to StubServices::text_buffers["strbuf<N>_money"].
                         out << "ctx.inventory:prepare_money_text("
                             << (int)o->account << ", " << (int)o->buffer_slot << ")\n"; break;
                     case NumberSource::Coins:
-                        // getcoins: no runtime implementation yet — explicit capability error.
+                        // Not yet implemented — explicit capability error.
                         out << "error(\"prepare_coins: not yet implemented (strbuf="
                             << (int)o->buffer_slot << ")\")\n"; break;
                     case NumberSource::ScriptVar:
-                        // getnum: stores wScriptVar value in text buffer.
-                        // GameState::variables["var_0"] holds the current script var value.
-                        out << "ctx.flags:set_var(\"strbuf" << (int)o->buffer_slot
+                        // Store current wScriptVar (var_0) in text buffer via ctx.text_buf.
+                        out << "ctx.text_buf:set(\"strbuf" << (int)o->buffer_slot
                             << "_scriptvar\", ctx.flags:get_var(0))\n"; break;
                 }
                 break;
             case TextArgType::String:
                 if (!o->str_value.empty())
-                    out << "ctx.flags:set_var(\"strbuf" << (int)o->buffer_slot << "_str\", \"" << SemanticLuaEmitter::escape_lua_string(o->str_value) << "\")\n";
+                    out << "ctx.text_buf:set(\"strbuf" << (int)o->buffer_slot << "_str\", \"" << SemanticLuaEmitter::escape_lua_string(o->str_value) << "\")\n";
                 else
                     out << "-- getstring strbuf=" << (int)o->buffer_slot << "\n";
                 break;
