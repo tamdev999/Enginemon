@@ -1,6 +1,22 @@
 # run_all_tests.ps1
 # Canonical Enginemon verification script
-# Runs all test suites and reports unified pass/fail status
+# Runs every correctness-relevant test suite and the production runtime compile gates.
+#
+# Required canonical gates:
+#   1.  runtime_test
+#   2.  emitter_test
+#   3.  sprite_money_test        (standalone, no ROM)
+#   4.  golden_test
+#   5.  legality_gate_test
+#   6.  corpus_test
+#   7.  corpus_lowering_audit
+#   8.  linker_test
+#   9.  compiler_integrity_test
+#  10.  oracle_test              (Phases 1-5.5 full-pipe -- SKIP = FAIL)
+#  11.  profile_verify           (profile offset correctness)
+#  12.  trainer_verify           (trainer group extraction correctness)
+#  13.  enginemon_bootstrap      build gate
+#  14.  enginemon_tiles          build gate
 #
 # Required invariants:
 #   - corpus lowering = 1788/1788
@@ -8,6 +24,7 @@
 #   - InvalidOwnership = 0
 #   - decoder/CFG integrity = PASS
 #   - All test suites pass
+#   - No required suite is skipped, omitted, or fails to build
 #
 # Exit codes:
 #   0 = ALL PASS
@@ -18,388 +35,511 @@
 
 param(
     [Parameter(Mandatory=$true)]
-    [string]$RomPath
+    [string]$RomPath,
+
+    [switch]$NoBuild   # Skip the build step (assumes binaries are already up-to-date)
 )
 
-# Use Continue for ErrorActionPreference to prevent stderr from native commands
-# from being treated as terminating errors. We determine pass/fail from exit code.
 $ErrorActionPreference = "Continue"
 
+# ---------------------------------------------------------------------------
 # Configuration
-$buildDir = "build"
-$testReleaseDir = "$buildDir\tests\Release"
-$toolsReleaseDir = "$buildDir\tools\Release"
+# ---------------------------------------------------------------------------
+$cmake           = "C:\Program Files\CMake\bin\cmake.exe"
+$vcpkgToolchain  = "C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+$buildDir        = "build"
+$testDir         = "$buildDir\tests\Release"
+$toolsDir        = "$buildDir\tools\Release"
+$runtimeDir      = "$buildDir\runtime\Release"
 
-# Expected corpus count - updated when new script roots are discovered
 $expectedCorpusCount = "1788"
 
-# Counters
-$passed = 0
-$failed = 0
+$passed      = 0
+$failed      = 0
 $failedTests = @()
 
-# Invariant tracking
-$corpusLoweringOk = $false
+$corpusLoweringOk    = $false
 $corpusLoweringCount = "?"
-$linkerCorpusOk = $false
-$linkerCorpusCount = "?"
-$ownershipOk = $false
-$decoderCfgOk = $false
+$linkerCorpusOk      = $false
+$linkerCorpusCount   = "?"
+$ownershipOk         = $false
+$decoderCfgOk        = $false
 
-function Write-TestHeader($name) {
-    Write-Host "`n" -NoNewline
-    Write-Host "=" * 60 -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+function Write-Header($name) {
+    Write-Host ""
+    Write-Host ("=" * 60) -ForegroundColor Cyan
     Write-Host "  $name" -ForegroundColor Cyan
-    Write-Host "=" * 60 -ForegroundColor Cyan
+    Write-Host ("=" * 60) -ForegroundColor Cyan
 }
 
-function Write-TestResult($name, $success, $details = "") {
+function Write-Result($name, $success, $details = "") {
     if ($success) {
         Write-Host "  [$name] " -NoNewline
         Write-Host "PASS" -ForegroundColor Green
-        if ($details) {
-            Write-Host "    $details" -ForegroundColor Gray
-        }
+        if ($details) { Write-Host "    $details" -ForegroundColor Gray }
         $script:passed++
     } else {
         Write-Host "  [$name] " -NoNewline
         Write-Host "FAIL" -ForegroundColor Red
-        if ($details) {
-            Write-Host "    $details" -ForegroundColor Yellow
-        }
+        if ($details) { Write-Host "    $details" -ForegroundColor Yellow }
         $script:failed++
         $script:failedTests += $name
     }
 }
 
-# Verify ROM exists
+# Run an executable; capture merged stdout+stderr; return hashtable with
+# ExitCode and Lines[].
+function Invoke-Exe {
+    param([string]$Exe, [string[]]$ExeArgs)
+    $lines = @()
+    & $Exe @ExeArgs 2>&1 | ForEach-Object {
+        $text = if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message -ForegroundColor DarkGray
+            $_.Exception.Message
+        } else {
+            "$_"
+        }
+        $lines += $text
+    }
+    return @{ ExitCode = $LASTEXITCODE; Lines = $lines }
+}
+
+# Extract Passed/Failed counts from output lines.
+function Get-PassFail($lines) {
+    $p = ($lines | Select-String -Pattern "^Passed:\s*(\d+)") | Select-Object -First 1
+    $f = ($lines | Select-String -Pattern "^Failed:\s*(\d+)") | Select-Object -First 1
+    return @{
+        PassCount = if ($p) { $p.Matches[0].Groups[1].Value } else { $null }
+        FailCount = if ($f) { $f.Matches[0].Groups[1].Value } else { $null }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight
+# ---------------------------------------------------------------------------
+
 if (-not (Test-Path -LiteralPath $RomPath)) {
-    Write-Host "ERROR: ROM not found at: $RomPath" -ForegroundColor Red
+    Write-Host "ERROR: ROM not found: $RomPath" -ForegroundColor Red
     exit 1
 }
 
-# Verify build exists
-if (-not (Test-Path $testReleaseDir)) {
-    Write-Host "ERROR: Test build not found at: $testReleaseDir" -ForegroundColor Red
-    Write-Host "Run the following to build:" -ForegroundColor Yellow
-    Write-Host '  & "C:\Program Files\CMake\bin\cmake.exe" --build build --config Release' -ForegroundColor Yellow
-    exit 1
+Write-Host ""
+Write-Host "Enginemon Canonical Verification" -ForegroundColor White
+Write-Host "ROM:   $RomPath"          -ForegroundColor Gray
+Write-Host "Build: $buildDir"         -ForegroundColor Gray
+Write-Host "Date:  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor Gray
+
+# ---------------------------------------------------------------------------
+# GATE 0 -- Build
+# ---------------------------------------------------------------------------
+Write-Header "Build"
+
+$requiredExes = @(
+    "$testDir\runtime_test.exe",
+    "$testDir\emitter_test.exe",
+    "$testDir\sprite_money_test.exe",
+    "$testDir\golden_test.exe",
+    "$testDir\legality_gate_test.exe",
+    "$testDir\corpus_test.exe",
+    "$testDir\linker_test.exe",
+    "$testDir\compiler_integrity_test.exe",
+    "$testDir\oracle_test.exe",
+    "$toolsDir\corpus_lowering_audit.exe",
+    "$toolsDir\profile_verify.exe",
+    "$toolsDir\trainer_verify.exe",
+    "$runtimeDir\enginemon_bootstrap.exe",
+    "$runtimeDir\enginemon_tiles.exe"
+)
+
+if ($NoBuild) {
+    Write-Host "  [build] SKIPPED (--NoBuild)" -ForegroundColor Yellow
+    $missingExes = $requiredExes | Where-Object { -not (Test-Path $_) }
+    if ($missingExes.Count -gt 0) {
+        Write-Host "  ERROR: Required binaries missing (run without --NoBuild):" -ForegroundColor Red
+        $missingExes | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+        exit 1
+    }
+    Write-Host "  [build] All required binaries present" -ForegroundColor Gray
+} else {
+    if (-not (Test-Path $cmake)) {
+        Write-Host "  ERROR: CMake not found at $cmake" -ForegroundColor Red
+        exit 1
+    }
+
+    if (-not (Test-Path $buildDir)) {
+        Write-Host "  Configuring CMake build..." -ForegroundColor Gray
+        & $cmake `
+            -B $buildDir `
+            -DCMAKE_TOOLCHAIN_FILE=$vcpkgToolchain `
+            -DENGINEMON_ENABLE_ENGINE=ON `
+            -DENGINEMON_ENABLE_VULKAN=ON `
+            2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [build] FAIL: CMake configure failed" -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    $buildTargets = @(
+        "runtime_test", "emitter_test", "sprite_money_test",
+        "golden_test", "legality_gate_test", "corpus_test",
+        "linker_test", "compiler_integrity_test", "oracle_test",
+        "corpus_lowering_audit", "profile_verify", "trainer_verify",
+        "enginemon_bootstrap", "enginemon_tiles"
+    )
+
+    $buildFailed = $false
+    foreach ($tgt in $buildTargets) {
+        Write-Host "  Building $tgt..." -ForegroundColor Gray
+        & $cmake --build $buildDir --target $tgt --config Release 2>&1 |
+            ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [build] FAIL: target '$tgt' did not build cleanly" -ForegroundColor Red
+            $buildFailed = $true
+        }
+    }
+
+    if ($buildFailed) {
+        Write-Host ""
+        Write-Host "  FATAL: build failure -- aborting verification." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  [build] All required targets built" -ForegroundColor Green
 }
 
-Write-Host "`nEngineemon Canonical Verification" -ForegroundColor White
-Write-Host "ROM: $RomPath" -ForegroundColor Gray
-Write-Host "Build: $buildDir" -ForegroundColor Gray
+# ---------------------------------------------------------------------------
+# GATE 1 -- Production Runtime Compile Gates
+# ---------------------------------------------------------------------------
+Write-Header "Production Runtime Compile Gates"
 
-# =============================================================================
-# Suite 1: Runtime Tests
-# =============================================================================
-Write-TestHeader "Runtime Tests"
+$bootstrapExe = "$runtimeDir\enginemon_bootstrap.exe"
+if (Test-Path $bootstrapExe) {
+    $sz = [math]::Round((Get-Item $bootstrapExe).Length / 1KB)
+    Write-Result "enginemon_bootstrap_compile" $true "enginemon_bootstrap.exe (${sz} KB)"
+} else {
+    Write-Result "enginemon_bootstrap_compile" $false "enginemon_bootstrap.exe not found at $bootstrapExe"
+}
 
-$runtimeExe = "$testReleaseDir\runtime_test.exe"
+$tilesExe = "$runtimeDir\enginemon_tiles.exe"
+if (Test-Path $tilesExe) {
+    $sz = [math]::Round((Get-Item $tilesExe).Length / 1KB)
+    Write-Result "enginemon_tiles_compile" $true "enginemon_tiles.exe (${sz} KB)"
+} else {
+    Write-Result "enginemon_tiles_compile" $false "enginemon_tiles.exe not found at $tilesExe"
+}
+
+# ---------------------------------------------------------------------------
+# GATE 2 -- Runtime Tests
+# ---------------------------------------------------------------------------
+Write-Header "Runtime Tests"
+
+$runtimeExe = "$testDir\runtime_test.exe"
 if (Test-Path $runtimeExe) {
-    # Run and capture output - stderr is visible but doesn't affect pass/fail
-    # Pass/fail is determined ONLY by exit code
-    $output = & $runtimeExe $RomPath 2>&1 | ForEach-Object { 
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            # stderr - write to host but include in output for parsing
-            Write-Host $_.Exception.Message -ForegroundColor DarkGray
-            $_.Exception.Message
-        } else {
-            $_
-        }
-    }
-    $exitCode = $LASTEXITCODE
-    
-    # Parse output for pass/fail count (informational only)
-    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
-    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
-    
-    if ($passedMatch -and $failedMatch) {
-        $passCount = $passedMatch.Matches[0].Groups[1].Value
-        $failCount = $failedMatch.Matches[0].Groups[1].Value
-        # Success = exit code 0 (regardless of stderr output)
-        Write-TestResult "runtime_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
+    $r  = Invoke-Exe $runtimeExe @($RomPath)
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "runtime_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
     } else {
-        Write-TestResult "runtime_test" ($exitCode -eq 0) "Exit code: $exitCode"
+        Write-Result "runtime_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
     }
 } else {
-    Write-TestResult "runtime_test" $false "Executable not found"
+    Write-Result "runtime_test" $false "Executable not found: $runtimeExe"
 }
 
-# =============================================================================
-# Suite 2: Golden Tests
-# =============================================================================
-Write-TestHeader "Golden Tests"
+# ---------------------------------------------------------------------------
+# GATE 3 -- Emitter Tests  (no ROM argument)
+# ---------------------------------------------------------------------------
+Write-Header "Emitter Tests"
 
-$goldenExe = "$testReleaseDir\golden_test.exe"
+$emitterExe = "$testDir\emitter_test.exe"
+if (Test-Path $emitterExe) {
+    $r  = Invoke-Exe $emitterExe @()
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "emitter_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
+    } else {
+        Write-Result "emitter_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+    }
+} else {
+    Write-Result "emitter_test" $false "Executable not found: $emitterExe"
+}
+
+# ---------------------------------------------------------------------------
+# GATE 4 -- Sprite/Money Tests  (no ROM argument)
+# Covers GameState variable-sprite identity, money account isolation,
+# Day Care species save/load, and PackageWriter->PackageReader species-icon roundtrip.
+# ---------------------------------------------------------------------------
+Write-Header "Sprite/Money Tests"
+
+$spriteMoneyExe = "$testDir\sprite_money_test.exe"
+if (Test-Path $spriteMoneyExe) {
+    $r  = Invoke-Exe $spriteMoneyExe @()
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "sprite_money_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
+    } else {
+        Write-Result "sprite_money_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+    }
+} else {
+    Write-Result "sprite_money_test" $false "Executable not found: $spriteMoneyExe"
+}
+
+# ---------------------------------------------------------------------------
+# GATE 5 -- Golden Tests
+# ---------------------------------------------------------------------------
+Write-Header "Golden Tests"
+
+$goldenExe = "$testDir\golden_test.exe"
 if (Test-Path $goldenExe) {
-    # Run and capture output - pass/fail determined by exit code only
-    $output = & $goldenExe $RomPath 2>&1 | ForEach-Object { 
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $_.Exception.Message -ForegroundColor DarkGray
-            $_.Exception.Message
-        } else {
-            $_
-        }
-    }
-    $exitCode = $LASTEXITCODE
-    
-    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
-    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
-    
-    if ($passedMatch -and $failedMatch) {
-        $passCount = $passedMatch.Matches[0].Groups[1].Value
-        $failCount = $failedMatch.Matches[0].Groups[1].Value
-        Write-TestResult "golden_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
+    $r  = Invoke-Exe $goldenExe @($RomPath)
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "golden_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
     } else {
-        Write-TestResult "golden_test" ($exitCode -eq 0) "Exit code: $exitCode"
+        Write-Result "golden_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
     }
 } else {
-    Write-TestResult "golden_test" $false "Executable not found"
+    Write-Result "golden_test" $false "Executable not found: $goldenExe"
 }
 
-# =============================================================================
-# Suite 3: Legality Gate Tests (adversarial)
-# =============================================================================
-Write-TestHeader "Legality Gate Tests"
+# ---------------------------------------------------------------------------
+# GATE 6 -- Legality Gate Tests (adversarial)
+# ---------------------------------------------------------------------------
+Write-Header "Legality Gate Tests"
 
-$legalityExe = "$testReleaseDir\legality_gate_test.exe"
+$legalityExe = "$testDir\legality_gate_test.exe"
 if (Test-Path $legalityExe) {
-    # Run and capture output - pass/fail determined by exit code only
-    $output = & $legalityExe $RomPath 2>&1 | ForEach-Object { 
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $_.Exception.Message -ForegroundColor DarkGray
-            $_.Exception.Message
-        } else {
-            $_
-        }
-    }
-    $exitCode = $LASTEXITCODE
-    
-    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
-    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
-    
-    if ($passedMatch -and $failedMatch) {
-        $passCount = $passedMatch.Matches[0].Groups[1].Value
-        $failCount = $failedMatch.Matches[0].Groups[1].Value
-        Write-TestResult "legality_gate_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
+    $r  = Invoke-Exe $legalityExe @($RomPath)
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "legality_gate_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
     } else {
-        Write-TestResult "legality_gate_test" ($exitCode -eq 0) "Exit code: $exitCode"
+        Write-Result "legality_gate_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
     }
 } else {
-    Write-TestResult "legality_gate_test" $false "Executable not found"
+    Write-Result "legality_gate_test" $false "Executable not found: $legalityExe"
 }
 
-# =============================================================================
-# Suite 4: Corpus Test (Decoder/CFG Integrity)
-# Stage 1: Typed decoding validation
-# Stage 2: CFG construction and validation  
-# Stage 3: NativeCallRegistry + RamAddressRegistry classification
-# =============================================================================
-Write-TestHeader "Corpus Test (Decoder/CFG Integrity)"
+# ---------------------------------------------------------------------------
+# GATE 7 -- Corpus Test (Decoder/CFG Integrity)
+# ---------------------------------------------------------------------------
+Write-Header "Corpus Test (Decoder/CFG Integrity)"
 
-$corpusExe = "$testReleaseDir\corpus_test.exe"
+$corpusExe = "$testDir\corpus_test.exe"
 if (Test-Path $corpusExe) {
-    # Run and capture output - pass/fail determined by exit code only
-    $output = & $corpusExe $RomPath 2>&1 | ForEach-Object { 
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $_.Exception.Message -ForegroundColor DarkGray
-            $_.Exception.Message
-        } else {
-            $_
-        }
-    }
-    $exitCode = $LASTEXITCODE
-    
-    # Exit code 0 = all stages pass
-    $decoderCfgOk = ($exitCode -eq 0)
-    
-    Write-TestResult "corpus_test" $decoderCfgOk "decoder/CFG integrity"
+    $r = Invoke-Exe $corpusExe @($RomPath)
+    $decoderCfgOk = ($r.ExitCode -eq 0)
+    Write-Result "corpus_test" $decoderCfgOk "decoder/CFG integrity -- Exit code: $($r.ExitCode)"
 } else {
-    Write-TestResult "corpus_test" $false "Executable not found"
+    Write-Result "corpus_test" $false "Executable not found: $corpusExe"
 }
 
-# =============================================================================
-# Suite 5: Corpus Lowering Audit (corpus=1788/1788 invariant)
-# Stage 4: Semantic lowering verification
-# =============================================================================
-Write-TestHeader "Corpus Lowering Audit"
+# ---------------------------------------------------------------------------
+# GATE 8 -- Corpus Lowering Audit  (1788/1788 invariant)
+# ---------------------------------------------------------------------------
+Write-Header "Corpus Lowering Audit"
 
-$loweringExe = "$toolsReleaseDir\corpus_lowering_audit.exe"
+$loweringExe = "$toolsDir\corpus_lowering_audit.exe"
 if (Test-Path $loweringExe) {
-    # Run and capture output - pass/fail determined by exit code only
-    $output = & $loweringExe $RomPath 2>&1 | ForEach-Object { 
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $_.Exception.Message -ForegroundColor DarkGray
-            $_.Exception.Message
-        } else {
-            $_
-        }
+    $r = Invoke-Exe $loweringExe @($RomPath)
+
+    $successM = $r.Lines | Select-String -Pattern "Successes:\s*(\d+)"   | Select-Object -First 1
+    $totalM   = $r.Lines | Select-String -Pattern "Total:\s*(\d+)"       | Select-Object -First 1
+    $allM     = $r.Lines | Select-String -Pattern "ALL\s+(\d+)\s+BODIES" | Select-Object -First 1
+
+    if ($successM -and $totalM) {
+        $corpusLoweringCount = $successM.Matches[0].Groups[1].Value
+        $totalCount          = $totalM.Matches[0].Groups[1].Value
+        $corpusLoweringOk    = ($corpusLoweringCount -eq $expectedCorpusCount) -and ($corpusLoweringCount -eq $totalCount)
+    } elseif ($allM) {
+        $corpusLoweringCount = $allM.Matches[0].Groups[1].Value
+        $corpusLoweringOk    = ($corpusLoweringCount -eq $expectedCorpusCount)
     }
-    $exitCode = $LASTEXITCODE
-    
-    # Check for SUCCESS count
-    $successMatch = $output | Select-String -Pattern "Successes:\s*(\d+)"
-    $totalMatch = $output | Select-String -Pattern "Total:\s*(\d+)"
-    
-    if ($successMatch -and $totalMatch) {
-        $corpusLoweringCount = $successMatch.Matches[0].Groups[1].Value
-        $totalCount = $totalMatch.Matches[0].Groups[1].Value
-        $corpusLoweringOk = ($corpusLoweringCount -eq $expectedCorpusCount) -and ($corpusLoweringCount -eq $totalCount)
-        Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0 -and $corpusLoweringOk) "lowering=$corpusLoweringCount/$expectedCorpusCount"
-    } else {
-        # Alternative: check for "ALL X BODIES COMPILE" pattern
-        $allMatch = $output | Select-String -Pattern "ALL\s+(\d+)\s+BODIES\s+COMPILE"
-        if ($allMatch) {
-            $corpusLoweringCount = $allMatch.Matches[0].Groups[1].Value
-            $corpusLoweringOk = ($corpusLoweringCount -eq $expectedCorpusCount)
-            Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0 -and $corpusLoweringOk) "lowering=$corpusLoweringCount/$expectedCorpusCount"
-        } else {
-            Write-TestResult "corpus_lowering_audit" ($exitCode -eq 0) "Exit code: $exitCode"
-        }
-    }
+
+    Write-Result "corpus_lowering_audit" ($r.ExitCode -eq 0 -and $corpusLoweringOk) `
+        "lowering=$corpusLoweringCount/$expectedCorpusCount"
 } else {
-    Write-TestResult "corpus_lowering_audit" $false "Executable not found at $loweringExe"
+    Write-Result "corpus_lowering_audit" $false "Executable not found: $loweringExe"
 }
 
-# =============================================================================
-# Suite 6: Linker Test (corpus=1788, InvalidOwnership=0)
-# Stage 6: Corpus-wide typed-reference validation
-# =============================================================================
-Write-TestHeader "Linker Test"
+# ---------------------------------------------------------------------------
+# GATE 9 -- Linker Test  (corpus=1788, InvalidOwnership=0)
+# ---------------------------------------------------------------------------
+Write-Header "Linker Test"
 
-$linkerExe = "$testReleaseDir\linker_test.exe"
+$linkerExe = "$testDir\linker_test.exe"
 if (Test-Path $linkerExe) {
-    # Run and capture output - pass/fail determined by exit code only
-    $output = & $linkerExe $RomPath 2>&1 | ForEach-Object { 
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $_.Exception.Message -ForegroundColor DarkGray
-            $_.Exception.Message
-        } else {
-            $_
-        }
+    $r = Invoke-Exe $linkerExe @($RomPath)
+
+    $corpusM = $r.Lines | Select-String -Pattern "Total unique bodies:\s*(\d+)" | Select-Object -First 1
+    $ownerM  = $r.Lines | Select-String -Pattern "InvalidOwnership:\s*(\d+)"    | Select-Object -First 1
+
+    if ($corpusM) {
+        $linkerCorpusCount = $corpusM.Matches[0].Groups[1].Value
+        $linkerCorpusOk    = ($linkerCorpusCount -eq $expectedCorpusCount)
     }
-    $exitCode = $LASTEXITCODE
-    
-    # Check corpus count
-    $corpusMatch = $output | Select-String -Pattern "Total unique bodies:\s*(\d+)"
-    if ($corpusMatch) {
-        $linkerCorpusCount = $corpusMatch.Matches[0].Groups[1].Value
-        $linkerCorpusOk = ($linkerCorpusCount -eq $expectedCorpusCount)
-    }
-    
-    # Check InvalidOwnership count
-    $ownerMatch = $output | Select-String -Pattern "InvalidOwnership:\s*(\d+)"
-    if ($ownerMatch) {
-        $ownerCount = $ownerMatch.Matches[0].Groups[1].Value
-        $ownershipOk = ($ownerCount -eq "0")
+    if ($ownerM) {
+        $ownershipOk = ($ownerM.Matches[0].Groups[1].Value -eq "0")
     } else {
-        # If not explicitly mentioned, check for absence of ownership errors
-        $ownershipOk = -not ($output -match "InvalidOwnership:\s*[1-9]|ownership.?error|invalid.?owner")
+        $ownershipOk = -not ($r.Lines -match "InvalidOwnership:\s*[1-9]|ownership.?error|invalid.?owner")
     }
-    
-    $linkerPass = ($exitCode -eq 0) -and $linkerCorpusOk -and $ownershipOk
-    $ownerDisplay = if ($ownershipOk) { "0" } else { "ERROR" }
-    Write-TestResult "linker_test" $linkerPass "corpus=$linkerCorpusCount/$expectedCorpusCount, InvalidOwnership=$ownerDisplay"
+
+    $ownerDisp = if ($ownershipOk) { "0" } else { "ERROR" }
+    Write-Result "linker_test" ($r.ExitCode -eq 0 -and $linkerCorpusOk -and $ownershipOk) `
+        "corpus=$linkerCorpusCount/$expectedCorpusCount, InvalidOwnership=$ownerDisp"
 } else {
-    Write-TestResult "linker_test" $false "Executable not found"
+    Write-Result "linker_test" $false "Executable not found: $linkerExe"
 }
 
-# =============================================================================
-# Suite 7: Compiler Integrity Tests (fail-open adversarial)
-# Finding 1: asset extraction fail-closed
-# Finding 2: map discovery fail-closed
-# =============================================================================
-Write-TestHeader "Compiler Integrity Tests"
+# ---------------------------------------------------------------------------
+# GATE 10 -- Compiler Integrity Tests
+# ---------------------------------------------------------------------------
+Write-Header "Compiler Integrity Tests"
 
-$integrityExe = "$testReleaseDir\compiler_integrity_test.exe"
+$integrityExe = "$testDir\compiler_integrity_test.exe"
 if (Test-Path $integrityExe) {
-    $output = & $integrityExe $RomPath 2>&1 | ForEach-Object {
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $_.Exception.Message -ForegroundColor DarkGray
-            $_.Exception.Message
-        } else {
-            $_
-        }
-    }
-    $exitCode = $LASTEXITCODE
-
-    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
-    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
-
-    if ($passedMatch -and $failedMatch) {
-        $passCount = $passedMatch.Matches[0].Groups[1].Value
-        $failCount = $failedMatch.Matches[0].Groups[1].Value
-        Write-TestResult "compiler_integrity_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
+    $r  = Invoke-Exe $integrityExe @($RomPath)
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "compiler_integrity_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
     } else {
-        Write-TestResult "compiler_integrity_test" ($exitCode -eq 0) "Exit code: $exitCode"
+        Write-Result "compiler_integrity_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
     }
 } else {
-    Write-TestResult "compiler_integrity_test" $false "Executable not found"
+    Write-Result "compiler_integrity_test" $false "Executable not found: $integrityExe"
 }
 
-# =============================================================================
-# Suite 8: Crystal Frontend Oracle (Phase 1)
-# Independent source-fidelity tests — expected values from pokecrystal semantics,
-# never from Enginemon encoder/decoder output.
-# =============================================================================
-Write-TestHeader "Crystal Frontend Oracle (Phase 1)"
+# ---------------------------------------------------------------------------
+# GATE 11 -- Crystal Frontend Oracle (Phases 1-5.5)
+#
+# SKIP policy (hard rule):
+#   Any SKIP output emitted by the oracle binary is a canonical failure.
+#   A skipped required correctness test is NOT an acceptable outcome.
+#
+#   Patterns matched:
+#     "[Phase 5] SKIP: ..."    -- whole P5 suite skipped (package compile failed)
+#     "[Phase 5.5] SKIP: ..."  -- whole P5.5 suite skipped
+#     ": SKIP -..."            -- individual test self-skipped
+# ---------------------------------------------------------------------------
+Write-Header "Crystal Frontend Oracle (Phases 1-5.5)"
 
-$oracleExe = "$testReleaseDir\oracle_test.exe"
+$oracleExe = "$testDir\oracle_test.exe"
 if (Test-Path $oracleExe) {
-    $output = & $oracleExe $RomPath 2>&1 | ForEach-Object {
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $_.Exception.Message -ForegroundColor DarkGray
-            $_.Exception.Message
-        } else {
-            $_
+    $r  = Invoke-Exe $oracleExe @($RomPath)
+    $pf = Get-PassFail $r.Lines
+
+    $canonicalSkips = $r.Lines | Where-Object {
+        ($_ -match "\[Phase 5") -and ($_ -match "SKIP") -or
+        ($_ -match ":\s+SKIP\s+-")
+    }
+
+    $hasSkips = ($canonicalSkips.Count -gt 0)
+    $oracleOk = ($r.ExitCode -eq 0) -and (-not $hasSkips)
+
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        $detail = "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
+    } else {
+        $detail = "Exit code: $($r.ExitCode)"
+    }
+
+    if ($hasSkips) {
+        $detail += " | SKIPPED TESTS DETECTED (= FAIL)"
+        $canonicalSkips | Select-Object -First 5 | ForEach-Object {
+            Write-Host "    SKIP: $_" -ForegroundColor Yellow
         }
     }
-    $exitCode = $LASTEXITCODE
 
-    $passedMatch = $output | Select-String -Pattern "^Passed:\s*(\d+)"
-    $failedMatch = $output | Select-String -Pattern "^Failed:\s*(\d+)"
-
-    if ($passedMatch -and $failedMatch) {
-        $passCount = $passedMatch.Matches[0].Groups[1].Value
-        $failCount = $failedMatch.Matches[0].Groups[1].Value
-        Write-TestResult "oracle_test" ($exitCode -eq 0) "Passed: $passCount, Failed: $failCount"
-    } else {
-        Write-TestResult "oracle_test" ($exitCode -eq 0) "Exit code: $exitCode"
-    }
+    Write-Result "oracle_test" $oracleOk $detail
 } else {
-    Write-TestResult "oracle_test" $false "Executable not found"
+    Write-Result "oracle_test" $false "Executable not found: $oracleExe"
 }
 
-# =============================================================================
-# Summary
-# =============================================================================
-Write-Host "`n" -NoNewline
-Write-Host "=" * 60 -ForegroundColor White
-Write-Host "  SUMMARY" -ForegroundColor White
-Write-Host "=" * 60 -ForegroundColor White
+# ---------------------------------------------------------------------------
+# GATE 12 -- Profile Verify
+# Validates ExtractionProfile base-data and move offsets against known-good
+# values from the Crystal ROM.  Returns 1 on any stat mismatch.
+# ---------------------------------------------------------------------------
+Write-Header "Profile Verify"
 
-Write-Host "`n  Passed: $passed" -ForegroundColor Green
-Write-Host "  Failed: $failed" -ForegroundColor $(if ($failed -gt 0) { "Red" } else { "Green" })
+$profileExe = "$toolsDir\profile_verify.exe"
+if (Test-Path $profileExe) {
+    $r = Invoke-Exe $profileExe @($RomPath)
+    # Tool reports "Profile verification: PASSED" or "FAILED"
+    $passLine = $r.Lines | Select-String -Pattern "Profile verification:\s*PASSED" | Select-Object -First 1
+    $failLine = $r.Lines | Select-String -Pattern "Profile verification:\s*FAILED" | Select-Object -First 1
+    if ($passLine) {
+        Write-Result "profile_verify" $true "Profile offsets match ROM data"
+    } elseif ($failLine) {
+        Write-Result "profile_verify" $false "Profile offset mismatch -- see output above"
+    } else {
+        Write-Result "profile_verify" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+    }
+} else {
+    Write-Result "profile_verify" $false "Executable not found: $profileExe"
+}
+
+# ---------------------------------------------------------------------------
+# GATE 13 -- Trainer Verify
+# Validates TrainerRegistry extraction counts against authoritative
+# per-group counts from pokecrystal/data/trainers/parties.asm.
+# Returns 1 on any group count mismatch.
+# ---------------------------------------------------------------------------
+Write-Header "Trainer Verify"
+
+$trainerExe = "$toolsDir\trainer_verify.exe"
+if (Test-Path $trainerExe) {
+    $r = Invoke-Exe $trainerExe @($RomPath)
+    $verifiedLine = $r.Lines | Select-String -Pattern "VERIFIED.*All counts match" | Select-Object -First 1
+    $bugLine      = $r.Lines | Select-String -Pattern "BUG FOUND"                  | Select-Object -First 1
+    if ($verifiedLine) {
+        Write-Result "trainer_verify" $true "All trainer group counts match authoritative source"
+    } elseif ($bugLine) {
+        Write-Result "trainer_verify" $false "Trainer count mismatch -- see output above"
+    } else {
+        Write-Result "trainer_verify" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+    }
+} else {
+    Write-Result "trainer_verify" $false "Executable not found: $trainerExe"
+}
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host ("=" * 60) -ForegroundColor White
+Write-Host "  SUMMARY" -ForegroundColor White
+Write-Host ("=" * 60) -ForegroundColor White
+Write-Host ""
+Write-Host "  Gates passed: $passed" -ForegroundColor Green
+Write-Host "  Gates failed: $failed" `
+    -ForegroundColor $(if ($failed -gt 0) { "Red" } else { "Green" })
 
 if ($failed -gt 0) {
-    Write-Host "`n  Failed tests:" -ForegroundColor Red
-    foreach ($test in $failedTests) {
-        Write-Host "    - $test" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Failed gates:" -ForegroundColor Red
+    foreach ($t in $failedTests) {
+        Write-Host "    - $t" -ForegroundColor Red
     }
 }
 
-# Key invariants
-Write-Host "`n  Key Invariants:" -ForegroundColor Gray
-Write-Host "    corpus lowering   = $corpusLoweringCount/$expectedCorpusCount" -ForegroundColor $(if ($corpusLoweringOk) { "Green" } else { "Red" })
-Write-Host "    linker corpus     = $linkerCorpusCount/$expectedCorpusCount" -ForegroundColor $(if ($linkerCorpusOk) { "Green" } else { "Red" })
-$ownerDisplay = if ($ownershipOk) { "0" } else { "ERROR" }
-Write-Host "    InvalidOwnership  = $ownerDisplay" -ForegroundColor $(if ($ownershipOk) { "Green" } else { "Red" })
-$decoderDisplay = if ($decoderCfgOk) { "PASS" } else { "FAIL" }
-Write-Host "    decoder/CFG       = $decoderDisplay" -ForegroundColor $(if ($decoderCfgOk) { "Green" } else { "Red" })
+Write-Host ""
+Write-Host "  Key Invariants:" -ForegroundColor Gray
+Write-Host "    corpus lowering   = $corpusLoweringCount/$expectedCorpusCount" `
+    -ForegroundColor $(if ($corpusLoweringOk) { "Green" } else { "Red" })
+Write-Host "    linker corpus     = $linkerCorpusCount/$expectedCorpusCount" `
+    -ForegroundColor $(if ($linkerCorpusOk) { "Green" } else { "Red" })
+$ownerDisp2 = if ($ownershipOk) { "0" } else { "ERROR" }
+Write-Host "    InvalidOwnership  = $ownerDisp2" `
+    -ForegroundColor $(if ($ownershipOk) { "Green" } else { "Red" })
+$decoderDisp = if ($decoderCfgOk) { "PASS" } else { "FAIL" }
+Write-Host "    decoder/CFG       = $decoderDisp" `
+    -ForegroundColor $(if ($decoderCfgOk) { "Green" } else { "Red" })
+Write-Host ""
 
-# Final result
-Write-Host "`n" -NoNewline
 $allInvariantsOk = $corpusLoweringOk -and $linkerCorpusOk -and $ownershipOk -and $decoderCfgOk
 if ($failed -eq 0 -and $allInvariantsOk) {
     Write-Host "  OVERALL: PASS" -ForegroundColor Green -BackgroundColor DarkGreen

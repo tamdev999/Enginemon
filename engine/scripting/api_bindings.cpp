@@ -991,11 +991,18 @@ int can_use_hm(lua_State* L) {
 namespace inventory_api {
 
 // ctx.inventory:give(item_id, count)
+// ctx.inventory:give(item_id, count) -> int
+// Returns 1 (given) or 0 (bag full).
+// Sem_GiveItemVerbose and Sem_GiveItemVerboseVar both assign their result
+// to the VM `result` local and may forward it to set_var.  Returning 0
+// values (nil) causes the downstream luaL_checkinteger on `result` to
+// fail with "number expected, got nil".  Always return an integer.
 int give(lua_State* L) {
     int item_id = luaL_checkinteger(L, 2);
-    int count = luaL_optinteger(L, 3, 1);
+    int count   = luaL_optinteger(L, 3, 1);
     (void)item_id; (void)count;
-    return 0;
+    lua_pushinteger(L, 1);  // stub: success (bag never full in headless)
+    return 1;
 }
 
 // ctx.inventory:take(item_id, count) -> bool
@@ -1261,32 +1268,53 @@ int check(lua_State* L) {
 }
 
 // ctx.flags:set_var(var_id, value)
+// var_id may be an integer (canonical numeric slot, stored as "var_N" in GameState)
+// or a string (text-buffer slot like "strbuf0_item", stored as-is in GameState).
+// Sem_PrepareTextArg uses string keys; Sem_SetVar uses integer keys.
+// Both must accept integer values as the VM result ABI.
 int set_var(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
-    int var_id = luaL_checkinteger(L, 2);
-    int value  = luaL_checkinteger(L, 3);
-    // Production path: write through GameState when bound
+    int value = luaL_checkinteger(L, 3);
+
     if (GameState* gs = runtime->get_game_state()) {
-        gs->variables["var_" + std::to_string(var_id)] = value;
+        if (lua_type(L, 2) == LUA_TSTRING) {
+            gs->variables[lua_tostring(L, 2)] = value;
+        } else {
+            gs->variables["var_" + std::to_string(luaL_checkinteger(L, 2))] = value;
+        }
     } else {
-        runtime->get_stub_services().vars[var_id] = value;
+        // Stub path: only integer-keyed vars are tracked in StubServices.
+        // String-keyed text-buffer writes (strbuf*) are presentation side-effects
+        // with no observable impact on headless test assertions.
+        if (lua_type(L, 2) != LUA_TSTRING) {
+            runtime->get_stub_services().vars[static_cast<int>(luaL_checkinteger(L, 2))] = value;
+        }
     }
     return 0;
 }
 
 // ctx.flags:get_var(var_id) -> number
+// var_id may be an integer or a string key (see set_var).
 int get_var(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
-    int var_id = luaL_checkinteger(L, 2);
-    int value  = 0;
-    // Production path: read from GameState when bound
+    int value = 0;
     if (GameState* gs = runtime->get_game_state()) {
-        auto it = gs->variables.find("var_" + std::to_string(var_id));
+        std::string key;
+        if (lua_type(L, 2) == LUA_TSTRING) {
+            key = lua_tostring(L, 2);
+        } else {
+            key = "var_" + std::to_string(luaL_checkinteger(L, 2));
+        }
+        auto it = gs->variables.find(key);
         value = (it != gs->variables.end()) ? it->second : 0;
     } else {
-        const auto& stubs = runtime->get_stub_services();
-        auto it = stubs.vars.find(var_id);
-        value = (it != stubs.vars.end()) ? it->second : 0;
+        if (lua_type(L, 2) != LUA_TSTRING) {
+            int var_id = static_cast<int>(luaL_checkinteger(L, 2));
+            const auto& stubs = runtime->get_stub_services();
+            auto it = stubs.vars.find(var_id);
+            value = (it != stubs.vars.end()) ? it->second : 0;
+        }
+        // String-keyed reads in stub mode: return 0 (no stub storage for text buffers)
     }
     lua_pushinteger(L, value);
     return 1;

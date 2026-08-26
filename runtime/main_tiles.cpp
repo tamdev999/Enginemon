@@ -759,8 +759,8 @@ int main(int argc, char* argv[]) {
     // Set up package context
     pkg_ctx.package = package.get();
     pkg_ctx.initialized = true;
-    pkg_ctx.game_state = &game_state;
-    // Load species→icon map from package (compiled from Crystal MonMenuIcons).
+    // pkg_ctx.game_state is set below, after GameState is declared (STEP 4).
+    // Load species->icon map from package (compiled from Crystal MonMenuIcons).
     // This replaces the hardcoded pokemon_icons.hpp table with package-sourced data.
     pkg_ctx.species_icon_map = package->load_species_icon_map();
     
@@ -782,6 +782,9 @@ int main(int argc, char* argv[]) {
     
     WorldManager world_manager;
     GameState game_state;
+    
+    // Bind game_state pointer into package context now that GameState is declared.
+    pkg_ctx.game_state = &game_state;
     
     // Set up map loader callback - captures pkg_ctx by reference (per-instance)
     world_manager.set_map_loader([&pkg_ctx](const std::string& map_id) -> std::optional<RuntimeMap> {
