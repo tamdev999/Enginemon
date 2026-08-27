@@ -17,6 +17,7 @@
 #  12.  trainer_verify           (trainer group extraction correctness)
 #  13.  enginemon_bootstrap      build gate
 #  14.  enginemon_tiles          build gate
+#  15.  emon_smoke                production runtime smoke (package + map + tick)
 #
 # Required invariants:
 #   - corpus lowering = 1788/1788
@@ -152,7 +153,8 @@ $requiredExes = @(
     "$toolsDir\profile_verify.exe",
     "$toolsDir\trainer_verify.exe",
     "$runtimeDir\enginemon_bootstrap.exe",
-    "$runtimeDir\enginemon_tiles.exe"
+    "$runtimeDir\enginemon_tiles.exe",
+    "$toolsDir\emon_smoke.exe"
 )
 
 if ($NoBuild) {
@@ -189,7 +191,7 @@ if ($NoBuild) {
         "golden_test", "legality_gate_test", "corpus_test",
         "linker_test", "compiler_integrity_test", "oracle_test",
         "corpus_lowering_audit", "profile_verify", "trainer_verify",
-        "enginemon_bootstrap", "enginemon_tiles"
+        "enginemon_bootstrap", "enginemon_tiles", "emon_smoke"
     )
 
     $buildFailed = $false
@@ -504,6 +506,33 @@ if (Test-Path $trainerExe) {
     }
 } else {
     Write-Result "trainer_verify" $false "Executable not found: $trainerExe"
+}
+
+# ---------------------------------------------------------------------------
+# GATE 15 -- Production Runtime Smoke
+# Opens the compiled .emon package, loads a map, runs 10 HeadlessGameLoop
+# ticks via the real PackageReader -> WorldManager -> LuaRuntime stack.
+# No Vulkan required. Fails if package missing, corrupt, or map load fails.
+# ---------------------------------------------------------------------------
+Write-Header "Production Runtime Smoke"
+
+$smokeExe = "$toolsDir\emon_smoke.exe"
+$emonPkg  = "crystal.emon"
+if (-not (Test-Path $smokeExe)) {
+    Write-Result "emon_smoke" $false "Executable not found: $smokeExe"
+} elseif (-not (Test-Path $emonPkg)) {
+    Write-Result "emon_smoke" $false "Package not found: $emonPkg (run emon_compile first)"
+} else {
+    $r = Invoke-Exe $smokeExe @($emonPkg)
+    $passLine = $r.Lines | Select-String -Pattern "\[smoke\] PASS" | Select-Object -First 1
+    $failLine = $r.Lines | Select-String -Pattern "\[smoke\] FAIL" | Select-Object -First 1
+    if ($passLine) {
+        Write-Result "emon_smoke" $true "PackageReader + WorldManager + HeadlessGameLoop smoke passed"
+    } elseif ($failLine) {
+        Write-Result "emon_smoke" $false $failLine.Line.Trim()
+    } else {
+        Write-Result "emon_smoke" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+    }
 }
 
 # ---------------------------------------------------------------------------

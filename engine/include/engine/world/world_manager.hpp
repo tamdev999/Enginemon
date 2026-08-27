@@ -69,6 +69,11 @@ struct ConnectionResult {
     // For seamless crossing, the "pre-seam" position
     int32_t seam_x = 0;
     int32_t seam_y = 0;
+
+    // Staged destination map — acquired by prepare_connection() without
+    // committing it to current_map_.  commit_connection() applies it atomically
+    // after renderer staging succeeds, matching the warp prepare/commit pattern.
+    std::optional<RuntimeMap> staged_map;
 };
 
 //=============================================================================

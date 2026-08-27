@@ -462,8 +462,12 @@ ConnectionResult WorldManager::execute_connection(
 }
 
 void WorldManager::commit_connection(const ConnectionResult& result, GameState& state) {
-    // F4: Non-failing state application.
-    // load_map() was called during prepare_connection() before staging.
+    // Non-failing state application — all fallible work done in prepare_connection().
+    // Commit staged map to WorldManager, then update state.player to destination.
+    if (result.staged_map.has_value()) {
+        RuntimeMap map_copy = *result.staged_map;
+        commit_map(result.target_map_id, std::move(map_copy));
+    }
     state.player.current_map_id = result.target_map_id;
     state.player.x = result.target_x;
     state.player.y = result.target_y;
@@ -474,19 +478,27 @@ ConnectionResult WorldManager::prepare_connection(
     int32_t player_x, int32_t player_y,
     Direction facing
 ) {
-    // F4: Resolve connection + load destination map (the only fallible step).
-    // Does NOT write state.player.
-    // On failure: WorldManager.current_map_ is unchanged (load_map is all-or-nothing).
+    // Atomicity contract (mirrors prepare_warp):
+    // 1. resolve_connection() — pure computation, no side effects.
+    // 2. acquire_map()        — loads destination WITHOUT mutating current_map_
+    //                          or current_map_id_.  Stores in result.staged_map.
+    // 3. state.player is NOT written.
+    //
+    // On any failure: WorldManager.current_map_ and current_map_id_ are unchanged.
+    // commit_connection() applies the staged map and player state only after
+    // renderer staging (transition_to_map) succeeds.
     ConnectionResult result = resolve_connection(player_x, player_y, facing);
     if (!result.success) return result;
-    
-    if (!load_map(result.target_map_id)) {
+
+    auto acquired = acquire_map(result.target_map_id);
+    if (!acquired.has_value()) {
         result.success = false;
-        result.error = "Failed to load destination map: " + result.target_map_id;
+        result.error = "Failed to acquire destination map: " + result.target_map_id;
         return result;
     }
-    
-    return result;  // success=true; state.player unchanged
+    result.staged_map = std::move(acquired);
+
+    return result;  // success=true; state.player unchanged; current_map_ unchanged
 }
 
 //=============================================================================

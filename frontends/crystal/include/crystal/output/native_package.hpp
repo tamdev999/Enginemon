@@ -16,6 +16,7 @@
 // - Script bytecode (compiled Lua)
 
 #include "crystal/extract/tileset_extractor.hpp"
+#include "engine/package/package_format.hpp"   // canonical PackageHeader/ChunkType/TocEntry
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/sprite_atlas.hpp"
 #include "engine/core/types.hpp"
@@ -39,56 +40,15 @@ using enginemon::RuntimeSprite;
 using enginemon::SpriteObjPalettes;
 using enginemon::SpeciesId;
 
-//=============================================================================
-// PACKAGE HEADER
-//=============================================================================
-
-struct PackageHeader {
-    static constexpr uint32_t MAGIC = 0x454D4F4E;  // "EMON"
-    static constexpr uint32_t VERSION = 3;  // v3: connection fields src_skip_blocks/strip_length_blocks/coord_adjust_tiles replace strip_offset/strip_length
-    
-    uint32_t magic;
-    uint32_t version;
-    uint32_t flags;
-    
-    // Source ROM info (for verification, not extraction)
-    char source_sha1[41];       // Null-terminated hex string
-    char source_version[32];    // e.g., "Crystal USA v1.1"
-    
-    // Table of contents offsets
-    uint32_t toc_offset;
-    uint32_t toc_size;
-    
-    // Checksums for integrity
-    uint32_t data_crc32;
-};
-
-//=============================================================================
-// TABLE OF CONTENTS
-//=============================================================================
-
-enum class ChunkType : uint32_t {
-    Maps = 0x4D415053,          // "MAPS"
-    TilesetAtlases = 0x54494C53, // "TILS"
-    Sprites = 0x53505254,        // "SPRT"
-    ObjPalettes = 0x4F424A50,    // "OBJP"
-    Scripts = 0x53435250,        // "SCRP"
-    Audio = 0x41554449,          // "AUDI"
-    Strings = 0x53545247,        // "STRG"
-    Fonts = 0x464F4E54,          // "FONT"
-    SpeciesIconMap = 0x53494D50, // "SIMP" — SpeciesId → pokemon_icon asset ID mapping
-                                 // Compiled from Crystal MonMenuIcons (bank 23) by the
-                                 // Crystal frontend. Runtime uses this for Day Care sprite
-                                 // resolution without any hardcoded Crystal tables.
-};
-
-struct TocEntry {
-    ChunkType type;
-    uint32_t offset;
-    uint32_t size;
-    uint32_t count;             // Number of items in chunk
-    uint32_t crc32;             // Chunk checksum
-};
+// Package format types — single source of truth in engine/package/package_format.hpp.
+// These aliases make the types available unqualified inside namespace crystal so that
+// PackageWriter/PackageReader implementations can use them without qualification.
+// No separate crystal:: definitions — drift is impossible.
+using enginemon::PackageHeader;
+using enginemon::ChunkType;
+using enginemon::TocEntry;
+// Note: calculate_crc32 is defined separately in native_package.cpp (identical algorithm).
+// It remains a crystal:: local until a future consolidation pass removes the duplication.
 
 //=============================================================================
 // SERIALIZED MAP DATA
@@ -246,11 +206,8 @@ private:
     std::unordered_map<std::string, size_t> sprite_index_;
 };
 
-//=============================================================================
-// UTILITY
-//=============================================================================
-
-// Calculate CRC32 for data integrity
+// calculate_crc32 — local implementation in native_package.cpp.
+// Uses identical algorithm to enginemon::calculate_crc32 in package_reader.cpp.
 uint32_t calculate_crc32(const void* data, size_t size);
 
 } // namespace crystal

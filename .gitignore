@@ -10,7 +10,13 @@ references/
 # -----------------------------------------------------------------------------
 # Build outputs
 # -----------------------------------------------------------------------------
+# Top-level CMake output directory only.
+# engine/build/ and engine/include/engine/build/ are production C++ source
+# (thread_pool, build_stats, package_cache, asset_cache) — not build output.
+# The negations below override the glob for those two paths.
 build/
+!engine/build/
+!engine/include/engine/build/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake

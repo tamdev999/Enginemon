@@ -1,5 +1,15 @@
 # Standalone tools for development/debugging
 
+# Headless production smoke test — verifies PackageReader + WorldManager +
+# HeadlessGameLoop + LuaRuntime integration without Vulkan.
+# Exercises: package open/validate -> map load -> game_loop.tick() x 10.
+add_executable(emon_smoke
+    emon_smoke.cpp
+)
+target_link_libraries(emon_smoke PRIVATE
+    enginemon_engine
+)
+
 # Crystal compiler CLI - compiles ROM to native format
 add_executable(crystal_compile
     crystal_compile.cpp
