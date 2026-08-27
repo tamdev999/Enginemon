@@ -209,6 +209,7 @@ void test_f3_no_second_player_authority();
 void test_f3_player_authority_step_syncs_gamestate();
 void test_f3_player_authority_warp_uses_latest_position();
 void test_f4_failed_prepare_warp_leaves_everything_unchanged();
+void test_f4_failed_prepare_connection_leaves_everything_unchanged();
 void test_f4_prepare_warp_does_not_mutate_player();
 void test_f4_scripted_warp_coordinates_preserved();
 void test_f4_transition_failure_leaves_old_world_coherent();
@@ -789,6 +790,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(f3_no_second_player_authority);
     RUN_TEST(f4_prepare_warp_does_not_mutate_player);
     RUN_TEST(f4_failed_prepare_warp_leaves_everything_unchanged);
+    RUN_TEST(f4_failed_prepare_connection_leaves_everything_unchanged);
 
     // F5: Save v2 NPC section mandatory
     RUN_TEST(f5_save_v2_npc_section_mandatory_truncations);

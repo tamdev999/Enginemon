@@ -1,4 +1,4 @@
-// runtime_test_scripts.cpp — F3/F4/F5/F6/F7 warp/state, semantic ops, input, NPC movement
+﻿// runtime_test_scripts.cpp — F3/F4/F5/F6/F7 warp/state, semantic ops, input, NPC movement
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
 #include "engine/scripting/semantic_ir.hpp"
@@ -517,6 +517,67 @@ TEST(f4_failed_prepare_warp_leaves_everything_unchanged) {
 // =============================================================================
 // F5: NPC map_count is mandatory in v2 — truncation before/inside it must fail
 // =============================================================================
+// =============================================================================
+// F4b: Connection atomicity — prepare_connection failure leaves state unchanged
+//
+// Mirrors f4_failed_prepare_warp_leaves_everything_unchanged for connections.
+// prepare_connection() must use acquire_map() (no side effects on current_map_).
+// If the destination map cannot be acquired, WorldManager.current_map_ and
+// state.player must remain on the original map.
+// =============================================================================
+TEST(f4_failed_prepare_connection_leaves_everything_unchanged) {
+    using namespace enginemon;
+    GameState gs;
+    gs.player.x = 4;
+    gs.player.y = 0;
+    gs.player.facing = enginemon::Direction::Up;
+    gs.player.current_map_id = "source_map";
+
+    WorldManager wm;
+
+    RuntimeMap src;
+    src.map_id = "source_map";
+    src.width  = 10;
+    src.height = 5;
+    src.blocks.assign(static_cast<size_t>(src.width * src.height), 0);
+
+    // North connection pointing at a destination that will fail to load.
+    RuntimeConnection conn;
+    conn.direction           = ConnectionDirection::North;
+    conn.target_map_id       = "missing_dest_map";
+    conn.coord_adjust_tiles  = 0;
+    conn.src_skip_blocks     = 0;
+    conn.strip_length_blocks = src.width;  // full width so player_x=4 is within strip
+    src.connections.push_back(conn);
+
+    // Map loader: source exists; destination does NOT.
+    wm.set_map_loader([&](const std::string& id) -> std::optional<RuntimeMap> {
+        if (id == "source_map") return src;
+        return std::nullopt;   // missing_dest_map not found -> acquire_map fails
+    });
+
+    ASSERT_TRUE(wm.load_map("source_map"));
+    const std::string old_wm_id = wm.current_map_id();
+    ASSERT_STR_EQ(old_wm_id.c_str(), "source_map");
+
+    // Attempt crossing — destination acquisition must fail.
+    auto result = wm.prepare_connection(gs.player.x, gs.player.y, gs.player.facing);
+    ASSERT_FALSE(result.success);
+
+    // ORACLE: WorldManager.current_map_ must still be "source_map".
+    ASSERT_STR_EQ(wm.current_map_id().c_str(), "source_map");
+
+    // ORACLE: staged_map must not be populated on failure.
+    ASSERT_FALSE(result.staged_map.has_value());
+
+    // ORACLE: state.player completely unchanged.
+    ASSERT_EQ(gs.player.x, 4);
+    ASSERT_EQ(gs.player.y, 0);
+    ASSERT_EQ(gs.player.facing, enginemon::Direction::Up);
+    ASSERT_STR_EQ(gs.player.current_map_id.c_str(), "source_map");
+
+    std::cout << "  [F4b: failed prepare_connection leaves WorldManager/player unchanged]\n";
+}
 TEST(f5_save_v2_npc_section_mandatory_truncations) {
     // Build a minimal valid v2 save, then truncate it at various byte offsets
     // just before/inside the NPC map_count field.

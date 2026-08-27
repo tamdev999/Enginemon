@@ -154,7 +154,8 @@ $requiredExes = @(
     "$toolsDir\trainer_verify.exe",
     "$runtimeDir\enginemon_bootstrap.exe",
     "$runtimeDir\enginemon_tiles.exe",
-    "$toolsDir\emon_smoke.exe"
+    "$toolsDir\emon_smoke.exe",
+    "$toolsDir\emon_compile.exe"
 )
 
 if ($NoBuild) {
@@ -191,7 +192,7 @@ if ($NoBuild) {
         "golden_test", "legality_gate_test", "corpus_test",
         "linker_test", "compiler_integrity_test", "oracle_test",
         "corpus_lowering_audit", "profile_verify", "trainer_verify",
-        "enginemon_bootstrap", "enginemon_tiles", "emon_smoke"
+        "enginemon_bootstrap", "enginemon_tiles", "emon_smoke", "emon_compile"
     )
 
     $buildFailed = $false
@@ -510,29 +511,43 @@ if (Test-Path $trainerExe) {
 
 # ---------------------------------------------------------------------------
 # GATE 15 -- Production Runtime Smoke
-# Opens the compiled .emon package, loads a map, runs 10 HeadlessGameLoop
-# ticks via the real PackageReader -> WorldManager -> LuaRuntime stack.
-# No Vulkan required. Fails if package missing, corrupt, or map load fails.
+# Compiles a FRESH temporary .emon from the same ROM used by all other gates,
+# then runs emon_smoke against that package.  This proves the smoke exercises
+# the current compiler output, not an arbitrary pre-existing crystal.emon.
+#
+# Flow:  RomPath -> emon_compile -> $env:TEMP\smoke_verify.emon -> emon_smoke
+#        Temporary package is removed after the gate regardless of outcome.
 # ---------------------------------------------------------------------------
 Write-Header "Production Runtime Smoke"
 
-$smokeExe = "$toolsDir\emon_smoke.exe"
-$emonPkg  = "crystal.emon"
+$smokeExe    = "$toolsDir\emon_smoke.exe"
+$emonCompile = "$toolsDir\emon_compile.exe"
+$smokePkg    = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "smoke_verify_$([System.Diagnostics.Process]::GetCurrentProcess().Id).emon")
+
 if (-not (Test-Path $smokeExe)) {
     Write-Result "emon_smoke" $false "Executable not found: $smokeExe"
-} elseif (-not (Test-Path $emonPkg)) {
-    Write-Result "emon_smoke" $false "Package not found: $emonPkg (run emon_compile first)"
+} elseif (-not (Test-Path $emonCompile)) {
+    Write-Result "emon_smoke" $false "Executable not found: $emonCompile (cannot compile fresh package)"
 } else {
-    $r = Invoke-Exe $smokeExe @($emonPkg)
-    $passLine = $r.Lines | Select-String -Pattern "\[smoke\] PASS" | Select-Object -First 1
-    $failLine = $r.Lines | Select-String -Pattern "\[smoke\] FAIL" | Select-Object -First 1
-    if ($passLine) {
-        Write-Result "emon_smoke" $true "PackageReader + WorldManager + HeadlessGameLoop smoke passed"
-    } elseif ($failLine) {
-        Write-Result "emon_smoke" $false $failLine.Line.Trim()
+    # Step 1: compile a fresh temporary package from the canonical ROM
+    $compileR = Invoke-Exe $emonCompile @($RomPath, $smokePkg, "--no-cache")
+    if ($compileR.ExitCode -ne 0 -or -not (Test-Path $smokePkg)) {
+        Write-Result "emon_smoke" $false "emon_compile failed (exit $($compileR.ExitCode)) -- cannot verify smoke provenance"
     } else {
-        Write-Result "emon_smoke" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+        # Step 2: run smoke against the freshly compiled package
+        $r = Invoke-Exe $smokeExe @($smokePkg)
+        $passLine = $r.Lines | Select-String -Pattern "\[smoke\] PASS" | Select-Object -First 1
+        $failLine = $r.Lines | Select-String -Pattern "\[smoke\] FAIL" | Select-Object -First 1
+        if ($passLine) {
+            Write-Result "emon_smoke" $true "Fresh ROM->compile->smoke passed (package was $([math]::Round((Get-Item $smokePkg).Length/1KB)) KB)"
+        } elseif ($failLine) {
+            Write-Result "emon_smoke" $false $failLine.Line.Trim()
+        } else {
+            Write-Result "emon_smoke" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+        }
     }
+    # Step 3: always clean up the temporary package
+    Remove-Item -LiteralPath $smokePkg -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------------------
