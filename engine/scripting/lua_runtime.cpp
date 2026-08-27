@@ -164,6 +164,15 @@ void LuaRuntime::bind_world_api() {
     
     lua_pushcfunction(L_, world_api::hide_npc);
     lua_setfield(L_, -2, "hide_npc");
+
+    lua_pushcfunction(L_, world_api::teleport_npc);
+    lua_setfield(L_, -2, "teleport_npc");
+
+    lua_pushcfunction(L_, world_api::face_toward);
+    lua_setfield(L_, -2, "face_toward");
+
+    lua_pushcfunction(L_, world_api::set_last_talked);
+    lua_setfield(L_, -2, "set_last_talked");
     
     lua_pushcfunction(L_, world_api::npc_visible);
     lua_setfield(L_, -2, "npc_visible");

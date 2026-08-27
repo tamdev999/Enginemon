@@ -55,6 +55,12 @@ HeadlessGameLoop::~HeadlessGameLoop() {
         lua_runtime_->get_stub_services().async_movement_enabled = false;
         // Null the position query callback — it captured 'this' which is now destroyed.
         lua_runtime_->get_stub_services().actor_pos_query = nullptr;
+        // Null NPC mutation callbacks — they captured 'this'.
+        lua_runtime_->get_stub_services().set_npc_visible_fn = nullptr;
+        lua_runtime_->get_stub_services().set_npc_facing_fn  = nullptr;
+        lua_runtime_->get_stub_services().set_player_facing_fn = nullptr;
+        lua_runtime_->get_stub_services().teleport_npc_fn    = nullptr;
+        lua_runtime_->get_stub_services().player_pos_query   = nullptr;
     }
 }
 
@@ -232,6 +238,13 @@ InputResult HeadlessGameLoop::handle_interact() {
     
     if (interaction_result.found()) {
         result.script_id = interaction_result.script_id();
+        // Record last-talked NPC id so scripts using LastTalked can resolve correctly.
+        // object_local_id is 0 for non-NPC events (signs, BG events) — scripts using
+        // LastTalked should only be triggered by NPC interactions where this is set.
+        if (lua_runtime_) {
+            lua_runtime_->get_stub_services().last_talked_id =
+                interaction_result.object_local_id;
+        }
         
         // Start the script — hard failure if the referenced script is missing.
         // A recognised interaction with a missing script_id is a package integrity
@@ -455,6 +468,11 @@ void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
         // to a valid HeadlessGameLoop movement manager.
         lua_runtime_->get_stub_services().async_movement_enabled = false;
         lua_runtime_->get_stub_services().actor_pos_query = nullptr;
+        lua_runtime_->get_stub_services().set_npc_visible_fn = nullptr;
+        lua_runtime_->get_stub_services().set_npc_facing_fn  = nullptr;
+        lua_runtime_->get_stub_services().set_player_facing_fn = nullptr;
+        lua_runtime_->get_stub_services().teleport_npc_fn    = nullptr;
+        lua_runtime_->get_stub_services().player_pos_query   = nullptr;
     }
     lua_runtime_ = runtime;
     if (runtime) {
@@ -482,6 +500,35 @@ void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
                 const NpcState* npc = get_npc(static_cast<uint16_t>(actor_id));
                 if (npc) return {npc->x, npc->y};
                 return {0, 0};
+            };
+        // Wire NPC visibility mutator so show_npc/hide_npc update authoritative NpcState.
+        runtime->get_stub_services().set_npc_visible_fn =
+            [this](uint16_t actor_id, bool visible) {
+                NpcState* npc = get_npc(actor_id);
+                if (npc) npc->visible = visible;
+            };
+        // Wire NPC facing mutator so face_actor(NPC) updates authoritative NpcState.
+        runtime->get_stub_services().set_npc_facing_fn =
+            [this](uint16_t actor_id, Direction facing) {
+                NpcState* npc = get_npc(actor_id);
+                if (npc) npc->facing = facing;
+            };
+        // Wire player facing mutator so face_actor(0) updates authoritative PlayerState.
+        runtime->get_stub_services().set_player_facing_fn =
+            [this](Direction facing) {
+                player_.facing = facing;
+                if (game_state_) game_state_->player.facing = facing;
+            };
+        // Wire NPC teleport mutator so teleport_npc() updates authoritative NpcState.
+        runtime->get_stub_services().teleport_npc_fn =
+            [this](uint16_t actor_id, int32_t x, int32_t y) {
+                NpcState* npc = get_npc(actor_id);
+                if (npc) { npc->x = x; npc->y = y; npc->is_moving = false; }
+            };
+        // Wire player position query so face_player() can determine the facing direction.
+        runtime->get_stub_services().player_pos_query =
+            [this]() -> std::pair<int32_t, int32_t> {
+                return {player_.x, player_.y};
             };
     }
 }

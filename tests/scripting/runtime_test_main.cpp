@@ -536,6 +536,16 @@ void test_unrelated_coroutine_resume_does_not_set_script_resumed();
 void test_vm_call_returns_to_continuation();
 void test_vm_callee_end_does_not_exit_top_level();
 void test_vm_deferred_failure_propagates_error();
+
+// Capability closure E2E tests
+void test_capability_show_hide_npc_updates_npc_state();
+void test_capability_face_actor_updates_npc_facing();
+void test_capability_face_actor_player_updates_player_facing();
+void test_capability_face_player_updates_npc_facing_toward_player();
+void test_capability_teleport_npc_updates_npc_position();
+void test_capability_set_last_talked_records_id();
+void test_capability_set_scene_persists_in_game_state();
+void test_capability_state_var_persists_in_game_state();
 void test_vm_endall_inside_nested_call_terminates();
 void test_vm_nested_calls_unwind_correctly();
 void test_vm_result_nonzero_integer_true();
@@ -1266,6 +1276,16 @@ int main(int argc, char* argv[]) {
     RUN_TEST(vm_sdefer_cleared_on_rebind);
     RUN_TEST(vm_sdefer_cleared_on_loop_destroy);
     RUN_TEST(vm_deferred_failure_propagates_error);
+
+    // Capability closure E2E tests
+    RUN_TEST(capability_show_hide_npc_updates_npc_state);
+    RUN_TEST(capability_face_actor_updates_npc_facing);
+    RUN_TEST(capability_face_actor_player_updates_player_facing);
+    RUN_TEST(capability_face_player_updates_npc_facing_toward_player);
+    RUN_TEST(capability_teleport_npc_updates_npc_position);
+    RUN_TEST(capability_set_last_talked_records_id);
+    RUN_TEST(capability_set_scene_persists_in_game_state);
+    RUN_TEST(capability_state_var_persists_in_game_state);
 
     // Summary
     std::cout << "\n=== Results ===\n";

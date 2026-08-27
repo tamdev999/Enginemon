@@ -3057,3 +3057,241 @@ return script
     std::cout << "  [movement_callback_wires_to_live_object: NPC (3,0)->(2,0);"
               << " callback fired against live in-place object]\n";
 }
+
+// =============================================================================
+// CAPABILITY CLOSURE E2E TESTS
+// Exercises the non-battle script capabilities fixed in this pass:
+//   - show_npc / hide_npc -> NpcState::visible
+//   - face_actor          -> NpcState::facing
+//   - face_player         -> last_talked NPC faces toward player
+//   - teleport_npc        -> NpcState::{x,y}
+//   - set_last_talked / LastTalked resolution
+//   - set_scene/check_scene -> GameState::variables["scene_current"]
+//   - set_state_var / read_state_var -> GameState::variables
+// =============================================================================
+
+// Helper: build a HeadlessGameLoop with one NPC for actor-state tests.
+static void setup_npc_loop(HeadlessGameLoop& loop, GameState& gs, LuaRuntime& rt, int npc_id, int nx, int ny) {
+    gs.rng.seed(0xDEADBEEF);
+    rt.set_game_state(&gs);
+    loop.set_game_state(&gs);
+    loop.set_lua_runtime(&rt);
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    NpcState npc;
+    npc.id      = static_cast<uint16_t>(npc_id);
+    npc.x       = nx;
+    npc.y       = ny;
+    npc.facing  = enginemon::Direction::Down;
+    npc.visible = true;
+    loop.add_npc(npc);
+}
+
+// show_npc / hide_npc -> NpcState::visible
+TEST(capability_show_hide_npc_updates_npc_state) {
+    HeadlessGameLoop loop;
+    GameState gs;
+    LuaRuntime rt;
+    setup_npc_loop(loop, gs, rt, 1, 3, 3);
+
+    ASSERT_TRUE(loop.get_npc(1)->visible);
+
+    // hide via script
+    const char* hide_code = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:hide_npc(1)
+    return
+end
+return script
+)";
+    rt.execute_string(hide_code, "hide");
+    rt.start_script("script");
+    ASSERT_FALSE(loop.get_npc(1)->visible);
+
+    // show via script
+    const char* show_code = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:show_npc(1)
+    return
+end
+return script
+)";
+    rt.execute_string(show_code, "show");
+    rt.start_script("script");
+    ASSERT_TRUE(loop.get_npc(1)->visible);
+
+    std::cout << "  [show/hide NPC updates NpcState::visible via callback]\n";
+}
+
+// face_actor(npc_id, dir) -> NpcState::facing
+TEST(capability_face_actor_updates_npc_facing) {
+    HeadlessGameLoop loop;
+    GameState gs;
+    LuaRuntime rt;
+    setup_npc_loop(loop, gs, rt, 2, 5, 5);
+
+    ASSERT_EQ(loop.get_npc(2)->facing, enginemon::Direction::Down);
+
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:face_actor(2, "up")
+    return
+end
+return script
+)";
+    rt.execute_string(code, "face");
+    rt.start_script("script");
+
+    ASSERT_EQ(loop.get_npc(2)->facing, enginemon::Direction::Up);
+    std::cout << "  [face_actor(2,'up') -> NpcState::facing = Up]\n";
+}
+
+// face_actor(0, dir) -> PlayerState::facing
+TEST(capability_face_actor_player_updates_player_facing) {
+    HeadlessGameLoop loop;
+    GameState gs;
+    LuaRuntime rt;
+    setup_npc_loop(loop, gs, rt, 1, 3, 3);
+
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:face_actor(0, "left")
+    return
+end
+return script
+)";
+    rt.execute_string(code, "face_p");
+    rt.start_script("script");
+
+    ASSERT_EQ(loop.player().facing, enginemon::Direction::Left);
+    std::cout << "  [face_actor(0,'left') -> PlayerState::facing = Left]\n";
+}
+
+// face_player: last-talked NPC faces toward player
+TEST(capability_face_player_updates_npc_facing_toward_player) {
+    HeadlessGameLoop loop;
+    GameState gs;
+    LuaRuntime rt;
+    // Player at (0,0); NPC at (0, 3) — player is directly above NPC → NPC should face Up
+    setup_npc_loop(loop, gs, rt, 3, 0, 3);
+    loop.spawn_player(0, 0, enginemon::Direction::Down);
+
+    // Manually set last_talked_id to NPC 3
+    rt.get_stub_services().last_talked_id = 3;
+
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:face_player()
+    return
+end
+return script
+)";
+    rt.execute_string(code, "fp");
+    rt.start_script("script");
+
+    // Player is at y=0, NPC at y=3: dy = 0-3 = -3 → Direction::Up
+    ASSERT_EQ(loop.get_npc(3)->facing, enginemon::Direction::Up);
+    std::cout << "  [face_player: NPC(0,3) faces player(0,0) -> Up]\n";
+}
+
+// teleport_npc -> NpcState::{x,y}
+TEST(capability_teleport_npc_updates_npc_position) {
+    HeadlessGameLoop loop;
+    GameState gs;
+    LuaRuntime rt;
+    setup_npc_loop(loop, gs, rt, 1, 5, 5);
+
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:teleport_npc(1, 10, 12)
+    return
+end
+return script
+)";
+    rt.execute_string(code, "teleport");
+    rt.start_script("script");
+
+    ASSERT_EQ(loop.get_npc(1)->x, 10);
+    ASSERT_EQ(loop.get_npc(1)->y, 12);
+    ASSERT_FALSE(loop.get_npc(1)->is_moving);
+    std::cout << "  [teleport_npc(1,10,12) -> NpcState x=10,y=12]\n";
+}
+
+// set_last_talked records the NPC id
+TEST(capability_set_last_talked_records_id) {
+    HeadlessGameLoop loop;
+    GameState gs;
+    LuaRuntime rt;
+    setup_npc_loop(loop, gs, rt, 7, 2, 2);
+
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:set_last_talked(7)
+    return
+end
+return script
+)";
+    rt.execute_string(code, "lt");
+    rt.start_script("script");
+
+    ASSERT_EQ(rt.get_stub_services().last_talked_id, static_cast<uint16_t>(7));
+    std::cout << "  [set_last_talked(7) -> last_talked_id = 7]\n";
+}
+
+// set_scene / check_scene persist through GameState
+TEST(capability_set_scene_persists_in_game_state) {
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.game:set_scene(5)
+    result = ctx.game:check_scene()
+    ctx.flags:set_var(0, result)
+    return
+end
+return script
+)";
+    rt.execute_string(code, "scene");
+    rt.start_script("script");
+
+    // scene=5 must be in GameState::variables
+    ASSERT_EQ(gs.variables["scene_current"], 5);
+    // check_scene must return 5
+    ASSERT_EQ(gs.variables["var_0"], 5);
+    std::cout << "  [set_scene(5) -> GameState::variables['scene_current']=5]\n";
+}
+
+// set_state_var / read_state_var persist through GameState
+TEST(capability_state_var_persists_in_game_state) {
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.game:set_state_var(3, 42)
+    result = ctx.game:read_state_var(3)
+    ctx.flags:set_var(0, result)
+    return
+end
+return script
+)";
+    rt.execute_string(code, "statevar");
+    rt.start_script("script");
+
+    ASSERT_EQ(gs.variables["state_var_3"], 42);
+    ASSERT_EQ(gs.variables["var_0"], 42);
+    std::cout << "  [set_state_var(3,42) / read_state_var(3) -> GameState persisted]\n";
+}

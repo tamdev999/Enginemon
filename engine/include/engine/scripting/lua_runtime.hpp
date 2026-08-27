@@ -134,6 +134,38 @@ struct StubServices {
     // OWNERSHIP: callback captures HeadlessGameLoop* which owns its lifetime.
     std::function<std::pair<int32_t, int32_t>(uint32_t actor_id)> actor_pos_query;
 
+    // Last-talked NPC id — set by HeadlessGameLoop when the player interacts with an NPC.
+    // Resolves the Crystal LastTalked sentinel so scripts can target the interacting NPC.
+    // 0 = no last-talked NPC (player interacted with a sign/object, not an NPC).
+    uint16_t last_talked_id = 0;
+
+    // NPC visibility mutator — set by HeadlessGameLoop::set_lua_runtime().
+    // Called by ctx.world:show_npc / hide_npc to update NpcState::visible.
+    // Signature: (actor_id, visible) → void.
+    std::function<void(uint16_t actor_id, bool visible)> set_npc_visible_fn;
+
+    // NPC facing mutator — set by HeadlessGameLoop::set_lua_runtime().
+    // Called by ctx.world:face_actor (NPC path) and ctx.world:face_player to update
+    // NpcState::facing.  Also used by ctx.world:face_toward.
+    // Signature: (actor_id, Direction) → void.
+    std::function<void(uint16_t actor_id, Direction facing)> set_npc_facing_fn;
+
+    // Player facing mutator — set by HeadlessGameLoop::set_lua_runtime().
+    // Called by ctx.world:face_actor (player path, actor_id==0).
+    // Signature: (Direction) → void.
+    std::function<void(Direction facing)> set_player_facing_fn;
+
+    // NPC position mutator — set by HeadlessGameLoop::set_lua_runtime().
+    // Called by ctx.world:teleport_npc to immediately place an NPC at (x,y).
+    // This is the Sem_MoveObject runtime path.
+    // Signature: (actor_id, x, y) → void.
+    std::function<void(uint16_t actor_id, int32_t x, int32_t y)> teleport_npc_fn;
+
+    // Player position query — set by HeadlessGameLoop::set_lua_runtime().
+    // Called by ctx.world:face_player to determine which direction an NPC should face.
+    // Returns {x, y} of the player.
+    std::function<std::pair<int32_t, int32_t>()> player_pos_query;
+
     // Active script coroutine ID — set by HeadlessGameLoop before each yield so
     // ctx.world:move_actor can store the real coroutine ID in the movement entry.
     uint32_t active_script_coroutine_id = 0;

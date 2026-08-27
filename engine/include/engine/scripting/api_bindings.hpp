@@ -70,6 +70,15 @@ namespace world_api {
     
     // ctx.world:hide_npc(npc_id)
     int hide_npc(lua_State* L);
+
+    // ctx.world:teleport_npc(npc_id, x, y) -- Sem_MoveObject
+    int teleport_npc(lua_State* L);
+
+    // ctx.world:face_toward(actor_id, target_actor_id) -- Sem_FaceObject
+    int face_toward(lua_State* L);
+
+    // ctx.world:set_last_talked(npc_id) -- Sem_SetLastTalked
+    int set_last_talked(lua_State* L);
     
     // ctx.world:npc_visible(npc_id) -> bool
     int npc_visible(lua_State* L);

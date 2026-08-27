@@ -528,8 +528,20 @@ static bool parse_movement_command_sequence(lua_State* L, int table_idx,
 // ctx.world:move_actor(actor_id, table) — table is either:
 //   emitter format: {{type="step",dir="left"},...}   (from SemanticLuaEmitter)
 //   batch format:   {down=N, up=N, left=N, right=N}  (hand-written tests)
+// actor_id == -2 is the LastTalked sentinel from Sem_ApplyMovement{LastTalked}.
+// It resolves to stubs.last_talked_id at runtime.
 int move_actor_table(lua_State* L, int actor_id, int table_idx) {
     auto& stubs = get_stubs(L);
+
+    // Resolve LastTalked sentinel (-2) to the actual last-talked NPC id.
+    if (actor_id == -2) {
+        actor_id = static_cast<int>(stubs.last_talked_id);
+        if (actor_id == 0) {
+            // No last-talked NPC recorded — nothing to move.
+            stubs.movement_calls.push_back({"move_noop", "last_talked_unresolved"});
+            return 0;
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Path A: emitter's ordered command array — preserves sequence, type, speed
@@ -691,23 +703,72 @@ int move_actor_dispatch(lua_State* L) {
 }
 
 // ctx.world:face_actor(actor_id, direction)
+// Sets the facing direction of an NPC or the player.
+// actor_id == 0 → player; actor_id > 0 → NPC.
+// Writes to HeadlessGameLoop NpcState::facing / PlayerState::facing via callbacks.
+// Source: Crystal turnobject / Sem_TurnObject, and warp-facing ops.
 int face_actor(lua_State* L) {
     auto& stubs = get_stubs(L);
+    LuaRuntime* runtime = get_runtime(L);
     
     int actor_id = static_cast<int>(luaL_checkinteger(L, 2));
     const char* direction = luaL_checkstring(L, 3);
     
-    StubActorState& state = (actor_id == 0) ? stubs.player : stubs.actors[actor_id];
-    state.facing = direction;
+    // Resolve direction string to enum for authoritative state update.
+    Direction dir = Direction::Down;
+    std::string d(direction);
+    if      (d == "up")    dir = Direction::Up;
+    else if (d == "down")  dir = Direction::Down;
+    else if (d == "left")  dir = Direction::Left;
+    else if (d == "right") dir = Direction::Right;
+
+    if (actor_id == 0) {
+        // Player facing
+        if (stubs.set_player_facing_fn) {
+            stubs.set_player_facing_fn(dir);
+        }
+        stubs.player.facing = direction;
+    } else {
+        // NPC facing
+        if (stubs.set_npc_facing_fn) {
+            stubs.set_npc_facing_fn(static_cast<uint16_t>(actor_id), dir);
+        }
+        stubs.actors[actor_id].facing = direction;
+    }
     
     stubs.movement_calls.push_back({"face", direction});
     return 0;
 }
 
-// ctx.world:face_player() - NPC faces the player
+// ctx.world:face_player() - the interacting NPC faces toward the player.
+// Source: Crystal faceplayer / Sem_FacePlayer — NPC turns to face the player.
+// Resolves facing via player_pos_query and the last_talked NPC's position.
+// Updates NpcState::facing via set_npc_facing_fn.
 int face_player(lua_State* L) {
     auto& stubs = get_stubs(L);
     stubs.movement_calls.push_back({"face_player", ""});
+
+    // If we have a wired HeadlessGameLoop, resolve actual direction.
+    if (!stubs.last_talked_id || !stubs.player_pos_query || !stubs.actor_pos_query) {
+        return 0;  // Stub mode: no state to update
+    }
+
+    auto [px, py] = stubs.player_pos_query();
+    auto [nx, ny] = stubs.actor_pos_query(static_cast<uint32_t>(stubs.last_talked_id));
+
+    // Choose direction: prefer axis with larger offset; prefer vertical over horizontal.
+    int dx = px - nx;
+    int dy = py - ny;
+    Direction dir;
+    if (std::abs(dy) >= std::abs(dx)) {
+        dir = (dy >= 0) ? Direction::Down : Direction::Up;
+    } else {
+        dir = (dx >= 0) ? Direction::Right : Direction::Left;
+    }
+
+    if (stubs.set_npc_facing_fn) {
+        stubs.set_npc_facing_fn(stubs.last_talked_id, dir);
+    }
     return 0;
 }
 
@@ -740,11 +801,86 @@ int get_actor_facing(lua_State* L) {
 }
 
 // ctx.world:teleport_player(map_id, x, y)
+// (Reserved for future player teleport — not currently emitted by scripts)
 int teleport_player(lua_State* L) {
     int map_id = luaL_checkinteger(L, 2);
     int x = luaL_checkinteger(L, 3);
     int y = luaL_checkinteger(L, 4);
     (void)map_id; (void)x; (void)y;
+    return 0;
+}
+
+// ctx.world:teleport_npc(npc_id, x, y)
+// Immediately places an NPC at (x, y) without movement animation.
+// Source: Crystal moveobject opcode → Sem_MoveObject.
+// Writes to HeadlessGameLoop::NpcState::{x,y,is_moving} via teleport_npc_fn.
+int teleport_npc(lua_State* L) {
+    uint16_t npc_id = static_cast<uint16_t>(luaL_checkinteger(L, 2));
+    int32_t x       = static_cast<int32_t>(luaL_checkinteger(L, 3));
+    int32_t y       = static_cast<int32_t>(luaL_checkinteger(L, 4));
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+    if (stubs.teleport_npc_fn) {
+        stubs.teleport_npc_fn(npc_id, x, y);
+    } else {
+        stubs.actors[static_cast<int>(npc_id)].x = x;
+        stubs.actors[static_cast<int>(npc_id)].y = y;
+    }
+    return 0;
+}
+
+// ctx.world:face_toward(actor_id, target_actor_id)
+// actor_id faces toward target_actor_id by computing their relative positions.
+// Source: Crystal faceobject object1, object2 → Sem_FaceObject.
+// object1 turns to face object2. Computes direction at runtime.
+int face_toward(lua_State* L) {
+    auto& stubs = get_stubs(L);
+    LuaRuntime* runtime = get_runtime(L);
+    uint16_t actor_id  = static_cast<uint16_t>(luaL_checkinteger(L, 2));
+    uint16_t target_id = static_cast<uint16_t>(luaL_checkinteger(L, 3));
+
+    // Resolve actor position
+    std::pair<int32_t,int32_t> a_pos{0, 0}, t_pos{0, 0};
+    if (stubs.actor_pos_query) {
+        a_pos = stubs.actor_pos_query(actor_id);
+        t_pos = stubs.actor_pos_query(target_id);
+    } else if (target_id == 0 && stubs.player_pos_query) {
+        a_pos = stubs.actor_pos_query
+            ? stubs.actor_pos_query(actor_id)
+            : std::make_pair<int32_t,int32_t>(0,0);
+        t_pos = stubs.player_pos_query();
+    }
+
+    int dx = t_pos.first  - a_pos.first;
+    int dy = t_pos.second - a_pos.second;
+    Direction dir;
+    if (std::abs(dy) >= std::abs(dx)) {
+        dir = (dy >= 0) ? Direction::Down : Direction::Up;
+    } else {
+        dir = (dx >= 0) ? Direction::Right : Direction::Left;
+    }
+
+    if (actor_id == 0) {
+        if (stubs.set_player_facing_fn) stubs.set_player_facing_fn(dir);
+    } else {
+        if (stubs.set_npc_facing_fn) stubs.set_npc_facing_fn(actor_id, dir);
+        const char* d = "down";
+        if (dir == Direction::Up)    d = "up";
+        if (dir == Direction::Left)  d = "left";
+        if (dir == Direction::Right) d = "right";
+        stubs.actors[actor_id].facing = d;
+    }
+    stubs.movement_calls.push_back({"face_toward", std::to_string(target_id)});
+    return 0;
+}
+
+// ctx.world:set_last_talked(npc_id)
+// Records the last-talked NPC id for subsequent LastTalked-targeted operations.
+// Source: Crystal setlasttalked opcode → Sem_SetLastTalked.
+int set_last_talked(lua_State* L) {
+    uint16_t npc_id = static_cast<uint16_t>(luaL_checkinteger(L, 2));
+    LuaRuntime* runtime = get_runtime(L);
+    runtime->get_stub_services().last_talked_id = npc_id;
     return 0;
 }
 
@@ -774,16 +910,33 @@ int warp_to_spawn(lua_State* L) {
 }
 
 // ctx.world:show_npc(npc_id)
+// Makes the NPC visible.  Source: Crystal showobject opcode → Sem_ShowObject.
+// Writes to HeadlessGameLoop::NpcState::visible via set_npc_visible_fn callback.
 int show_npc(lua_State* L) {
-    int npc_id = luaL_checkinteger(L, 2);
-    (void)npc_id;
+    uint16_t npc_id = static_cast<uint16_t>(luaL_checkinteger(L, 2));
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+    if (stubs.set_npc_visible_fn) {
+        stubs.set_npc_visible_fn(npc_id, true);
+    } else {
+        // Stub mode: record in actor visibility map for test inspection
+        stubs.actors[npc_id].visible = true;
+    }
     return 0;
 }
 
 // ctx.world:hide_npc(npc_id)
+// Hides the NPC.  Source: Crystal hideobject opcode → Sem_HideObject.
+// Writes to HeadlessGameLoop::NpcState::visible via set_npc_visible_fn callback.
 int hide_npc(lua_State* L) {
-    int npc_id = luaL_checkinteger(L, 2);
-    (void)npc_id;
+    uint16_t npc_id = static_cast<uint16_t>(luaL_checkinteger(L, 2));
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+    if (stubs.set_npc_visible_fn) {
+        stubs.set_npc_visible_fn(npc_id, false);
+    } else {
+        stubs.actors[npc_id].visible = false;
+    }
     return 0;
 }
 
@@ -2073,18 +2226,37 @@ int behavior(lua_State* L) {
 }
 
 // ctx.game:set_scene(scene)
+// Stores the current map's scene value.
+// Source: Crystal setscene opcode → Sem_SetScene.
+// Production: persisted in GameState::variables["scene_current"] for save/load.
+// Test-observable: also updates StubServices::current_scene for assertions.
 int set_scene(lua_State* L) {
     int scene = luaL_checkinteger(L, 2);
     LuaRuntime* runtime = get_runtime(L);
     auto& stubs = runtime->get_stub_services();
+    // Always update stub field so tests can assert without a bound GameState.
     stubs.current_scene = scene;
+    if (GameState* gs = runtime->get_game_state()) {
+        gs->variables["scene_current"] = scene;
+    }
     return 0;
 }
 
 // ctx.game:check_scene() -> scene_id
+// Returns the current map's scene value.
+// Source: Crystal checkscene opcode → Sem_CheckScene.
 int check_scene(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
-    lua_pushinteger(L, runtime->get_stub_services().current_scene);
+    int scene = 0;
+    if (GameState* gs = runtime->get_game_state()) {
+        auto it = gs->variables.find("scene_current");
+        scene = (it != gs->variables.end()) ? it->second : 0;
+        // Keep stub in sync for test assertions.
+        runtime->get_stub_services().current_scene = scene;
+    } else {
+        scene = runtime->get_stub_services().current_scene;
+    }
+    lua_pushinteger(L, scene);
     return 1;
 }
 
@@ -2283,25 +2455,49 @@ int modify_warp(lua_State* L) {
 }
 
 // ctx.game:read_state_var(id) -> value
+// Reads a well-known gameplay state variable by its WellKnownStateVar id.
+// Source: Crystal readmem of a specific RAM address → Sem_ReadStateVar.
+// Stored in GameState::variables["state_var_N"] for persistence.
 int read_state_var(lua_State* L) {
     int id = luaL_checkinteger(L, 2);
-    (void)id;
-    lua_pushinteger(L, 0); // stub
+    LuaRuntime* runtime = get_runtime(L);
+    int value = 0;
+    if (GameState* gs = runtime->get_game_state()) {
+        auto it = gs->variables.find("state_var_" + std::to_string(id));
+        value = (it != gs->variables.end()) ? it->second : 0;
+    }
+    lua_pushinteger(L, value);
     return 1;
 }
 
 // ctx.game:write_state_var(id)
+// Writes the current VM `result` value into the state variable (id).
+// Source: Crystal writemem of a specific RAM address → Sem_WriteStateVar.
+// The Lua emitter emits this AFTER setting `result`; the binding reads result from Lua.
 int write_state_var(lua_State* L) {
     int id = luaL_checkinteger(L, 2);
-    (void)id;
+    LuaRuntime* runtime = get_runtime(L);
+    // The VM result is in the Lua `result` local — caller must push it explicitly.
+    // For now, write 0 as a placeholder since the emitter does not pass result.
+    // TODO: emitter should emit ctx.game:write_state_var(id, result) and pass result.
+    if (GameState* gs = runtime->get_game_state()) {
+        std::string key = "state_var_" + std::to_string(id);
+        auto it = gs->variables.find(key);
+        gs->variables[key] = (it != gs->variables.end()) ? it->second : 0;
+    }
     return 0;
 }
 
 // ctx.game:set_state_var(id, value)
+// Sets a state variable to a literal value.
+// Source: Crystal callasm that stores a constant → Sem_SetStateVar.
 int set_state_var(lua_State* L) {
     int id    = luaL_checkinteger(L, 2);
     int value = luaL_checkinteger(L, 3);
-    (void)id; (void)value;
+    LuaRuntime* runtime = get_runtime(L);
+    if (GameState* gs = runtime->get_game_state()) {
+        gs->variables["state_var_" + std::to_string(id)] = value;
+    }
     return 0;
 }
 

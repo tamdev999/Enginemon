@@ -562,7 +562,11 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:face_player()\n"; return true;
     }
     if (auto* o = std::get_if<Sem_FaceObject>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:face_actor(" << (int)o->object1 << ", \"down\")\n"; return true;
+        // object1 should face toward object2 — compute direction at runtime.
+        // Source: Crystal faceobject object1, object2 (0x6C).
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "ctx.world:face_toward(" << (int)o->object1 << ", " << (int)o->object2 << ")\n";
+        return true;
     }
     if (auto* o = std::get_if<Sem_TurnObject>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:face_actor(" << (int)o->object_id << ", " << SemanticLuaEmitter::direction_name(o->facing) << ")\n"; return true;
@@ -574,10 +578,18 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:hide_npc(" << (int)o->object_id << ")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_MoveObject>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:teleport_player(" << (int)o->object_id << ", " << (int)o->x << ", " << (int)o->y << ")\n"; return true;
+        // Crystal moveobject: place NPC object_id at map coordinates (x, y).
+        // Source: scripting.asm Script_moveobject (0x96): object_id, x, y.
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "ctx.world:teleport_npc(" << (int)o->object_id << ", " << (int)o->x << ", " << (int)o->y << ")\n";
+        return true;
     }
     if (auto* o = std::get_if<Sem_SetLastTalked>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "-- set_last_talked " << (int)o->object_id << "\n"; return true;
+        // Record which object is the "last talked" NPC so subsequent operations
+        // using LastTalked target (e.g., faceobject, applymovement) can resolve it.
+        SemanticLuaEmitter::indent_line(out, I);
+        out << "ctx.world:set_last_talked(" << (int)o->object_id << ")\n";
+        return true;
     }
     if (auto* o = std::get_if<Sem_VariableSprite>(&op)) {
         // Assign a stable SpriteId to a named variable slot at runtime.
