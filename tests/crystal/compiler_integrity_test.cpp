@@ -27,6 +27,7 @@
 #include "crystal/rom/profile.hpp"
 #include "crystal/compile/full_compiler.hpp"
 #include "crystal/extract/map_extractor.hpp"
+#include "engine/build/package_cache.hpp"
 #include <iostream>
 #include <filesystem>
 #include <cassert>
@@ -476,6 +477,117 @@ TEST(compiler_single_use_failed_first_retry_throws) {
 }
 
 //=============================================================================
+// WORKER EXCEPTION PROPAGATION TESTS
+//=============================================================================
+
+// Worker throws → compile() must fail explicitly (not silently succeed).
+// Verifies that the try/catch wrapper in submit_compilation_jobs propagates
+// the exception into linker_input_.errors and the completeness gate fires.
+TEST(worker_exception_propagates_to_compile_failure) {
+    auto out = temp_emon_path("worker_throw");
+    std::filesystem::remove(out);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+    // Inject a throw for map (24,5) — ElmsLab, always in the discovered set.
+    compiler.for_test_throw_map(24, 5);
+
+    bool ok = compiler.compile(out, no_cache_config());
+
+    // compile() must return false — the worker exception must propagate.
+    ASSERT_FALSE(ok);
+
+    // Package must NOT be written.
+    bool absent = !std::filesystem::exists(out) || std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(absent);
+
+    std::cout << "  [worker throw → compile() returned false, package absent ✓]\n";
+}
+
+// One map job fails (result.success=false) → completeness gate fires.
+// The existing for_test_fail_map already covers soft failures via linker_input_.errors.
+// This test specifically asserts the completeness count gate also catches it.
+TEST(map_job_failure_triggers_completeness_gate) {
+    auto out = temp_emon_path("completeness_gate");
+    std::filesystem::remove(out);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+    // Inject a soft failure for map (24,4) — NewBarkTown player house.
+    compiler.for_test_fail_map(24, 4);
+
+    bool ok = compiler.compile(out, no_cache_config());
+
+    ASSERT_FALSE(ok);
+
+    bool absent = !std::filesystem::exists(out) || std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(absent);
+
+    std::cout << "  [map job failure → completeness gate + compile() false ✓]\n";
+}
+
+//=============================================================================
+// CACHE MANIFEST HARDENING TESTS
+// These tests operate at the BuildIdentity API level — no ROM required.
+//=============================================================================
+
+// Truncated manifest (only first two fields) → cache miss (nullopt).
+TEST(truncated_manifest_is_cache_miss) {
+    using namespace enginemon::build;
+    // Only rom_sha1 and compiler_version present — format_version missing.
+    std::string truncated = "rom_sha1=abc123\ncompiler_version=crystal-3.4.0\n";
+    auto id = BuildIdentity::deserialize(truncated);
+    ASSERT_FALSE(id.has_value());
+    std::cout << "  [truncated manifest (missing format_version) → nullopt ✓]\n";
+}
+
+// Garbage format_version → cache miss (nullopt), not throw/UB.
+TEST(garbage_format_version_is_cache_miss) {
+    using namespace enginemon::build;
+    std::string garbage_ver = "rom_sha1=abc123\ncompiler_version=crystal-3.4.0\n"
+                              "format_version=NOT_A_NUMBER\noptions_hash=abc\n";
+    auto id = BuildIdentity::deserialize(garbage_ver);
+    ASSERT_FALSE(id.has_value());
+    std::cout << "  [garbage format_version → nullopt (no throw) ✓]\n";
+}
+
+// format_version=0 → cache miss (not a valid version).
+TEST(zero_format_version_is_cache_miss) {
+    using namespace enginemon::build;
+    std::string zero_ver = "rom_sha1=abc123\ncompiler_version=crystal-3.4.0\n"
+                           "format_version=0\noptions_hash=abc\n";
+    auto id = BuildIdentity::deserialize(zero_ver);
+    ASSERT_FALSE(id.has_value());
+    std::cout << "  [format_version=0 → nullopt ✓]\n";
+}
+
+// Completely empty manifest → nullopt.
+TEST(empty_manifest_is_cache_miss) {
+    using namespace enginemon::build;
+    auto id = BuildIdentity::deserialize("");
+    ASSERT_FALSE(id.has_value());
+    std::cout << "  [empty manifest → nullopt ✓]\n";
+}
+
+// Valid manifest round-trips correctly.
+TEST(valid_manifest_deserializes_correctly) {
+    using namespace enginemon::build;
+    BuildIdentity orig;
+    orig.rom_sha1          = "f2f52230b536214ef7c9924f483392993e226cfb";
+    orig.compiler_version  = "crystal-3.4.0";
+    orig.format_version    = 3;
+    orig.options_hash      = "deadbeef";
+    auto serialized = orig.serialize();
+    auto restored   = BuildIdentity::deserialize(serialized);
+    ASSERT_TRUE(restored.has_value());
+    ASSERT_TRUE(restored->rom_sha1         == orig.rom_sha1);
+    ASSERT_TRUE(restored->compiler_version == orig.compiler_version);
+    ASSERT_TRUE(restored->format_version   == orig.format_version);
+    ASSERT_TRUE(restored->options_hash     == orig.options_hash);
+    std::cout << "  [valid manifest round-trips correctly ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -528,6 +640,15 @@ int main(int argc, char* argv[]) {
     // Fix 5: single-use contract
     RUN_TEST(compiler_single_use_success_then_retry_throws);
     RUN_TEST(compiler_single_use_failed_first_retry_throws);
+    // Worker exception propagation + completeness gate
+    RUN_TEST(worker_exception_propagates_to_compile_failure);
+    RUN_TEST(map_job_failure_triggers_completeness_gate);
+    // Cache manifest hardening
+    RUN_TEST(truncated_manifest_is_cache_miss);
+    RUN_TEST(garbage_format_version_is_cache_miss);
+    RUN_TEST(zero_format_version_is_cache_miss);
+    RUN_TEST(empty_manifest_is_cache_miss);
+    RUN_TEST(valid_manifest_deserializes_correctly);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";

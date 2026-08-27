@@ -53,24 +53,57 @@ std::string BuildIdentity::serialize() const {
 }
 
 std::optional<BuildIdentity> BuildIdentity::deserialize(const std::string& data) {
+    // Reject empty input immediately — no point parsing.
+    if (data.empty()) return std::nullopt;
+
     BuildIdentity id;
+    // Track which mandatory fields were present.
+    bool has_rom_sha1          = false;
+    bool has_compiler_version  = false;
+    bool has_format_version    = false;
+    bool has_options_hash      = false;
+
     std::istringstream ss(data);
     std::string line;
     
     while (std::getline(ss, line)) {
         auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
+        if (eq == std::string::npos) continue;   // skip malformed lines silently
         
-        std::string key = line.substr(0, eq);
+        std::string key   = line.substr(0, eq);
         std::string value = line.substr(eq + 1);
         
-        if (key == "rom_sha1") id.rom_sha1 = value;
-        else if (key == "compiler_version") id.compiler_version = value;
-        else if (key == "format_version") id.format_version = static_cast<uint32_t>(std::stoul(value));
-        else if (key == "options_hash") id.options_hash = value;
+        if (key == "rom_sha1") {
+            if (value.empty()) return std::nullopt;  // present but blank = malformed
+            id.rom_sha1 = value;
+            has_rom_sha1 = true;
+        } else if (key == "compiler_version") {
+            if (value.empty()) return std::nullopt;
+            id.compiler_version = value;
+            has_compiler_version = true;
+        } else if (key == "format_version") {
+            // Guard numeric parsing: garbage or out-of-range → cache miss, not throw.
+            if (value.empty()) return std::nullopt;
+            try {
+                unsigned long parsed = std::stoul(value);
+                // format_version must be a plausible non-zero version number.
+                if (parsed == 0 || parsed > 0xFFFFFFFFUL) return std::nullopt;
+                id.format_version = static_cast<uint32_t>(parsed);
+                has_format_version = true;
+            } catch (const std::invalid_argument&) {
+                return std::nullopt;  // not a number
+            } catch (const std::out_of_range&) {
+                return std::nullopt;  // too large
+            }
+        } else if (key == "options_hash") {
+            // options_hash may legitimately be empty for configs that hash to "".
+            id.options_hash = value;
+            has_options_hash = true;
+        }
     }
     
-    if (id.rom_sha1.empty() || id.compiler_version.empty()) {
+    // All four fields are mandatory.  Missing any one → malformed manifest → cache miss.
+    if (!has_rom_sha1 || !has_compiler_version || !has_format_version || !has_options_hash) {
         return std::nullopt;
     }
     
@@ -151,8 +184,12 @@ bool PackageCache::validate_cached_package(const BuildIdentity& id) const {
 }
 
 std::optional<std::filesystem::path> PackageCache::find(const BuildIdentity& id) const {
-    if (validate_cached_package(id)) {
-        return get_package_path(id);
+    try {
+        if (validate_cached_package(id)) {
+            return get_package_path(id);
+        }
+    } catch (...) {
+        // Any unexpected exception during validation → cache miss, not crash.
     }
     return std::nullopt;
 }

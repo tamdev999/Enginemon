@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // crystal/compile/full_compiler.hpp
 // Full-game Crystal ROM → EMON package compiler
 //
@@ -456,6 +456,10 @@ private:
     std::function<enginemon::build::AssetResult<RuntimeSprite>(const std::string&)>    test_sprite_override_;
     std::function<enginemon::build::AssetResult<FontAtlas>()>                           test_font_override_;
     std::function<enginemon::build::AssetResult<SpriteObjPalettes>()>                  test_palettes_override_;
+    // Throw-injection seam: compile_map_job() throws for this (group, index).
+    // Default 0xFF/0xFF = no injection.
+    uint8_t test_throw_map_group_ = 0xFF;
+    uint8_t test_throw_map_index_ = 0xFF;
     
 public:
     // Test-only injection methods — call before compile()
@@ -490,6 +494,13 @@ public:
     // Takes (group, index) since semantic IDs aren't resolved until extraction.
     void for_test_fail_map(uint8_t group, uint8_t index) {
         map_extractor_->for_test_fail_extraction(group, index);
+    }
+
+    // Causes compile_map_job() to throw std::runtime_error for the given map.
+    // Tests that the worker exception propagation path reaches linker_input_.errors.
+    void for_test_throw_map(uint8_t group, uint8_t index) {
+        test_throw_map_group_ = group;
+        test_throw_map_index_ = index;
     }
     
 private:

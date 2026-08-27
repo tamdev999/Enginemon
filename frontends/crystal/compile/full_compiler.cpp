@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <queue>
 #include <set>
+#include <unordered_set>
 
 namespace crystal {
 
@@ -241,6 +242,41 @@ bool FullGameCompiler::compile(const std::filesystem::path& output_path,
     std::cout << "  Jobs completed: " << stats_.completed_jobs.load() << "\n";
     std::cout << "  Cache hits: " << stats_.cache_hits.load() << "\n";
     std::cout << "  Cache misses: " << stats_.cache_misses.load() << "\n\n";
+    
+    // Post-job completeness gate: every discovered map must have been compiled.
+    // Any silent drop (worker exception swallowed, ID mismatch, etc.) is caught here.
+    {
+        uint32_t discovered  = static_cast<uint32_t>(content_.maps.size());
+        uint32_t compiled_ok = stats_.maps_compiled.load();
+        uint32_t failed      = stats_.failed_jobs.load();
+        if (compiled_ok + failed != discovered) {
+            std::cerr << "FATAL: Map job count mismatch: "
+                      << compiled_ok << " compiled + " << failed << " failed != "
+                      << discovered << " discovered\n";
+            return false;
+        }
+        if (compiled_ok != discovered) {
+            std::cerr << "FATAL: " << failed << " map compilation job(s) failed "
+                      << "(compiled " << compiled_ok << " / " << discovered << ")\n";
+            return false;
+        }
+        // ID-set equality: every discovered map_id must appear in linker input.
+        std::unordered_set<std::string> discovered_ids;
+        for (const auto& dm : content_.maps) {
+            discovered_ids.insert(dm.map_id);
+        }
+        std::unordered_set<std::string> compiled_ids;
+        for (const auto& mr : linker_input_.maps) {
+            compiled_ids.insert(mr.map_id);
+        }
+        for (const auto& id : discovered_ids) {
+            if (!compiled_ids.count(id)) {
+                std::cerr << "FATAL: Discovered map '" << id
+                          << "' is absent from compilation output\n";
+                return false;
+            }
+        }
+    }
     
     //=========================================================================
     // PHASE 4: Linking (serial)
@@ -504,14 +540,27 @@ void FullGameCompiler::submit_compilation_jobs(const FullCompilerConfig& config)
         ++stats_.total_jobs;
         
         thread_pool_->submit([this, dm, &config]() {
-            auto result = compile_map_job(dm, config);
-            
-            if (result.success) {
-                ++stats_.maps_compiled;
-                linker_input_.add_map(std::move(result));
-            } else {
+            // Wrap the entire job in try/catch so any exception from
+            // compile_map_job (e.g. from map_extractor_ throwing on malformed
+            // ROM data) is converted to a named compile error instead of being
+            // silently discarded by ThreadPool::worker_loop's catch(...).
+            try {
+                auto result = compile_map_job(dm, config);
+                if (result.success) {
+                    ++stats_.maps_compiled;
+                    linker_input_.add_map(std::move(result));
+                } else {
+                    ++stats_.failed_jobs;
+                    linker_input_.add_error(result.error);
+                }
+            } catch (const std::exception& ex) {
                 ++stats_.failed_jobs;
-                linker_input_.add_error(result.error);
+                linker_input_.add_error(
+                    "WORKER EXCEPTION in map '" + dm.map_id + "': " + ex.what());
+            } catch (...) {
+                ++stats_.failed_jobs;
+                linker_input_.add_error(
+                    "WORKER EXCEPTION in map '" + dm.map_id + "': unknown exception");
             }
         });
     }
@@ -523,6 +572,13 @@ CompiledMapResult FullGameCompiler::compile_map_job(const DiscoveredMap& map_inf
     result.map_id = map_info.map_id;
     result.success = false;
     
+    // Test-only throw injection: simulate an unhandled exception in a worker.
+    if (map_info.group == test_throw_map_group_ && map_info.index == test_throw_map_index_) {
+        throw std::runtime_error("injected worker exception for map (" +
+                                 std::to_string(map_info.group) + "," +
+                                 std::to_string(map_info.index) + ")");
+    }
+
     // Extract map using group/index (avoids ID lookup overhead)
     auto map_result = map_extractor_->extract_map(map_info.group, map_info.index);
     if (!map_result.success) {
