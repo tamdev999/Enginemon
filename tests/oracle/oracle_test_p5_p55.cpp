@@ -69,9 +69,16 @@ struct P5Harness {
         return loop.is_idle();
     }
 
-    // Query a flag from GameState
-    bool flag(int flag_id) {
-        return gs.check_flag("flag_" + std::to_string(flag_id));
+    // Query a flag from GameState.
+    // Canonical key format matches api_bindings: "flag_{:04x}" of the lower 16 bits.
+    // For event flags the encoded int from the semantic emitter is just the raw value
+    // (ns=0, so enc = value). For engine flags enc = (1<<16)|value — strip ns before
+    // converting so the key matches the production api_bindings path.
+    bool flag(int encoded_flag_id) {
+        uint16_t flag_value = static_cast<uint16_t>(encoded_flag_id & 0xFFFF);
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "flag_%04x", static_cast<unsigned>(flag_value));
+        return gs.check_flag(buf);
     }
 
     // Query a var from GameState
@@ -801,7 +808,8 @@ TEST(p55_flag_setflag_endcallback_nbt_flypoint) {
     P5Harness h;
 
     // Pre-condition: set the event flag so clearevent has something to clear
-    h.gs.set_flag("flag_" + std::to_string(/* EVENT_FIRST_TIME_BANKING_WITH_MOM will map to an event flag */ 1));
+    // EventFlag{1} → canonical key "flag_0001" (hex-padded, matches api_bindings)
+    h.gs.set_flag("flag_0001");
     // (The exact event flag number doesn't matter for this test —
     //  what matters is setflag ENGINE_FLYPOINT_NEW_BARK fires)
 
@@ -810,18 +818,18 @@ TEST(p55_flag_setflag_endcallback_nbt_flypoint) {
     ASSERT_TRUE(idle);
 
     // ORACLE: Sem_SetFlag{EngineFlag{65}} must have written to GameState.
-    // EngineFlag namespace = 1, value = 65. Encoded as "flag_<enc>" where
-    // enc = (1 << 16) | 65 = 65601.
-    // ctx.flags:set(enc) → gs.set_flag("flag_65601")
-    uint32_t engine_flypoint_enc = (1u << 16) | 65u;  // EngineFlag{65}
-    ASSERT_TRUE(h.gs.check_flag("flag_" + std::to_string(engine_flypoint_enc)));
+    // EngineFlag{65}: namespace=1, value=65 (0x41).
+    // api_bindings strips ns bits (& 0xFFFF) then formats as hex:
+    //   enc = (1<<16)|65 = 65601 → flag_value = 65601 & 0xFFFF = 65 → "flag_0041"
+    // Using the canonical hex key that api_bindings actually produces.
+    ASSERT_TRUE(h.gs.check_flag("flag_0041"));
 
     // ORACLE: Lua must not contain ctx.game:behavior("EndAll") —
     // endcallback lowers to Sem_Return, not Sem_EndAll.
     ASSERT_TRUE(lua->find("EndAll") == std::string::npos);
 
     std::cout << "  [P5.5-1: NBT flypoint callback → ENGINE_FLYPOINT_NEW_BARK set ✓]\n";
-    std::cout << "  [Flag enc=" << engine_flypoint_enc << " in GameState ✓]\n";
+    std::cout << "  [EngineFlag{65} → \"flag_0041\" in GameState ✓]\n";
 }
 
 // ── P5.5-2: Branch via checkevent — teacher script with flag set ──────────────
@@ -851,8 +859,8 @@ TEST(p55_branch_checkevent_teacher_flag_set) {
 
     P5Harness h;
     // Pre-condition: set EVENT_GOT_A_POKEMON_FROM_ELM = EventFlag{297}
-    uint32_t got_pokemon_enc = 297u;
-    h.gs.set_flag("flag_" + std::to_string(got_pokemon_enc));
+    // 297 = 0x129 → canonical key "flag_0129" (hex-padded, matches api_bindings)
+    h.gs.set_flag("flag_0129");
 
     // ORACLE: start_script loads the script from the package (non-empty Lua)
     bool started = h.loop.start_script(sid);
@@ -1137,7 +1145,8 @@ TEST(p55_hardened_elm_directions_behavioral) {
     ASSERT_EQ(scene, 5);
 
     // C: ORACLE — setevent EVENT_GOT_A_POKEMON_FROM_ELM = EventFlag{297}
-    ASSERT_TRUE(h.gs.check_flag("flag_297"));
+    // 297 = 0x129 → canonical key "flag_0129" (api_bindings hex format)
+    ASSERT_TRUE(h.gs.check_flag("flag_0129"));
 
     ASSERT_TRUE(h.loop.is_idle());
     std::cout << "  [P5.5-HARDENED-A: ElmDirectionsScript → scene=5 ✓, flag_297 set ✓, idle ✓]\n";
@@ -1501,11 +1510,12 @@ TEST(p55_closure_scall_abc) {
     // ==========================================================================
     if (callee_lua.has_value()) {
         P5Harness h;
-        h.gs.set_flag("flag_1001");
+        // Marker flag: arbitrary value 1001 (0x3E9) → canonical key "flag_03e9"
+        h.gs.set_flag("flag_03e9");
 
         bool started = h.loop.start_script(callee_sid);
         if (!started) {
-            ASSERT_TRUE(h.gs.check_flag("flag_1001"));
+            ASSERT_TRUE(h.gs.check_flag("flag_03e9"));
             std::cout << "  [P5.5-CLOSURE-1 Part3: callee not started on first resume"
                       << " -- package load + structural Lua verified]\n";
             return;
@@ -1527,7 +1537,7 @@ TEST(p55_closure_scall_abc) {
         }
 
         // Canonical callee ran cleanly: assert scene==2.
-        ASSERT_TRUE(h.gs.check_flag("flag_1001"));
+        ASSERT_TRUE(h.gs.check_flag("flag_03e9"));
         ASSERT_EQ(h.rt.get_stub_services().current_scene, 2);
         ASSERT_TRUE(h.loop.is_idle());
         std::cout << "  [P5.5-CLOSURE-1 Part3: A=flag_1001, B=scene=2, C=idle]\n";
@@ -2164,12 +2174,13 @@ TEST(p55_save_load_flag_continuity) {
     ASSERT_TRUE(idle);
 
     // Verify flag was set (ENGINE_FLYPOINT_NEW_BARK = EngineFlag{65})
-    uint32_t enc = (1u << 16) | 65u;
-    std::string flag_key = "flag_" + std::to_string(enc);
-    ASSERT_TRUE(h.gs.check_flag(flag_key));
+    // EngineFlag{65}: enc = (1<<16)|65 = 65601 → api_bindings strips ns → value=65=0x41
+    // Canonical key: "flag_0041"
+    ASSERT_TRUE(h.gs.check_flag("flag_0041"));
 
-    // Also manually set a user flag and var for extra coverage
-    h.gs.set_flag("flag_42");
+    // Also manually set a user flag and var for extra coverage.
+    // 42 = 0x2A → canonical key "flag_002a" (matches what api_bindings would produce)
+    h.gs.set_flag("flag_002a");
     h.gs.variables["var_7"] = 123;
 
     // Serialize → deserialize
@@ -2180,9 +2191,9 @@ TEST(p55_save_load_flag_continuity) {
     const auto& restored = result.state;
 
     // ORACLE: ENGINE_FLYPOINT_NEW_BARK flag survives round-trip
-    ASSERT_TRUE(restored.check_flag(flag_key));
+    ASSERT_TRUE(restored.check_flag("flag_0041"));
     // ORACLE: user flag and var survive
-    ASSERT_TRUE(restored.check_flag("flag_42"));
+    ASSERT_TRUE(restored.check_flag("flag_002a"));
     ASSERT_EQ(restored.get_var("var_7"), 123);
 
     std::cout << "  [P5.5-11: script→flag→serialize→deserialize: all state preserved ✓]\n";
@@ -2428,8 +2439,9 @@ TEST(p55_closure_scall_e2e) {
     rt.execute_string(lua, "scall_fixture");
 
     // Verify pre-execution state (nothing set yet)
-    ASSERT_FALSE(gs.check_flag("flag_5"));   // A not yet set
-    ASSERT_FALSE(gs.check_flag("flag_6"));   // B not yet set
+    // EventFlag{5} → "flag_0005", EventFlag{6} → "flag_0006" (canonical hex format)
+    ASSERT_FALSE(gs.check_flag("flag_0005"));   // A not yet set
+    ASSERT_FALSE(gs.check_flag("flag_0006"));   // B not yet set
     ASSERT_EQ(rt.get_stub_services().current_scene, 0);  // C not yet set
 
     uint32_t coro = rt.start_script("script");
@@ -2446,11 +2458,11 @@ TEST(p55_closure_scall_e2e) {
     ASSERT_TRUE(state == ScriptState::Finished);
 
     // ORACLE BEHAVIORAL A/B/C:
-    // A: EventFlag{5} set by caller setevent before scall
-    ASSERT_TRUE(gs.check_flag("flag_5"));
+    // A: EventFlag{5} set by caller setevent before scall → "flag_0005"
+    ASSERT_TRUE(gs.check_flag("flag_0005"));
 
-    // B: EventFlag{6} set by callee setevent inside scall body
-    ASSERT_TRUE(gs.check_flag("flag_6"));
+    // B: EventFlag{6} set by callee setevent inside scall body → "flag_0006"
+    ASSERT_TRUE(gs.check_flag("flag_0006"));
 
     // C: scene == 4 (setscene 4 in caller CONTINUATION, after callee End returned)
     // If scall return were broken: scene would be 3 (callee's last setscene, script terminates there)
@@ -2618,11 +2630,11 @@ TEST(p55_closure_farscall_e2e) {
     ASSERT_TRUE(state == ScriptState::Finished);
 
     // ORACLE BEHAVIORAL:
-    // A: EventFlag{7} set by caller before farscall
-    ASSERT_TRUE(gs.check_flag("flag_7"));
+    // A: EventFlag{7} set by caller before farscall → "flag_0007"
+    ASSERT_TRUE(gs.check_flag("flag_0007"));
 
-    // B: EventFlag{8} set by callee (in bank 3, resolved cross-bank by farscall)
-    ASSERT_TRUE(gs.check_flag("flag_8"));
+    // B: EventFlag{8} set by callee (in bank 3, resolved cross-bank by farscall) → "flag_0008"
+    ASSERT_TRUE(gs.check_flag("flag_0008"));
 
     // C: scene == 6 (caller post-farscall continuation)
     // scene == 6, not 5: proves continuation ran AFTER callee End returned

@@ -246,3 +246,80 @@ return script
 
     std::cout << "  [adversarial: script set(26) observed by map condition_flag='flag_001a']\n";
 }
+
+// =============================================================================
+// TEST 7: Door auto-step routes through authoritative movement path
+//
+// start_player_movement_to() must be used rather than direct player_ field
+// mutation so MovementManager has a valid reservation during the step.
+//
+// Invariants checked:
+//   - start_player_movement_to enqueues movement → state = Moving (not Idle)
+//   - After movement completes, GameState.player.x/y is at destination (south_y)
+//   - Loop reaches Idle after the step (MovementManager clears correctly)
+// =============================================================================
+TEST(door_auto_step_routes_through_movement_manager) {
+    using namespace enginemon;
+
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.set_lua_runtime(&rt);
+
+    // Minimal map: all Floor collision so movement is unblocked
+    RuntimeMap map;
+    map.map_id  = "test_door_map";
+    map.width   = 5;
+    map.height  = 5;
+    map.blocks.assign(static_cast<size_t>(map.width) * map.height, 0u);
+    loop.load_map(map);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    // Simulate the door auto-step sequence used by transition_to_map:
+    //   1. spawn_player at door position (x=2, y=2)
+    //   2. start_player_movement_to(x=2, south_y=3, Down)
+    constexpr int32_t px = 2, py = 2, south_y = 3;
+    loop.spawn_player(px, py, Direction::Down);
+
+    // After spawn_player, state is Idle and position is (px, py)
+    ASSERT_EQ(loop.player().x, px);
+    ASSERT_EQ(loop.player().y, py);
+    ASSERT_FALSE(loop.player().is_moving);
+
+    // start_player_movement_to — the authoritative path that enqueues in MovementManager
+    loop.start_player_movement_to(px, south_y, Direction::Down);
+
+    // Immediately after the call, state must be Moving (not Idle).
+    // If the old direct-mutation approach were used instead, is_moving would
+    // be set but state_ might not be LoopState::Moving and the MovementManager
+    // would have no reservation.
+    ASSERT_TRUE(loop.player().is_moving);
+    ASSERT_FALSE(loop.is_idle());  // state_ == Moving
+
+    // Run ticks until idle (movement completes through MovementManager)
+    int ticks = 0;
+    for (; ticks < 64 && !loop.is_idle(); ++ticks) {
+        auto tr = loop.tick();
+        ASSERT_FALSE(tr.script_error);
+    }
+    ASSERT_TRUE(loop.is_idle());
+    ASSERT_TRUE(ticks > 0 && ticks < 64);  // took some ticks, not immediate
+
+    // After completion, authoritative position must be at destination
+    ASSERT_EQ(loop.player().x, px);
+    ASSERT_EQ(loop.player().y, south_y);  // moved one cell south
+
+    // GameState must also reflect the destination
+    ASSERT_EQ(gs.player.x, px);
+    ASSERT_EQ(gs.player.y, south_y);
+
+    // is_moving must be cleared
+    ASSERT_FALSE(loop.player().is_moving);
+
+    std::cout << "  [door auto-step: start_player_movement_to -> MovementManager "
+              << "-> idle after " << ticks << " ticks, destination (" << px
+              << "," << south_y << ") correct]\n";
+}

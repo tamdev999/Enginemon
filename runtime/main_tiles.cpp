@@ -572,7 +572,15 @@ static bool transition_to_map(
     // Clear NPCs and add new ones from the new map
     ctx.game_loop->clear_npcs();
     
-    // Add NPCs from new map
+    // Add NPCs from new map.
+    // Initial visibility is determined by the NPC's visibility_flag:
+    //   empty flag  → always visible (flag 0xFFFF in Crystal source)
+    //   non-empty   → visible only if that flag IS SET in authoritative GameState
+    //
+    // Source: pokecrystal/engine/overworld/map_objects.asm SpriteHider
+    //   An object with event_flag set is hidden until the controlling flag fires.
+    //   show_npc/hide_npc (ctx.world) remain authoritative for dynamic changes.
+    GameState* gs_ptr = ctx.game_loop->game_state();
     for (const auto& obj : world_state.map.objects) {
         NpcState npc;
         npc.id = obj.local_id;
@@ -583,8 +591,19 @@ static bool transition_to_map(
         npc.is_trainer = obj.is_trainer;
         npc.script_id = obj.script_id;
         npc.visibility_flag = obj.visibility_flag;
-        npc.visible = true;
-        
+
+        // Evaluate visibility_flag against authoritative GameState at map load.
+        // Empty flag string → object has no controlling flag → always visible.
+        if (obj.visibility_flag.empty()) {
+            npc.visible = true;
+        } else if (gs_ptr) {
+            npc.visible = gs_ptr->check_flag(obj.visibility_flag);
+        } else {
+            // No GameState bound (headless tool or test without real state):
+            // default visible so the headless path doesn't silently drop objects.
+            npc.visible = true;
+        }
+
         npc.behavior = movement_data_to_behavior(obj.movement_type);
         npc.radius_x = obj.movement_radius_x;
         npc.radius_y = obj.movement_radius_y;
@@ -595,7 +614,7 @@ static bool transition_to_map(
         npc.target_y = obj.y;
         npc.move_progress = 0;
         npc.frozen = false;
-        
+
         ctx.game_loop->add_npc(npc);
     }
     
@@ -677,13 +696,15 @@ static bool transition_to_map(
                     // Scripted movements do NOT call onStepComplete - skip warp evaluation
                     ctx.warp_state->is_door_auto_step = true;
                     
-                    // Execute door auto-step IMMEDIATELY (not deferred)
+                    // Execute door auto-step through authoritative movement path.
                     // Reference: Gen2Recomped calls scriptMove() inside the transition callback
-                    // Player starts at door, movement target is one cell south
+                    // Player starts at door (spawn_player sets authoritative origin),
+                    // then start_player_movement_to enqueues in MovementManager so
+                    // collision reservation and state_ = Moving are correctly set.
+                    // Previously this directly mutated player_.target_y and is_moving,
+                    // bypassing MovementManager — fixed to use the authoritative path.
                     ctx.game_loop->spawn_player(player_x, player_y, Direction::Down);
-                    ctx.game_loop->player().target_x = player_x;
-                    ctx.game_loop->player().target_y = south_y;
-                    ctx.game_loop->player().is_moving = true;
+                    ctx.game_loop->start_player_movement_to(player_x, south_y, Direction::Down);
                     
                     // Set up presentation state for the auto-step
                     *ctx.player_start_x = player_x * 16.0f;
@@ -835,8 +856,11 @@ int main(int argc, char* argv[]) {
     // complete_player_movement (confirmed position) call.
     // The movement callback copy is no longer needed.
     
-    // Add NPCs from map objects for collision, interaction, and autonomous movement
-    // Reference: pokecrystal/maps/NewBarkTown.asm object_events
+    // Add NPCs from map objects for collision, interaction, and autonomous movement.
+    // Initial visibility is determined by the NPC's visibility_flag:
+    //   empty flag  → always visible
+    //   non-empty   → visible only if that flag IS SET in authoritative GameState
+    // Source: pokecrystal/engine/overworld/map_objects.asm SpriteHider
     for (const auto& obj : world_state.map.objects) {
         NpcState npc;
         npc.id = obj.local_id;
@@ -847,8 +871,14 @@ int main(int argc, char* argv[]) {
         npc.is_trainer = obj.is_trainer;
         npc.script_id = obj.script_id;
         npc.visibility_flag = obj.visibility_flag;
-        npc.visible = true;  // TODO: check visibility flags
-        
+
+        // Evaluate visibility_flag against authoritative GameState at map load.
+        if (obj.visibility_flag.empty()) {
+            npc.visible = true;
+        } else {
+            npc.visible = game_state.check_flag(obj.visibility_flag);
+        }
+
         // Initialize movement behavior from Crystal movement_type
         // Reference: pokecrystal SpriteMovementData table
         npc.behavior = movement_data_to_behavior(obj.movement_type);
@@ -894,30 +924,94 @@ int main(int argc, char* argv[]) {
     // warp_fn is called by ctx.world:warp() in Lua scripts.
     // Uses prepare_warp/commit_warp for atomicity: failure leaves authoritative
     // world state unchanged.  Returns true on success, false on failure.
+    //
+    // After a successful warp, world_state (map + tileset + collision source)
+    // is updated via load_world_state so all authoritative subsystems agree
+    // on the destination map before the next tick runs:
+    //   WorldManager::current_map  ← commit_warp
+    //   GameState::player           ← commit_warp
+    //   HeadlessGameLoop map        ← game_loop.load_map
+    //   world_state.map/tileset     ← load_world_state (this lambda)
+    //   game_loop collision source  ← set_collision_data rewired (this lambda)
+    //   NPC list                    ← clear + re-add from new map (this lambda)
+    //
+    // GPU/renderer resources are stale until the render loop's next frame
+    // processes the updated world_state — that is acceptable because the
+    // scripted warp fires from inside tick(), before any rendering for that
+    // frame has occurred.
     lua_runtime.get_stub_services().warp_fn =
-        [&world_manager, &game_state, &game_loop, &world_state](
+        [&world_manager, &game_state, &game_loop, &world_state, &pkg_ctx](
             const std::string& map_id, int32_t x, int32_t y) -> bool {
 
-        // Build a synthetic warp pointing to (map_id, first warp index, x/y override)
+        // Build a synthetic warp pointing to (map_id, x/y landing override)
         RuntimeWarp synthetic;
         synthetic.target_map_id     = map_id;
-        synthetic.target_warp_index = 0;  // landing at explicit (x,y) — index used only as hint
+        synthetic.target_warp_index = 0;
         synthetic.x = static_cast<uint8_t>(x);
         synthetic.y = static_cast<uint8_t>(y);
 
+        // prepare_warp: fallible — acquires destination without touching live state.
         WarpResult result = world_manager.prepare_warp(synthetic, game_state);
         if (!result.success) return false;
 
-        // Stage succeeded: commit (non-failing)
+        // Commit: non-failing — applies GameState.player + WorldManager.current_map.
         world_manager.commit_warp(result, game_state);
 
-        // Reload game loop with new map
+        // Update world_state (map + tileset) so the rest of the runtime uses
+        // the destination data.  This mirrors what transition_to_map does for
+        // the tile-collision warp path.
+        std::string load_error;
+        if (!load_world_state(pkg_ctx, map_id, world_state, load_error)) {
+            // world_state reload failed after commit — log but do not undo the
+            // authoritative WorldManager/GameState commit (which is non-failing).
+            // The render loop will re-attempt on the next natural map load.
+            std::cerr << "[scripted warp] world_state reload failed for '"
+                      << map_id << "': " << load_error << "\n";
+        }
+
+        // Reload game loop with new map and rewire collision source.
         const RuntimeMap* new_map = world_manager.current_map();
         if (!new_map) return false;
         game_loop.load_map(*new_map);
-        game_loop.spawn_player(
-            static_cast<int32_t>(x), static_cast<int32_t>(y),
-            game_state.player.facing);
+
+        // Rewire collision callback to new map's tileset.
+        // Captures world_state by reference — world_state.tileset is now the
+        // destination map's tileset (updated above by load_world_state).
+        game_loop.set_collision_data([&world_state](int32_t cx, int32_t cy) -> CollisionClass {
+            return get_collision_from_blocks(world_state.map.blocks,
+                world_state.tileset.collision, world_state.map.width, cx, cy);
+        });
+
+        // Reload NPCs from new map with correct initial visibility.
+        game_loop.clear_npcs();
+        for (const auto& obj : world_state.map.objects) {
+            NpcState npc;
+            npc.id               = obj.local_id;
+            npc.x                = obj.x;
+            npc.y                = obj.y;
+            npc.facing           = movement_data_to_facing(obj.movement_type);
+            npc.is_moving        = false;
+            npc.is_trainer       = obj.is_trainer;
+            npc.script_id        = obj.script_id;
+            npc.visibility_flag  = obj.visibility_flag;
+            npc.visible          = obj.visibility_flag.empty()
+                                   ? true
+                                   : game_state.check_flag(obj.visibility_flag);
+            npc.behavior         = movement_data_to_behavior(obj.movement_type);
+            npc.radius_x         = obj.movement_radius_x;
+            npc.radius_y         = obj.movement_radius_y;
+            npc.init_x           = obj.x;
+            npc.init_y           = obj.y;
+            npc.idle_timer       = 30 + (obj.local_id * 17) % 98;
+            npc.target_x         = obj.x;
+            npc.target_y         = obj.y;
+            npc.move_progress    = 0;
+            npc.frozen           = false;
+            game_loop.add_npc(npc);
+        }
+
+        // Spawn player at the scripted-warp destination.
+        game_loop.spawn_player(x, y, game_state.player.facing);
         return true;
     };
     
