@@ -7,6 +7,7 @@
 #include "engine/scripting/semantic_ir.hpp"
 #include "engine/world/movement_manager.hpp"
 #include "engine/core/game_state.hpp"
+#include "engine/core/rtc.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1554,45 +1555,59 @@ int get(lua_State* L) {
 
 namespace time_api {
 
+// Helper: compute effective RTC components from GameState (if bound) or fallback.
+static enginemon::RtcComponents get_rtc(lua_State* L) {
+    LuaRuntime* runtime = get_runtime(L);
+    int64_t offset = 0;
+    if (runtime) {
+        if (const GameState* gs = runtime->get_game_state()) {
+            offset = gs->rtc_offset_seconds;
+        }
+    }
+    enginemon::UnixSeconds eff = enginemon::GameRtc::system_source().now_seconds() + offset;
+    return enginemon::GameRtc::decompose(eff);
+}
+
 // ctx.time:hour() -> 0-23
 int hour(lua_State* L) {
-    lua_pushinteger(L, 12);  // Stub: noon
+    lua_pushinteger(L, get_rtc(L).hour);
     return 1;
 }
 
 // ctx.time:minute() -> 0-59
 int minute(lua_State* L) {
-    lua_pushinteger(L, 0);
+    lua_pushinteger(L, get_rtc(L).minute);
     return 1;
 }
 
-// ctx.time:day_of_week() -> 0-6
+// ctx.time:day_of_week() -> 0-6  (0=Sunday, 1=Monday, …, 6=Saturday)
 int day_of_week(lua_State* L) {
-    lua_pushinteger(L, 1);  // Monday
+    lua_pushinteger(L, get_rtc(L).day_of_week);
     return 1;
 }
 
-// ctx.time:time_of_day() -> "morning", "day", "night"
+// ctx.time:time_of_day() -> "morning", "day", or "night"
 int time_of_day(lua_State* L) {
-    lua_pushstring(L, "day");
+    auto c = get_rtc(L);
+    lua_pushstring(L, enginemon::GameRtc::period_name(c.hour));
     return 1;
 }
 
-// ctx.time:is_morning() -> bool (1 or 0)
+// ctx.time:is_morning() -> 0 or 1
 int is_morning(lua_State* L) {
-    lua_pushinteger(L, 0);  // stub: not morning
+    lua_pushinteger(L, enginemon::GameRtc::is_morning(get_rtc(L).hour) ? 1 : 0);
     return 1;
 }
 
-// ctx.time:is_day() -> bool (1 or 0)
+// ctx.time:is_day() -> 0 or 1
 int is_day(lua_State* L) {
-    lua_pushinteger(L, 1);  // stub: daytime
+    lua_pushinteger(L, enginemon::GameRtc::is_day(get_rtc(L).hour) ? 1 : 0);
     return 1;
 }
 
-// ctx.time:is_night() -> bool (1 or 0)
+// ctx.time:is_night() -> 0 or 1
 int is_night(lua_State* L) {
-    lua_pushinteger(L, 0);  // stub: not night
+    lua_pushinteger(L, enginemon::GameRtc::is_night(get_rtc(L).hour) ? 1 : 0);
     return 1;
 }
 
@@ -2394,9 +2409,21 @@ int describe_decoration(lua_State* L) {
 }
 
 // ctx.game:set_daylight_saving(enabled)
+// Adjusts rtc_offset_seconds by ±3600 to apply or remove a one-hour DST shift.
+// Records the preference in GameState::rtc_dst_enabled for display/toggleability.
 int set_daylight_saving(lua_State* L) {
-    int enabled = luaL_checkinteger(L, 2);
-    (void)enabled;
+    bool enable = (luaL_checkinteger(L, 2) != 0);
+    LuaRuntime* runtime = get_runtime(L);
+    if (GameState* gs = runtime->get_game_state()) {
+        if (enable && !gs->rtc_dst_enabled) {
+            gs->rtc_offset_seconds += 3600;   // spring forward
+            gs->rtc_dst_enabled = true;
+        } else if (!enable && gs->rtc_dst_enabled) {
+            gs->rtc_offset_seconds -= 3600;   // fall back
+            gs->rtc_dst_enabled = false;
+        }
+        // No-op if already in the requested state.
+    }
     return 0;
 }
 

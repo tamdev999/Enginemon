@@ -11,6 +11,7 @@
 // Reference: Gen2Recomped save system, pokecrystal SRAM layout
 
 #include "engine/core/types.hpp"
+#include "engine/core/rtc.hpp"
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -232,6 +233,20 @@ struct GameState {
     
     // Playtime (frames or seconds)
     uint64_t playtime_frames = 0;
+
+    // Real-Time Clock offset (seconds).
+    // effective_time = system_clock::now() + rtc_offset_seconds
+    // Setting the in-game clock recomputes this offset; it does not tick
+    // with game frames, turbo mode, or pause.
+    // Serialized in save format v6.
+    int64_t rtc_offset_seconds = 0;
+
+    // DST preference flag (player-set).
+    // When true, effective RTC is offset by +3600 (one hour ahead of standard).
+    // Implementation: adjust rtc_offset_seconds by ±3600 when toggled.
+    // The offset already absorbs DST; this flag records the player's preference
+    // so it can be displayed and toggled correctly.
+    bool rtc_dst_enabled = false;
     
     //=========================================================================
     // FLAG OPERATIONS

@@ -364,15 +364,15 @@ TEST(pcg_v5_save_roundtrip) {
     for (int i = 0; i < 50; ++i) (void)gs.rng.next_u32();
     uint64_t state_at_save = gs.rng.state();
 
-    // Serialize (v5)
+    // Serialize (v6 — bumped from v5 when RTC fields were added)
     auto data = gs.serialize();
 
-    // Verify version field = 5 at byte offset 4
+    // Verify version field = 6 at byte offset 4
     uint32_t ver = static_cast<uint32_t>(data[4]) |
                    (static_cast<uint32_t>(data[5]) << 8) |
                    (static_cast<uint32_t>(data[6]) << 16) |
                    (static_cast<uint32_t>(data[7]) << 24);
-    ASSERT_EQ(ver, 5u);
+    ASSERT_EQ(ver, 6u);
 
     // Deserialize
     auto result = GameState::try_deserialize(data);
@@ -387,16 +387,16 @@ TEST(pcg_v5_save_roundtrip) {
     ASSERT_EQ(loaded_next, expected_next);
 
     // MUTATION CHECK: old two-field layout would consume 16 bytes for RNG
-    // v5 uses exactly 8 bytes — verify by looking at a trivial save's size
+    // v6 uses exactly 8 bytes for RNG — verify by looking at a trivial save's size
     GameState empty;
     empty.rng.seed(0ULL);
-    auto v5 = empty.serialize();
+    auto v6 = empty.serialize();
     // v4 would be 8 bytes larger (extra uint64_t for legacy seed field)
-    // Any v5 save must be deserializable without error
-    auto v5_result = GameState::try_deserialize(v5);
-    ASSERT_TRUE(v5_result.ok());
+    // Any v6 save must be deserializable without error
+    auto v6_result = GameState::try_deserialize(v6);
+    ASSERT_TRUE(v6_result.ok());
 
-    std::cout << "  [PCG v5 save round-trip: state preserved, version=5, continuation matches ✓]\n";
+    std::cout << "  [PCG v6 save round-trip: state preserved, version=6, continuation matches]\n";
 }
 
 // =============================================================================

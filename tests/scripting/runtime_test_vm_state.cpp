@@ -1,4 +1,4 @@
-﻿// runtime_test_vm_state.cpp â€” input edge/scheduler, coroutine lifecycle, semantic_fix, bank_utils
+// runtime_test_vm_state.cpp â€” input edge/scheduler, coroutine lifecycle, semantic_fix, bank_utils
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
 #include "engine/scripting/semantic_ir.hpp"
@@ -3295,3 +3295,4 @@ return script
     ASSERT_EQ(gs.variables["var_0"], 42);
     std::cout << "  [set_state_var(3,42) / read_state_var(3) -> GameState persisted]\n";
 }
+

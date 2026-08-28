@@ -19,6 +19,7 @@ if(ENGINEMON_ENABLE_ENGINE)
         scripting/runtime_test_scripts.cpp
         scripting/runtime_test_batches.cpp
         scripting/runtime_test_vm_state.cpp
+        scripting/runtime_test_rtc.cpp
         scripting/runtime_test_text_rng.cpp
         scripting/runtime_test_pcg_vm.cpp
         scripting/runtime_test_main.cpp

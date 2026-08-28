@@ -557,6 +557,18 @@ void test_vm_sdefer_cleared_on_rebind();
 void test_vm_setvar_from_result_zero_stores_zero();
 void test_wait_frames_before_expiry_no_resume();
 void test_movement_callback_wires_to_live_object();
+
+// RTC tests
+void test_rtc_hour_minute_from_offset();
+void test_rtc_fake_clock_advance();
+void test_rtc_set_clock_recomputes_offset();
+void test_rtc_period_boundaries();
+void test_rtc_weekday_derivation();
+void test_rtc_midnight_daily_rollover();
+void test_rtc_negative_offset();
+void test_rtc_ticks_do_not_advance_rtc();
+void test_rtc_save_load_preserves_offset();
+void test_rtc_set_daylight_saving_adjusts_offset();
 void test_wait_frames_expiry_reyield_sets_resumed();
 void test_wait_frames_expiry_sets_resumed();
 void test_wait_seconds_not_immediate_resume();
@@ -1007,6 +1019,17 @@ int main(int argc, char* argv[]) {
     RUN_TEST(wait_frames_before_expiry_no_resume);
     // Move-safety regression: callback fires against live object, not stale moved-from address
     RUN_TEST(movement_callback_wires_to_live_object);
+    // RTC
+    RUN_TEST(rtc_hour_minute_from_offset);
+    RUN_TEST(rtc_fake_clock_advance);
+    RUN_TEST(rtc_set_clock_recomputes_offset);
+    RUN_TEST(rtc_period_boundaries);
+    RUN_TEST(rtc_weekday_derivation);
+    RUN_TEST(rtc_midnight_daily_rollover);
+    RUN_TEST(rtc_negative_offset);
+    RUN_TEST(rtc_ticks_do_not_advance_rtc);
+    RUN_TEST(rtc_save_load_preserves_offset);
+    RUN_TEST(rtc_set_daylight_saving_adjusts_offset);
     RUN_TEST(wait_frames_expiry_sets_resumed);
     RUN_TEST(wait_frames_expiry_reyield_sets_resumed);
     RUN_TEST(wait_seconds_not_immediate_resume);

@@ -95,12 +95,54 @@ bool read_uint8(const uint8_t*& ptr, const uint8_t* end, uint8_t& out) {
     return true;
 }
 
+// Write int64
+void write_int64(std::vector<uint8_t>& out, int64_t val) {
+    uint64_t u = static_cast<uint64_t>(val);
+    for (int i = 0; i < 8; i++) {
+        out.push_back(static_cast<uint8_t>((u >> (i * 8)) & 0xFF));
+    }
+}
+
+// Read int64
+bool read_int64(const uint8_t*& ptr, const uint8_t* end, int64_t& out) {
+    if (ptr + 8 > end) return false;
+    uint64_t u = 0;
+    for (int i = 0; i < 8; i++) {
+        u |= static_cast<uint64_t>(ptr[i]) << (i * 8);
+    }
+    out = static_cast<int64_t>(u);
+    ptr += 8;
+    return true;
+}
+
+// Write uint32
+void write_uint32(std::vector<uint8_t>& out, uint32_t val) {
+    out.push_back(static_cast<uint8_t>(val & 0xFF));
+    out.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
+}
+
+// Read uint32
+bool read_uint32(const uint8_t*& ptr, const uint8_t* end, uint32_t& out) {
+    if (ptr + 4 > end) return false;
+    out = static_cast<uint32_t>(ptr[0]) |
+          (static_cast<uint32_t>(ptr[1]) << 8) |
+          (static_cast<uint32_t>(ptr[2]) << 16) |
+          (static_cast<uint32_t>(ptr[3]) << 24);
+    ptr += 4;
+    return true;
+}
+
 // Magic number for save format
 constexpr uint32_t SAVE_MAGIC = 0x454E474D;  // "ENGM"
 // Version history:
 //   v4 — added daycare_slot; RNG stored as two uint64_t (LCG seed + state)
 //   v5 — PCG-XSH-RR replaces LCG; RNG stored as single uint64_t (PCG state)
-constexpr uint32_t SAVE_VERSION   = 5;   // Current version
+//   v6 — added rtc_offset_seconds (int64) + rtc_dst_enabled (bool)
+//         + items bag (count + {ItemId(uint32), qty(int32)} pairs)
+constexpr uint32_t SAVE_VERSION   = 6;   // Current version
+constexpr uint32_t SAVE_VERSION_5 = 5;   // Previous version (migrate: default RTC offset = 0)
 constexpr uint32_t SAVE_VERSION_4 = 4;   // Legacy LCG version (migrate on load)
 
 // Write uint16
@@ -226,7 +268,26 @@ std::vector<uint8_t> GameState::serialize() const {
             write_bool(out, npc.visible);
         }
     }
-    
+
+    // Item bag — sorted by ItemId for canonical ordering.
+    // ItemId is uint16_t; cast to uint32_t for wire format compatibility.
+    std::vector<std::pair<uint32_t, int32_t>> sorted_items;
+    sorted_items.reserve(items.size());
+    for (const auto& [id, qty] : items) {
+        if (qty > 0) sorted_items.emplace_back(static_cast<uint32_t>(id), qty);
+    }
+    std::sort(sorted_items.begin(), sorted_items.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    write_int32(out, static_cast<int32_t>(sorted_items.size()));
+    for (const auto& [id, qty] : sorted_items) {
+        write_uint32(out, id);
+        write_int32(out, qty);
+    }
+
+    // RTC offset (v6)
+    write_int64(out, rtc_offset_seconds);
+    write_bool(out, rtc_dst_enabled);
+
     return out;
 }
 
@@ -256,10 +317,11 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
         result.error = DeserializeError::InvalidMagic;
         return result;
     }
-    // Accept current version (v5, PCG) and legacy version (v4, LCG)
+    // Accept v6 (current), v5 (PCG), and v4 (LCG legacy)
     const bool is_v4 = (static_cast<uint32_t>(version) == SAVE_VERSION_4);
-    const bool is_v5 = (static_cast<uint32_t>(version) == SAVE_VERSION);
-    if (!is_v4 && !is_v5) {
+    const bool is_v5 = (static_cast<uint32_t>(version) == SAVE_VERSION_5);
+    const bool is_v6 = (static_cast<uint32_t>(version) == SAVE_VERSION);
+    if (!is_v4 && !is_v5 && !is_v6) {
         result.error = DeserializeError::UnsupportedVersion;
         return result;
     }
@@ -414,7 +476,7 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
         // Deterministic migration: seed PCG from legacy state value
         state.rng.seed(legacy_state);
     } else {
-        // v5: single uint64_t PCG internal state — restore directly
+        // v5/v6: single uint64_t PCG internal state — restore directly
         uint64_t pcg_state = 0;
         if (!read_uint64(ptr, end, pcg_state)) {
             result.error = DeserializeError::CorruptedPayload;
@@ -546,6 +608,43 @@ DeserializeResult GameState::try_deserialize(const std::vector<uint8_t>& data) {
             
             state.npc_states[map_id] = std::move(npcs);
         }
+
+    // Item bag (v6) — in v4/v5, default to empty
+    if (is_v6) {
+        int32_t item_count = 0;
+        if (!read_int32(ptr, end, item_count)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        if (item_count < 0 || item_count > 1000) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        for (int32_t i = 0; i < item_count; i++) {
+            uint32_t item_id_raw = 0;
+            int32_t qty = 0;
+            if (!read_uint32(ptr, end, item_id_raw) || !read_int32(ptr, end, qty)) {
+                result.error = DeserializeError::CorruptedPayload;
+                return result;
+            }
+            if (qty <= 0 || qty > GameState::ITEM_QUANTITY_MAX) {
+                result.error = DeserializeError::CorruptedPayload;
+                return result;
+            }
+            state.items[static_cast<ItemId>(item_id_raw)] = qty;
+        }
+
+        // RTC offset (v6)
+        if (!read_int64(ptr, end, state.rtc_offset_seconds)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+        if (!read_bool(ptr, end, state.rtc_dst_enabled)) {
+            result.error = DeserializeError::CorruptedPayload;
+            return result;
+        }
+    }
+    // v4/v5 migration: items = empty, rtc_offset = 0, dst = false (defaults)
     
     // Require exact payload consumption — no trailing bytes allowed
     if (ptr != end) {
