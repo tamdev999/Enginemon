@@ -1139,8 +1139,11 @@ struct Sem_StopFollow {};
 struct Sem_Emote { uint8_t emote_id; uint8_t object_id; uint8_t duration; };
 
 // --- Map/Warp/Scene ---
-struct Sem_Warp { MapId map; uint8_t x; uint8_t y; };
-struct Sem_WarpFacing { Direction facing; MapId map; uint8_t x; uint8_t y; };
+// map_id_string: canonical package string ID (e.g. "new_bark_town") emitted by
+// semantic_lua_emitter so the runtime can load the destination by string ID
+// without frontend map-group-to-string tables.
+struct Sem_Warp { MapId map; uint8_t x; uint8_t y; std::string map_id_string; };
+struct Sem_WarpFacing { Direction facing; MapId map; uint8_t x; uint8_t y; std::string map_id_string; };
 // Warp to backup location (Crystal BADWARP - when script warp has map=0)
 // This triggers MAPSETUP_BADWARP which restores player to wBackupMap location
 // Distinct from Sem_Warp because there's no MapId to validate

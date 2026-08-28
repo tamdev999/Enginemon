@@ -873,7 +873,12 @@ int main(int argc, char* argv[]) {
     //=========================================================================
     
     LuaRuntime lua_runtime;
-    
+
+    // Bind authoritative GameState to LuaRuntime so ctx.flags:set/check/clear
+    // and ctx.time:* write through GameState, not stub storage.
+    // Must be called before any script executes.
+    lua_runtime.set_game_state(&game_state);
+
     // Set error handler to log script errors
     lua_runtime.set_error_handler([](const std::string& error, const std::string& traceback) {
         std::cerr << "[SCRIPT ERROR] " << error << "\n";
@@ -884,6 +889,37 @@ int main(int argc, char* argv[]) {
     
     // Connect game loop to Lua runtime
     game_loop.set_lua_runtime(&lua_runtime);
+
+    // Wire scripted warp → staged WorldManager transition.
+    // warp_fn is called by ctx.world:warp() in Lua scripts.
+    // Uses prepare_warp/commit_warp for atomicity: failure leaves authoritative
+    // world state unchanged.  Returns true on success, false on failure.
+    lua_runtime.get_stub_services().warp_fn =
+        [&world_manager, &game_state, &game_loop, &world_state](
+            const std::string& map_id, int32_t x, int32_t y) -> bool {
+
+        // Build a synthetic warp pointing to (map_id, first warp index, x/y override)
+        RuntimeWarp synthetic;
+        synthetic.target_map_id     = map_id;
+        synthetic.target_warp_index = 0;  // landing at explicit (x,y) — index used only as hint
+        synthetic.x = static_cast<uint8_t>(x);
+        synthetic.y = static_cast<uint8_t>(y);
+
+        WarpResult result = world_manager.prepare_warp(synthetic, game_state);
+        if (!result.success) return false;
+
+        // Stage succeeded: commit (non-failing)
+        world_manager.commit_warp(result, game_state);
+
+        // Reload game loop with new map
+        const RuntimeMap* new_map = world_manager.current_map();
+        if (!new_map) return false;
+        game_loop.load_map(*new_map);
+        game_loop.spawn_player(
+            static_cast<int32_t>(x), static_cast<int32_t>(y),
+            game_state.player.facing);
+        return true;
+    };
     
     // Set up script loader that loads pre-compiled Lua from package
     // Scripts are already stored with global ScriptId: "map_id::local_script_id"

@@ -2768,8 +2768,9 @@ end)()
     ASSERT_TRUE(state == ScriptState::Finished || state == ScriptState::Running);
 
     // GameState must reflect script mutations
-    ASSERT_TRUE(gs.check_flag("flag_7"));      // set(7) fired
-    ASSERT_FALSE(gs.check_flag("flag_42"));    // set(42) then clear(42) → absent
+    // With canonical hex flag keys: set(7) -> "flag_0007", clear(42) -> "flag_002a" removed
+    ASSERT_TRUE(gs.check_flag("flag_0007"));      // set(7) fired
+    ASSERT_FALSE(gs.check_flag("flag_002a"));    // set(42) then clear(42) → absent
     ASSERT_EQ(gs.get_var("var_3"), 125);       // set_var(3,100) + add_var(3,25)
 
     // Serialize and deserialize
@@ -2778,9 +2779,9 @@ end)()
     ASSERT_TRUE(result.ok());
     GameState& restored = result.state;
 
-    // Flag 7 survives, flag 42 absent, var_3 = 125
-    ASSERT_TRUE(restored.check_flag("flag_7"));
-    ASSERT_FALSE(restored.check_flag("flag_42"));
+    // Flag 0007 survives, flag 002a absent, var_3 = 125
+    ASSERT_TRUE(restored.check_flag("flag_0007"));
+    ASSERT_FALSE(restored.check_flag("flag_002a"));
     ASSERT_EQ(restored.get_var("var_3"), 125);
 
     std::cout << "  [Lua flags/vars → GameState → serialize → deserialize: all correct ✓]\n";

@@ -906,6 +906,7 @@ void FullGameCompiler::build_production_game_data() {
     for (const auto& dm : content_.maps) {
         enginemon::MapId map_id = (static_cast<uint16_t>(dm.group) << 8) | dm.index;
         compiled_game_data_.maps.insert(map_id);
+        compiled_game_data_.map_string_ids[map_id] = dm.map_id;  // canonical string ID
         
         // Get object and warp counts
         auto result = map_extractor_->extract_map(dm.group, dm.index);
@@ -1097,6 +1098,29 @@ void FullGameCompiler::build_production_game_data() {
 
 bool FullGameCompiler::link_scripts(const std::map<uint32_t, enginemon::MapId>& address_to_map) {
     std::cout << "  Linking " << (map_root_irs_.size() + std_script_irs_.size()) << " scripts...\n";
+
+    // Populate Sem_Warp::map_id_string / Sem_WarpFacing::map_id_string on all IRs
+    // so the runtime can load the destination map by string ID without frontend tables.
+    auto resolve_warp_strings = [&](std::vector<enginemon::SemanticScriptIR>& irs) {
+        for (auto& ir : irs) {
+            for (auto& block : ir.blocks) {
+                for (auto& inst : block.instructions) {
+                    std::visit([&](auto& op) {
+                        using T = std::decay_t<decltype(op)>;
+                        if constexpr (std::is_same_v<T, enginemon::Sem_Warp> ||
+                                      std::is_same_v<T, enginemon::Sem_WarpFacing>) {
+                            auto it = compiled_game_data_.map_string_ids.find(op.map);
+                            if (it != compiled_game_data_.map_string_ids.end()) {
+                                op.map_id_string = it->second;
+                            }
+                        }
+                    }, inst.op);
+                }
+            }
+        }
+    };
+    resolve_warp_strings(map_root_irs_);
+    resolve_warp_strings(std_script_irs_);
     
     // Set compiled game data
     semantic_linker_->set_game_data(&compiled_game_data_);

@@ -15,6 +15,7 @@
 #include <memory>
 #include <functional>
 #include <string_view>
+#include <format>
 
 namespace enginemon {
 
@@ -886,17 +887,40 @@ int set_last_talked(lua_State* L) {
 }
 
 // ctx.world:warp(map_id, x, y) — scripted warp to map coordinates
-// Source: Script_warp passes (group, map, x, y) → semantic Sem_Warp{map, x, y}
-// The emitter passes map ID + tile coordinates, matching Crystal's actual warp semantics.
+// map_id may be a string (canonical package ID, e.g. "new_bark_town") or an
+// integer (legacy numeric MapId for tools/tests that skip the linker string pass).
+// Production bootstrap sets stubs.warp_fn to route through WorldManager::prepare_warp /
+// commit_warp for atomic staged transition; failure leaves authoritative state unchanged.
 int warp(lua_State* L) {
-    auto& stubs = get_stubs(L);
-    int map_id = luaL_checkinteger(L, 2);
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+
+    // Accept string or integer map_id
+    std::string map_id_str;
+    int numeric_map_id = 0;
+    if (lua_type(L, 2) == LUA_TSTRING) {
+        map_id_str = luaL_checkstring(L, 2);
+        // numeric form not available for string map IDs
+        numeric_map_id = 0;
+    } else {
+        numeric_map_id = static_cast<int>(luaL_checkinteger(L, 2));
+        map_id_str = std::to_string(numeric_map_id);
+    }
     int x = luaL_checkinteger(L, 3);
     int y = luaL_checkinteger(L, 4);
-    stubs.last_warp_map = map_id;
+
+    stubs.last_warp_map = numeric_map_id;
     stubs.last_warp_x = x;
     stubs.last_warp_y = y;
-    stubs.movement_calls.push_back({"warp", std::to_string(map_id) + "," + std::to_string(x) + "," + std::to_string(y)});
+    stubs.movement_calls.push_back({"warp", map_id_str + "," + std::to_string(x) + "," + std::to_string(y)});
+
+    if (stubs.warp_fn) {
+        bool ok = stubs.warp_fn(map_id_str, static_cast<int32_t>(x), static_cast<int32_t>(y));
+        if (!ok) {
+            // Surface explicit failure so the coroutine can observe the error
+            return luaL_error(L, "warp failed: destination '%s' could not be loaded", map_id_str.c_str());
+        }
+    }
     return 0;
 }
 
@@ -1413,7 +1437,14 @@ int set(lua_State* L) {
     int flag_id = luaL_checkinteger(L, 2);
     // Production path: write through GameState when bound
     if (GameState* gs = runtime->get_game_state()) {
-        gs->flags.insert("flag_" + std::to_string(flag_id));
+        // flag_id is encoded by semantic_lua_emitter as (ns << 16) | value.
+        // ns=0 (Event) or ns=1 (Engine). We extract the 16-bit value and
+        // produce the same hex-padded key as MapExtractor::make_flag_id():
+        //   "flag_{:04x}"
+        // This ensures a script calling setflag 0x001A and a BG event
+        // conditioned on source flag 0x001A resolve to the same GameState key.
+        uint16_t flag_value = static_cast<uint16_t>(flag_id & 0xFFFF);
+        gs->flags.insert(std::format("flag_{:04x}", flag_value));
     } else {
         auto& stubs = runtime->get_stub_services();
         stubs.flags[flag_id] = true;
@@ -1428,7 +1459,8 @@ int clear(lua_State* L) {
     int flag_id = luaL_checkinteger(L, 2);
     // Production path: write through GameState when bound
     if (GameState* gs = runtime->get_game_state()) {
-        gs->flags.erase("flag_" + std::to_string(flag_id));
+        uint16_t flag_value = static_cast<uint16_t>(flag_id & 0xFFFF);
+        gs->flags.erase(std::format("flag_{:04x}", flag_value));
     } else {
         auto& stubs = runtime->get_stub_services();
         stubs.flags[flag_id] = false;
@@ -1444,7 +1476,8 @@ int check(lua_State* L) {
     bool value = false;
     // Production path: read from GameState when bound
     if (GameState* gs = runtime->get_game_state()) {
-        value = gs->flags.count("flag_" + std::to_string(flag_id)) > 0;
+        uint16_t flag_value = static_cast<uint16_t>(flag_id & 0xFFFF);
+        value = gs->flags.count(std::format("flag_{:04x}", flag_value)) > 0;
     } else {
         value = get_test_flag(runtime, flag_id);
     }

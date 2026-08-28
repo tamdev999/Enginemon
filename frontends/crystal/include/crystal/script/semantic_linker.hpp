@@ -281,6 +281,11 @@ struct CompiledGameData {
     
     // Maps: exact compiled map set (discovered via fixed-point)
     std::unordered_set<enginemon::MapId> maps;
+
+    // Map string IDs: MapId → canonical package string ID (e.g. "new_bark_town").
+    // Used by SemanticLinker to populate Sem_Warp::map_id_string so the runtime
+    // can load destination maps by string without frontend map-group tables.
+    std::unordered_map<enginemon::MapId, std::string> map_string_ids;
     
     // Map object counts: how many objects each compiled map has
     std::unordered_map<enginemon::MapId, uint8_t> map_object_counts;

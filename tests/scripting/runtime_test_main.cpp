@@ -572,6 +572,13 @@ void test_rtc_set_daylight_saving_adjusts_offset();
 void test_rtc_dst_enable_twice_idempotent();
 void test_rtc_dst_disable_twice_idempotent();
 void test_rtc_dst_enable_set_clock_disable_net_reversal();
+// Integration tests
+void test_production_bootstrap_script_mutates_gamestate();
+void test_no_gamestate_flags_fallback_to_stubs();
+void test_lua_syntax_error_throws_explicitly();
+void test_flag_identity_hex_canonical();
+void test_flag_gamestate_set_clear_check_roundtrip();
+void test_flag_map_condition_matches_script_set();
 void test_wait_frames_expiry_reyield_sets_resumed();
 void test_wait_frames_expiry_sets_resumed();
 void test_wait_seconds_not_immediate_resume();
@@ -1036,6 +1043,12 @@ int main(int argc, char* argv[]) {
     RUN_TEST(rtc_dst_enable_twice_idempotent);
     RUN_TEST(rtc_dst_disable_twice_idempotent);
     RUN_TEST(rtc_dst_enable_set_clock_disable_net_reversal);
+    RUN_TEST(production_bootstrap_script_mutates_gamestate);
+    RUN_TEST(no_gamestate_flags_fallback_to_stubs);
+    RUN_TEST(lua_syntax_error_throws_explicitly);
+    RUN_TEST(flag_identity_hex_canonical);
+    RUN_TEST(flag_gamestate_set_clear_check_roundtrip);
+    RUN_TEST(flag_map_condition_matches_script_set);
     RUN_TEST(wait_frames_expiry_sets_resumed);
     RUN_TEST(wait_frames_expiry_reyield_sets_resumed);
     RUN_TEST(wait_seconds_not_immediate_resume);

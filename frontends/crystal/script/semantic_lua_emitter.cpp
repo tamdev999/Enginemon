@@ -622,12 +622,24 @@ static bool emit_op_part2(std::ostream& out, const SemanticOp& op, int I) {
 
     // Map / Warp / Scene
     if (auto* o = std::get_if<Sem_Warp>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:warp(" << (int)o->map << ", " << (int)o->x << ", " << (int)o->y << ")\n";
+        // Emit string map ID when available (populated by full_compiler link_scripts phase).
+        // Falls back to numeric ID for test/tool pipelines that don't run link_scripts.
+        SemanticLuaEmitter::indent_line(out, I);
+        if (!o->map_id_string.empty()) {
+            out << "ctx.world:warp(\"" << o->map_id_string << "\", " << (int)o->x << ", " << (int)o->y << ")\n";
+        } else {
+            out << "ctx.world:warp(" << (int)o->map << ", " << (int)o->x << ", " << (int)o->y << ")\n";
+        }
         SemanticLuaEmitter::indent_line(out, I); out << "coroutine.yield(\"warp\")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_WarpFacing>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:face_actor(0, " << SemanticLuaEmitter::direction_name(o->facing) << ")\n";
-        SemanticLuaEmitter::indent_line(out, I); out << "ctx.world:warp(" << (int)o->map << ", " << (int)o->x << ", " << (int)o->y << ")\n";
+        SemanticLuaEmitter::indent_line(out, I);
+        if (!o->map_id_string.empty()) {
+            out << "ctx.world:warp(\"" << o->map_id_string << "\", " << (int)o->x << ", " << (int)o->y << ")\n";
+        } else {
+            out << "ctx.world:warp(" << (int)o->map << ", " << (int)o->x << ", " << (int)o->y << ")\n";
+        }
         SemanticLuaEmitter::indent_line(out, I); out << "coroutine.yield(\"warp\")\n"; return true;
     }
     if (std::get_if<Sem_WarpToBackup>(&op)) {

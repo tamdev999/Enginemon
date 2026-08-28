@@ -174,6 +174,13 @@ struct StubServices {
     int last_warp_map = 0;
     int last_warp_x = -1;
     int last_warp_y = -1;
+
+    // Production warp callback — set by the production bootstrap (main_tiles, emon_smoke).
+    // Signature: (map_id_string, x, y) -> bool (true = success, false = transition failed).
+    // When set, ctx.world:warp() calls this instead of only recording stub state.
+    // Failure must leave the authoritative world state unchanged (atomicity guaranteed by
+    // WorldManager::prepare_warp / commit_warp).
+    std::function<bool(const std::string& map_id, int32_t x, int32_t y)> warp_fn;
     
     // Flag API stub state
     std::unordered_map<int, bool> flags;
