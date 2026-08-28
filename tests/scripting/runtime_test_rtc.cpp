@@ -215,3 +215,104 @@ return script
     ASSERT_FALSE(gs.rtc_dst_enabled);
     std::cout << "  [RTC DST: enable +3600, disable -3600 via set_daylight_saving]\n";
 }
+
+// set_daylight_saving(1) called twice -> exactly +3600 total (idempotent)
+TEST(rtc_dst_enable_twice_idempotent) {
+    using namespace enginemon;
+    GameState gs;
+    gs.rtc_offset_seconds = 0;
+    gs.rtc_dst_enabled    = false;
+
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    const char* enable_twice = R"(
+script = {}
+function script.main(ctx)
+    ctx.game:set_daylight_saving(1)
+    ctx.game:set_daylight_saving(1)
+    return
+end
+return script
+)";
+    rt.execute_string(enable_twice, "enable_twice");
+    rt.start_script("script");
+
+    ASSERT_EQ(gs.rtc_offset_seconds, 3600);  // exactly +3600, not +7200
+    ASSERT_TRUE(gs.rtc_dst_enabled);
+    std::cout << "  [RTC DST idempotent: enable twice -> exactly +3600]\n";
+}
+
+// set_daylight_saving(0) called twice from baseline -> exactly 0 (idempotent)
+TEST(rtc_dst_disable_twice_idempotent) {
+    using namespace enginemon;
+    GameState gs;
+    gs.rtc_offset_seconds = 0;
+    gs.rtc_dst_enabled    = false;
+
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    const char* disable_twice = R"(
+script = {}
+function script.main(ctx)
+    ctx.game:set_daylight_saving(0)
+    ctx.game:set_daylight_saving(0)
+    return
+end
+return script
+)";
+    rt.execute_string(disable_twice, "disable_twice");
+    rt.start_script("script");
+
+    ASSERT_EQ(gs.rtc_offset_seconds, 0);     // unchanged from baseline
+    ASSERT_FALSE(gs.rtc_dst_enabled);
+    std::cout << "  [RTC DST idempotent: disable twice from baseline -> exactly 0]\n";
+}
+
+// enable -> set_clock -> disable -> net exactly one-hour reversal
+TEST(rtc_dst_enable_set_clock_disable_net_reversal) {
+    using namespace enginemon;
+    GameState gs;
+    gs.rtc_offset_seconds = 1000;   // arbitrary baseline offset
+    gs.rtc_dst_enabled    = false;
+    int64_t baseline = gs.rtc_offset_seconds;
+
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    // Step 1: enable DST -> offset += 3600
+    const char* enable_dst = R"(
+script = {}
+function script.main(ctx)
+    ctx.game:set_daylight_saving(1)
+    return
+end
+return script
+)";
+    rt.execute_string(enable_dst, "enable_dst");
+    rt.start_script("script");
+    ASSERT_EQ(gs.rtc_offset_seconds, baseline + 3600);
+    ASSERT_TRUE(gs.rtc_dst_enabled);
+
+    // Step 2: simulate "set clock" — directly adjust offset (as a script would via
+    // a set_rtc_offset call or any other mechanism that moves the offset arbitrarily)
+    gs.rtc_offset_seconds += 7200;   // simulate user setting clock forward 2h
+    int64_t after_set = gs.rtc_offset_seconds;
+
+    // Step 3: disable DST -> offset -= 3600 (exactly one reversal, not two)
+    const char* disable_dst = R"(
+script = {}
+function script.main(ctx)
+    ctx.game:set_daylight_saving(0)
+    return
+end
+return script
+)";
+    rt.execute_string(disable_dst, "disable_dst");
+    rt.start_script("script");
+
+    ASSERT_EQ(gs.rtc_offset_seconds, after_set - 3600);  // exactly one-hour reversal
+    ASSERT_FALSE(gs.rtc_dst_enabled);
+    std::cout << "  [RTC DST: enable->set_clock->disable -> exactly one-hour reversal]\n";
+}
