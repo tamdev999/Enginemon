@@ -323,3 +323,244 @@ TEST(door_auto_step_routes_through_movement_manager) {
               << "-> idle after " << ticks << " ticks, destination (" << px
               << "," << south_y << ") correct]\n";
 }
+
+// =============================================================================
+// TEST 8: Crystal NPC visibility semantics — flag SET = hidden
+//
+// From pokecrystal map_objects_2.asm CheckObjectFlag:
+//   flag SET   → .masked  → hidden
+//   flag CLEAR → .unmasked → visible
+//   0xFFFF    → .unmasked → always visible
+//
+// Tests:
+//   A. no visibility_flag  → always visible
+//   B. visibility_flag SET in GameState → NPC hidden at map load
+//   C. visibility_flag CLEAR in GameState → NPC visible at map load
+//   D. hidden NPC not collidable, not interactable
+// =============================================================================
+TEST(crystal_npc_visibility_flag_set_means_hidden) {
+    using namespace enginemon;
+
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.set_lua_runtime(&rt);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    RuntimeMap map;
+    map.map_id = "test_vis_map";
+    map.width  = 5;
+    map.height = 5;
+    map.blocks.assign(25u, 0u);
+    loop.load_map(map);
+
+    // A: NPC with empty visibility_flag → always visible
+    {
+        NpcState npc;
+        npc.id = 1; npc.x = 1; npc.y = 1;
+        npc.visibility_flag = "";     // no controlling flag
+        npc.visible = true;           // empty flag → always visible
+        loop.add_npc(npc);
+        const NpcState* n = loop.get_npc(1);
+        ASSERT_TRUE(n && n->visible);
+    }
+
+    // B: NPC with visibility_flag THAT IS SET → hidden (flag SET = hidden)
+    gs.set_flag("flag_001a");  // set flag 0x001A
+    {
+        NpcState npc;
+        npc.id = 2; npc.x = 2; npc.y = 2;
+        npc.visibility_flag = "flag_001a";
+        // Crystal semantics: flag IS SET → hidden = !check_flag
+        npc.visible = !gs.check_flag(npc.visibility_flag);  // false = hidden
+        loop.add_npc(npc);
+        const NpcState* n = loop.get_npc(2);
+        ASSERT_TRUE(n != nullptr);
+        ASSERT_FALSE(n->visible);  // flag set → hidden
+    }
+
+    // C: NPC with visibility_flag THAT IS CLEAR → visible
+    // (flag "flag_002b" is not in GameState → clear)
+    {
+        NpcState npc;
+        npc.id = 3; npc.x = 3; npc.y = 3;
+        npc.visibility_flag = "flag_002b";
+        npc.visible = !gs.check_flag(npc.visibility_flag);  // true = visible
+        loop.add_npc(npc);
+        const NpcState* n = loop.get_npc(3);
+        ASSERT_TRUE(n != nullptr);
+        ASSERT_TRUE(n->visible);   // flag clear → visible
+    }
+
+    // D: hidden NPC (id=2) must not block movement.
+    // Verify via process_input: player at (2,1) moving south to (2,2).
+    // NPC id=2 is at (2,2) and is hidden — movement must be accepted (not blocked).
+    loop.spawn_player(2, 1, Direction::Down);
+    auto ir = loop.process_input(InputAction::MoveDown);
+    // If the hidden NPC were collidable, movement would be blocked.
+    ASSERT_TRUE(ir.accepted);  // hidden NPC does not block player movement
+
+    std::cout << "  [Crystal NPC visibility: flag SET=hidden, CLEAR=visible; "
+              << "hidden NPC not collidable]\n";
+}
+
+// =============================================================================
+// TEST 9: show_npc / hide_npc persist to GameState flags
+//
+// hide_npc(N) must SET the NPC's controlling flag in GameState.
+// show_npc(N) must CLEAR the NPC's controlling flag in GameState.
+// After a map unload/reload, visibility reflects the persisted flag state.
+// =============================================================================
+TEST(show_hide_npc_persists_to_gamestate_flags) {
+    using namespace enginemon;
+
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.set_lua_runtime(&rt);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    RuntimeMap map;
+    map.map_id = "persist_vis_map";
+    map.width  = 5;
+    map.height = 5;
+    map.blocks.assign(25u, 0u);
+    loop.load_map(map);
+
+    // Add NPC with controlling flag "flag_0042"
+    NpcState npc;
+    npc.id = 5; npc.x = 2; npc.y = 2;
+    npc.visibility_flag = "flag_0042";
+    npc.visible = true;   // flag is clear → visible
+    loop.add_npc(npc);
+    ASSERT_FALSE(gs.check_flag("flag_0042"));  // flag starts clear
+
+    // hide_npc(5) via Lua → must SET flag_0042 in GameState
+    const char* hide_script = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:hide_npc(5)
+    return
+end
+return script
+)";
+    rt.execute_string(hide_script, "hide_test");
+    rt.start_script("script");
+
+    // Flag must be SET now (Crystal Script_disappear semantics)
+    ASSERT_TRUE(gs.check_flag("flag_0042"));
+    // NpcState::visible must be false
+    const NpcState* n = loop.get_npc(5);
+    ASSERT_TRUE(n != nullptr);
+    ASSERT_FALSE(n->visible);
+
+    // Simulate map re-entry: rebuild NPC list from map objects, re-evaluating flags
+    // (Crystal semantics: flag SET → hidden on reload)
+    loop.clear_npcs();
+    {
+        NpcState reloaded;
+        reloaded.id = 5; reloaded.x = 2; reloaded.y = 2;
+        reloaded.visibility_flag = "flag_0042";
+        reloaded.visible = !gs.check_flag(reloaded.visibility_flag);  // flag SET → hidden
+        loop.add_npc(reloaded);
+    }
+    const NpcState* reloaded_n = loop.get_npc(5);
+    ASSERT_TRUE(reloaded_n != nullptr);
+    ASSERT_FALSE(reloaded_n->visible);  // still hidden after reload
+
+    // show_npc(5) via Lua → must CLEAR flag_0042 in GameState
+    const char* show_script = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:show_npc(5)
+    return
+end
+return script
+)";
+    rt.execute_string(show_script, "show_test");
+    rt.start_script("script");
+
+    // Flag must be CLEAR now (Crystal Script_appear semantics)
+    ASSERT_FALSE(gs.check_flag("flag_0042"));
+    // NpcState::visible must be true
+    const NpcState* shown_n = loop.get_npc(5);
+    ASSERT_TRUE(shown_n != nullptr);
+    ASSERT_TRUE(shown_n->visible);
+
+    // Reload again → still visible (flag CLEAR → visible)
+    loop.clear_npcs();
+    {
+        NpcState reloaded2;
+        reloaded2.id = 5; reloaded2.x = 2; reloaded2.y = 2;
+        reloaded2.visibility_flag = "flag_0042";
+        reloaded2.visible = !gs.check_flag(reloaded2.visibility_flag);  // flag CLEAR → visible
+        loop.add_npc(reloaded2);
+    }
+    const NpcState* r2 = loop.get_npc(5);
+    ASSERT_TRUE(r2 != nullptr);
+    ASSERT_TRUE(r2->visible);  // persisted as visible after show_npc
+
+    std::cout << "  [show/hide_npc: hide sets flag (persist hidden), "
+              << "show clears flag (persist visible)]\n";
+}
+
+// =============================================================================
+// TEST 10: hide NPC without controlling flag — transient only
+//
+// Crystal Script_disappear no-ops when event_flag == 0xFFFF (-1).
+// hide_npc on a flag-less NPC updates NpcState::visible but does NOT
+// invent a fake flag in GameState.
+// =============================================================================
+TEST(hide_npc_no_flag_is_transient) {
+    using namespace enginemon;
+
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.set_lua_runtime(&rt);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    RuntimeMap map;
+    map.map_id = "transient_vis_map";
+    map.width = 4; map.height = 4;
+    map.blocks.assign(16u, 0u);
+    loop.load_map(map);
+
+    NpcState npc;
+    npc.id = 7; npc.x = 1; npc.y = 1;
+    npc.visibility_flag = "";   // no controlling flag (0xFFFF in ROM)
+    npc.visible = true;
+    loop.add_npc(npc);
+
+    size_t flag_count_before = gs.flags.size();
+
+    const char* hide_script = R"(
+script = {}
+function script.main(ctx)
+    ctx.world:hide_npc(7)
+    return
+end
+return script
+)";
+    rt.execute_string(hide_script, "hide_noflag");
+    rt.start_script("script");
+
+    // NpcState::visible must be false (live change)
+    const NpcState* n = loop.get_npc(7);
+    ASSERT_TRUE(n != nullptr);
+    ASSERT_FALSE(n->visible);
+
+    // GameState::flags must be unchanged — no fake flag invented
+    ASSERT_EQ(gs.flags.size(), flag_count_before);
+
+    std::cout << "  [hide_npc with no flag: NpcState hidden, GameState unchanged]\n";
+}

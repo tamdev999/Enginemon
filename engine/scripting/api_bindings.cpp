@@ -936,31 +936,69 @@ int warp_to_spawn(lua_State* L) {
 
 // ctx.world:show_npc(npc_id)
 // Makes the NPC visible.  Source: Crystal showobject opcode → Sem_ShowObject.
-// Writes to HeadlessGameLoop::NpcState::visible via set_npc_visible_fn callback.
+// Crystal Script_appear semantics (scripting.asm): clears the NPC's event_flag
+// (flag CLEAR = visible per CheckObjectFlag in map_objects_2.asm).
+// Writes to HeadlessGameLoop::NpcState::visible AND clears the controlling
+// GameState flag so visibility persists across map unload/reload.
 int show_npc(lua_State* L) {
     uint16_t npc_id = static_cast<uint16_t>(luaL_checkinteger(L, 2));
     LuaRuntime* runtime = get_runtime(L);
     auto& stubs = runtime->get_stub_services();
+
+    // 1. Update live NpcState::visible
     if (stubs.set_npc_visible_fn) {
         stubs.set_npc_visible_fn(npc_id, true);
     } else {
-        // Stub mode: record in actor visibility map for test inspection
         stubs.actors[npc_id].visible = true;
+    }
+
+    // 2. Persist to GameState::flags so visibility survives map transitions.
+    //    Crystal Script_appear → RESET_FLAG (clear) on the NPC's event_flag.
+    //    flag CLEAR = visible (CheckObjectFlag: !flag → .unmasked → visible).
+    if (GameState* gs = runtime->get_game_state()) {
+        std::string vis_flag;
+        if (stubs.get_npc_visibility_flag_fn) {
+            vis_flag = stubs.get_npc_visibility_flag_fn(npc_id);
+        }
+        if (!vis_flag.empty()) {
+            gs->clear_flag(vis_flag);  // Crystal Script_appear: RESET_FLAG
+        }
     }
     return 0;
 }
 
 // ctx.world:hide_npc(npc_id)
 // Hides the NPC.  Source: Crystal hideobject opcode → Sem_HideObject.
-// Writes to HeadlessGameLoop::NpcState::visible via set_npc_visible_fn callback.
+// Crystal Script_disappear semantics (scripting.asm): sets the NPC's event_flag
+// (flag SET = hidden per CheckObjectFlag in map_objects_2.asm).
+// Writes to HeadlessGameLoop::NpcState::visible AND sets the controlling
+// GameState flag so the NPC stays hidden across map unload/reload.
 int hide_npc(lua_State* L) {
     uint16_t npc_id = static_cast<uint16_t>(luaL_checkinteger(L, 2));
     LuaRuntime* runtime = get_runtime(L);
     auto& stubs = runtime->get_stub_services();
+
+    // 1. Update live NpcState::visible
     if (stubs.set_npc_visible_fn) {
         stubs.set_npc_visible_fn(npc_id, false);
     } else {
         stubs.actors[npc_id].visible = false;
+    }
+
+    // 2. Persist to GameState::flags so visibility survives map transitions.
+    //    Crystal Script_disappear → SET_FLAG on the NPC's event_flag.
+    //    flag SET = hidden (CheckObjectFlag: flag → .masked → hidden).
+    if (GameState* gs = runtime->get_game_state()) {
+        std::string vis_flag;
+        if (stubs.get_npc_visibility_flag_fn) {
+            vis_flag = stubs.get_npc_visibility_flag_fn(npc_id);
+        }
+        if (!vis_flag.empty()) {
+            gs->set_flag(vis_flag);    // Crystal Script_disappear: SET_FLAG
+        }
+        // If the NPC has no controlling visibility_flag (0xFFFF in ROM),
+        // the hide is transient (no flag to persist). This matches Crystal
+        // Script_disappear behavior which no-ops on flag == -1.
     }
     return 0;
 }

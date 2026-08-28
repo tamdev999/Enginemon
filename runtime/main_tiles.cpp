@@ -593,11 +593,15 @@ static bool transition_to_map(
         npc.visibility_flag = obj.visibility_flag;
 
         // Evaluate visibility_flag against authoritative GameState at map load.
-        // Empty flag string → object has no controlling flag → always visible.
+        // Crystal semantics (map_objects_2.asm CheckObjectFlag):
+        //   0xFFFF (empty string) → always visible
+        //   flag CLEAR            → visible
+        //   flag SET              → hidden
+        // So: visible = flag is empty OR flag is NOT set in GameState.
         if (obj.visibility_flag.empty()) {
             npc.visible = true;
         } else if (gs_ptr) {
-            npc.visible = gs_ptr->check_flag(obj.visibility_flag);
+            npc.visible = !gs_ptr->check_flag(obj.visibility_flag);
         } else {
             // No GameState bound (headless tool or test without real state):
             // default visible so the headless path doesn't silently drop objects.
@@ -873,10 +877,14 @@ int main(int argc, char* argv[]) {
         npc.visibility_flag = obj.visibility_flag;
 
         // Evaluate visibility_flag against authoritative GameState at map load.
+        // Crystal semantics (map_objects_2.asm CheckObjectFlag):
+        //   0xFFFF (empty string) → always visible
+        //   flag CLEAR            → visible
+        //   flag SET              → hidden
         if (obj.visibility_flag.empty()) {
             npc.visible = true;
         } else {
-            npc.visible = game_state.check_flag(obj.visibility_flag);
+            npc.visible = !game_state.check_flag(obj.visibility_flag);
         }
 
         // Initialize movement behavior from Crystal movement_type
@@ -920,100 +928,13 @@ int main(int argc, char* argv[]) {
     // Connect game loop to Lua runtime
     game_loop.set_lua_runtime(&lua_runtime);
 
-    // Wire scripted warp → staged WorldManager transition.
-    // warp_fn is called by ctx.world:warp() in Lua scripts.
-    // Uses prepare_warp/commit_warp for atomicity: failure leaves authoritative
-    // world state unchanged.  Returns true on success, false on failure.
-    //
-    // After a successful warp, world_state (map + tileset + collision source)
-    // is updated via load_world_state so all authoritative subsystems agree
-    // on the destination map before the next tick runs:
-    //   WorldManager::current_map  ← commit_warp
-    //   GameState::player           ← commit_warp
-    //   HeadlessGameLoop map        ← game_loop.load_map
-    //   world_state.map/tileset     ← load_world_state (this lambda)
-    //   game_loop collision source  ← set_collision_data rewired (this lambda)
-    //   NPC list                    ← clear + re-add from new map (this lambda)
-    //
-    // GPU/renderer resources are stale until the render loop's next frame
-    // processes the updated world_state — that is acceptable because the
-    // scripted warp fires from inside tick(), before any rendering for that
-    // frame has occurred.
-    lua_runtime.get_stub_services().warp_fn =
-        [&world_manager, &game_state, &game_loop, &world_state, &pkg_ctx](
-            const std::string& map_id, int32_t x, int32_t y) -> bool {
-
-        // Build a synthetic warp pointing to (map_id, x/y landing override)
-        RuntimeWarp synthetic;
-        synthetic.target_map_id     = map_id;
-        synthetic.target_warp_index = 0;
-        synthetic.x = static_cast<uint8_t>(x);
-        synthetic.y = static_cast<uint8_t>(y);
-
-        // prepare_warp: fallible — acquires destination without touching live state.
-        WarpResult result = world_manager.prepare_warp(synthetic, game_state);
-        if (!result.success) return false;
-
-        // Commit: non-failing — applies GameState.player + WorldManager.current_map.
-        world_manager.commit_warp(result, game_state);
-
-        // Update world_state (map + tileset) so the rest of the runtime uses
-        // the destination data.  This mirrors what transition_to_map does for
-        // the tile-collision warp path.
-        std::string load_error;
-        if (!load_world_state(pkg_ctx, map_id, world_state, load_error)) {
-            // world_state reload failed after commit — log but do not undo the
-            // authoritative WorldManager/GameState commit (which is non-failing).
-            // The render loop will re-attempt on the next natural map load.
-            std::cerr << "[scripted warp] world_state reload failed for '"
-                      << map_id << "': " << load_error << "\n";
-        }
-
-        // Reload game loop with new map and rewire collision source.
-        const RuntimeMap* new_map = world_manager.current_map();
-        if (!new_map) return false;
-        game_loop.load_map(*new_map);
-
-        // Rewire collision callback to new map's tileset.
-        // Captures world_state by reference — world_state.tileset is now the
-        // destination map's tileset (updated above by load_world_state).
-        game_loop.set_collision_data([&world_state](int32_t cx, int32_t cy) -> CollisionClass {
-            return get_collision_from_blocks(world_state.map.blocks,
-                world_state.tileset.collision, world_state.map.width, cx, cy);
-        });
-
-        // Reload NPCs from new map with correct initial visibility.
-        game_loop.clear_npcs();
-        for (const auto& obj : world_state.map.objects) {
-            NpcState npc;
-            npc.id               = obj.local_id;
-            npc.x                = obj.x;
-            npc.y                = obj.y;
-            npc.facing           = movement_data_to_facing(obj.movement_type);
-            npc.is_moving        = false;
-            npc.is_trainer       = obj.is_trainer;
-            npc.script_id        = obj.script_id;
-            npc.visibility_flag  = obj.visibility_flag;
-            npc.visible          = obj.visibility_flag.empty()
-                                   ? true
-                                   : game_state.check_flag(obj.visibility_flag);
-            npc.behavior         = movement_data_to_behavior(obj.movement_type);
-            npc.radius_x         = obj.movement_radius_x;
-            npc.radius_y         = obj.movement_radius_y;
-            npc.init_x           = obj.x;
-            npc.init_y           = obj.y;
-            npc.idle_timer       = 30 + (obj.local_id * 17) % 98;
-            npc.target_x         = obj.x;
-            npc.target_y         = obj.y;
-            npc.move_progress    = 0;
-            npc.frozen           = false;
-            game_loop.add_npc(npc);
-        }
-
-        // Spawn player at the scripted-warp destination.
-        game_loop.spawn_player(x, y, game_state.player.facing);
-        return true;
-    };
+    // Wire scripted warp → full-transaction transition.
+    // warp_fn is registered here as a placeholder; the authoritative implementation
+    // is installed after TransitionContext is built (after STEP 6c / renderer init),
+    // where all GPU resources and presentation state are available to call
+    // transition_to_map atomically.  See "RE-REGISTER warp_fn" block below.
+    // This placeholder allows compile-time validation of the lambda capture list.
+    lua_runtime.get_stub_services().warp_fn = nullptr;
     
     // Set up script loader that loads pre-compiled Lua from package
     // Scripts are already stored with global ScriptId: "map_id::local_script_id"
@@ -1243,9 +1164,65 @@ int main(int argc, char* argv[]) {
     transition_ctx.step_frame = &step_frame;
     transition_ctx.anim_clock = &anim_clock;
     transition_ctx.warp_state = &warp_state;
-    
+
     //=========================================================================
-    // STEP 7: Main render loop
+    // RE-REGISTER warp_fn with full transition_to_map atomicity.
+    //
+    // Now that TransitionContext is fully built (all GPU resources, presentation
+    // floats, warp_state available), we can register the authoritative warp_fn
+    // that calls transition_to_map — the same path used by tile-collision warps.
+    //
+    // Invariant after successful scripted warp:
+    //   WorldManager::current_map  ← prepare_warp/commit_warp (inside transition_to_map)
+    //   GameState::player           ← commit_warp (inside transition_to_map)
+    //   world_state.map/tileset     ← transition_to_map (staged WorldState swap)
+    //   game_loop map/collision/NPCs ← transition_to_map
+    //   tile/sprite renderers       ← transition_to_map (prepare + commit)
+    //   presentation state          ← transition_to_map (resets floats/step/anim)
+    //   warp arrival state          ← transition_to_map (sets warpEntryCell)
+    //
+    // Failure: if any staged GPU preparation fails, transition_to_map returns
+    //   false; prepare_warp has already been called but commit_warp has NOT —
+    //   so GameState, WorldManager, world_state, and game_loop are all unchanged.
+    //=========================================================================
+    lua_runtime.get_stub_services().warp_fn =
+        [&world_manager, &game_state, &world_state, &transition_ctx](
+            const std::string& map_id, int32_t x, int32_t y) -> bool {
+
+        // Step 1: resolve/acquire destination (fallible, no state mutation).
+        RuntimeWarp synthetic;
+        synthetic.target_map_id     = map_id;
+        synthetic.target_warp_index = 0;
+        synthetic.x = static_cast<uint8_t>(x);
+        synthetic.y = static_cast<uint8_t>(y);
+        WarpResult result = world_manager.prepare_warp(synthetic, game_state);
+        if (!result.success) return false;
+
+        // Step 2: stage + commit renderer and world state via the production path.
+        // transition_to_map does: load_world_state → prepare GPU resources →
+        // swap world_state → commit renderers → reload game_loop → spawn player.
+        // If any GPU preparation fails, transition_to_map returns false and
+        // nothing has been committed yet — old world state remains authoritative.
+        transition_ctx.is_warp_arrival = true;
+        std::string trans_error;
+        if (!transition_to_map(
+                result.target_map_id,
+                result.target_x,
+                result.target_y,
+                result.target_facing,
+                world_state,
+                transition_ctx,
+                trans_error)) {
+            std::cerr << "[scripted warp] transition failed for '"
+                      << map_id << "': " << trans_error << "\n";
+            return false;
+        }
+
+        // Step 3: commit WorldManager + GameState player (non-failing; all
+        // fallible work done in transition_to_map above).
+        world_manager.commit_warp(result, game_state);
+        return true;
+    };
     //
     // TIMING ARCHITECTURE (Audit 8 fix):
     //   Simulation runs at fixed 60 Hz regardless of render rate.

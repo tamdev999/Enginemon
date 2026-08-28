@@ -57,6 +57,7 @@ HeadlessGameLoop::~HeadlessGameLoop() {
         lua_runtime_->get_stub_services().actor_pos_query = nullptr;
         // Null NPC mutation callbacks — they captured 'this'.
         lua_runtime_->get_stub_services().set_npc_visible_fn = nullptr;
+        lua_runtime_->get_stub_services().get_npc_visibility_flag_fn = nullptr;
         lua_runtime_->get_stub_services().set_npc_facing_fn  = nullptr;
         lua_runtime_->get_stub_services().set_player_facing_fn = nullptr;
         lua_runtime_->get_stub_services().teleport_npc_fn    = nullptr;
@@ -469,6 +470,7 @@ void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
         lua_runtime_->get_stub_services().async_movement_enabled = false;
         lua_runtime_->get_stub_services().actor_pos_query = nullptr;
         lua_runtime_->get_stub_services().set_npc_visible_fn = nullptr;
+        lua_runtime_->get_stub_services().get_npc_visibility_flag_fn = nullptr;
         lua_runtime_->get_stub_services().set_npc_facing_fn  = nullptr;
         lua_runtime_->get_stub_services().set_player_facing_fn = nullptr;
         lua_runtime_->get_stub_services().teleport_npc_fn    = nullptr;
@@ -506,6 +508,13 @@ void HeadlessGameLoop::set_lua_runtime(LuaRuntime* runtime) {
             [this](uint16_t actor_id, bool visible) {
                 NpcState* npc = get_npc(actor_id);
                 if (npc) npc->visible = visible;
+            };
+        // Wire NPC visibility-flag query so show_npc/hide_npc can persist the state
+        // to GameState::flags (Crystal semantics: flag SET = hidden, flag CLEAR = visible).
+        runtime->get_stub_services().get_npc_visibility_flag_fn =
+            [this](uint16_t actor_id) -> std::string {
+                const NpcState* npc = get_npc(actor_id);
+                return npc ? npc->visibility_flag : std::string{};
             };
         // Wire NPC facing mutator so face_actor(NPC) updates authoritative NpcState.
         runtime->get_stub_services().set_npc_facing_fn =

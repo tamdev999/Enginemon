@@ -144,6 +144,11 @@ struct StubServices {
     // Signature: (actor_id, visible) → void.
     std::function<void(uint16_t actor_id, bool visible)> set_npc_visible_fn;
 
+    // NPC visibility-flag query — set by HeadlessGameLoop::set_lua_runtime().
+    // Called by show_npc/hide_npc to write through to GameState::flags for persistence.
+    // Signature: (actor_id) → visibility_flag string (empty if no controlling flag).
+    std::function<std::string(uint16_t actor_id)> get_npc_visibility_flag_fn;
+
     // NPC facing mutator — set by HeadlessGameLoop::set_lua_runtime().
     // Called by ctx.world:face_actor (NPC path) and ctx.world:face_player to update
     // NpcState::facing.  Also used by ctx.world:face_toward.
