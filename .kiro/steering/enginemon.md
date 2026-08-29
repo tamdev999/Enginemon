@@ -7,8 +7,9 @@ Enginemon is a native C++23 Pokémon runtime/compiler platform.
 The first frontend targets Pokémon Crystal, but Crystal is content input and compatibility authority, not the runtime architecture.
 
 ```
-Crystal ROM
-→ Crystal compiler frontend
+ROM (Crystal / Gold / Silver / RBY / Emerald / hack / ...)
+→ SHA-1 identification → exact profile selection
+→ frontend compiler (source-specific)
 → semantic native game definitions
 → EMON package
 → generic native runtime
@@ -18,10 +19,13 @@ Crystal ROM
 Long-term:
 
 ```
-Gen1 frontend ─┐
-Crystal frontend ─┼→ common Enginemon semantic model → EMON → native runtime
-Gen3 frontend ─┘
-Mods ──────────┘
+Crystal retail profile ─┐
+Crystal hack A profile  ─┤
+Crystal hack B profile  ─┤
+Gold/Silver profile     ─┼→ common Enginemon semantic model → EMON → native runtime
+RBY profile             ─┤
+Emerald profile         ─┘
+Mods ──────────────────┘
 ```
 
 The shipped game must run without:
@@ -44,6 +48,28 @@ The Crystal frontend accepts ONLY raw ROM bytes as input.
 - no external metadata files
 - no manually selected hack profiles
 
+**ROM identity is always the actual input ROM's SHA-1 hash.**
+
+The compiler pipeline begins with strict ROM identification:
+
+```
+raw ROM bytes
+→ SHA-1 hash
+→ exact profile lookup (registered SHA → exact profile)
+→ OR explicit fallback with strong layout validation
+→ frontend compiler
+```
+
+An unrecognized SHA-1 may only proceed with an explicitly supplied fallback profile if that profile passes a full layout validation pass (not just superficial spot checks). If compatibility cannot be proven, the compiler fails explicitly.
+
+This means:
+- Crystal retail → Crystal v1.1 profile
+- Crystal retail v1.0 → Crystal v1.0 profile
+- Crystal hack A → registered hack-A profile OR validated-compatible profile
+- Unknown ROM → hard failure (no silent guessing)
+
+The cache identity is the actual input ROM's SHA-1. A package compiled from ROM A can never satisfy a cache lookup for ROM B, even if they share the same profile layout.
+
 **No hardcoded assumptions:**
 - species count must be derived from ROM structure, not hardcoded 251
 - table locations may be discovered or validated from ROM patterns
@@ -56,7 +82,7 @@ This enables:
 - format-compatible ROM hacks (245, 274, or other species counts)
 - relocated tables (common in ROM hacks)
 
-without per-hack profile maintenance.
+without per-hack profile maintenance — provided the selected profile truthfully describes the ROM's actual layout.
 
 ---
 
@@ -110,8 +136,8 @@ $romPath = (Get-ChildItem -Path "references" -Filter "*.gbc" | Select-Object -Fi
 ```
 
 This runs all 6 test suites and reports key invariants:
-- corpus lowering = 1679/1679
-- linker corpus = 1679/1679
+- corpus lowering = 1788/1788
+- linker corpus = 1788/1788
 - InvalidOwnership = 0
 - decoder/CFG = PASS
 
@@ -124,6 +150,7 @@ This runs all 6 test suites and reports key invariants:
 .\build\tests\Release\corpus_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
 .\build\tests\Release\linker_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
 .\build\tools\Release\corpus_lowering_audit.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+.\build\tests\Release\compiler_integrity_test.exe "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
 ```
 
 ---
@@ -230,14 +257,14 @@ Stable semantic behavior identities mapped to native/mod implementations.
 
 **GameState**
 All mutable gameplay state:
-- party
-- inventory
-- flags
-- variables
-- map state
-- actors
-- battle state
-- RNG
+- party (planned)
+- inventory (items, money_player, money_mom, coins)
+- flags and variables (event flags, engine flags, per-map scene state, script variables)
+- map state (current map, player position, warp memory)
+- actors (NPC positions, facing, visibility — snapshotted per map)
+- battle state (planned)
+- RNG (PCG-XSH-RR, canonical authoritative stream)
+- RTC offset + DST flag
 - script execution state
 - field-move context
 
@@ -693,7 +720,8 @@ RTC is independent from simulation speed.
 
 Normal behavior:
 ```
-system/calendar time
+system/calendar time + rtc_offset_seconds (from GameState)
+→ effective game time
 → time of day
 → scheduled events
 → RTC-dependent encounters/content
@@ -701,13 +729,59 @@ system/calendar time
 
 Fast-forward does not advance calendar time.
 
+`rtc_offset_seconds` is the persisted offset stored in `GameState`. Setting the in-game clock computes a new offset so that `effective_time = system_now + offset`. DST is absorbed into the offset (+3600 when enabled). Both fields are serialized in the native save format.
+
 Supported modes:
 
 | Mode | Behavior | Purpose |
 |------|----------|---------|
-| system | Real system time | Normal play |
+| system | Real system time + stored offset | Normal play |
 | fixed | Fixed timestamp | Tests/screenshots |
 | offset | System time + offset | Testing/modding |
+
+---
+
+## Native Save Format
+
+The canonical save format is the Enginemon native `.emon_save`. It is format-independent and does not know or care about the source frontend.
+
+The current format is v6 (`magic = "ENGM"`, version = 6). Fields are little-endian with length-prefixed UTF-8 strings. All unordered containers are sorted canonically before serialization for byte-identical output.
+
+Currently persisted:
+- Player position, facing, map (semantic string ID), surfing/bike state
+- Warp memory (last outdoor map + backup warp for LAST_MAP/LAST_WARP semantics)
+- Event flags (`flag_XXXX` = EventFlag, `eflag_XXXX` = EngineFlag — namespaced)
+- Variables: `money_player`, `money_mom`, `coins`, per-map scene state (`scene_<map_id>`), script variables (`var_N`), well-known state vars (`state_var_N`)
+- Variable sprite assignments
+- PCG-XSH-RR RNG state (restore_state — exact continuation, not re-seed)
+- Day Care occupancy (species IDs)
+- Playtime frames
+- NPC states per map (position, facing, visibility, idle timer — restored after map load)
+- Item bag (ItemId → quantity, sorted, quantity capped at 99)
+- RTC offset + DST flag (v6+)
+
+Not yet persisted (prerequisite for Crystal .sav codec):
+- Party Pokémon
+- PC boxes
+- Pokédex owned/seen
+- Trainer ID / player name
+- Badges
+
+### Crystal `.sav` Compatibility (Planned)
+
+Crystal save compatibility is an optional frontend codec in `frontends/crystal/save/`. The native save is always authoritative. The `.sav` codec is a two-way bridge:
+
+```
+raw Crystal .sav (32 KB SRAM)
+→ crystal_save_reader: validate sentinels + checksums, decode into CrystalSaveSnapshot
+→ convert to GameState
+→ attach SRAM shadow (opaque 32 KB buffer preserved for round-trip fidelity)
+→ persist as .emon_save with optional XSRM chunk
+```
+
+Export is the reverse: start from the SRAM shadow (or a blank template for new games), patch known fields from GameState, recompute sentinels and checksums, emit `.sav`.
+
+Unknown Crystal SRAM bytes (Hall of Fame, RTC hardware, mobile features) are never touched — they survive verbatim via the shadow. See `docs/SAVE_ARCHITECTURE.md` for the full Crystal SRAM layout, integrity scheme, and codec design.
 
 ---
 
@@ -1163,6 +1237,16 @@ Never use as runtime identity:
 Package evolution should be explicit and versioned.
 
 Integrity checks should use the existing EMON TOC/CRC infrastructure rather than inventing unrelated parallel formats.
+
+### Build Cache Identity
+
+The package cache key is derived from four fields:
+- `rom_sha1`: the actual input ROM's SHA-1 (computed from raw ROM bytes — NOT the profile's hardcoded SHA)
+- `compiler_version`: semantic compiler version string
+- `format_version`: EMON package format version
+- `options_hash`: hash of compilation options
+
+Two different ROMs that share the same table layout (e.g., vanilla Crystal and a compatible ROM hack) will have different `rom_sha1` values and therefore different cache keys. A cached package from ROM A can never satisfy a lookup for ROM B.
 
 ---
 
