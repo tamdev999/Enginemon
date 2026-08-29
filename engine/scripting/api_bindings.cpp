@@ -2391,9 +2391,10 @@ int behavior(lua_State* L) {
 }
 
 // ctx.game:set_scene(scene)
-// Stores the current map's scene value.
+// Stores the scene value for the CURRENT map (player.current_map_id).
 // Source: Crystal setscene opcode → Sem_SetScene.
-// Production: persisted in GameState::variables["scene_current"] for save/load.
+// Crystal wMapSceneIDs is a per-map array; scene state is never global.
+// Production: stored in GameState::variables["scene_<map_id>"] for save/load.
 // Test-observable: also updates StubServices::current_scene for assertions.
 int set_scene(lua_State* L) {
     int scene = luaL_checkinteger(L, 2);
@@ -2402,19 +2403,23 @@ int set_scene(lua_State* L) {
     // Always update stub field so tests can assert without a bound GameState.
     stubs.current_scene = scene;
     if (GameState* gs = runtime->get_game_state()) {
-        gs->variables["scene_current"] = scene;
+        // Key is per-map: "scene_<current_map_id>".
+        // This matches Crystal's per-map wMapSceneIDs array semantics.
+        gs->variables["scene_" + gs->player.current_map_id] = scene;
     }
     return 0;
 }
 
 // ctx.game:check_scene() -> scene_id
-// Returns the current map's scene value.
+// Returns the scene value for the CURRENT map (player.current_map_id).
 // Source: Crystal checkscene opcode → Sem_CheckScene.
 int check_scene(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
     int scene = 0;
     if (GameState* gs = runtime->get_game_state()) {
-        auto it = gs->variables.find("scene_current");
+        // Key is per-map — same as set_scene.
+        const std::string key = "scene_" + gs->player.current_map_id;
+        auto it = gs->variables.find(key);
         scene = (it != gs->variables.end()) ? it->second : 0;
         // Keep stub in sync for test assertions.
         runtime->get_stub_services().current_scene = scene;

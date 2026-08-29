@@ -343,3 +343,296 @@ TEST(prepare_for_save_snapshots_npc_state) {
 
     std::cout << "  [prepare_for_save: restored NPC (id=3) at (2,8,Up) after load]\n";
 }
+
+// =============================================================================
+// Fix 6 (NPC Restore): setup_headless_runtime calls restore_npc_states
+//
+// Verifies that when a GameState has a saved NPC snapshot for a map,
+// setup_headless_runtime restores NPC positions instead of using ROM defaults.
+// =============================================================================
+TEST(npc_restore_in_production_setup) {
+    using namespace enginemon;
+
+    // Build a GameState that already has a saved NPC snapshot for a map.
+    // This simulates loading a save file where NPC positions were recorded.
+    GameState gs;
+    gs.player.current_map_id = "npc_restore_map";
+    gs.player.x = 0; gs.player.y = 0;
+
+    // Plant a saved NPC state into GameState directly (simulates what
+    // prepare_for_save() would have written on a previous session).
+    NpcSaveState saved_npc;
+    saved_npc.id           = 2;
+    saved_npc.x            = 7;   // moved from ROM default (3,3)
+    saved_npc.y            = 11;
+    saved_npc.facing       = Direction::Left;
+    saved_npc.visible      = true;
+    saved_npc.idle_timer   = 42;
+    saved_npc.is_moving    = false;
+    saved_npc.target_x     = 7;
+    saved_npc.target_y     = 11;
+    saved_npc.move_progress = 0;
+    saved_npc.frozen       = false;
+    gs.npc_states["npc_restore_map"] = {saved_npc};
+
+    // Build a game loop and populate NPCs from ROM defaults (id=2 at 3,3).
+    auto map = make_map("npc_restore_map");
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.load_map(map);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    // Simulate what init_npcs_from_map does for a ROM-default NPC.
+    NpcState npc;
+    npc.id = 2; npc.x = 3; npc.y = 3;  // ROM/package default position
+    npc.facing = Direction::Down;
+    npc.visible = true;
+    npc.behavior = NpcMovementBehavior::Standing;
+    loop.add_npc(npc);
+
+    // Verify NPC is at ROM default before restore.
+    ASSERT_EQ(loop.get_npc(2)->x, 3);
+    ASSERT_EQ(loop.get_npc(2)->y, 3);
+
+    // This is the call that setup_headless_runtime now makes after init_npcs_from_map.
+    loop.restore_npc_states("npc_restore_map");
+
+    // NPC must be at saved position, not ROM default.
+    const NpcState* npc_after = loop.get_npc(2);
+    ASSERT_TRUE(npc_after != nullptr);
+    ASSERT_EQ(npc_after->x, 7);
+    ASSERT_EQ(npc_after->y, 11);
+    ASSERT_TRUE(npc_after->facing == Direction::Left);
+    ASSERT_EQ(npc_after->idle_timer, 42);
+
+    std::cout << "  [npc_restore: saved (7,11,Left) overrides ROM default (3,3,Down)]\n";
+}
+
+TEST(npc_restore_fresh_map_keeps_rom_defaults) {
+    using namespace enginemon;
+
+    // GameState has NO snapshot for this map — NPCs keep ROM/package defaults.
+    GameState gs;
+    gs.player.current_map_id = "fresh_map";
+
+    auto map = make_map("fresh_map");
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.load_map(map);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    NpcState npc;
+    npc.id = 5; npc.x = 4; npc.y = 6;
+    npc.facing = Direction::Right;
+    npc.visible = true;
+    loop.add_npc(npc);
+
+    // No snapshot exists — restore_npc_states is a no-op for this map.
+    loop.restore_npc_states("fresh_map");
+
+    // ROM defaults must be untouched.
+    const NpcState* n = loop.get_npc(5);
+    ASSERT_TRUE(n != nullptr);
+    ASSERT_EQ(n->x, 4);
+    ASSERT_EQ(n->y, 6);
+    ASSERT_TRUE(n->facing == Direction::Right);
+
+    std::cout << "  [npc_restore: no snapshot -> ROM defaults preserved (4,6,Right)]\n";
+}
+
+TEST(npc_restore_save_load_full_round_trip) {
+    using namespace enginemon;
+
+    // Full round-trip: move NPC → prepare_for_save → serialize → deserialize
+    // → restore_npc_states → verify NPC at saved position.
+    auto map = make_map("round_trip_map");
+    GameState gs;
+    gs.player.current_map_id = "round_trip_map";
+
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.load_map(map);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+    loop.spawn_player(0, 0, Direction::Down);
+
+    NpcState npc;
+    npc.id = 7; npc.x = 1; npc.y = 1;
+    npc.facing = Direction::Down;
+    npc.behavior = NpcMovementBehavior::Standing;
+    npc.visible = true;
+    loop.add_npc(npc);
+
+    // Move NPC to a new position.
+    {
+        NpcState* n = loop.get_npc(7);
+        n->x = 3; n->y = 4; n->facing = Direction::Up;
+    }
+
+    // Snapshot + serialize.
+    loop.prepare_for_save();
+    auto bytes = gs.serialize();
+
+    // Deserialize into fresh GameState.
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+    const GameState& gs2 = result.state;
+
+    // Verify snapshot survived serialization.
+    auto snap_it = gs2.npc_states.find("round_trip_map");
+    ASSERT_TRUE(snap_it != gs2.npc_states.end());
+    ASSERT_TRUE(!snap_it->second.empty());
+    ASSERT_EQ(snap_it->second[0].x, 3);
+    ASSERT_EQ(snap_it->second[0].y, 4);
+    ASSERT_TRUE(snap_it->second[0].facing == Direction::Up);
+
+    // Boot a new game loop from the loaded GameState.
+    GameState gs3 = gs2;
+    HeadlessGameLoop loop2;
+    loop2.set_game_state(&gs3);
+    loop2.load_map(map);
+    loop2.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    // Add NPC at ROM default — what init_npcs_from_map would do.
+    NpcState npc2;
+    npc2.id = 7; npc2.x = 1; npc2.y = 1;
+    npc2.facing = Direction::Down;
+    npc2.visible = true;
+    loop2.add_npc(npc2);
+
+    // Restore from snapshot (what setup_headless_runtime now calls).
+    loop2.restore_npc_states("round_trip_map");
+
+    const NpcState* restored = loop2.get_npc(7);
+    ASSERT_TRUE(restored != nullptr);
+    ASSERT_EQ(restored->x, 3);
+    ASSERT_EQ(restored->y, 4);
+    ASSERT_TRUE(restored->facing == Direction::Up);
+
+    std::cout << "  [npc_restore round_trip: saved (3,4,Up) restored after full serialize]\n";
+}
+
+// =============================================================================
+// Fix 7 (Per-Map Scene): set_scene / check_scene are now scoped per map
+//
+// Crystal wMapSceneIDs is a per-map array. set_scene/check_scene must not
+// bleed across map boundaries.
+// =============================================================================
+TEST(set_scene_check_scene_per_map_isolation) {
+    using namespace enginemon;
+
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    // --- Map A: set scene to 2 ---
+    gs.player.current_map_id = "scene_map_a";
+    {
+        const char* code = R"(
+script = {}
+function script.main(ctx) ctx.game:set_scene(2) return end
+return script
+)";
+        rt.execute_string(code, "set_a");
+        rt.start_script("script");
+    }
+    ASSERT_EQ(gs.get_var("scene_scene_map_a"), 2);
+
+    // --- Map B: set scene to 5 ---
+    gs.player.current_map_id = "scene_map_b";
+    {
+        const char* code = R"(
+script = {}
+function script.main(ctx) ctx.game:set_scene(5) return end
+return script
+)";
+        rt.execute_string(code, "set_b");
+        rt.start_script("script");
+    }
+    ASSERT_EQ(gs.get_var("scene_scene_map_b"), 5);
+
+    // --- Map A scene must be unchanged ---
+    ASSERT_EQ(gs.get_var("scene_scene_map_a"), 2);
+
+    // --- check_scene on map A returns 2 ---
+    gs.player.current_map_id = "scene_map_a";
+    {
+        const char* code = R"(
+script = {}
+function script.main(ctx) ctx.flags:set_var(0, ctx.game:check_scene()) return end
+return script
+)";
+        rt.execute_string(code, "chk_a");
+        rt.start_script("script");
+    }
+    ASSERT_EQ(gs.get_var("var_0"), 2);
+
+    // --- check_scene on map B returns 5 ---
+    gs.player.current_map_id = "scene_map_b";
+    {
+        const char* code = R"(
+script = {}
+function script.main(ctx) ctx.flags:set_var(1, ctx.game:check_scene()) return end
+return script
+)";
+        rt.execute_string(code, "chk_b");
+        rt.start_script("script");
+    }
+    ASSERT_EQ(gs.get_var("var_1"), 5);
+
+    std::cout << "  [per-map scene: map_a=2, map_b=5 independently stored and read]\n";
+}
+
+TEST(set_scene_per_map_affects_only_current_map) {
+    using namespace enginemon;
+
+    // set_scene on map A must not affect map B's scene (which was never set).
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    gs.player.current_map_id = "scene_only_a";
+    {
+        const char* code = R"(
+script = {}
+function script.main(ctx) ctx.game:set_scene(7) return end
+return script
+)";
+        rt.execute_string(code, "set_only_a");
+        rt.start_script("script");
+    }
+
+    // Switch to map B and check_scene — must be 0 (default).
+    gs.player.current_map_id = "scene_only_b";
+    {
+        const char* code = R"(
+script = {}
+function script.main(ctx) ctx.flags:set_var(0, ctx.game:check_scene()) return end
+return script
+)";
+        rt.execute_string(code, "chk_only_b");
+        rt.start_script("script");
+    }
+    ASSERT_EQ(gs.get_var("var_0"), 0);
+
+    std::cout << "  [per-map scene: set_scene on A does not affect B (0)]\n";
+}
+
+TEST(set_scene_per_map_save_load_preserves_both) {
+    using namespace enginemon;
+
+    // save/load round-trip preserves independent per-map scene values.
+    GameState gs;
+    gs.player.current_map_id = "smap_a";
+    gs.variables["scene_smap_a"] = 3;
+    gs.variables["scene_smap_b"] = 9;
+
+    auto bytes = gs.serialize();
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+
+    const GameState& gs2 = result.state;
+    ASSERT_EQ(gs2.get_var("scene_smap_a"), 3);
+    ASSERT_EQ(gs2.get_var("scene_smap_b"), 9);
+
+    std::cout << "  [per-map scene save/load: smap_a=3, smap_b=9 both preserved]\n";
+}

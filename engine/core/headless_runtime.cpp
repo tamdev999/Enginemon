@@ -156,6 +156,11 @@ bool setup_headless_runtime(
     // -------------------------------------------------------------------------
     init_npcs_from_map(rt.game_loop, rt.world_state, rt.game_state);
 
+    // Restore saved NPC positions/facing/visibility from GameState if a snapshot
+    // exists for this map (e.g. resuming a save).  NPCs on maps with no snapshot
+    // keep their ROM/package defaults set above.
+    rt.game_loop.restore_npc_states(map_id);
+
     // -------------------------------------------------------------------------
     // Spawn player
     // -------------------------------------------------------------------------
@@ -259,6 +264,10 @@ bool setup_headless_runtime(
 
         // Step 6: rebuild NPCs with production visibility semantics
         init_npcs_from_map(rt.game_loop, rt.world_state.map, rt.game_state);
+
+        // Restore saved NPC positions/facing/visibility if a snapshot exists
+        // for the destination map (e.g. previously visited, save/load resume).
+        rt.game_loop.restore_npc_states(map_id);
 
         // Step 7: spawn player at destination
         rt.game_loop.spawn_player(x, y, rt.game_state.player.facing);

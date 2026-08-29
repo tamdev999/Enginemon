@@ -3246,9 +3246,10 @@ return script
     std::cout << "  [set_last_talked(7) -> last_talked_id = 7]\n";
 }
 
-// set_scene / check_scene persist through GameState
+// set_scene / check_scene persist through GameState — per-map keyed
 TEST(capability_set_scene_persists_in_game_state) {
     GameState gs;
+    gs.player.current_map_id = "test_scene_map";
     LuaRuntime rt;
     rt.set_game_state(&gs);
 
@@ -3265,11 +3266,11 @@ return script
     rt.execute_string(code, "scene");
     rt.start_script("script");
 
-    // scene=5 must be in GameState::variables
-    ASSERT_EQ(gs.variables["scene_current"], 5);
+    // scene=5 must be stored under the per-map key "scene_<map_id>"
+    ASSERT_EQ(gs.variables["scene_test_scene_map"], 5);
     // check_scene must return 5
     ASSERT_EQ(gs.variables["var_0"], 5);
-    std::cout << "  [set_scene(5) -> GameState::variables['scene_current']=5]\n";
+    std::cout << "  [set_scene(5) -> GameState::variables['scene_test_scene_map']=5]\n";
 }
 
 // set_state_var / read_state_var persist through GameState
