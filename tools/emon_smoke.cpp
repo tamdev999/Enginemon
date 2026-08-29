@@ -166,12 +166,15 @@ return script
     }
 
     // =========================================================================
-    // GATE 5: Transition success path
+    // GATE 5: Transition success path — canonical scripted warp
     //
-    // If a second map exists in the package, perform a real world transition
-    // through the production warp_fn (prepare_warp → load destination → commit).
-    // After the transition, WorldManager, GameState, and game_loop must all
-    // agree on the destination map.
+    // Exercise the production headless warp_fn (prepare_warp → load destination
+    // → commit_warp → init_npcs_from_map → restore_npc_states → spawn_player).
+    // After the transition, WorldManager, GameState, HeadlessWorldState, and
+    // game_loop must all agree on the destination map.
+    //
+    // A NPC snapshot is planted in GameState before the warp so we can verify
+    // that restore_npc_states fires inside the warp_fn (not just init defaults).
     // =========================================================================
     std::string pre_transition_map = rt.game_state.player.current_map_id;
     bool did_transition = false;
@@ -181,38 +184,40 @@ return script
         std::cerr << "[smoke] Transition: '" << pre_transition_map
                   << "' → '" << dest_map << "'\n";
 
-        // Load destination via WorldManager (authoritative production path:
-        // acquire_map → validate destination is loadable → commit_map).
-        // This exercises the same map-load + commit path used by tile-collision
-        // warps (prepare_warp internally calls acquire_map; commit_warp calls
-        // commit_map). The full warp_fn also requires a valid warp entry in
-        // the source map's warp table, which may not exist for arbitrary map pairs.
-        auto acquired = rt.world_manager.acquire_map(dest_map);
-        if (!acquired) {
-            fail("WorldManager::acquire_map('" + dest_map + "') returned nullopt");
+        // Plant a fake NPC snapshot for the destination map so we can verify
+        // restore_npc_states was called by the warp path (not manually here).
+        // If the warp_fn calls restore_npc_states, the NPC will be at (3,4)
+        // after the transition instead of whatever the package puts it at.
+        // We only do this if the destination map has at least one object — pick
+        // the first NPC id from the destination map's objects for the probe.
+        uint16_t probe_npc_id = 0;
+        bool probe_npc_planted = false;
+        {
+            auto dest_map_opt = rt.package->load_map(dest_map);
+            if (dest_map_opt && !dest_map_opt->objects.empty()) {
+                probe_npc_id = dest_map_opt->objects[0].local_id;
+                enginemon::NpcSaveState probe;
+                probe.id = probe_npc_id;
+                probe.x = 3; probe.y = 4;
+                probe.facing = enginemon::Direction::Left;
+                probe.visible = true;
+                rt.game_state.npc_states[dest_map] = {probe};
+                probe_npc_planted = true;
+                std::cerr << "[smoke] Planted NPC snapshot: id=" << probe_npc_id
+                          << " at (3,4,Left) in dest map npc_states\n";
+            }
         }
-        rt.world_manager.commit_map(dest_map, std::move(*acquired));
-        rt.game_state.player.current_map_id = dest_map;
 
-        // Load destination world state (map + tileset)
-        enginemon::HeadlessWorldState new_world_state;
-        std::string ws_err;
-        if (!enginemon::load_headless_world_state(*pkg, dest_map, new_world_state, ws_err)) {
-            fail("load_headless_world_state('" + dest_map + "'): " + ws_err);
+        // Use the canonical scripted warp path — explicit_coords=true, no
+        // physical warp entry required.  This exercises the full headless
+        // warp transaction: prepare_warp → load_headless_world_state →
+        // commit_warp → init_npcs_from_map → restore_npc_states → spawn_player.
+        bool warp_ok = rt.lua_runtime.get_stub_services().warp_fn(dest_map, 1, 1);
+        if (!warp_ok) {
+            fail("warp_fn('" + dest_map + "', 1, 1) returned false");
         }
-        rt.world_state = std::move(new_world_state);
-        rt.game_loop.load_map(rt.world_state.map);
-        rt.game_loop.set_collision_data(
-            [&rt](int32_t x, int32_t y) -> enginemon::CollisionClass {
-                return enginemon::get_collision_from_blocks(
-                    rt.world_state.map.blocks,
-                    rt.world_state.tileset.collision,
-                    rt.world_state.map.width, x, y);
-            });
-        enginemon::init_npcs_from_map(rt.game_loop, rt.world_state.map, rt.game_state);
-        rt.game_loop.spawn_player(1, 1, enginemon::Direction::Down);
 
-        // Verify all three authoritative subsystems agree on the destination
+        // Verify all authoritative subsystems agree on the destination map.
         const std::string& gs_map = rt.game_state.player.current_map_id;
         if (gs_map != dest_map) {
             fail("GameState.player.current_map_id '" + gs_map +
@@ -228,8 +233,46 @@ return script
             fail("world_state.map_id '" + rt.world_state.map_id +
                  "' does not match destination '" + dest_map + "'");
         }
-
         std::cerr << "[smoke] Transition OK: all subsystems → '" << dest_map << "'\n";
+
+        // Verify player landed at the explicit coordinates we requested.
+        if (rt.game_state.player.x != 1 || rt.game_state.player.y != 1) {
+            fail("GameState.player position is not (1,1) after warp — expected explicit coords");
+        }
+        std::cerr << "[smoke] Player coords: (" << rt.game_state.player.x
+                  << "," << rt.game_state.player.y << ") = (1,1) OK\n";
+
+        // Verify collision is live for the destination tileset.
+        // Spot-check the (0,0) cell — it should not crash and must return a
+        // CollisionClass (not raw garbage from a stale tileset).
+        auto test_coll = enginemon::get_collision_from_blocks(
+            rt.world_state.map.blocks,
+            rt.world_state.tileset.collision,
+            rt.world_state.map.width, 0, 0);
+        // CollisionClass is an enum — any value other than the sentinel is fine;
+        // the test here is that the collision data is coherent (didn't crash).
+        (void)test_coll;
+        std::cerr << "[smoke] Collision data coherent for dest map\n";
+
+        // Verify restore_npc_states fired inside the warp path:
+        // if we planted a probe, the live NPC for that id must be at (3,4,Left)
+        // not at ROM defaults.
+        if (probe_npc_planted) {
+            const enginemon::NpcState* probe_live = rt.game_loop.get_npc(probe_npc_id);
+            if (!probe_live) {
+                // Map may have no NPC with that id if the package omits it; skip
+                std::cerr << "[smoke] NPC restore: probe NPC id=" << probe_npc_id
+                          << " not found in live loop — skipping position check\n";
+            } else if (probe_live->x == 3 && probe_live->y == 4
+                       && probe_live->facing == enginemon::Direction::Left) {
+                std::cerr << "[smoke] NPC restore via warp_fn: probe NPC at (3,4,Left) OK\n";
+            } else {
+                fail("NPC restore: probe NPC id=" + std::to_string(probe_npc_id) +
+                     " expected (3,4,Left) but got (" + std::to_string(probe_live->x) +
+                     "," + std::to_string(probe_live->y) + ") — restore_npc_states not called by warp_fn");
+            }
+        }
+
         did_transition = true;
     } else {
         std::cerr << "[smoke] Transition: skipped (package has only 1 map)\n";

@@ -636,3 +636,209 @@ TEST(set_scene_per_map_save_load_preserves_both) {
 
     std::cout << "  [per-map scene save/load: smap_a=3, smap_b=9 both preserved]\n";
 }
+
+// =============================================================================
+// Fix 8 (NPC restore in production transition): restore_npc_states fires
+// after init_npcs_from_map in a production-style transition
+//
+// This is the unit-level regression for the fix applied to transition_to_map
+// in main_tiles.cpp: the headless path has always called restore_npc_states
+// after init_npcs_from_map; the GPU path was missing it.
+//
+// This test replicates the logical sequence that transition_to_map now runs:
+//   init_npcs_from_map(loop, map, gs)          — ROM defaults
+//   loop.restore_npc_states(dest_map_id)       — override from GameState snapshot
+// =============================================================================
+TEST(npc_restore_after_production_transition) {
+    using namespace enginemon;
+
+    // Destination map with one NPC (ROM default: id=1 at (2,2,Down))
+    auto dest_map = make_map("transition_dest");
+    GameState gs;
+    gs.player.current_map_id = "transition_src";
+
+    // Plant a saved snapshot for the destination map (simulates prepare_for_save
+    // having been called before the previous session ended on dest_map).
+    NpcSaveState snap;
+    snap.id = 1; snap.x = 7; snap.y = 9;
+    snap.facing = Direction::Right; snap.visible = true;
+    gs.npc_states["transition_dest"] = {snap};
+
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.load_map(dest_map);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    // Step 1: init from ROM defaults — same as what transition_to_map does first.
+    // Simulate a ROM/package object with id=1 at (2,2).
+    NpcState npc;
+    npc.id = 1; npc.x = 2; npc.y = 2;
+    npc.facing = Direction::Down; npc.visible = true;
+    loop.add_npc(npc);
+
+    // Confirm ROM default is in place before restore.
+    ASSERT_EQ(loop.get_npc(1)->x, 2);
+    ASSERT_EQ(loop.get_npc(1)->y, 2);
+
+    // Step 2: restore_npc_states — the call transition_to_map now makes.
+    loop.restore_npc_states("transition_dest");
+
+    // Snapshot must override ROM defaults.
+    const NpcState* restored = loop.get_npc(1);
+    ASSERT_TRUE(restored != nullptr);
+    ASSERT_EQ(restored->x, 7);
+    ASSERT_EQ(restored->y, 9);
+    ASSERT_TRUE(restored->facing == Direction::Right);
+
+    std::cout << "  [npc_restore production transition: (7,9,Right) overrides ROM (2,2,Down)]\n";
+}
+
+TEST(npc_restore_no_snapshot_keeps_rom_defaults_after_transition) {
+    using namespace enginemon;
+
+    // Destination map with one NPC — GameState has NO snapshot for it.
+    auto dest_map = make_map("fresh_dest");
+    GameState gs;
+    gs.player.current_map_id = "transition_src";
+    // No npc_states entry for "fresh_dest"
+
+    HeadlessGameLoop loop;
+    loop.set_game_state(&gs);
+    loop.load_map(dest_map);
+    loop.set_collision_data([](int32_t, int32_t) { return CollisionClass::Floor; });
+
+    NpcState npc;
+    npc.id = 4; npc.x = 5; npc.y = 3;
+    npc.facing = Direction::Up; npc.visible = true;
+    loop.add_npc(npc);
+
+    // restore_npc_states with no snapshot is a no-op.
+    loop.restore_npc_states("fresh_dest");
+
+    const NpcState* n = loop.get_npc(4);
+    ASSERT_TRUE(n != nullptr);
+    ASSERT_EQ(n->x, 5);
+    ASSERT_EQ(n->y, 3);
+    ASSERT_TRUE(n->facing == Direction::Up);
+
+    std::cout << "  [npc_restore fresh dest: ROM defaults (5,3,Up) untouched]\n";
+}
+
+// =============================================================================
+// Fix 9 (Coin account separation): account=2 maps to "coins" not "money_player"
+//
+// Crystal wMoney/wMomsMoney/wCoins are three distinct RAM addresses.
+// give_money(account=2) must write "coins", not "money_player".
+// =============================================================================
+TEST(coins_account_does_not_alias_player_money) {
+    using namespace enginemon;
+
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    // Give coins via account=2
+    {
+        const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.inventory:give_money(500, 2)   -- account 2 = coins
+    return
+end
+return script
+)";
+        rt.execute_string(code, "give_coins");
+        rt.start_script("script");
+    }
+
+    // Coins key must be set
+    ASSERT_EQ(gs.get_var("coins"), 500);
+    // Player money must be untouched
+    ASSERT_EQ(gs.get_var("money_player"), 0);
+
+    std::cout << "  [coins account: give_money(500,2) -> coins=500, money_player=0]\n";
+}
+
+TEST(player_money_does_not_alias_coins) {
+    using namespace enginemon;
+
+    GameState gs;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    // Give player money via account=0
+    {
+        const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.inventory:give_money(1000, 0)  -- account 0 = player
+    return
+end
+return script
+)";
+        rt.execute_string(code, "give_player");
+        rt.start_script("script");
+    }
+
+    // Player money must be set
+    ASSERT_EQ(gs.get_var("money_player"), 1000);
+    // Coins must be untouched
+    ASSERT_EQ(gs.get_var("coins"), 0);
+
+    std::cout << "  [coins account: give_money(1000,0) -> money_player=1000, coins=0]\n";
+}
+
+TEST(coins_has_money_reads_coins_not_player_money) {
+    using namespace enginemon;
+
+    GameState gs;
+    gs.variables["coins"] = 200;
+    gs.variables["money_player"] = 9999;
+    LuaRuntime rt;
+    rt.set_game_state(&gs);
+
+    // has_money(100, 2) should return 1 (coins=200 >= 100)
+    // has_money(100, 0) should return 1 (player=9999 >= 100)
+    // take_money(150, 2) should deduct from coins (200-150=50), not player money
+    const char* code = R"(
+script = {}
+function script.main(ctx)
+    ctx.flags:set_var(0, ctx.inventory:has_money(100, 2))   -- has_coins(100)
+    ctx.flags:set_var(1, ctx.inventory:take_money(150, 2))  -- take_coins(150)
+    ctx.flags:set_var(2, ctx.inventory:money(2))            -- coins balance
+    ctx.flags:set_var(3, ctx.inventory:money(0))            -- player money (unchanged)
+    return
+end
+return script
+)";
+    rt.execute_string(code, "coins_ops");
+    rt.start_script("script");
+
+    ASSERT_EQ(gs.get_var("var_0"), 1);     // has_coins(100) = true (200 >= 100)
+    ASSERT_EQ(gs.get_var("var_1"), 1);     // take_coins(150) succeeded
+    ASSERT_EQ(gs.get_var("var_2"), 50);    // coins = 200 - 150 = 50
+    ASSERT_EQ(gs.get_var("var_3"), 9999);  // player money unchanged
+
+    std::cout << "  [coins ops: has_coins(100)=1, take_coins(150) -> coins=50, player=9999]\n";
+}
+
+TEST(coins_save_load_independent_of_player_money) {
+    using namespace enginemon;
+
+    GameState gs;
+    gs.variables["coins"] = 750;
+    gs.variables["money_player"] = 12345;
+    gs.variables["money_mom"] = 3000;
+    gs.player.current_map_id = "test";
+
+    auto bytes = gs.serialize();
+    auto result = GameState::try_deserialize(bytes);
+    ASSERT_TRUE(result.ok());
+
+    const GameState& gs2 = result.state;
+    ASSERT_EQ(gs2.get_var("coins"), 750);
+    ASSERT_EQ(gs2.get_var("money_player"), 12345);
+    ASSERT_EQ(gs2.get_var("money_mom"), 3000);
+
+    std::cout << "  [coins save/load: coins=750, money_player=12345, money_mom=3000 all preserved]\n";
+}

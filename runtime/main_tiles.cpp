@@ -585,7 +585,15 @@ static bool transition_to_map(
             init_npcs_from_map(*ctx.game_loop, world_state.map, GameState{});
         }
     }
-    
+
+    // Restore saved NPC positions/facing/visibility/idle_timer if a snapshot
+    // exists for the destination map.  Mirrors the headless warp_fn in
+    // headless_runtime.cpp — the GPU transition path must be consistent with
+    // the headless path so save/load NPC state is correct in both contexts.
+    if (const GameState* gs = ctx.game_loop->game_state()) {
+        ctx.game_loop->restore_npc_states(new_map_id);
+    }
+
     // Spawn player at destination
     ctx.game_loop->spawn_player(player_x, player_y, player_facing);
     

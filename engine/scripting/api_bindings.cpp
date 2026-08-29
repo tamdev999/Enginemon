@@ -1346,15 +1346,18 @@ int count(lua_State* L) {
     return 1;
 }
 
-// ctx.inventory:give_money(amount, account?) - account: 0=player, 1=mom
+// ctx.inventory:give_money(amount, account?) - account: 0=player, 1=mom, 2=coins
 // Production path: write through GameState::variables when bound.
 int give_money(lua_State* L) {
     int amount  = luaL_checkinteger(L, 2);
     int account = static_cast<int>(luaL_optinteger(L, 3, 0));
     LuaRuntime* runtime = get_runtime(L);
     // Canonical money keys in GameState::variables
-    // Source: Crystal wMoney (player) / wMomsMoney (mom)
-    const char* key = (account == 1) ? "money_mom" : "money_player";
+    // Source: Crystal wMoney (player) / wMomsMoney (mom) / wCoins (Game Corner coins)
+    // These are three distinct RAM addresses in Crystal — they must not alias.
+    const char* key = (account == 1) ? "money_mom"
+                    : (account == 2) ? "coins"
+                    :                  "money_player";
     if (GameState* gs = runtime->get_game_state()) {
         auto it = gs->variables.find(key);
         int32_t current = (it != gs->variables.end()) ? it->second : 0;
@@ -1372,7 +1375,9 @@ int take_money(lua_State* L) {
     int amount  = luaL_checkinteger(L, 2);
     int account = static_cast<int>(luaL_optinteger(L, 3, 0));
     LuaRuntime* runtime = get_runtime(L);
-    const char* key = (account == 1) ? "money_mom" : "money_player";
+    const char* key = (account == 1) ? "money_mom"
+                    : (account == 2) ? "coins"
+                    :                  "money_player";
     bool success = false;
     if (GameState* gs = runtime->get_game_state()) {
         auto it = gs->variables.find(key);
@@ -1396,7 +1401,9 @@ int has_money(lua_State* L) {
     int amount  = luaL_checkinteger(L, 2);
     int account = static_cast<int>(luaL_optinteger(L, 3, 0));
     LuaRuntime* runtime = get_runtime(L);
-    const char* key = (account == 1) ? "money_mom" : "money_player";
+    const char* key = (account == 1) ? "money_mom"
+                    : (account == 2) ? "coins"
+                    :                  "money_player";
     bool result = false;
     if (GameState* gs = runtime->get_game_state()) {
         auto it = gs->variables.find(key);
@@ -1412,7 +1419,9 @@ int has_money(lua_State* L) {
 int money(lua_State* L) {
     int account = static_cast<int>(luaL_optinteger(L, 2, 0));
     LuaRuntime* runtime = get_runtime(L);
-    const char* key = (account == 1) ? "money_mom" : "money_player";
+    const char* key = (account == 1) ? "money_mom"
+                    : (account == 2) ? "coins"
+                    :                  "money_player";
     int32_t balance = 0;
     if (GameState* gs = runtime->get_game_state()) {
         auto it = gs->variables.find(key);
@@ -1425,14 +1434,14 @@ int money(lua_State* L) {
 // ctx.inventory:prepare_money_text(account, buffer_slot)
 // Reads the current money balance for the given account and stores it in a
 // per-runtime TRANSIENT text buffer for script text display.
-// account: 0=player (money_player), 1=mom (money_mom)
+// account: 0=player (money_player), 1=mom (money_mom), 2=coins (coins)
 // buffer_slot: strbuf index 0-2 (matches Sem_PrepareTextArg buffer_slot)
 //
 // The value is NOT written to GameState — it is a transient formatting artifact
 // that must not pollute the save state. StubServices::text_buffers provides
 // the per-runtime transient store.
 //
-// Balance authority: GameState::variables["money_player"/"money_mom"] (persistent).
+// Balance authority: GameState::variables["money_player"/"money_mom"/"coins"] (persistent).
 // Text buffer:       StubServices::text_buffers["strbuf<N>_money"] (transient, not saved).
 //
 // Source: Crystal getmoney opcode → text buffer substitution.
@@ -1440,7 +1449,9 @@ int prepare_money_text(lua_State* L) {
     int account     = static_cast<int>(luaL_checkinteger(L, 2));
     int buffer_slot = static_cast<int>(luaL_checkinteger(L, 3));
     LuaRuntime* runtime = get_runtime(L);
-    const char* src_key  = (account == 1) ? "money_mom" : "money_player";
+    const char* src_key = (account == 1) ? "money_mom"
+                        : (account == 2) ? "coins"
+                        :                  "money_player";
 
     // Read balance from GameState (authoritative) or stub.
     int32_t balance = 0;
