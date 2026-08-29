@@ -36,7 +36,7 @@ Everything source-game-specific lives in `frontends/`. The runtime (`engine/`, `
 
 ```
 frontends/crystal/    ← ROM knowledge, all of it
-  rom/                  SHA-1 identification, profile registry, validation
+  rom/                  SHA-1 identification, profile registry, layout validation
   extract/              Data table extraction (maps, tilesets, sprites, species)
   script/               Typed decode → CFG → SemanticScriptIR → legality gate
   compile/              Full compiler pipeline, corpus discovery, linker
@@ -46,10 +46,10 @@ engine/               ← No ROM knowledge
   core/                 GameState, HeadlessGameLoop, RTC, save format
   world/                Maps, collision, WorldManager, interaction
   scripting/            LuaRuntime, Lua API bindings (ctx.*)
-  build/                PackageCache, BuildIdentity
+  build/                PackageCache, BuildIdentity (keyed by actual ROM SHA-1)
 
 runtime/              ← Vulkan renderer, SDL3, presentation
-  main_tiles.cpp        Entry point, GPU-backed transition_to_map
+  main_tiles.cpp        Entry point, map transitions, warp/connection handling
   render/               TileRenderer, SpriteRenderer, TextboxRenderer
 ```
 

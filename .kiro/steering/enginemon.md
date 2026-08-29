@@ -46,7 +46,7 @@ The Crystal frontend accepts ONLY raw ROM bytes as input.
 - no .sym symbol files
 - no pokecrystal source tree at compile time
 - no external metadata files
-- no manually selected hack profiles
+- no user-specified hack profiles — profile selection is always driven by the ROM's SHA-1, not manual user configuration
 
 **ROM identity is always the actual input ROM's SHA-1 hash.**
 
