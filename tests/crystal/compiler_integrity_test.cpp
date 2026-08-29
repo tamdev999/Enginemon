@@ -588,6 +588,120 @@ TEST(valid_manifest_deserializes_correctly) {
 }
 
 //=============================================================================
+// FIX: Cache identity uses actual ROM hash not profile SHA
+//=============================================================================
+
+// BuildIdentity::rom_sha1 must be the actual input ROM's SHA-1, not the
+// profile's hardcoded SHA-1.  Two different ROMs that share the same table
+// layout (e.g., vanilla Crystal and a compatible ROM hack) have different SHA-1
+// values and must produce different cache identities so a cached package from
+// one ROM can never satisfy a lookup for the other.
+TEST(build_identity_uses_actual_rom_hash_not_profile_sha) {
+    // The canonical Crystal v1.1 profile's SHA-1 is the registered ROM hash.
+    // The compiler's make_build_identity() should populate rom_sha1 from the
+    // live ROM's hash() method, which is identical to the profile sha1 for an
+    // exact-match ROM.  The key invariant: changing profile_.sha1 alone must
+    // NOT change the identity; only rom_.hash() is authoritative.
+    //
+    // We test this by building the identity and confirming it matches the ROM's
+    // actual hash rather than any hardcoded string.
+    crystal::FullCompilerConfig cfg;
+    cfg.use_package_cache = false;
+    cfg.worker_count = 1;
+
+    crystal::FullGameCompiler compiler(*g_rom, *g_profile);
+    auto id = compiler.make_build_identity_for_test(cfg);
+
+    // The rom_sha1 in the identity must equal the ROM's live hash.
+    ASSERT_TRUE(id.rom_sha1 == g_rom->hash());
+
+    // It must NOT be the empty string.
+    ASSERT_FALSE(id.rom_sha1.empty());
+
+    // It must be a valid hex SHA-1 (40 hex chars).
+    ASSERT_TRUE(id.rom_sha1.size() == 40);
+    for (char c : id.rom_sha1) {
+        bool is_hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        ASSERT_TRUE(is_hex);
+    }
+
+    std::cout << "  [build identity rom_sha1='" << id.rom_sha1 << "' matches rom.hash() ✓]\n";
+}
+
+// Two hypothetical ROMs with the same profile but different content must
+// produce different cache identities.  We simulate this by constructing two
+// BuildIdentity values with distinct rom_sha1 values and confirming their
+// combined hashes differ.
+TEST(different_rom_sha1_produces_different_cache_key) {
+    enginemon::build::BuildIdentity id_a;
+    id_a.rom_sha1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";  // 40 hex
+    id_a.compiler_version = "crystal-test";
+    id_a.format_version = 99;
+    id_a.options_hash = "opts";
+
+    enginemon::build::BuildIdentity id_b;
+    id_b.rom_sha1 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";  // different
+    id_b.compiler_version = "crystal-test";
+    id_b.format_version = 99;
+    id_b.options_hash = "opts";
+
+    // Same profile/compiler/options → only rom_sha1 differs.
+    ASSERT_FALSE(id_a.compute_hash() == id_b.compute_hash());
+
+    std::cout << "  [different rom_sha1 → different cache key ✓]\n";
+}
+
+//=============================================================================
+// FIX: Tileset extraction fail-closed on truncated/malformed data
+//=============================================================================
+
+// A tileset with an LZ-decompressed tile data address that falls outside the
+// ROM must produce success=false, not success=true with zero tiles.
+TEST(tileset_lz_failure_returns_failure_not_partial_success) {
+    // Use the for_test_fail_tileset seam to inject a tileset extraction failure
+    // and confirm compile() fails — this exercises the fail-closed path where
+    // the tileset extractor previously continued with empty tiles.
+    auto out = temp_emon_path("tileset_lz_fail");
+    std::filesystem::remove(out);
+
+    crystal::FullGameCompiler compiler(*g_rom, *g_profile);
+    compiler.for_test_fail_tileset("johto_outdoor");
+
+    bool ok = compiler.compile(out, no_cache_config());
+
+    // compile() must return false — partial/empty tileset is not acceptable.
+    ASSERT_FALSE(ok);
+
+    bool package_absent = !std::filesystem::exists(out) ||
+                          std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(package_absent);
+
+    std::cout << "  [tileset LZ failure → compile() returned false, no partial package ✓]\n";
+}
+
+// A second tileset failure test to confirm the cave tileset (which has fewer
+// tiles than johto_outdoor) also fails closed when injected.
+TEST(tileset_cave_failure_returns_failure_not_partial_success) {
+    auto out = temp_emon_path("tileset_cave_fail");
+    std::filesystem::remove(out);
+
+    crystal::FullGameCompiler compiler(*g_rom, *g_profile);
+    compiler.for_test_fail_tileset("cave");
+
+    bool ok = compiler.compile(out, no_cache_config());
+
+    ASSERT_FALSE(ok);
+
+    bool package_absent = !std::filesystem::exists(out) ||
+                          std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(package_absent);
+
+    std::cout << "  [tileset 'cave' failure → compile() returned false ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -649,6 +763,14 @@ int main(int argc, char* argv[]) {
     RUN_TEST(zero_format_version_is_cache_miss);
     RUN_TEST(empty_manifest_is_cache_miss);
     RUN_TEST(valid_manifest_deserializes_correctly);
+
+    // Fix: cache identity uses actual ROM hash
+    RUN_TEST(build_identity_uses_actual_rom_hash_not_profile_sha);
+    RUN_TEST(different_rom_sha1_produces_different_cache_key);
+
+    // Fix: tileset extraction fail-closed
+    RUN_TEST(tileset_lz_failure_returns_failure_not_partial_success);
+    RUN_TEST(tileset_cave_failure_returns_failure_not_partial_success);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";

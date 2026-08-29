@@ -136,34 +136,64 @@ CorpusDiscoveryResult collect_initial_roots(
         }
         
         // === Scene scripts and callbacks from MapScripts header ===
+        // These maps were already validated by discover_reachable_maps() which read
+        // and successfully decoded their headers inside the BFS.  Any bounds failure
+        // here is a structural inconsistency — the same map cannot fail a second read
+        // of data that it already successfully provided.  Throw rather than silently
+        // dropping scene/callback scripts, which would shrink the discovered corpus.
         uint32_t group_ptr_addr = o.map_group_pointers + ((ref.group - 1) * 2);
-        if (group_ptr_addr + 2 > rom.size()) continue;
+        if (group_ptr_addr + 2 > rom.size()) {
+            throw std::runtime_error(std::format(
+                "collect_initial_roots: map ({},{}) group pointer address 0x{:x} "
+                "out of ROM bounds on second read (structural inconsistency)",
+                ref.group, ref.map, group_ptr_addr));
+        }
         
         uint16_t group_addr = rom.read_word(group_ptr_addr);
         uint32_t group_flat = rom.bank_to_flat(o.map_groups_bank, group_addr);
         uint32_t map_entry_addr = group_flat + ((ref.map - 1) * 9);
         
-        if (map_entry_addr + 9 > rom.size()) continue;
+        if (map_entry_addr + 9 > rom.size()) {
+            throw std::runtime_error(std::format(
+                "collect_initial_roots: map ({},{}) map-entry address 0x{:x} "
+                "out of ROM bounds on second read (structural inconsistency)",
+                ref.group, ref.map, map_entry_addr));
+        }
         
         auto entry = rom.read_bytes(map_entry_addr, 9);
         uint8_t attr_bank = entry[0];
         uint16_t attr_ptr = entry[3] | (entry[4] << 8);
         uint32_t header_addr = rom.bank_to_flat(attr_bank, attr_ptr);
         
-        if (header_addr + fmt.header_size > rom.size()) continue;
+        if (header_addr + fmt.header_size > rom.size()) {
+            throw std::runtime_error(std::format(
+                "collect_initial_roots: map ({},{}) header address 0x{:x} "
+                "out of ROM bounds on second read (structural inconsistency)",
+                ref.group, ref.map, header_addr));
+        }
         
         auto header = rom.read_bytes(header_addr, fmt.header_size);
         uint8_t script_bank = header[fmt.script_bank_offset];
         uint16_t script_ptr = header[fmt.script_ptr_offset] | (header[fmt.script_ptr_offset + 1] << 8);
         
         uint32_t map_scripts_addr = rom.bank_to_flat(script_bank, script_ptr);
-        if (map_scripts_addr + 1 > rom.size()) continue;
+        if (map_scripts_addr + 1 > rom.size()) {
+            throw std::runtime_error(std::format(
+                "collect_initial_roots: map ({},{}) map-scripts address 0x{:x} "
+                "out of ROM bounds (scene/callback header truncated)",
+                ref.group, ref.map, map_scripts_addr));
+        }
         
         uint32_t ptr = map_scripts_addr;
         
         // --- Scene scripts ---
         uint8_t scene_count = rom.read_byte(ptr++);
-        if (scene_count > 20) continue;
+        if (scene_count > 20) {
+            throw std::runtime_error(std::format(
+                "collect_initial_roots: map ({},{}) has implausible scene_count={} "
+                "(max 20); likely ROM structure corruption at 0x{:x}",
+                ref.group, ref.map, scene_count, map_scripts_addr));
+        }
         
         for (uint8_t i = 0; i < scene_count; ++i) {
             if (ptr + SCENE_SCRIPT_SIZE > rom.size()) break;
@@ -189,10 +219,20 @@ CorpusDiscoveryResult collect_initial_roots(
         }
         
         // --- Callbacks ---
-        if (ptr + 1 > rom.size()) continue;
+        if (ptr + 1 > rom.size()) {
+            throw std::runtime_error(std::format(
+                "collect_initial_roots: map ({},{}) callback header truncated "
+                "at 0x{:x} (after scene scripts)",
+                ref.group, ref.map, ptr));
+        }
         
         uint8_t callback_count = rom.read_byte(ptr++);
-        if (callback_count > 20) continue;
+        if (callback_count > 20) {
+            throw std::runtime_error(std::format(
+                "collect_initial_roots: map ({},{}) has implausible callback_count={} "
+                "(max 20); likely ROM structure corruption at 0x{:x}",
+                ref.group, ref.map, callback_count, ptr - 1));
+        }
         
         for (uint8_t i = 0; i < callback_count; ++i) {
             if (ptr + CALLBACK_SIZE > rom.size()) break;

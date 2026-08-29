@@ -502,6 +502,13 @@ public:
         test_throw_map_group_ = group;
         test_throw_map_index_ = index;
     }
+
+    // Expose make_build_identity for testing: allows tests to verify that the
+    // identity is populated from the live ROM's hash, not from profile_.sha1.
+    enginemon::build::BuildIdentity make_build_identity_for_test(
+            const FullCompilerConfig& config) const {
+        return make_build_identity(config);
+    }
     
 private:
     

@@ -1658,7 +1658,11 @@ std::string FullGameCompiler::make_global_script_id(const std::string& map_id,
 
 BuildIdentity FullGameCompiler::make_build_identity(const FullCompilerConfig& config) const {
     BuildIdentity id;
-    id.rom_sha1 = profile_.sha1;
+    // Use the actual input ROM's SHA-1 hash — NOT the profile's hardcoded SHA.
+    // Two different compatible ROMs (e.g., vanilla Crystal and a ROM hack with the
+    // same table layout) hash to different SHA-1 values and must produce different
+    // cache keys so a package compiled from ROM A can never satisfy ROM B.
+    id.rom_sha1 = rom_.hash();
     id.compiler_version = CRYSTAL_COMPILER_VERSION;
     id.format_version = EMON_FORMAT_VERSION;
     id.options_hash = config.compute_options_hash();

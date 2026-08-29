@@ -488,6 +488,34 @@ bool ProfileRegistry::validate_profile_layout(
         return fail("profile.offsets.mon_menu_icons + num_pokemon exceeds ROM");
     }
 
+    // ── Check 6: Tilesets table is reachable ─────────────────────────────────
+    // The tilesets table must hold at least (num_tilesets + 1) entries at
+    // tileset_size bytes each (tilesets are 1-indexed, entry 0 is unused).
+    // This catches ROMs that relocate the tileset table to a different bank.
+    {
+        uint32_t tilesets_end = o.tilesets +
+            static_cast<uint32_t>(c.num_tilesets + 1u) *
+            static_cast<uint32_t>(fmt.tileset.tileset_size);
+        if (!in_range(o.tilesets, tilesets_end - o.tilesets)) {
+            return fail("profile.offsets.tilesets table exceeds ROM bounds; "
+                        "tileset table may have been relocated");
+        }
+    }
+
+    // ── Check 7: First map group pointer is a valid ROM-bank address ──────────
+    // Every map group pointer must be in the switchable ROM-bank window
+    // (0x4000..0x7FFF).  A value outside that window means the profile's
+    // map_group_pointers offset points at something other than the map table.
+    if (in_range(o.map_group_pointers, 2)) {
+        uint16_t first_grp_ptr = static_cast<uint16_t>(
+            rom_bytes[o.map_group_pointers] |
+            (static_cast<uint16_t>(rom_bytes[o.map_group_pointers + 1]) << 8));
+        if (first_grp_ptr < 0x4000u || first_grp_ptr > 0x7FFFu) {
+            return fail("first map group pointer is outside ROM-bank range 0x4000-0x7FFF; "
+                        "map group table may have been relocated");
+        }
+    }
+
     return true;  // All checks passed
 }
 

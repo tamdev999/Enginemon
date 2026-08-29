@@ -332,10 +332,13 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
     std::vector<uint8_t> tile_data;
     
     if (!decompress_lz(gfx_addr, tile_data)) {
-        // Try uncompressed fallback
-        // Some tilesets may use different compression or none
-        result.error = "Failed to decompress tile graphics";
-        // Continue anyway to extract what we can
+        // LZ decompression failed entirely — zero bytes produced.
+        // A tileset with no tile graphics is not usable; fail closed.
+        result.error = std::format(
+            "Failed to decompress tile graphics for tileset '{}' "
+            "(gfx_bank=0x{:02x} gfx_ptr=0x{:04x} flat=0x{:x})",
+            tileset.tileset_id, gfx_bank, gfx_ptr, gfx_addr);
+        return result;
     }
     
     // Decode tiles (16 bytes per 8x8 tile in 2bpp)
@@ -382,7 +385,6 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
     
     if (meta_addr + metatile_count * metatile_size <= rom_.size()) {
         tileset.metatiles.reserve(metatile_count);
-        
         for (size_t i = 0; i < metatile_count; ++i) {
             auto meta_data = rom_.read_bytes(meta_addr + i * metatile_size, metatile_size);
             
@@ -435,6 +437,15 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
             tileset.metatiles.push_back(mt);
             stats_.metatiles_extracted++;
         }
+    } else {
+        // Metatile data out of ROM bounds — fail closed rather than producing
+        // an empty tileset that would render as solid black in the game.
+        result.error = std::format(
+            "Metatile data out of ROM bounds for tileset '{}' "
+            "(meta_addr=0x{:x} metatile_count={} metatile_size={} requires 0x{:x} bytes)",
+            tileset.tileset_id, meta_addr, metatile_count, metatile_size,
+            metatile_count * metatile_size);
+        return result;
     }
     
     // Extract collision data: 4 bytes per metatile (TL, TR, BL, BR quadrants)
@@ -458,8 +469,16 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
         for (size_t m = 0; m < metatile_count && m < tileset.metatiles.size(); ++m) {
             tileset.metatiles[m].collision = static_cast<CollisionType>(tileset.collision[m * 4]);
         }
+    } else {
+        // Collision data out of ROM bounds — fail closed.  A tileset without
+        // collision data cannot be used safely (all tiles would be walkable/solid
+        // depending on the default, which is wrong for any real map).
+        result.error = std::format(
+            "Collision data out of ROM bounds for tileset '{}' "
+            "(coll_addr=0x{:x} requires {} bytes)",
+            tileset.tileset_id, coll_addr, coll_data_size);
+        return result;
     }
-    
     // Extract palette map
     // The palette map maps tile indices to BG palette IDs (0-6).
     // Crystal uses a two-bank VRAM layout:
