@@ -86,7 +86,11 @@ inline Environment environment_from_crystal(uint8_t raw) {
 struct RuntimeWarp {
     uint8_t x, y;                   // Position in this map (tiles)
     std::string target_map_id;      // Destination map (semantic ID)
-    uint8_t target_warp_index;      // Which warp in target map
+    uint8_t target_warp_index;      // Which warp in target map (1-based Crystal index)
+    bool    explicit_coords = false; // When true: use x/y directly as landing coordinates
+                                    // (scripted coordinate warps); bypass warp-index lookup.
+                                    // When false: resolve landing position from destination
+                                    // warp table at target_warp_index.
 };
 
 // Coordinate-triggered event (step triggers)

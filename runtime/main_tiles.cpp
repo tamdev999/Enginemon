@@ -1122,8 +1122,9 @@ int main(int argc, char* argv[]) {
         RuntimeWarp synthetic;
         synthetic.target_map_id     = map_id;
         synthetic.target_warp_index = 0;
-        synthetic.x = static_cast<uint8_t>(x);
-        synthetic.y = static_cast<uint8_t>(y);
+        synthetic.x                 = static_cast<uint8_t>(x);
+        synthetic.y                 = static_cast<uint8_t>(y);
+        synthetic.explicit_coords   = true;  // scripted coordinate warp — bypass warp-index
         WarpResult result = world_manager.prepare_warp(synthetic, game_state);
         if (!result.success) return false;
 

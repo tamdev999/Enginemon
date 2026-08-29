@@ -95,43 +95,63 @@ WarpResult WorldManager::resolve_warp(const RuntimeWarp& warp, const GameState& 
             result.error = "No map loader";
             return result;
         }
-        
-        auto target = map_loader_(target_map);
-        if (!target.has_value()) {
-            result.error = "Target map not found: " + target_map;
-            return result;
-        }
-        
-        // Find the target warp by index
-        // Crystal warp indices are 1-based: warp_index=1 → warps[0]
-        // CRITICAL: No silent fallback - invalid index must fail explicitly
-        uint8_t warp_index = warp.target_warp_index;
-        if (warp_index == 0) {
-            // warp_index=0 is invalid in Crystal (indices are 1-based)
-            result.error = "Invalid warp index 0 (Crystal indices are 1-based)";
-            return result;
-        }
-        if (target->warps.empty()) {
-            result.error = "Target map has no warps: " + target_map;
-            return result;
-        }
-        if (static_cast<size_t>(warp_index - 1) >= target->warps.size()) {
-            result.error = "Warp index " + std::to_string(warp_index) + 
-                           " out of range (map has " + std::to_string(target->warps.size()) + " warps)";
-            return result;
-        }
-        
-        // Valid warp index
-        const auto& dest_warp = target->warps[warp_index - 1];
-        target_x = dest_warp.x;
-        target_y = dest_warp.y;
-        
-        // Check if this is outdoor→indoor transition
-        if (current_map_.has_value() && current_map_->is_outdoor && !target->is_outdoor) {
-            result.is_outdoor_to_indoor = true;
-        }
-        if (current_map_.has_value() && !current_map_->is_outdoor && target->is_outdoor) {
-            result.is_indoor_to_outdoor = true;
+
+        // Scripted coordinate warps set explicit_coords = true; the explicit
+        // x/y are the intended landing position and no warp-index lookup is needed.
+        if (warp.explicit_coords) {
+            target_x = static_cast<int32_t>(warp.x);
+            target_y = static_cast<int32_t>(warp.y);
+
+            // Still need to check destination is indoor/outdoor for warp memory
+            auto target = map_loader_(target_map);
+            if (!target.has_value()) {
+                result.error = "Target map not found: " + target_map;
+                return result;
+            }
+            if (current_map_.has_value() && current_map_->is_outdoor && !target->is_outdoor) {
+                result.is_outdoor_to_indoor = true;
+            }
+            if (current_map_.has_value() && !current_map_->is_outdoor && target->is_outdoor) {
+                result.is_indoor_to_outdoor = true;
+            }
+        } else {
+            auto target = map_loader_(target_map);
+            if (!target.has_value()) {
+                result.error = "Target map not found: " + target_map;
+                return result;
+            }
+
+            // Find the target warp by index
+            // Crystal warp indices are 1-based: warp_index=1 → warps[0]
+            // CRITICAL: No silent fallback - invalid index must fail explicitly
+            uint8_t warp_index = warp.target_warp_index;
+            if (warp_index == 0) {
+                // warp_index=0 is invalid in Crystal (indices are 1-based)
+                result.error = "Invalid warp index 0 (Crystal indices are 1-based)";
+                return result;
+            }
+            if (target->warps.empty()) {
+                result.error = "Target map has no warps: " + target_map;
+                return result;
+            }
+            if (static_cast<size_t>(warp_index - 1) >= target->warps.size()) {
+                result.error = "Warp index " + std::to_string(warp_index) +
+                               " out of range (map has " + std::to_string(target->warps.size()) + " warps)";
+                return result;
+            }
+
+            // Valid warp index
+            const auto& dest_warp = target->warps[warp_index - 1];
+            target_x = dest_warp.x;
+            target_y = dest_warp.y;
+
+            // Check if this is outdoor→indoor transition
+            if (current_map_.has_value() && current_map_->is_outdoor && !target->is_outdoor) {
+                result.is_outdoor_to_indoor = true;
+            }
+            if (current_map_.has_value() && !current_map_->is_outdoor && target->is_outdoor) {
+                result.is_indoor_to_outdoor = true;
+            }
         }
     }
     

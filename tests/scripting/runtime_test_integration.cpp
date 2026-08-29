@@ -564,3 +564,5 @@ return script
 
     std::cout << "  [hide_npc with no flag: NpcState hidden, GameState unchanged]\n";
 }
+
+// =============================================================================

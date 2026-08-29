@@ -925,12 +925,41 @@ int warp(lua_State* L) {
 }
 
 // ctx.world:warp_to_spawn()
-// Warp the player to their last-set backup/spawn warp position.
+// Warp the player to the backup warp position stored in GameState::warp_memory.
 // Corresponds to Crystal's warptobspawn / WarpToBackup semantics.
-// Semantic equivalent of Sem_WarpToBackup — use the backup warp point from GameState.
+//
+// Source: Crystal Script_warpbspawn reads wBackupWarp (backup_map_id/x/y).
+// Production: calls warp_fn with the backup coordinates, executing the full
+// staged/atomic world transition.
+// Explicit failure: if no backup warp is set OR warp_fn not wired, luaL_error.
 int warp_to_spawn(lua_State* L) {
-    auto& stubs = get_stubs(L);
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
     stubs.movement_calls.push_back({"warp_to_spawn", ""});
+
+    if (stubs.warp_fn) {
+        // Read backup warp from authoritative GameState
+        if (const GameState* gs = runtime->get_game_state()) {
+            const std::string& backup_map = gs->warp_memory.backup_map_id;
+            if (backup_map.empty()) {
+                return luaL_error(L, "warp_to_spawn: no backup warp set in GameState "
+                                     "(warp_memory.backup_map_id is empty)");
+            }
+            bool ok = stubs.warp_fn(backup_map,
+                                    static_cast<int32_t>(gs->warp_memory.backup_x),
+                                    static_cast<int32_t>(gs->warp_memory.backup_y));
+            if (!ok) {
+                return luaL_error(L, "warp_to_spawn: transition to backup map '%s' failed",
+                                  backup_map.c_str());
+            }
+        } else {
+            return luaL_error(L, "warp_to_spawn: no GameState bound — cannot read backup warp");
+        }
+    } else {
+        // No warp_fn wired (unit tests without production bootstrap).
+        // This is a capability gap — not silent, not fabricated.
+        return luaL_error(L, "warp_to_spawn: warp_fn not wired (production bootstrap required)");
+    }
     return 0;
 }
 

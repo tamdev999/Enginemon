@@ -576,7 +576,9 @@ void test_door_auto_step_routes_through_movement_manager();
 void test_crystal_npc_visibility_flag_set_means_hidden();
 void test_show_hide_npc_persists_to_gamestate_flags();
 void test_hide_npc_no_flag_is_transient();
-// Integration tests
+void test_scripted_coordinate_warp_uses_explicit_coords();
+void test_warp_to_spawn_uses_gamestate_backup_warp();
+void test_warp_to_spawn_no_fn_errors_explicitly();
 void test_production_bootstrap_script_mutates_gamestate();
 void test_no_gamestate_flags_fallback_to_stubs();
 void test_lua_syntax_error_throws_explicitly();
@@ -1047,6 +1049,12 @@ int main(int argc, char* argv[]) {
     RUN_TEST(rtc_dst_enable_twice_idempotent);
     RUN_TEST(rtc_dst_disable_twice_idempotent);
     RUN_TEST(rtc_dst_enable_set_clock_disable_net_reversal);
+    RUN_TEST(scripted_coordinate_warp_uses_explicit_coords);
+    RUN_TEST(warp_to_spawn_uses_gamestate_backup_warp);
+    RUN_TEST(warp_to_spawn_no_fn_errors_explicitly);
+    RUN_TEST(scripted_coordinate_warp_uses_explicit_coords);
+    RUN_TEST(warp_to_spawn_uses_gamestate_backup_warp);
+    RUN_TEST(warp_to_spawn_no_fn_errors_explicitly);
     RUN_TEST(door_auto_step_routes_through_movement_manager);
     RUN_TEST(crystal_npc_visibility_flag_set_means_hidden);
     RUN_TEST(show_hide_npc_persists_to_gamestate_flags);

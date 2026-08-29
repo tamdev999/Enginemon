@@ -216,12 +216,15 @@ bool setup_headless_runtime(
     rt.lua_runtime.get_stub_services().warp_fn =
         [&rt](const std::string& map_id, int32_t x, int32_t y) -> bool {
 
-        // Step 1: resolve destination — fallible, no state mutation
+        // Step 1: resolve destination — fallible, no state mutation.
+        // explicit_coords = true: x/y are the intended landing position;
+        // no warp-index table lookup required.
         RuntimeWarp synthetic;
-        synthetic.target_map_id     = map_id;
+        synthetic.target_map_id    = map_id;
         synthetic.target_warp_index = 0;
-        synthetic.x = static_cast<uint8_t>(x);
-        synthetic.y = static_cast<uint8_t>(y);
+        synthetic.x                = static_cast<uint8_t>(x);
+        synthetic.y                = static_cast<uint8_t>(y);
+        synthetic.explicit_coords  = true;  // scripted coordinate warp — bypass warp-index
         WarpResult warp_result = rt.world_manager.prepare_warp(synthetic, rt.game_state);
         if (!warp_result.success) return false;
 
