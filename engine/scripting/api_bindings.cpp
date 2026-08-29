@@ -775,11 +775,33 @@ int face_player(lua_State* L) {
 }
 
 // ctx.world:get_player_pos() -> x, y, map_id
+// ctx.world:get_player_pos() -> x, y, map_id
+// Returns authoritative player coordinates.
+// Authority order (production → test):
+//   1. player_pos_query callback (wired by HeadlessGameLoop::set_lua_runtime) → game_loop.player_.x/y
+//   2. GameState::player.x/y (when bound, no game_loop available)
+//   3. stubs.player.x/y (stub/isolated test only)
 int get_player_pos(lua_State* L) {
-    const auto& stubs = get_stubs(L);
-    lua_pushinteger(L, stubs.player.x);
-    lua_pushinteger(L, stubs.player.y);
-    lua_pushinteger(L, 1);  // map_id stub
+    LuaRuntime* runtime = get_runtime(L);
+    auto& stubs = runtime->get_stub_services();
+
+    int32_t px = 0, py = 0;
+    if (stubs.player_pos_query) {
+        // Production: wired to HeadlessGameLoop::player_.x/y
+        auto [qx, qy] = stubs.player_pos_query();
+        px = qx; py = qy;
+    } else if (const GameState* gs = runtime->get_game_state()) {
+        // Fallback: GameState authoritative position (e.g. headless without full loop)
+        px = gs->player.x;
+        py = gs->player.y;
+    } else {
+        // Last resort: stub actor (test isolation only)
+        px = stubs.player.x;
+        py = stubs.player.y;
+    }
+    lua_pushinteger(L, px);
+    lua_pushinteger(L, py);
+    lua_pushinteger(L, 1);  // map_id — semantic map identity not yet exposed here
     return 3;
 }
 
@@ -1516,20 +1538,32 @@ const std::vector<std::pair<std::string, int>>& get_flag_calls(LuaRuntime* runti
     return runtime->get_stub_services().flag_calls;
 }
 
+// Helper: produce the canonical GameState flag key from an encoded flag integer.
+// The emitter encodes flags as (ns_byte << 16) | flag_value where:
+//   ns=0 (Event)  → key prefix "flag_"   e.g. "flag_001a"
+//   ns=1 (Engine) → key prefix "eflag_"  e.g. "eflag_0041"
+//
+// Using distinct prefixes ensures EventFlag{N} and EngineFlag{N} with the same N
+// produce DIFFERENT keys and cannot silently alias each other.
+// EventFlag keys ("flag_{:04x}") are identical to MapExtractor::make_flag_id() output
+// so map visibility/event flags continue to match correctly.
+static std::string make_flag_key(int flag_id) {
+    uint16_t val = static_cast<uint16_t>(flag_id & 0xFFFF);
+    bool is_engine = ((flag_id >> 16) & 0xFF) != 0;  // ns byte in bits 16-23
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), is_engine ? "eflag_%04x" : "flag_%04x",
+                  static_cast<unsigned>(val));
+    return buf;
+}
+
 // ctx.flags:set(flag_id)
 int set(lua_State* L) {
     LuaRuntime* runtime = get_runtime(L);
     int flag_id = luaL_checkinteger(L, 2);
     // Production path: write through GameState when bound
     if (GameState* gs = runtime->get_game_state()) {
-        // flag_id is encoded by semantic_lua_emitter as (ns << 16) | value.
-        // ns=0 (Event) or ns=1 (Engine). We extract the 16-bit value and
-        // produce the same hex-padded key as MapExtractor::make_flag_id():
-        //   "flag_{:04x}"
-        // This ensures a script calling setflag 0x001A and a BG event
-        // conditioned on source flag 0x001A resolve to the same GameState key.
-        uint16_t flag_value = static_cast<uint16_t>(flag_id & 0xFFFF);
-        gs->flags.insert(std::format("flag_{:04x}", flag_value));
+        // make_flag_key preserves namespace: EventFlag→"flag_XXXX", EngineFlag→"eflag_XXXX"
+        gs->flags.insert(make_flag_key(flag_id));
     } else {
         auto& stubs = runtime->get_stub_services();
         stubs.flags[flag_id] = true;
@@ -1544,8 +1578,7 @@ int clear(lua_State* L) {
     int flag_id = luaL_checkinteger(L, 2);
     // Production path: write through GameState when bound
     if (GameState* gs = runtime->get_game_state()) {
-        uint16_t flag_value = static_cast<uint16_t>(flag_id & 0xFFFF);
-        gs->flags.erase(std::format("flag_{:04x}", flag_value));
+        gs->flags.erase(make_flag_key(flag_id));
     } else {
         auto& stubs = runtime->get_stub_services();
         stubs.flags[flag_id] = false;
@@ -1561,8 +1594,7 @@ int check(lua_State* L) {
     bool value = false;
     // Production path: read from GameState when bound
     if (GameState* gs = runtime->get_game_state()) {
-        uint16_t flag_value = static_cast<uint16_t>(flag_id & 0xFFFF);
-        value = gs->flags.count(std::format("flag_{:04x}", flag_value)) > 0;
+        value = gs->flags.count(make_flag_key(flag_id)) > 0;
     } else {
         value = get_test_flag(runtime, flag_id);
     }
@@ -2394,18 +2426,41 @@ int check_scene(lua_State* L) {
 }
 
 // ctx.game:set_map_scene(map_id, scene)
+// ctx.game:set_map_scene(map_id, scene)
+// Stores the scene value for a specific map.
+// Source: Crystal setmapscene opcode (Script_setmapscene) → wMapSceneID per-map buffer.
+// Per-map scene state is stored in GameState::variables["map_scene_XXXX"] where XXXX is
+// the hex-formatted MapId (stable, derived from ROM group/index).
+// This is SEPARATE from the global set_scene / check_scene (which use "scene_current").
 int set_map_scene(lua_State* L) {
     int map_id = luaL_checkinteger(L, 2);
     int scene   = luaL_checkinteger(L, 3);
-    (void)map_id; (void)scene;
+    LuaRuntime* runtime = get_runtime(L);
+    if (GameState* gs = runtime->get_game_state()) {
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "map_scene_%04x",
+                      static_cast<unsigned>(map_id & 0xFFFF));
+        gs->variables[buf] = scene;
+    }
     return 0;
 }
 
 // ctx.game:check_map_scene(map_id) -> scene_id
+// Returns the current per-map scene value.
+// Source: Crystal checkmapscene opcode (Script_checkmapscene) → reads wMapSceneID.
+// Returns 0 (default scene) if no scene has been set for this map.
 int check_map_scene(lua_State* L) {
     int map_id = luaL_checkinteger(L, 2);
-    (void)map_id;
-    lua_pushinteger(L, 0); // stub
+    LuaRuntime* runtime = get_runtime(L);
+    if (GameState* gs = runtime->get_game_state()) {
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "map_scene_%04x",
+                      static_cast<unsigned>(map_id & 0xFFFF));
+        auto it = gs->variables.find(buf);
+        lua_pushinteger(L, it != gs->variables.end() ? it->second : 0);
+    } else {
+        lua_pushinteger(L, 0);  // no GameState → scene 0
+    }
     return 1;
 }
 
@@ -2615,20 +2670,17 @@ int read_state_var(lua_State* L) {
     return 1;
 }
 
-// ctx.game:write_state_var(id)
-// Writes the current VM `result` value into the state variable (id).
+// ctx.game:write_state_var(id, value)
+// Writes value (the current VM result) into the named state variable.
 // Source: Crystal writemem of a specific RAM address → Sem_WriteStateVar.
-// The Lua emitter emits this AFTER setting `result`; the binding reads result from Lua.
+// The Lua emitter now emits ctx.game:write_state_var(id, result) to pass
+// the current result register as the second argument.
 int write_state_var(lua_State* L) {
-    int id = luaL_checkinteger(L, 2);
+    int id    = luaL_checkinteger(L, 2);
+    int value = static_cast<int>(luaL_optinteger(L, 3, 0));  // result from Lua
     LuaRuntime* runtime = get_runtime(L);
-    // The VM result is in the Lua `result` local — caller must push it explicitly.
-    // For now, write 0 as a placeholder since the emitter does not pass result.
-    // TODO: emitter should emit ctx.game:write_state_var(id, result) and pass result.
     if (GameState* gs = runtime->get_game_state()) {
-        std::string key = "state_var_" + std::to_string(id);
-        auto it = gs->variables.find(key);
-        gs->variables[key] = (it != gs->variables.end()) ? it->second : 0;
+        gs->variables["state_var_" + std::to_string(id)] = value;
     }
     return 0;
 }

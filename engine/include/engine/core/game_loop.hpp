@@ -344,6 +344,12 @@ public:
     // Restore NPC states from GameState
     // Must be called after loading a map and before simulation resumes
     void restore_npc_states(const std::string& map_id);
+
+    // Prepare GameState for serialization.
+    // Snapshots live NPC state for the current map so GameState::npc_states
+    // reflects the actual positions/facing/visibility when serialize() is called.
+    // Must be called before GameState::serialize() in any production save path.
+    void prepare_for_save();
     
     //=========================================================================
     // NPC AUTONOMOUS MOVEMENT

@@ -22,6 +22,7 @@ if(ENGINEMON_ENABLE_ENGINE)
         scripting/runtime_test_rtc.cpp
         scripting/runtime_test_integration.cpp
         scripting/runtime_test_warp_semantics.cpp
+        scripting/runtime_test_blast_radius.cpp
         scripting/runtime_test_text_rng.cpp
         scripting/runtime_test_pcg_vm.cpp
         scripting/runtime_test_main.cpp
@@ -32,9 +33,11 @@ if(ENGINEMON_ENABLE_ENGINE)
     )
     target_include_directories(runtime_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     if(MSVC)
-        # /Od disables optimizations — reduces code-gen heap usage on this large file
-        # containing many std::variant<> instantiations.
-        target_compile_options(runtime_test PRIVATE /bigobj /Zm2000 /Od)
+        # /O1 (minimize size) keeps OBJ files small; /Od produced 550MB of OBJ input
+        # that made the linker take minutes even on fast hardware.
+        # /bigobj + /Zm2000: required for the large std::variant<> instantiation TUs.
+        # /wd4566: suppress C4566 unicode escape warnings that OOM MSBuild's regex parser.
+        target_compile_options(runtime_test PRIVATE /bigobj /Zm2000 /O1 /wd4566)
     endif()
     # Not added to ctest - requires ROM path argument
 
@@ -167,10 +170,11 @@ target_link_libraries(oracle_test PRIVATE
     enginemon_engine
 )
 # /bigobj: required for variant-heavy translation units
-# /Od:     disables optimization to reduce MSVC compiler heap pressure (C1060/C1002)
-# /Zm2000: raises compiler heap limit (matches runtime_test treatment)
+# /O1:     minimize size — keeps OBJ small, avoids 550MB+ link bottleneck from /Od
+# /Zm2000: raises compiler heap limit
+# /wd4566: suppress C4566 unicode escape warnings
 if(MSVC)
-    target_compile_options(oracle_test PRIVATE /bigobj /Zm2000 /Od)
+    target_compile_options(oracle_test PRIVATE /bigobj /Zm2000 /O1 /wd4566)
 endif()
 
 # TODO: Enable these when GTest is available and dependencies are built

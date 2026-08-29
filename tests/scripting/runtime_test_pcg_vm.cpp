@@ -476,7 +476,7 @@ TEST(pcg_npc_save_load_canonical_continuation) {
 
     // Advance 50 ticks to get non-trivial state
     for (int i = 0; i < 50; ++i) loop.tick();
-    loop.snapshot_npc_states("a2_map");
+    loop.prepare_for_save();  // snapshot NPC state before serialization
 
     // Save full state (includes canonical RNG)
     auto saved = gs.serialize();

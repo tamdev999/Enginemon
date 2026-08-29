@@ -78,6 +78,13 @@ struct HeadlessRuntime {
     HeadlessRuntime& operator=(const HeadlessRuntime&) = delete;
     HeadlessRuntime(HeadlessRuntime&&)                 = delete;
     HeadlessRuntime& operator=(HeadlessRuntime&&)      = delete;
+
+    // Call this before game_state.serialize() to capture live NPC positions.
+    // Delegates to HeadlessGameLoop::prepare_for_save() which snapshots the
+    // current map's NPC states into game_state.npc_states.
+    void prepare_for_save() {
+        game_loop.prepare_for_save();
+    }
 };
 
 //=============================================================================

@@ -900,6 +900,15 @@ void HeadlessGameLoop::restore_npc_states(const std::string& map_id) {
     }
 }
 
+void HeadlessGameLoop::prepare_for_save() {
+    // Snapshot live NPC state into GameState before serialization.
+    // This is the single required call-site for any production save path.
+    // Without this, GameState::npc_states for the current map would be stale
+    // or empty, causing NPCs to reset to ROM-default positions on load.
+    if (!game_state_) return;
+    snapshot_npc_states(game_state_->player.current_map_id);
+}
+
 //=============================================================================
 // NPC AUTONOMOUS MOVEMENT
 // Reference: pokecrystal/engine/overworld/map_objects.asm

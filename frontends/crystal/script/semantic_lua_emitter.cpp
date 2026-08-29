@@ -388,7 +388,10 @@ static bool emit_op_part1(std::ostream& out, const SemanticOp& op, int I) {
         SemanticLuaEmitter::indent_line(out, I); out << "result = ctx.game:read_state_var(" << (int)o->state_var << ")\n"; return true;
     }
     if (auto* o = std::get_if<Sem_WriteStateVar>(&op)) {
-        SemanticLuaEmitter::indent_line(out, I); out << "ctx.game:write_state_var(" << (int)o->state_var << ")\n"; return true;
+        // Pass the current VM result register as the value to store.
+        // Source: Crystal writemem stores wScriptVar into a mapped RAM address.
+        // The result local holds the most recent computed value.
+        SemanticLuaEmitter::indent_line(out, I); out << "ctx.game:write_state_var(" << (int)o->state_var << ", result)\n"; return true;
     }
     if (auto* o = std::get_if<Sem_SetStateVar>(&op)) {
         SemanticLuaEmitter::indent_line(out, I); out << "ctx.game:set_state_var(" << (int)o->state_var << ", " << (int)o->value << ")\n"; return true;

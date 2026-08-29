@@ -4931,15 +4931,16 @@ struct P5Harness {
     }
 
     // Query a flag from GameState.
-    // Canonical key format matches api_bindings: "flag_{:04x}" of the lower 16 bits.
-    // For event flags the encoded int from the semantic emitter is just the raw value
-    // (ns=0, so enc = value). For engine flags enc = (1<<16)|value — strip ns before
-    // converting so the key matches the production api_bindings path.
+    // Matches make_flag_key in api_bindings:
+    //   EventFlag (ns=0) → "flag_{:04x}"
+    //   EngineFlag (ns=1) → "eflag_{:04x}"
     bool flag(int encoded_flag_id) {
         uint16_t flag_value = static_cast<uint16_t>(encoded_flag_id & 0xFFFF);
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "flag_%04x", static_cast<unsigned>(flag_value));
-        return gs.check_flag(buf);
+        bool is_engine = ((encoded_flag_id >> 16) & 0xFF) != 0;
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), is_engine ? "eflag_%04x" : "flag_%04x",
+                      static_cast<unsigned>(flag_value));
+        return gs.check_flag(buf);        return gs.check_flag(buf);
     }
 
     // Query a var from GameState
@@ -5682,8 +5683,8 @@ TEST(p55_flag_setflag_endcallback_nbt_flypoint) {
     // ORACLE: Sem_SetFlag{EngineFlag{65}} must have written to GameState.
     // EngineFlag{65}: namespace=1, value=65 (0x41).
     // api_bindings strips ns bits (& 0xFFFF) then formats as hex:
-    //   enc = (1<<16)|65 = 65601 → flag_value = 65 → "flag_0041"
-    ASSERT_TRUE(h.gs.check_flag("flag_0041"));
+    //   enc = (1<<16)|65 = 65601 → flag_value = 65 → "eflag_0041"
+    ASSERT_TRUE(h.gs.check_flag("eflag_0041"));
 
     // ORACLE: Lua must not contain ctx.game:behavior("EndAll") —
     // endcallback lowers to Sem_Return, not Sem_EndAll.
@@ -7014,8 +7015,8 @@ TEST(p55_save_load_flag_continuity) {
     ASSERT_TRUE(idle);
 
     // Verify flag was set (ENGINE_FLYPOINT_NEW_BARK = EngineFlag{65})
-    // EngineFlag{65}: enc = (1<<16)|65 → api_bindings strips ns → value=65=0x41 → "flag_0041"
-    ASSERT_TRUE(h.gs.check_flag("flag_0041"));
+    // EngineFlag{65}: enc = (1<<16)|65 → api_bindings strips ns → value=65=0x41 → "eflag_0041"
+    ASSERT_TRUE(h.gs.check_flag("eflag_0041"));
 
     // Also manually set a user flag and var for extra coverage.
     // 42 = 0x2A → canonical key "flag_002a" (matches what api_bindings would produce)
@@ -7030,7 +7031,7 @@ TEST(p55_save_load_flag_continuity) {
     const auto& restored = result.state;
 
     // ORACLE: ENGINE_FLYPOINT_NEW_BARK flag survives round-trip
-    ASSERT_TRUE(restored.check_flag("flag_0041"));
+    ASSERT_TRUE(restored.check_flag("eflag_0041"));
     // ORACLE: user flag and var survive
     ASSERT_TRUE(restored.check_flag("flag_002a"));
     ASSERT_EQ(restored.get_var("var_7"), 123);
