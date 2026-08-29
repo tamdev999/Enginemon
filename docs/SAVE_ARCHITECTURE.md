@@ -190,8 +190,8 @@ SRAM Bank 1  0x2000–0x3FFF   Primary save data.
                0x2D10–0x3FFF   Active box, link battle stats, Hall of Fame,
                                Crystal Data, Battle Tower data.
 
-SRAM Boxes   0x4000–0x5FFF   PC Boxes 1–7  (sBox1..sBox7)
-             0x6000–0x7FFF   PC Boxes 8–14 (sBox8..sBox14)
+SRAM Boxes   0x4000–0x5E2F  PC Boxes 1–7  (sBox1..sBox7)
+             0x6000–0x7E2F  PC Boxes 8–14 (sBox8..sBox14)
 ```
 
 ### The two save copies and integrity flags
@@ -269,7 +269,10 @@ Source-verified against `ram/sram.asm` and `ram/wram.asm` in pret/pokecrystal.
   0x2703  PC box names       14 × 9 bytes = 126 bytes
 
   0x2780  Saved map header   (28 bytes)
-  0x2843  Player location    [map_bank:1][map_id:1][x:1][y:1]
+  0x2843  Player location    [map_group:1][map_number:1][y:1][x:1]
+          NOTE: wWarpNumber (warp index within the current map, 1 byte) sits
+          immediately before this group at 0x2842 and is a distinct field.
+          "map_bank"/"map_id" are Gen I naming; Crystal uses group+number.
   0x2847  Saved map tiles    (30 bytes)
   0x2865  Party Pokémon list (428 bytes)
   0x2A27  Pokédex owned      (32 bytes bitfield; bit0 = Bulbasaur)
@@ -283,8 +286,8 @@ Source-verified against `ram/sram.asm` and `ram/wram.asm` in pret/pokecrystal.
 0x3E3D  Player gender        0x00 = boy, 0x01 = girl  (outside checksum region)
 
 PC boxes (outside checksum region):
-0x4000–0x57FF  Boxes 1–7    (7 × sBox: each box = 1102 bytes)
-0x6000–0x77FF  Boxes 8–14   (7 × sBox: each box = 1102 bytes)
+0x4000–0x5E2F  Boxes 1–7    (7 × sBox, each box = 1104 bytes)
+0x6000–0x7E2F  Boxes 8–14   (7 × sBox, each box = 1104 bytes)
 
 Backup copy (mirrors primary, different addresses):
 0x1209–0x1D82  sBackupGameData
@@ -297,7 +300,7 @@ Party Pokémon list format:
 `[count:u8] [species_ids:u8 × 7, last entry=0xFF] [pokemon_data:48 × 6] [ot_names:11 × 6] [nicknames:11 × 6]`
 
 PC box format: capacity=20, entry size=32 (current stats omitted, recalculated
-on withdrawal — the Gen II "Box trick").
+on withdrawal — the Gen II "Box trick"). Each box is 1104 bytes total.
 
 ### Codec types
 
