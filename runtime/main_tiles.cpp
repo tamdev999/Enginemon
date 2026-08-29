@@ -26,6 +26,7 @@
 #include "engine/world/world_manager.hpp"
 #include "engine/core/game_loop.hpp"
 #include "engine/core/game_state.hpp"
+#include "engine/core/headless_runtime.hpp"
 #include "engine/core/timing.hpp"
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
@@ -569,57 +570,20 @@ static bool transition_to_map(
             world_state.tileset.collision, world_state.map.width, x, y);
     });
     
-    // Clear NPCs and add new ones from the new map
+    // Clear NPCs and add new ones from the new map.
+    // Uses the shared production NPC initialization from engine/core/headless_runtime.hpp:
+    //   - production Crystal visibility semantics (flag SET = hidden)
+    //   - full movement/behavior/radius fields
+    //   - visibility_flag stored for show_npc/hide_npc persistence
     ctx.game_loop->clear_npcs();
-    
-    // Add NPCs from new map.
-    // Initial visibility is determined by the NPC's visibility_flag:
-    //   empty flag  → always visible (flag 0xFFFF in Crystal source)
-    //   non-empty   → visible only if that flag IS SET in authoritative GameState
-    //
-    // Source: pokecrystal/engine/overworld/map_objects.asm SpriteHider
-    //   An object with event_flag set is hidden until the controlling flag fires.
-    //   show_npc/hide_npc (ctx.world) remain authoritative for dynamic changes.
-    GameState* gs_ptr = ctx.game_loop->game_state();
-    for (const auto& obj : world_state.map.objects) {
-        NpcState npc;
-        npc.id = obj.local_id;
-        npc.x = obj.x;
-        npc.y = obj.y;
-        npc.facing = movement_data_to_facing(obj.movement_type);
-        npc.is_moving = false;
-        npc.is_trainer = obj.is_trainer;
-        npc.script_id = obj.script_id;
-        npc.visibility_flag = obj.visibility_flag;
-
-        // Evaluate visibility_flag against authoritative GameState at map load.
-        // Crystal semantics (map_objects_2.asm CheckObjectFlag):
-        //   0xFFFF (empty string) → always visible
-        //   flag CLEAR            → visible
-        //   flag SET              → hidden
-        // So: visible = flag is empty OR flag is NOT set in GameState.
-        if (obj.visibility_flag.empty()) {
-            npc.visible = true;
-        } else if (gs_ptr) {
-            npc.visible = !gs_ptr->check_flag(obj.visibility_flag);
+    {
+        const GameState* gs = ctx.game_loop->game_state();
+        if (gs) {
+            init_npcs_from_map(*ctx.game_loop, world_state.map, *gs);
         } else {
-            // No GameState bound (headless tool or test without real state):
-            // default visible so the headless path doesn't silently drop objects.
-            npc.visible = true;
+            // No GameState (test/tool context) — use full init with default visible=true
+            init_npcs_from_map(*ctx.game_loop, world_state.map, GameState{});
         }
-
-        npc.behavior = movement_data_to_behavior(obj.movement_type);
-        npc.radius_x = obj.movement_radius_x;
-        npc.radius_y = obj.movement_radius_y;
-        npc.init_x = obj.x;
-        npc.init_y = obj.y;
-        npc.idle_timer = 30 + (obj.local_id * 17) % 98;
-        npc.target_x = obj.x;
-        npc.target_y = obj.y;
-        npc.move_progress = 0;
-        npc.frozen = false;
-
-        ctx.game_loop->add_npc(npc);
     }
     
     // Spawn player at destination
@@ -865,43 +829,8 @@ int main(int argc, char* argv[]) {
     //   empty flag  → always visible
     //   non-empty   → visible only if that flag IS SET in authoritative GameState
     // Source: pokecrystal/engine/overworld/map_objects.asm SpriteHider
-    for (const auto& obj : world_state.map.objects) {
-        NpcState npc;
-        npc.id = obj.local_id;
-        npc.x = obj.x;
-        npc.y = obj.y;
-        npc.facing = movement_data_to_facing(obj.movement_type);
-        npc.is_moving = false;
-        npc.is_trainer = obj.is_trainer;
-        npc.script_id = obj.script_id;
-        npc.visibility_flag = obj.visibility_flag;
-
-        // Evaluate visibility_flag against authoritative GameState at map load.
-        // Crystal semantics (map_objects_2.asm CheckObjectFlag):
-        //   0xFFFF (empty string) → always visible
-        //   flag CLEAR            → visible
-        //   flag SET              → hidden
-        if (obj.visibility_flag.empty()) {
-            npc.visible = true;
-        } else {
-            npc.visible = !game_state.check_flag(obj.visibility_flag);
-        }
-
-        // Initialize movement behavior from Crystal movement_type
-        // Reference: pokecrystal SpriteMovementData table
-        npc.behavior = movement_data_to_behavior(obj.movement_type);
-        npc.radius_x = obj.movement_radius_x;
-        npc.radius_y = obj.movement_radius_y;
-        npc.init_x = obj.x;
-        npc.init_y = obj.y;
-        npc.idle_timer = 30 + (obj.local_id * 17) % 98;  // Stagger initial timers
-        npc.target_x = obj.x;
-        npc.target_y = obj.y;
-        npc.move_progress = 0;
-        npc.frozen = false;
-        
-        game_loop.add_npc(npc);
-    }
+    // Uses the shared production NPC initialization from engine/core/headless_runtime.hpp
+    init_npcs_from_map(game_loop, world_state.map, game_state);
     
     // TEST: Spawn player at (4,6) facing down in Gate - walk down to test warp at (4,7)
     game_loop.spawn_player(4, 6, Direction::Down);
