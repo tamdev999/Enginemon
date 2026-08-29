@@ -995,9 +995,11 @@ The unification point is material/resource identity, not forced geometry semanti
 
 ### Renderer Direction
 
-Target progression:
+Enginemon has a backend-agnostic renderer interface. Vulkan is the primary desktop backend. The rendering API is deliberately abstracted so OpenGL ES can target low-end Linux handhelds and Metal can target Apple platforms without changes to the engine simulation layer.
+
+Target rendering progression:
 ```
-native 2D
+native 2D (current)
 → native 3D
 → enhanced 3D
 → Vulkan RT-assisted / ray-traced rendering
