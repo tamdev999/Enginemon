@@ -27,6 +27,10 @@ make  # Generates .sym files
 - `data/` - Data table layouts (Pokemon, moves, items, maps)
 - `engine/` - Game logic reference
 
+**Tracked revision:** `8e8f7e20` (master, Aug 2026)  
+**Latest upstream:** `7a7881d0` — `Sync the make_patch tool with poketcg` (tooling only, no semantic changes)  
+**Status:** Up to date for Enginemon purposes. The `kanzure/fix-buena-password` branch is unmerged.
+
 ---
 
 ### DanZC/suiCune
@@ -42,6 +46,24 @@ git clone https://github.com/DanZC/suiCune.git
 - Verified translations against original behavior
 
 This is the actively maintained C port using SDL2.
+
+**Tracked revision:** `201d7002` (main, Aug 2026)  
+**Latest upstream:** `2d9149c5`
+
+**Upstream findings since `201d7002`:**
+
+- `wGameTimeHours` is **big-endian u16** (`8619bd0b`, confirmed Aug 2026).  
+  `util/serialize.c` was fixed from `TY_U16LE` → `TY_U16BE`.  
+  Crystal stores `wGameTimeHours` big-endian in WRAM (consistent with `wCoins`,
+  `wMoney` big-endian patterns). The save codec must decode it as big-endian
+  when Phase 2 adds play-time to the snapshot.
+
+- TM/HM movepool bit array has an off-by-one in JSON loading (`2d9149c5`).  
+  The `wTMsHMs` bit array field (57 bytes in the checksummed SRAM region) is
+  affected. Relevant when Phase 2 save work encodes TM/HM data.
+
+- Variable sprite recursion fix (`6c36f344`): `v_DoesSpriteHaveFacings()` must
+  recurse into `variableSprites[]` for IDs ≥ SPRITE_VARS.
 
 ---
 
@@ -72,6 +94,49 @@ git clone https://github.com/bryanthaboi/gen1recomp.git
 **Key distinction:**
 - Gen1Recomp: Hand-written Lua engine + ROM data
 - Enginemon: Compiled ROM scripts + native C++ engine
+
+---
+
+### UNDERdecoded/Gen2Recomped
+**Purpose:** Modern Gen2 implementation/reference
+
+```bash
+git clone https://github.com/UNDERdecoded/Gen2Recomped.git
+```
+
+**What we use:**
+- ROM extraction patterns (`src/import/RomExtractorGen2.lua`)
+- World/map/warp semantics cross-reference
+- Save layout cross-reference
+- Script VM as behavioral reference
+
+**Tracked revision:** `401bc25` (tag: 0.5.1b-hotfix, main, Aug 2026)  
+**Latest upstream:** `fd1ba38` (tag: v0.7.35)
+
+**Upstream findings since `401bc25`:**
+
+- **Warp-carpet direction gate** (`524666c`, v0.7.31): `Warp.onArrive()` now
+  implements Crystal's `CheckDirectionalWarp` — carpet tiles (`COLL_WARP_CARPET_*`)
+  only fire when the player walks in the carpet's own direction; they do not fire
+  as instant trapdoors on any step. Enginemon already implements this correctly
+  via `CollisionClass` carpet detection. The Gen2Recomped commit has the best
+  inline commentary on Crystal's `CheckWarpTile` / `CheckDirectionalWarp` split
+  (`src/world/Warp.lua`).
+
+- **Roaming legendaries** (`524666c`, v0.7.31): `src/world/RoamMons.lua` (new,
+  147 lines) implements `CheckEncounterRoamMon` including the 100/256 encounter
+  rate and beast-staging logic with Crystal assembly cross-references. Reference
+  material for when Enginemon implements roaming encounters.
+
+- **Crystal EngineFlag numbering** (`2ebdf2c`, v0.7.32): Crystal's EngineFlag
+  table has one more row than Gold's from index 16 up. `Gen2Save.lua` was fixed
+  to use `scriptFlag` naming for Crystal (not `engineFlag`) to reflect this.
+  Relevant to `FlagNamespace::Engine` exact bit offsets when Crystal save Phase 2
+  decodes engine flags from SRAM.
+
+- **Crystal support** (`8f7de1f`, `ae144db`): Large-scale Crystal ROM import
+  added. `RomExtractorGen2.lua` has substantially more Crystal-aware extraction.
+  Useful as a cross-check when auditing Enginemon's own Crystal extraction.
 
 ---
 
