@@ -710,6 +710,320 @@ TEST(bcd3_decode_invalid_nibble_rejected) {
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 2 TESTS: player identity, map position, scene state, play time, RTC
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Build a valid SRAM with Phase 2 fields injected and checksums rebuilt.
+static std::vector<uint8_t> make_p2_sram(
+    uint16_t player_id   = 12345,
+    const char* pname    = "RED",
+    uint8_t gender       = 0,
+    uint8_t map_group    = 24, uint8_t map_number = 4,
+    uint8_t map_y        = 5,  uint8_t map_x      = 7,
+    uint16_t hours       = 99, uint8_t mins = 30, uint8_t secs = 15,
+    bool capped          = false,
+    uint8_t rtc_day      = 3,  uint8_t rtc_hour = 14,
+    uint8_t scene_slot0  = 0,  uint8_t scene_slot5 = 7)
+{
+    auto sav = make_valid_sram(500, 200, 100);
+    uint8_t* d = sav.data();
+
+    // PlayerID LE
+    d[PLAYER_ID]     = static_cast<uint8_t>(player_id & 0xFF);
+    d[PLAYER_ID + 1] = static_cast<uint8_t>(player_id >> 8);
+    // Player name: encode "RED" as Crystal charmap (R=0x91, E=0x84, D=0x83, term=0x50)
+    d[PLAYER_NAME + 0] = 0x91; // R
+    d[PLAYER_NAME + 1] = 0x84; // E
+    d[PLAYER_NAME + 2] = 0x83; // D
+    d[PLAYER_NAME + 3] = 0x50; // terminator
+    // Gender in sOptions byte 0 (bit 0)
+    d[PRIMARY_OPTIONS] = (d[PRIMARY_OPTIONS] & 0xFE) | (gender & 0x01);
+    // Map
+    d[MAP_GROUP]   = map_group;
+    d[MAP_NUMBER]  = map_number;
+    d[PLAYER_Y]    = map_y;
+    d[PLAYER_X]    = map_x;
+    // Play time: hours BIG-ENDIAN
+    d[GAME_TIME_HOURS]     = static_cast<uint8_t>(hours >> 8);
+    d[GAME_TIME_HOURS + 1] = static_cast<uint8_t>(hours & 0xFF);
+    d[GAME_TIME_MINUTES]   = mins;
+    d[GAME_TIME_SECONDS]   = secs;
+    if (capped) d[GAME_TIME_CAP] |= 0x80;
+    // RTC
+    d[RTC_BYTES + 0] = rtc_day;
+    d[RTC_BYTES + 1] = rtc_hour;
+    // Scene state
+    d[SCENE_IDS_BASE + 0] = scene_slot0;
+    d[SCENE_IDS_BASE + 5] = scene_slot5;
+
+    // Rebuild checksums
+    auto cs = [&](uint32_t b, uint32_t e) -> uint16_t {
+        uint16_t s = 0; for (uint32_t i = b; i <= e; ++i) s += d[i]; return s;
+    };
+    d[PRIMARY_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+    d[PRIMARY_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+    uint16_t pcs = cs(PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END);
+    d[PRIMARY_CHECKSUM]     = static_cast<uint8_t>(pcs & 0xFF);
+    d[PRIMARY_CHECKSUM + 1] = static_cast<uint8_t>(pcs >> 8);
+    std::copy(d + PRIMARY_GAME_DATA, d + PRIMARY_GAME_DATA + CHECKSUM_REGION_SIZE, d + BACKUP_GAME_DATA);
+    std::copy(d + PRIMARY_OPTIONS,   d + PRIMARY_OPTIONS + PRIMARY_OPTIONS_SIZE,   d + BACKUP_OPTIONS);
+    d[BACKUP_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+    d[BACKUP_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+    uint16_t bcs = cs(BACKUP_GAME_DATA, BACKUP_CHECKSUM_END);
+    d[BACKUP_CHECKSUM]     = static_cast<uint8_t>(bcs & 0xFF);
+    d[BACKUP_CHECKSUM + 1] = static_cast<uint8_t>(bcs >> 8);
+
+    return sav;
+}
+
+// ── Player identity ───────────────────────────────────────────────────────────
+
+TEST(p2_player_id_round_trips) {
+    auto sav = make_p2_sram(54321);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.player_id, 54321u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.player_id, 54321u);
+}
+
+TEST(p2_player_name_decoded_from_charmap) {
+    auto sav = make_p2_sram(1, "RED");
+    CrystalImport imp = import_save(sav);
+    ASSERT_TRUE(imp.snapshot.player_name == "RED");
+}
+
+TEST(p2_player_name_round_trips) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.player_name = "GOLD";
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_TRUE(reimp.snapshot.player_name == "GOLD");
+}
+
+TEST(p2_player_names_independent) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.player_name = "ASH";
+    imp.snapshot.moms_name   = "DELIA";
+    imp.snapshot.rival_name  = "GARY";
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_TRUE(reimp.snapshot.player_name == "ASH");
+    ASSERT_TRUE(reimp.snapshot.moms_name   == "DELIA");
+    ASSERT_TRUE(reimp.snapshot.rival_name  == "GARY");
+}
+
+TEST(p2_unrepresentable_character_rejected) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.player_name = "\xE2\x98\x80";  // ☀ (U+2600) — not in Crystal charmap
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow), SaveExportError);
+}
+
+TEST(p2_gender_boy_encodes_correctly) {
+    auto sav = make_p2_sram(1, "RED", 0);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.player_gender, 0u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.player_gender, 0u);
+    // Gender byte is in sOptions (0x2000) not the checksummed region
+    ASSERT_EQ(out[PRIMARY_OPTIONS] & 0x01, 0u);
+}
+
+TEST(p2_gender_girl_encodes_correctly) {
+    auto sav = make_p2_sram(1, "RED", 1);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.player_gender, 1u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.player_gender, 1u);
+    ASSERT_EQ(out[PRIMARY_OPTIONS] & 0x01, 1u);
+}
+
+// ── Map position ──────────────────────────────────────────────────────────────
+
+TEST(p2_map_identity_A_round_trips) {
+    // New Bark Town: group=24, map=4
+    auto sav = make_p2_sram(1, "RED", 0, 24, 4, 5, 7);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.location.group,  24u);
+    ASSERT_EQ(imp.snapshot.location.number,  4u);
+    ASSERT_EQ(imp.snapshot.location.y,       5u);
+    ASSERT_EQ(imp.snapshot.location.x,       7u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.location.group,  24u);
+    ASSERT_EQ(reimp.snapshot.location.number,  4u);
+    ASSERT_EQ(reimp.snapshot.location.y,       5u);
+    ASSERT_EQ(reimp.snapshot.location.x,       7u);
+}
+
+TEST(p2_map_identity_B_round_trips) {
+    // Elm's Lab: group=24, map=5
+    auto sav = make_p2_sram(1, "RED", 0, 24, 5, 3, 4);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.location.group,  24u);
+    ASSERT_EQ(imp.snapshot.location.number,  5u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.location.group,  24u);
+    ASSERT_EQ(reimp.snapshot.location.number,  5u);
+}
+
+TEST(p2_map_A_and_B_are_independent) {
+    auto sav1 = make_p2_sram(1, "RED", 0, 24, 4, 5, 7);  // New Bark
+    auto sav2 = make_p2_sram(1, "RED", 0, 24, 5, 3, 4);  // Elm's Lab
+    CrystalImport imp1 = import_save(sav1);
+    CrystalImport imp2 = import_save(sav2);
+    ASSERT_TRUE(imp1.snapshot.location.number != imp2.snapshot.location.number);
+    ASSERT_EQ(imp1.snapshot.location.group, imp2.snapshot.location.group);
+}
+
+// ── Per-map scene state ───────────────────────────────────────────────────────
+
+TEST(p2_scene_ids_round_trip) {
+    auto sav = make_p2_sram(1, "RED", 0, 24, 4, 5, 7, 100, 30, 0, false, 3, 14, 2, 5);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.scene_ids[0], 2u);
+    ASSERT_EQ(imp.snapshot.scene_ids[5], 5u);
+    // All other slots are 0
+    ASSERT_EQ(imp.snapshot.scene_ids[1], 0u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.scene_ids[0], 2u);
+    ASSERT_EQ(reimp.snapshot.scene_ids[5], 5u);
+}
+
+TEST(p2_scenes_are_independent_across_slots) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.scene_ids[0]  = 3;
+    imp.snapshot.scene_ids[10] = 7;
+    imp.snapshot.scene_ids[78] = 1;
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.scene_ids[0],  3u);
+    ASSERT_EQ(reimp.snapshot.scene_ids[10], 7u);
+    ASSERT_EQ(reimp.snapshot.scene_ids[78], 1u);
+    // Others unchanged
+    for (size_t i = 1; i < 10; ++i)  ASSERT_EQ(reimp.snapshot.scene_ids[i], 0u);
+}
+
+TEST(p2_scene_edit_does_not_affect_money) {
+    auto sav = make_valid_sram(50000, 10000, 500);
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.scene_ids[5] = 0xFF;
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.money_player, 50000u);
+    ASSERT_EQ(reimp.snapshot.money_mom,    10000u);
+    ASSERT_EQ(reimp.snapshot.coins,          500u);
+}
+
+// ── Play time ─────────────────────────────────────────────────────────────────
+
+TEST(p2_playtime_big_endian_hours_round_trip) {
+    // This test specifically validates wGameTimeHours is decoded/encoded as
+    // BIG-ENDIAN u16 (suiCune fix 2026-08, serialize.c TY_U16LE→TY_U16BE).
+    auto sav = make_p2_sram(1, "RED", 0, 24, 4, 0, 0, 999, 59, 30);
+    // Verify raw bytes: hours=999 (0x03E7), big-endian → [0x03, 0xE7]
+    ASSERT_EQ(sav[GAME_TIME_HOURS],     0x03u);  // high byte
+    ASSERT_EQ(sav[GAME_TIME_HOURS + 1], 0xE7u);  // low byte
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.playtime_hours,   999u);
+    ASSERT_EQ(imp.snapshot.playtime_minutes,  59u);
+    ASSERT_EQ(imp.snapshot.playtime_seconds,  30u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[GAME_TIME_HOURS],     0x03u);  // still big-endian after export
+    ASSERT_EQ(out[GAME_TIME_HOURS + 1], 0xE7u);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.playtime_hours,   999u);
+    ASSERT_EQ(reimp.snapshot.playtime_minutes,  59u);
+    ASSERT_EQ(reimp.snapshot.playtime_seconds,  30u);
+}
+
+TEST(p2_playtime_zero_round_trips) {
+    auto sav = make_p2_sram(1, "RED", 0, 24, 4, 0, 0, 0, 0, 0);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.playtime_hours, 0u);
+    ASSERT_TRUE(!(imp.snapshot.playtime_capped));
+}
+
+TEST(p2_playtime_capped_flag_round_trips) {
+    auto sav = make_p2_sram(1, "RED", 0, 24, 4, 0, 0, 999, 59, 59, true);
+    CrystalImport imp = import_save(sav);
+    ASSERT_TRUE(imp.snapshot.playtime_capped);
+    ASSERT_EQ(imp.snapshot.playtime_hours, 999u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_TRUE(reimp.snapshot.playtime_capped);
+}
+
+// ── RTC / time context ────────────────────────────────────────────────────────
+
+TEST(p2_rtc_state_round_trips) {
+    auto sav = make_p2_sram(1, "RED", 0, 24, 4, 0, 0, 50, 20, 10, false, 6, 18);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.rtc.day,    6u);
+    ASSERT_EQ(imp.snapshot.rtc.hour,  18u);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.rtc.day,   6u);
+    ASSERT_EQ(reimp.snapshot.rtc.hour, 18u);
+}
+
+TEST(p2_dst_flag_round_trips) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.rtc.dst = true;
+    auto out = export_save(imp.snapshot, imp.shadow);
+    // Verify bit 7 of DST byte is set
+    ASSERT_TRUE((out[DST] & 0x80) != 0);
+    CrystalImport reimp = import_save(out);
+    ASSERT_TRUE(reimp.snapshot.rtc.dst);
+}
+
+// ── Untouched-byte diff ───────────────────────────────────────────────────────
+
+// A no-edit round-trip must change only the bytes we own.
+// Specifically: bytes outside owned fields must be identical between
+// the original sav and the exported sav.
+TEST(p2_unowned_bytes_unchanged_on_roundtrip) {
+    auto sav = make_p2_sram(12345, "RED", 0, 24, 4, 5, 7, 100, 30, 15);
+    CrystalImport imp = import_save(sav);
+    auto out = export_save(imp.snapshot, imp.shadow);
+
+    // Bytes outside all owned fields must match the original.
+    // Sample check: byte in PC boxes region (0x4000) — unowned, should match.
+    ASSERT_EQ(out[0x4000], sav[0x4000]);
+    ASSERT_EQ(out[0x4001], sav[0x4001]);
+    // Byte in Hall of Fame region (0x3E00) — unowned.
+    ASSERT_EQ(out[0x3E00], sav[0x3E00]);
+    // Byte 0x3000 — also unowned.
+    ASSERT_EQ(out[0x3000], sav[0x3000]);
+}
+
+// ── Wrong profile identity rejected ──────────────────────────────────────────
+
+TEST(p2_wrong_profile_rejects_p2_export) {
+    const std::string correct_profile = "f2f52230b536214ef7c9924f483392993e226cfb";
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = correct_profile;
+    expected.rom_sha1      = correct_profile;
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+
+    auto sav = make_p2_sram();
+    // Import with a WRONG profile (Gold ROM)
+    CrystalImport imp = import_save(sav, "0000000000000000000000000000000000000000");
+
+    // Must reject because shadow was imported under wrong profile
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow, expected), SaveExportError);
+}
+
 // PHASE 1 CLOSURE: Symbol-derived offsets, backup boundaries, SRAM identity
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1028,8 +1342,29 @@ int main() {
     RUN(bcd3_encode_overflow_rejected);
     RUN(bcd3_decode_invalid_nibble_rejected);
 
-    std::cout << "\n-- Phase 1 closure: symbol-derived offsets, backup boundaries, SRAM identity --\n";
-    RUN(symbol_derived_offsets_match_expected_layout);
+    std::cout << "\n-- Phase 2: player identity, map position, scenes, playtime, RTC --\n";
+    RUN(p2_player_id_round_trips);
+    RUN(p2_player_name_decoded_from_charmap);
+    RUN(p2_player_name_round_trips);
+    RUN(p2_player_names_independent);
+    RUN(p2_unrepresentable_character_rejected);
+    RUN(p2_gender_boy_encodes_correctly);
+    RUN(p2_gender_girl_encodes_correctly);
+    RUN(p2_map_identity_A_round_trips);
+    RUN(p2_map_identity_B_round_trips);
+    RUN(p2_map_A_and_B_are_independent);
+    RUN(p2_scene_ids_round_trip);
+    RUN(p2_scenes_are_independent_across_slots);
+    RUN(p2_scene_edit_does_not_affect_money);
+    RUN(p2_playtime_big_endian_hours_round_trip);
+    RUN(p2_playtime_zero_round_trips);
+    RUN(p2_playtime_capped_flag_round_trips);
+    RUN(p2_rtc_state_round_trips);
+    RUN(p2_dst_flag_round_trips);
+    RUN(p2_unowned_bytes_unchanged_on_roundtrip);
+    RUN(p2_wrong_profile_rejects_p2_export);
+
+    std::cout << "\n-- Phase 1 closure: symbol-derived offsets, backup boundaries, SRAM identity --\n";    RUN(symbol_derived_offsets_match_expected_layout);
     RUN(event_flags_offset_is_sym_derived_value);
     RUN(event_flags_at_corrected_offset_roundtrips);
     RUN(backup_event_flags_offset_is_correct);

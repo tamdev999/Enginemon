@@ -4,7 +4,7 @@
 
 #include "crystal_save_writer.hpp"
 #include "crystal_bcd.hpp"
-#include "crystal_save_reader.hpp"   // SaveImportError (re-used for self-validation)
+#include "crystal_save_reader.hpp"
 #include "crystal_sram_layout.hpp"
 
 #include <array>
@@ -93,6 +93,8 @@ std::vector<uint8_t> export_save(
 
     // ── Step 3: Patch owned fields into primary region. ───────────────────────
 
+    // ── Phase 1: Money, coins, event flags ───────────────────────────────────
+
     // wMoney (3 bytes BCD big-endian)
     {
         auto enc = bcd3_encode(snapshot.money_player);
@@ -103,7 +105,7 @@ std::vector<uint8_t> export_save(
         auto enc = bcd3_encode(snapshot.money_mom);
         std::copy(enc.begin(), enc.end(), &data[MOMS_MONEY]);
     }
-    // wCoins (2 bytes big-endian — high byte at [COINS], low byte at [COINS+1])
+    // wCoins (2 bytes big-endian)
     {
         data[COINS]     = static_cast<uint8_t>(snapshot.coins >> 8);
         data[COINS + 1] = static_cast<uint8_t>(snapshot.coins & 0xFF);
@@ -114,6 +116,79 @@ std::vector<uint8_t> export_save(
                       "event_flags size mismatch");
         std::copy(snapshot.event_flags.begin(), snapshot.event_flags.end(),
                   &data[EVENT_FLAGS]);
+    }
+
+    // ── Phase 2: Player identity ─────────────────────────────────────────────
+
+    // wPlayerID (2 bytes LE)
+    {
+        data[PLAYER_ID]     = static_cast<uint8_t>(snapshot.player_id & 0xFF);
+        data[PLAYER_ID + 1] = static_cast<uint8_t>(snapshot.player_id >> 8);
+    }
+    // wSecretID (2 bytes LE)
+    {
+        data[SECRET_ID]     = static_cast<uint8_t>(snapshot.secret_id & 0xFF);
+        data[SECRET_ID + 1] = static_cast<uint8_t>(snapshot.secret_id >> 8);
+    }
+    // Names (Crystal charmap, 0x50-terminated, fixed length)
+    encode_crystal_string_to(snapshot.player_name, &data[PLAYER_NAME], PLAYER_NAME_SIZE);
+    encode_crystal_string_to(snapshot.moms_name,   &data[MOMS_NAME],   MOMS_NAME_SIZE);
+    encode_crystal_string_to(snapshot.rival_name,  &data[RIVAL_NAME],  RIVAL_NAME_SIZE);
+
+    // wPlayerGender in sOptions block (bit 0 of byte 0).
+    // sOptions is at PRIMARY_OPTIONS (0x2000), outside the checksummed region.
+    // Keep all other bits of sOptions byte 0 intact.
+    {
+        uint8_t existing = data[PRIMARY_OPTIONS];
+        data[PRIMARY_OPTIONS] = (existing & 0xFE) | (snapshot.player_gender & 0x01);
+    }
+
+    // ── Phase 2: Map position ────────────────────────────────────────────────
+
+    data[WARP_NUMBER] = snapshot.location.warp;
+    data[MAP_GROUP]   = snapshot.location.group;
+    data[MAP_NUMBER]  = snapshot.location.number;
+    data[PLAYER_Y]    = snapshot.location.y;
+    data[PLAYER_X]    = snapshot.location.x;
+
+    // ── Phase 2: Scene state ─────────────────────────────────────────────────
+
+    {
+        static_assert(snapshot.scene_ids.size() == SCENE_IDS_COUNT,
+                      "scene_ids size mismatch");
+        std::copy(snapshot.scene_ids.begin(), snapshot.scene_ids.end(),
+                  &data[SCENE_IDS_BASE]);
+    }
+
+    // ── Phase 2: Play time ───────────────────────────────────────────────────
+
+    // wGameTimeCap: preserve other bits, set/clear bit 7
+    {
+        uint8_t cap = data[GAME_TIME_CAP] & 0x7F;
+        if (snapshot.playtime_capped) cap |= 0x80;
+        data[GAME_TIME_CAP] = cap;
+    }
+    // wGameTimeHours: 2 bytes BIG-ENDIAN
+    {
+        data[GAME_TIME_HOURS]     = static_cast<uint8_t>(snapshot.playtime_hours >> 8);
+        data[GAME_TIME_HOURS + 1] = static_cast<uint8_t>(snapshot.playtime_hours & 0xFF);
+    }
+    data[GAME_TIME_MINUTES] = snapshot.playtime_minutes;
+    data[GAME_TIME_SECONDS] = snapshot.playtime_seconds;
+
+    // ── Phase 2: RTC / time context ─────────────────────────────────────────
+
+    {
+        uint32_t off = RTC_BYTES;
+        data[off + 0] = snapshot.rtc.day;
+        data[off + 1] = snapshot.rtc.hour;
+        data[off + 2] = snapshot.rtc.minute;
+        data[off + 3] = snapshot.rtc.second;
+    }
+    {
+        uint8_t dst = data[DST] & 0x7F;
+        if (snapshot.rtc.dst) dst |= 0x80;
+        data[DST] = dst;
     }
 
     // ── Step 4: Copy primary region → backup region (byte-for-byte). ─────────

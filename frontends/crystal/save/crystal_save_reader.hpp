@@ -17,8 +17,8 @@
 
 #include "crystal_sram.hpp"
 #include "crystal_save_snapshot.hpp"
+#include "crystal_save_errors.hpp"
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -31,10 +31,7 @@ struct CrystalImport {
 };
 
 /// Thrown when the raw bytes are not a valid Crystal save image.
-struct SaveImportError : std::runtime_error {
-    explicit SaveImportError(std::string msg)
-        : std::runtime_error(std::move(msg)) {}
-};
+// (defined in crystal_save_errors.hpp)
 
 /// Import a raw .sav byte sequence.
 ///
@@ -67,5 +64,10 @@ struct SaveImportError : std::runtime_error {
     return import_save(bytes.data(), bytes.size(),
                        std::move(profile_sha1), std::move(rom_sha1));
 }
+
+/// Encode a UTF-8 string to Crystal charmap bytes.
+/// Writes exactly max_bytes; fills remaining space with 0x50 (terminator).
+/// Throws SaveExportError if any character is not representable.
+void encode_crystal_string_to(const std::string& utf8, uint8_t* out, uint32_t max_bytes);
 
 }  // namespace crystal

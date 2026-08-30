@@ -10,6 +10,7 @@
 #include "crystal_save_reader.hpp"
 #include "crystal_save_writer.hpp"
 #include "crystal_save_snapshot.hpp"
+#include "crystal_save_errors.hpp"
 #include "crystal_sram.hpp"
 
 // Usage pattern:

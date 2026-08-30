@@ -21,19 +21,14 @@
 
 #include "crystal_save_snapshot.hpp"
 #include "crystal_sram.hpp"
-#include <stdexcept>
+#include "crystal_save_errors.hpp"
 #include <string>
 #include <vector>
 
 namespace crystal {
 
-/// Thrown when export cannot proceed:
-///   - snapshot contains values Crystal cannot represent
-///   - shadow identity does not match expected identity
-struct SaveExportError : std::runtime_error {
-    explicit SaveExportError(std::string msg)
-        : std::runtime_error(std::move(msg)) {}
-};
+/// Thrown when export cannot proceed — see crystal_save_errors.hpp.
+// (defined in crystal_save_errors.hpp)
 
 /// Export a .sav byte sequence.
 ///

@@ -157,6 +157,144 @@ static constexpr uint32_t EVENT_FLAGS              = 0x2600;
 static constexpr uint32_t EVENT_FLAGS_SIZE         = 100;  // ceil(800 / 8)
 static constexpr uint32_t NUM_EVENT_FLAGS          = 800;
 
+// ─── Phase 2 field offsets ────────────────────────────────────────────────────
+// All derived from WRAM symbols using the same formula:
+//   sav_offset = PRIMARY_GAME_DATA + (wram_addr - wGameData_wram)
+//   wGameData_wram = 0xD47B  (sym: 01:d47b)
+//
+// Fields marked OPTION are in the sOptions block (sav 0x2000..0x2008),
+// not in the checksummed region.  They still live in the shadow and are
+// read/written as owned fields but via the OPTIONS block path.
+
+// ── Player identity (inside checksummed region) ───────────────────────────────
+
+/// wPlayerID — 2 bytes u16 LE trainer ID.  sym: 01:d47b → sav 0x2009
+static constexpr uint32_t PLAYER_ID               = 0x2009;
+static constexpr uint32_t PLAYER_ID_SIZE          = 2;
+
+/// wPlayerName — 11 bytes Crystal charmap, 0x50-terminated.  sym: 01:d47d → sav 0x200B
+static constexpr uint32_t PLAYER_NAME             = 0x200B;
+static constexpr uint32_t PLAYER_NAME_SIZE        = 11;  // NAME_LENGTH
+
+/// wMomsName — 11 bytes Crystal charmap.  sym: 01:d488 → sav 0x2016
+static constexpr uint32_t MOMS_NAME               = 0x2016;
+static constexpr uint32_t MOMS_NAME_SIZE          = 11;
+
+/// wRivalName — 11 bytes Crystal charmap.  sym: 01:d493 → sav 0x2021
+static constexpr uint32_t RIVAL_NAME              = 0x2021;
+static constexpr uint32_t RIVAL_NAME_SIZE         = 11;
+
+/// wSecretID — 2 bytes u16 LE.  sym: 01:d84a → sav 0x23D8
+static constexpr uint32_t SECRET_ID               = 0x23D8;
+static constexpr uint32_t SECRET_ID_SIZE          = 2;
+
+// ── Player gender (OPTIONS block — NOT in checksummed region) ─────────────────
+// wPlayerGender is the first byte of wCrystalData which maps to sOptions (0x2000).
+// Crystal: 0 = boy, 1 = girl.
+// sym: 01:d472 → wram 0xD472, which is sOptions[0] = sav 0x2000.
+// This byte is mirrored to sBackupOptions[0] on save.
+static constexpr uint32_t PLAYER_GENDER           = PRIMARY_OPTIONS;  // sav 0x2000
+
+// ── Game time (inside checksummed region) ─────────────────────────────────────
+// Crystal serialises game time in wPlayerData, so it's inside the checksummed block.
+
+/// wGameTimeCap — 1 byte.  sym: 01:d4c3 → sav 0x2051
+/// Bit 7 set when playtime is capped (999 hours).
+static constexpr uint32_t GAME_TIME_CAP           = 0x2051;
+
+/// wGameTimeHours — 2 bytes BIG-ENDIAN u16.  sym: 01:d4c4 → sav 0x2052
+/// IMPORTANT: This field is BIG-ENDIAN (confirmed by suiCune serialize.c fix 2026-08).
+/// High byte at [0x2052], low byte at [0x2053].
+static constexpr uint32_t GAME_TIME_HOURS         = 0x2052;
+static constexpr uint32_t GAME_TIME_HOURS_SIZE    = 2;
+
+/// wGameTimeMinutes — 1 byte.  sym: 01:d4c6 → sav 0x2054
+static constexpr uint32_t GAME_TIME_MINUTES       = 0x2054;
+
+/// wGameTimeSeconds — 1 byte.  sym: 01:d4c7 → sav 0x2055
+static constexpr uint32_t GAME_TIME_SECONDS       = 0x2055;
+
+/// wGameTimeFrames — 1 byte.  sym: 01:d4c8 → sav 0x2056
+static constexpr uint32_t GAME_TIME_FRAMES        = 0x2056;
+
+// ── RTC / time context (inside checksummed region) ────────────────────────────
+
+/// wStartDay — 1 byte.  Day when new game started.  sym: 01:d4b6 → sav 0x2044
+static constexpr uint32_t START_DAY               = 0x2044;
+
+/// wStartHour — 1 byte.  sym: 01:d4b7 → sav 0x2045
+static constexpr uint32_t START_HOUR              = 0x2045;
+
+/// wStartMinute — 1 byte.  sym: 01:d4b8 → sav 0x2046
+static constexpr uint32_t START_MINUTE            = 0x2046;
+
+/// wStartSecond — 1 byte.  sym: 01:d4b9 → sav 0x2047
+static constexpr uint32_t START_SECOND            = 0x2047;
+
+/// wRTC — 4 bytes: [day, hour, min, sec] hardware mirror.
+/// sym: 01:d4ba → sav 0x2048
+static constexpr uint32_t RTC_BYTES               = 0x2048;
+static constexpr uint32_t RTC_BYTES_SIZE          = 4;
+
+/// wDST — 1 byte, bit 7 = DST active.  sym: 01:d4c2 → sav 0x2050
+static constexpr uint32_t DST                     = 0x2050;
+
+/// wCurDay — 1 byte, current real-time day-of-week (0–6).
+/// sym: 01:d4cb → sav 0x2059
+static constexpr uint32_t CUR_DAY                 = 0x2059;
+
+// ── Map position (inside checksummed region, in wCurMapData section) ──────────
+// Note: these are in wCurMapData which begins after wPlayerDataEnd (sav 0x2833).
+
+/// wWarpNumber — 1 byte, warp index within current map.  sym: 01:dcb4 → sav 0x2842
+static constexpr uint32_t WARP_NUMBER             = 0x2842;
+
+/// wMapGroup — 1 byte.  sym: 01:dcb5 → sav 0x2843
+static constexpr uint32_t MAP_GROUP               = 0x2843;
+
+/// wMapNumber — 1 byte.  sym: 01:dcb6 → sav 0x2844
+static constexpr uint32_t MAP_NUMBER              = 0x2844;
+
+/// wYCoord — 1 byte (tile row).  sym: 01:dcb7 → sav 0x2845
+static constexpr uint32_t PLAYER_Y                = 0x2845;
+
+/// wXCoord — 1 byte (tile column).  sym: 01:dcb8 → sav 0x2846
+static constexpr uint32_t PLAYER_X                = 0x2846;
+
+// ── Per-map scene state array (inside checksummed region) ────────────────────
+// 79 scene slots, 1 byte each: sav 0x2500..0x254E.
+// Each slot corresponds to a named map's scene state variable.
+// Slot index = (wXxxSceneID offset - wPokecenter2FSceneID offset).
+// sym first: wPokecenter2FSceneID → 01:d972 → sav 0x2500
+// sym last:  wMobileBattleRoomSceneID → 01:d9c0 → sav 0x254E
+
+static constexpr uint32_t SCENE_IDS_BASE          = 0x2500;
+static constexpr uint32_t SCENE_IDS_COUNT         = 79;   // wPokecenter2F .. wMobileBattleRoom
+static constexpr uint32_t SCENE_IDS_SIZE          = SCENE_IDS_COUNT;
+
+/// Per-slot index for the scene ID slots.
+/// scene_sav_offset(slot_i) = SCENE_IDS_BASE + slot_i
+/// The mapping symbol → slot_i is defined in the scene table below.
+
+// ─── Phase 2 compile-time assertions ─────────────────────────────────────────
+
+static_assert(PLAYER_ID     == 0x2009, "sym: 01:d47b");
+static_assert(PLAYER_NAME   == 0x200B, "sym: 01:d47d");
+static_assert(RIVAL_NAME    == 0x2021, "sym: 01:d493");
+static_assert(SECRET_ID     == 0x23D8, "sym: 01:d84a");
+static_assert(GAME_TIME_HOURS == 0x2052, "sym: 01:d4c4, big-endian u16");
+static_assert(RTC_BYTES     == 0x2048, "sym: 01:d4ba");
+static_assert(DST           == 0x2050, "sym: 01:d4c2");
+static_assert(MAP_GROUP     == 0x2843, "sym: 01:dcb5");
+static_assert(MAP_NUMBER    == 0x2844, "sym: 01:dcb6");
+static_assert(PLAYER_Y      == 0x2845, "sym: 01:dcb7");
+static_assert(PLAYER_X      == 0x2846, "sym: 01:dcb8");
+static_assert(SCENE_IDS_BASE == 0x2500, "sym: wPokecenter2FSceneID 01:d972");
+
+// wCurMapData fields are past wPlayerDataEnd (sav 0x2833) and still inside checksum region.
+static_assert(MAP_GROUP     >= PRIMARY_GAME_DATA && MAP_GROUP     <= PRIMARY_CHECKSUM_END, "");
+static_assert(SCENE_IDS_BASE >= PRIMARY_GAME_DATA && SCENE_IDS_BASE + SCENE_IDS_SIZE - 1 <= PRIMARY_CHECKSUM_END, "");
+
 // ─── Backup mirror offsets ────────────────────────────────────────────────────
 // Backup region mirrors primary with a fixed negative offset:
 //   BACKUP_OFFSET = PRIMARY_GAME_DATA - BACKUP_GAME_DATA = 0x2009 - 0x1209 = 0xE00

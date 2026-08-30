@@ -200,6 +200,25 @@ std::string validate_layout_against_sym(const std::filesystem::path& sym_file) {
     check_wram_to_primary("wMomsMoney",  MOMS_MONEY);
     check_wram_to_primary("wCoins",      COINS);
     check_wram_to_primary("wEventFlags", EVENT_FLAGS);
+    // Phase 2 fields
+    check_wram_to_primary("wPlayerID",           PLAYER_ID);
+    check_wram_to_primary("wPlayerName",         PLAYER_NAME);
+    check_wram_to_primary("wMomsName",           MOMS_NAME);
+    check_wram_to_primary("wRivalName",          RIVAL_NAME);
+    check_wram_to_primary("wSecretID",           SECRET_ID);
+    check_wram_to_primary("wStartDay",           START_DAY);
+    check_wram_to_primary("wRTC",                RTC_BYTES);
+    check_wram_to_primary("wDST",                DST);
+    check_wram_to_primary("wGameTimeCap",        GAME_TIME_CAP);
+    check_wram_to_primary("wGameTimeHours",      GAME_TIME_HOURS);
+    check_wram_to_primary("wGameTimeMinutes",    GAME_TIME_MINUTES);
+    check_wram_to_primary("wGameTimeSeconds",    GAME_TIME_SECONDS);
+    check_wram_to_primary("wGameTimeFrames",     GAME_TIME_FRAMES);
+    check_wram_to_primary("wPokecenter2FSceneID", SCENE_IDS_BASE);
+    check_wram_to_primary("wMapGroup",           MAP_GROUP);
+    check_wram_to_primary("wMapNumber",          MAP_NUMBER);
+    check_wram_to_primary("wYCoord",             PLAYER_Y);
+    check_wram_to_primary("wXCoord",             PLAYER_X);
 
     if (failures == 0) return "";  // all good
 
