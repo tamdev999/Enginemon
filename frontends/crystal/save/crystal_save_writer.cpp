@@ -6,6 +6,7 @@
 #include "crystal_bcd.hpp"
 #include "crystal_save_reader.hpp"
 #include "crystal_sram_layout.hpp"
+#include "crystal_party_codec.hpp"
 
 #include <array>
 #include <cstring>
@@ -191,6 +192,9 @@ std::vector<uint8_t> export_save(
         if (snapshot.rtc.dst) dst |= 0x80;
         data[DST] = dst;
     }
+
+    // ── Phase 3A: Party ──────────────────────────────────────────────────────
+    encode_party(snapshot.party, data, PartyCodecDomain{});
 
     // ── Step 4: Copy primary region → backup region (byte-for-byte). ─────────
     std::copy(&data[PRIMARY_GAME_DATA],

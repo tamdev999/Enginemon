@@ -70,4 +70,8 @@ struct CrystalImport {
 /// Throws SaveExportError if any character is not representable.
 void encode_crystal_string_to(const std::string& utf8, uint8_t* out, uint32_t max_bytes);
 
+/// Decode Crystal charmap bytes (0x50-terminated) to UTF-8.
+/// Reads at most max_bytes; stops at 0x50 terminator.
+[[nodiscard]] std::string decode_crystal_string_from(const uint8_t* bytes, uint32_t max_bytes);
+
 }  // namespace crystal

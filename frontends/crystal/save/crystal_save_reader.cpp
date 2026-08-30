@@ -6,6 +6,7 @@
 #include "crystal_bcd.hpp"
 #include "crystal_save_errors.hpp"
 #include "crystal_sram_layout.hpp"
+#include "crystal_party_codec.hpp"
 
 #include <array>
 #include <cstring>
@@ -268,6 +269,12 @@ static CrystalSaveSnapshot decode_snapshot(const uint8_t* data, uint32_t adj) {
     }
     snap.rtc.dst = (data[DST - adj] & 0x80) != 0;
 
+    // ── Phase 3A: Party ──────────────────────────────────────────────────────
+    // Domain uses defaults (Crystal v1.1): 251 species, 251 moves, 256 items.
+    // The codec boundary enforces these bounds; callers may pass tighter bounds
+    // via the import_save_with_domain() overload when available.
+    snap.party = decode_party(data, adj, PartyCodecDomain{});
+
     return snap;
 }
 
@@ -327,6 +334,12 @@ CrystalImport import_save(
 
 void encode_crystal_string_to(const std::string& utf8, uint8_t* out, uint32_t max_bytes) {
     encode_crystal_string(utf8, out, max_bytes);
+}
+
+// ─── decode_crystal_string exposed for party codec ────────────────────────────
+
+std::string decode_crystal_string_from(const uint8_t* bytes, uint32_t max_bytes) {
+    return decode_crystal_string(bytes, max_bytes);
 }
 
 }  // namespace crystal

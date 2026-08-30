@@ -1130,6 +1130,604 @@ TEST(p2_wrong_profile_rejects_p2_export) {
     ASSERT_THROWS(export_save(imp.snapshot, imp.shadow, expected), SaveExportError);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 3A TESTS: Party Pokémon
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper: build a minimal valid party_struct (48 bytes) at `dest`.
+// All unset bytes default to 0.
+// Source-verified field layout from macros/ram.asm, pokemon_data_constants.asm.
+static void make_party_struct(
+    uint8_t* s,          // 48-byte buffer to fill
+    uint8_t species,     // 0 = leave as 0
+    uint8_t item,
+    uint8_t move0,       // move IDs (0 = none)
+    uint8_t level,
+    uint16_t ot_id,      // LE
+    uint32_t exp,        // 3-byte BE
+    uint16_t hp_exp_le,  // LE
+    uint16_t dvs_le,     // byte0=ATK|DEF nibbles, byte1=SPD|SPC nibbles, LE
+    uint8_t  pp_byte0,   // bits7-6=pp_ups, bits5-0=pp
+    uint8_t  happiness,
+    uint8_t  caught_tl,  // caught_time_level byte
+    uint8_t  caught_gl,  // caught_gender_location byte
+    uint8_t  status,
+    uint16_t hp_be,      // current HP, BE
+    uint16_t maxhp_be,   // MaxHP, BE
+    uint16_t atk_be)
+{
+    std::fill(s, s + 48, 0);
+    s[0]  = species;
+    s[1]  = item;
+    s[2]  = move0;
+    // OT_ID LE
+    s[6]  = static_cast<uint8_t>(ot_id & 0xFF);
+    s[7]  = static_cast<uint8_t>(ot_id >> 8);
+    // EXP BE
+    s[8]  = static_cast<uint8_t>((exp >> 16) & 0xFF);
+    s[9]  = static_cast<uint8_t>((exp >>  8) & 0xFF);
+    s[10] = static_cast<uint8_t>( exp        & 0xFF);
+    // stat exp HP LE
+    s[11] = static_cast<uint8_t>(hp_exp_le & 0xFF);
+    s[12] = static_cast<uint8_t>(hp_exp_le >> 8);
+    // DVs LE
+    s[21] = static_cast<uint8_t>(dvs_le & 0xFF);
+    s[22] = static_cast<uint8_t>(dvs_le >> 8);
+    // PP
+    s[23] = pp_byte0;
+    s[27] = happiness;
+    s[29] = caught_tl;
+    s[30] = caught_gl;
+    s[31] = level;
+    s[32] = status;
+    // HP BE
+    s[34] = static_cast<uint8_t>(hp_be >> 8);
+    s[35] = static_cast<uint8_t>(hp_be & 0xFF);
+    // MaxHP BE
+    s[36] = static_cast<uint8_t>(maxhp_be >> 8);
+    s[37] = static_cast<uint8_t>(maxhp_be & 0xFF);
+    // ATK BE
+    s[38] = static_cast<uint8_t>(atk_be >> 8);
+    s[39] = static_cast<uint8_t>(atk_be & 0xFF);
+}
+
+// Helper: embed a party into a valid-checksum SRAM image.
+static std::vector<uint8_t> make_sram_with_party(
+    uint8_t count,                                    // 0-6
+    const std::vector<std::array<uint8_t,48>>& mons, // party_struct bytes per slot
+    const std::vector<std::array<uint8_t,11>>& ots,  // OT names
+    const std::vector<std::array<uint8_t,11>>& nicks) // nicknames
+{
+    auto sav = make_valid_sram();
+    uint8_t* d = sav.data();
+
+    d[PARTY_COUNT] = count;
+    for (uint8_t i = 0; i < count; ++i) {
+        d[PARTY_SPECIES + i] = mons[i][0]; // species from struct
+    }
+    d[PARTY_SPECIES + count] = 0xFF; // terminator
+
+    for (uint8_t i = 0; i < count; ++i) {
+        std::copy(mons[i].begin(), mons[i].end(), d + PARTY_MON_1 + i * 48);
+        std::copy(ots[i].begin(),  ots[i].end(),  d + PARTY_OT_NAMES  + i * 11);
+        std::copy(nicks[i].begin(),nicks[i].end(), d + PARTY_NICKNAMES + i * 11);
+    }
+
+    // Rebuild checksums
+    auto cs = [&](uint32_t b, uint32_t e) -> uint16_t {
+        uint16_t s = 0; for (uint32_t i = b; i <= e; ++i) s += d[i]; return s; };
+    d[PRIMARY_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+    d[PRIMARY_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+    uint16_t pcs = cs(PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END);
+    d[PRIMARY_CHECKSUM] = static_cast<uint8_t>(pcs & 0xFF);
+    d[PRIMARY_CHECKSUM+1] = static_cast<uint8_t>(pcs >> 8);
+    std::copy(d+PRIMARY_GAME_DATA, d+PRIMARY_GAME_DATA+CHECKSUM_REGION_SIZE, d+BACKUP_GAME_DATA);
+    std::copy(d+PRIMARY_OPTIONS, d+PRIMARY_OPTIONS+PRIMARY_OPTIONS_SIZE, d+BACKUP_OPTIONS);
+    d[BACKUP_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+    d[BACKUP_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+    uint16_t bcs = cs(BACKUP_GAME_DATA, BACKUP_CHECKSUM_END);
+    d[BACKUP_CHECKSUM] = static_cast<uint8_t>(bcs & 0xFF);
+    d[BACKUP_CHECKSUM+1] = static_cast<uint8_t>(bcs >> 8);
+    return sav;
+}
+
+// Crystal charmap for "PIKA" (P=0x8F, I=0x88, K=0x8A, A=0x80, term=0x50)
+static std::array<uint8_t,11> make_ot_name(const char* crystal_bytes) {
+    std::array<uint8_t,11> buf;
+    buf.fill(0x50);
+    for (int i = 0; i < 11 && crystal_bytes[i]; ++i) buf[i] = static_cast<uint8_t>(crystal_bytes[i]);
+    return buf;
+}
+
+// ── 1-mon import ─────────────────────────────────────────────────────────────
+
+TEST(p3a_one_mon_import_basic_fields) {
+    std::array<uint8_t,48> mon; mon.fill(0);
+    // Charizard (species 6), Charcoal (item 0xA8 tentative, use 1 for test), moves: Flamethrower=53,Fire Spin=83,Cut=15,Slash=163
+    // Use simple known values
+    make_party_struct(mon.data(),
+        6,    // species = Charizard
+        1,    // held item = Master Ball (just testing round-trip)
+        53,   // move 0 = Flamethrower
+        50,   // level
+        12345, // OT_ID LE
+        5000,  // exp BE
+        0x0200,// HP exp LE = 512
+        0xF3F7,// DVs LE: byte[21]=0xF7=ATK15|DEF7, byte[22]=0xF3=SPD15|SPC3
+        (2u<<6)|20u, // pp[0]: 2 PP Ups, 20 current PP
+        200,   // happiness
+        (2u<<6)|40u, // caught_time=day(2), caught_level=40
+        (1u<<7)|16u, // caught_by_boy=true, location=16
+        0,     // no status
+        180, 230, 260);  // HP=180 BE, MaxHP=230 BE, ATK=260 BE
+
+    std::array<uint8_t,11> ot;  ot.fill(0x50);
+    // "ASH" in Crystal charmap: A=0x80, S=0x92, H=0x87
+    ot[0]=0x80; ot[1]=0x92; ot[2]=0x87;
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    // "CHARCOAL" won't fit in 10 chars → use "CHAR": C=0x82,H=0x87,A=0x80,R=0x91
+    nick[0]=0x82; nick[1]=0x87; nick[2]=0x80; nick[3]=0x91;
+
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& pm = imp.snapshot.party.party_mons[0];
+
+    ASSERT_EQ(imp.snapshot.party.party_count, 1u);
+    ASSERT_EQ(pm.species, 6u);
+    ASSERT_EQ(pm.item, 1u);
+    ASSERT_EQ(pm.moves[0], 53u);
+    ASSERT_EQ(pm.level, 50u);
+    ASSERT_EQ(pm.ot_id, 12345u);
+    ASSERT_EQ(pm.exp, 5000u);
+    ASSERT_EQ(pm.stat_exp_hp, 0x0200u);
+    ASSERT_EQ(pm.dvs.atk, 15u);
+    ASSERT_EQ(pm.dvs.def,  7u);
+    ASSERT_EQ(pm.dvs.spd, 15u);
+    ASSERT_EQ(pm.dvs.spc,  3u);
+    ASSERT_EQ(pm.pp_ups[0], 2u);
+    ASSERT_EQ(pm.pp[0],    20u);
+    ASSERT_EQ(pm.happiness, 200u);
+    ASSERT_TRUE(pm.caught.caught_by_boy);
+    ASSERT_EQ(pm.caught.time_of_day,  2u);  // day
+    ASSERT_EQ(pm.caught.caught_level, 40u);
+    ASSERT_EQ(pm.caught.location,     16u);
+    ASSERT_EQ(pm.current_hp, 180u);
+    ASSERT_EQ(pm.max_hp,     230u);
+    ASSERT_EQ(pm.stat_atk,   260u);
+    ASSERT_TRUE(pm.ot_name == "ASH");
+    ASSERT_TRUE(pm.nickname == "CHAR");
+}
+
+// ── Species/move/item ID translation boundary ────────────────────────────────
+
+TEST(p3a_max_valid_species_accepted) {
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0] = 251; // Celebi — maximum valid species
+    mon[31] = 5;  // level
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.party.party_mons[0].species, 251u);
+}
+
+TEST(p3a_egg_species_accepted) {
+    // EGG = 254 is a valid species sentinel
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0] = 254; // EGG
+    mon[31] = 5;
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.party.party_mons[0].species, 254u);
+}
+
+TEST(p3a_invalid_species_zero_rejected) {
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0] = 0;  // species 0 = invalid
+    mon[31] = 5;
+    // Species list must also be 0 to trigger the struct check
+    // Build manually: species list says species[0]=0 → struct check fires
+    auto sav = make_valid_sram();
+    uint8_t* d = sav.data();
+    d[PARTY_COUNT] = 1;
+    d[PARTY_SPECIES + 0] = 0;  // invalid
+    d[PARTY_SPECIES + 1] = 0xFF;
+    std::copy(mon.begin(), mon.end(), d + PARTY_MON_1);
+    // Rebuild checksums
+    auto cs = [&](uint32_t b, uint32_t e) -> uint16_t {
+        uint16_t s = 0; for (uint32_t i = b; i <= e; ++i) s += d[i]; return s; };
+    d[PRIMARY_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+    d[PRIMARY_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+    uint16_t pcs = cs(PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END);
+    d[PRIMARY_CHECKSUM] = static_cast<uint8_t>(pcs&0xFF);
+    d[PRIMARY_CHECKSUM+1] = static_cast<uint8_t>(pcs>>8);
+    std::copy(d+PRIMARY_GAME_DATA,d+PRIMARY_GAME_DATA+CHECKSUM_REGION_SIZE,d+BACKUP_GAME_DATA);
+    std::copy(d+PRIMARY_OPTIONS,d+PRIMARY_OPTIONS+PRIMARY_OPTIONS_SIZE,d+BACKUP_OPTIONS);
+    d[BACKUP_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+    d[BACKUP_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+    uint16_t bcs = cs(BACKUP_GAME_DATA, BACKUP_CHECKSUM_END);
+    d[BACKUP_CHECKSUM] = static_cast<uint8_t>(bcs&0xFF);
+    d[BACKUP_CHECKSUM+1] = static_cast<uint8_t>(bcs>>8);
+    ASSERT_THROWS(import_save(sav), SaveImportError);
+}
+
+TEST(p3a_invalid_party_count_rejected) {
+    auto sav = make_valid_sram();
+    uint8_t* d = sav.data();
+    d[PARTY_COUNT] = 7;  // > PARTY_LENGTH = 6
+    auto cs = [&](uint32_t b, uint32_t e) -> uint16_t {
+        uint16_t s = 0; for (uint32_t i = b; i <= e; ++i) s += d[i]; return s; };
+    d[PRIMARY_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+    d[PRIMARY_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+    uint16_t pcs = cs(PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END);
+    d[PRIMARY_CHECKSUM] = static_cast<uint8_t>(pcs&0xFF);
+    d[PRIMARY_CHECKSUM+1] = static_cast<uint8_t>(pcs>>8);
+    std::copy(d+PRIMARY_GAME_DATA,d+PRIMARY_GAME_DATA+CHECKSUM_REGION_SIZE,d+BACKUP_GAME_DATA);
+    std::copy(d+PRIMARY_OPTIONS,d+PRIMARY_OPTIONS+PRIMARY_OPTIONS_SIZE,d+BACKUP_OPTIONS);
+    d[BACKUP_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+    d[BACKUP_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+    uint16_t bcs = cs(BACKUP_GAME_DATA, BACKUP_CHECKSUM_END);
+    d[BACKUP_CHECKSUM] = static_cast<uint8_t>(bcs&0xFF);
+    d[BACKUP_CHECKSUM+1] = static_cast<uint8_t>(bcs>>8);
+    ASSERT_THROWS(import_save(sav), SaveImportError);
+}
+
+TEST(p3a_empty_party_accepted) {
+    auto sav = make_valid_sram();  // wPartyCount = 0 by default
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.party.party_count, 0u);
+}
+
+// ── PP and PP Ups packing ─────────────────────────────────────────────────────
+
+TEST(p3a_pp_up_packing_round_trips) {
+    // PP byte: bits 7-6 = PP Up count (0-3), bits 5-0 = current PP
+    // Source: constants/pokemon_data_constants.asm PP_UP_MASK, PP_MASK
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0] = 1; mon[31] = 5;
+    // move 0: pp_ups=3, pp=35
+    mon[2]  = 1;   // Pound move ID
+    mon[23] = static_cast<uint8_t>((3u << 6) | 35u);  // 0xE3 = 0b11100011
+    // move 1: pp_ups=0, pp=5
+    mon[3]  = 2;
+    mon[24] = static_cast<uint8_t>((0u << 6) | 5u);
+
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& pm = imp.snapshot.party.party_mons[0];
+    ASSERT_EQ(pm.pp_ups[0], 3u);
+    ASSERT_EQ(pm.pp[0],    35u);
+    ASSERT_EQ(pm.pp_ups[1], 0u);
+    ASSERT_EQ(pm.pp[1],     5u);
+
+    // Round-trip: export and re-import
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_MON_1 + 23], static_cast<uint8_t>((3u<<6)|35u));
+    ASSERT_EQ(out[PARTY_MON_1 + 24], static_cast<uint8_t>((0u<<6)| 5u));
+
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.party.party_mons[0].pp_ups[0], 3u);
+    ASSERT_EQ(reimp.snapshot.party.party_mons[0].pp[0],    35u);
+}
+
+// ── DVs ──────────────────────────────────────────────────────────────────────
+
+TEST(p3a_dvs_decode_and_encode) {
+    // DVs: byte[21]=ATK(7-4)|DEF(3-0), byte[22]=SPD(7-4)|SPC(3-0)
+    // ATK=15,DEF=7 → byte0=0xF7;  SPD=15,SPC=3 → byte1=0xF3
+    // HP DV = (ATK&1)<<3|(DEF&1)<<2|(SPD&1)<<1|(SPC&1) = 1<<3|1<<2|1<<1|1 = 0xF (15)
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=5;
+    mon[21] = 0xF7;  // ATK=15, DEF=7
+    mon[22] = 0xF3;  // SPD=15, SPC=3
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& dvs = imp.snapshot.party.party_mons[0].dvs;
+    ASSERT_EQ(dvs.atk, 15u);
+    ASSERT_EQ(dvs.def,  7u);
+    ASSERT_EQ(dvs.spd, 15u);
+    ASSERT_EQ(dvs.spc,  3u);
+    ASSERT_EQ(dvs.hp_dv(), 15u);  // all odd → HP DV = 15
+
+    // Export and verify raw bytes
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_MON_1 + 21], 0xF7u);
+    ASSERT_EQ(out[PARTY_MON_1 + 22], 0xF3u);
+}
+
+TEST(p3a_dvs_all_zero) {
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=5;
+    // DVs all zero
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& dvs = imp.snapshot.party.party_mons[0].dvs;
+    ASSERT_EQ(dvs.atk, 0u);
+    ASSERT_EQ(dvs.def, 0u);
+    ASSERT_EQ(dvs.hp_dv(), 0u);
+}
+
+// ── EXP big-endian ────────────────────────────────────────────────────────────
+
+TEST(p3a_exp_big_endian_encoding) {
+    // EXP = 1 000 000 (0x0F4240) stored as 3 bytes BE: 0x0F, 0x42, 0x40
+    // Source: move_mon.asm GiveExp stores hMultiplicand[0..2] sequentially (BE)
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=50;
+    mon[8] = 0x0F; mon[9] = 0x42; mon[10] = 0x40;  // EXP = 1 000 000 BE
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.party.party_mons[0].exp, 1000000u);
+
+    // Export and verify raw bytes preserved
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_MON_1 + 8],  0x0Fu);
+    ASSERT_EQ(out[PARTY_MON_1 + 9],  0x42u);
+    ASSERT_EQ(out[PARTY_MON_1 + 10], 0x40u);
+}
+
+// ── Stat EXP LE ───────────────────────────────────────────────────────────────
+
+TEST(p3a_stat_exp_little_endian) {
+    // stat_exp_hp = 0x0200 stored LE: byte[11]=0x00, byte[12]=0x02
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=5;
+    mon[11] = 0x00; mon[12] = 0x02;  // HP EXP = 512 LE
+    mon[13] = 0xFF; mon[14] = 0x01;  // ATK EXP = 0x01FF = 511 LE
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& pm = imp.snapshot.party.party_mons[0];
+    ASSERT_EQ(pm.stat_exp_hp,  512u);
+    ASSERT_EQ(pm.stat_exp_atk, 511u);
+
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_MON_1 + 11], 0x00u);
+    ASSERT_EQ(out[PARTY_MON_1 + 12], 0x02u);
+    ASSERT_EQ(out[PARTY_MON_1 + 13], 0xFFu);
+    ASSERT_EQ(out[PARTY_MON_1 + 14], 0x01u);
+}
+
+// ── Stats big-endian ─────────────────────────────────────────────────────────
+
+TEST(p3a_stats_big_endian_encoding) {
+    // Stats are big-endian (CalcMonStats stores hMultiplicand[1] as high byte)
+    // MaxHP=230: byte[36]=0x00, byte[37]=0xE6
+    // ATK=260:   byte[38]=0x01, byte[39]=0x04
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=50;
+    mon[34]=0x00; mon[35]=0xB4;  // HP=180 BE
+    mon[36]=0x00; mon[37]=0xE6;  // MaxHP=230 BE
+    mon[38]=0x01; mon[39]=0x04;  // ATK=260 BE
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& pm = imp.snapshot.party.party_mons[0];
+    ASSERT_EQ(pm.current_hp, 180u);
+    ASSERT_EQ(pm.max_hp,     230u);
+    ASSERT_EQ(pm.stat_atk,   260u);
+
+    // Export: verify raw BE bytes
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_MON_1 + 34], 0x00u);
+    ASSERT_EQ(out[PARTY_MON_1 + 35], 0xB4u);
+    ASSERT_EQ(out[PARTY_MON_1 + 36], 0x00u);
+    ASSERT_EQ(out[PARTY_MON_1 + 37], 0xE6u);
+    ASSERT_EQ(out[PARTY_MON_1 + 38], 0x01u);
+    ASSERT_EQ(out[PARTY_MON_1 + 39], 0x04u);
+}
+
+// ── Caught data ───────────────────────────────────────────────────────────────
+
+TEST(p3a_caught_data_decode_encode) {
+    // caught_time_level byte: bits7-6=time, bits5-0=level
+    // caught_gender_location: bit7=gender(1=boy), bits6-0=location
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=5;
+    mon[29] = static_cast<uint8_t>((3u<<6) | 25u); // night(3), level 25
+    mon[30] = static_cast<uint8_t>((1u<<7) | 42u); // boy, location 42
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& c = imp.snapshot.party.party_mons[0].caught;
+    ASSERT_EQ(c.time_of_day,  3u);  // night
+    ASSERT_EQ(c.caught_level, 25u);
+    ASSERT_TRUE(c.caught_by_boy);
+    ASSERT_EQ(c.location, 42u);
+
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_MON_1 + 29], static_cast<uint8_t>((3u<<6)|25u));
+    ASSERT_EQ(out[PARTY_MON_1 + 30], static_cast<uint8_t>((1u<<7)|42u));
+}
+
+// ── Status and current HP ─────────────────────────────────────────────────────
+
+TEST(p3a_status_and_current_hp_round_trip) {
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=50;
+    mon[32] = 0x28;  // BRN = bit 3 + something, arbitrary status byte
+    mon[34] = 0x00; mon[35] = 0x64;  // HP=100 BE
+    mon[36] = 0x00; mon[37] = 0xC8;  // MaxHP=200 BE
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.party.party_mons[0].status,     0x28u);
+    ASSERT_EQ(imp.snapshot.party.party_mons[0].current_hp, 100u);
+    ASSERT_EQ(imp.snapshot.party.party_mons[0].max_hp,     200u);
+
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_MON_1 + 32], 0x28u);
+    ASSERT_EQ(out[PARTY_MON_1 + 34], 0x00u);
+    ASSERT_EQ(out[PARTY_MON_1 + 35], 0x64u);
+}
+
+// ── Nickname and OT charmap round-trip ───────────────────────────────────────
+
+TEST(p3a_nickname_ot_charmap_round_trip) {
+    // "PIKACHU" in Crystal charmap: P=0x8F,I=0x88,K=0x8A,A=0x80,C=0x82,H=0x87,U=0x94
+    // OT "RED": R=0x91,E=0x84,D=0x83
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=25; mon[31]=5; // Pikachu, level 5
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    ot[0]=0x91; ot[1]=0x84; ot[2]=0x83;  // "RED"
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    nick[0]=0x8F; nick[1]=0x88; nick[2]=0x8A;
+    nick[3]=0x80; nick[4]=0x82; nick[5]=0x87; nick[6]=0x94; // "PIKACHU"
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    ASSERT_TRUE(imp.snapshot.party.party_mons[0].ot_name  == "RED");
+    ASSERT_TRUE(imp.snapshot.party.party_mons[0].nickname == "PIKACHU");
+
+    // Export and verify raw bytes
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_OT_NAMES],  0x91u);  // 'R'
+    ASSERT_EQ(out[PARTY_OT_NAMES + 1], 0x84u); // 'E'
+    ASSERT_EQ(out[PARTY_NICKNAMES], 0x8Fu);  // 'P'
+    ASSERT_EQ(out[PARTY_NICKNAMES + 6], 0x94u); // 'U'
+
+    CrystalImport reimp = import_save(out);
+    ASSERT_TRUE(reimp.snapshot.party.party_mons[0].ot_name  == "RED");
+    ASSERT_TRUE(reimp.snapshot.party.party_mons[0].nickname == "PIKACHU");
+}
+
+// ── Full 6-mon party import ───────────────────────────────────────────────────
+
+TEST(p3a_full_six_mon_party_import) {
+    std::vector<std::array<uint8_t,48>> mons(6);
+    std::vector<std::array<uint8_t,11>> ots(6);
+    std::vector<std::array<uint8_t,11>> nicks(6);
+    uint8_t species[] = {1,4,7,152,155,158};  // Bulbasaur,Charmander,Squirtle,Chikorita,Cyndaquil,Totodile
+    for (int i = 0; i < 6; ++i) {
+        mons[i].fill(0);
+        mons[i][0] = species[i];
+        mons[i][31] = static_cast<uint8_t>(5 + i);
+        ots[i].fill(0x50);
+        nicks[i].fill(0x50);
+    }
+    auto sav = make_sram_with_party(6, mons, ots, nicks);
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.party.party_count, 6u);
+    for (int i = 0; i < 6; ++i) {
+        ASSERT_EQ(imp.snapshot.party.party_mons[i].species, species[i]);
+        ASSERT_EQ(imp.snapshot.party.party_mons[i].level,   static_cast<uint8_t>(5 + i));
+    }
+}
+
+// ── Unchanged import→export byte diff ────────────────────────────────────────
+
+TEST(p3a_unchanged_party_roundtrip_no_unowned_byte_drift) {
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=25; mon[31]=50; // Pikachu
+    // Set all stat bytes to known values to verify they round-trip
+    mon[34]=0x00; mon[35]=0x80;  // HP=128
+    mon[36]=0x00; mon[37]=0x80;  // MaxHP=128
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    ot[0]=0x80; // 'A'
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    nick[0]=0x8F; // 'P'
+
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    auto out = export_save(imp.snapshot, imp.shadow);
+
+    // Every party byte must be identical between original and exported
+    for (uint32_t i = 0; i < 48u; ++i) {
+        if (out[PARTY_MON_1 + i] != sav[PARTY_MON_1 + i]) {
+            throw std::runtime_error("party mon byte mismatch at offset " + std::to_string(i));
+        }
+    }
+    for (uint32_t i = 0; i < 11u; ++i) {
+        if (out[PARTY_OT_NAMES  + i] != sav[PARTY_OT_NAMES  + i]) {
+            throw std::runtime_error("OT name byte mismatch at offset " + std::to_string(i));
+        }
+        if (out[PARTY_NICKNAMES + i] != sav[PARTY_NICKNAMES + i]) {
+            throw std::runtime_error("nickname byte mismatch at offset " + std::to_string(i));
+        }
+    }
+}
+
+// ── Semantic edit produces expected SRAM bytes ────────────────────────────────
+
+TEST(p3a_semantic_edit_changes_expected_bytes) {
+    // Import, change species and happiness, export, verify raw bytes changed.
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=5; mon[27]=50;  // Bulbasaur, happiness=50
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+
+    // Edit species and happiness
+    imp.snapshot.party.party_mons[0].species   = 4;   // Charmander
+    imp.snapshot.party.party_mons[0].happiness = 200;
+
+    auto out = export_save(imp.snapshot, imp.shadow);
+    // Species byte at struct+0 and in species list
+    ASSERT_EQ(out[PARTY_MON_1 + 0], 4u);
+    ASSERT_EQ(out[PARTY_SPECIES],   4u);
+    // Happiness at struct+27
+    ASSERT_EQ(out[PARTY_MON_1 + 27], 200u);
+    // Everything else unchanged (spot check: level)
+    ASSERT_EQ(out[PARTY_MON_1 + 31], 5u);
+
+    // Re-import: species and happiness match
+    CrystalImport reimp = import_save(out);
+    ASSERT_EQ(reimp.snapshot.party.party_mons[0].species,   4u);
+    ASSERT_EQ(reimp.snapshot.party.party_mons[0].happiness, 200u);
+}
+
+// ── Unrepresentable native Pokémon rejected on export ────────────────────────
+
+TEST(p3a_export_invalid_species_rejected) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.party.party_count = 1;
+    imp.snapshot.party.party_mons[0].species = 252;  // invalid for Crystal v1.1 (>251, not EGG)
+    imp.snapshot.party.party_mons[0].level   = 5;
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow), SaveExportError);
+}
+
+TEST(p3a_export_invalid_party_count_rejected) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.party.party_count = 7;  // > PARTY_LENGTH = 6
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow), SaveExportError);
+}
+
+TEST(p3a_export_dv_out_of_range_rejected) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.party.party_count = 1;
+    imp.snapshot.party.party_mons[0].species = 1;
+    imp.snapshot.party.party_mons[0].level   = 5;
+    imp.snapshot.party.party_mons[0].dvs.atk = 16;  // > 15, invalid
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow), SaveExportError);
+}
+
+TEST(p3a_export_unrepresentable_name_rejected) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    imp.snapshot.party.party_count = 1;
+    imp.snapshot.party.party_mons[0].species  = 1;
+    imp.snapshot.party.party_mons[0].level    = 5;
+    imp.snapshot.party.party_mons[0].nickname = "\xE2\x98\x80"; // ☀ not in Crystal charmap
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow), SaveExportError);
+}
+
 // PHASE 1 CLOSURE: Symbol-derived offsets, backup boundaries, SRAM identity
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1474,6 +2072,30 @@ int main() {
     RUN(p2_dst_flag_round_trips);
     RUN(p2_unowned_bytes_unchanged_on_roundtrip);
     RUN(p2_wrong_profile_rejects_p2_export);
+
+    std::cout << "\n-- Phase 3A: party Pokémon --\n";
+    RUN(p3a_one_mon_import_basic_fields);
+    RUN(p3a_max_valid_species_accepted);
+    RUN(p3a_egg_species_accepted);
+    RUN(p3a_invalid_species_zero_rejected);
+    RUN(p3a_invalid_party_count_rejected);
+    RUN(p3a_empty_party_accepted);
+    RUN(p3a_pp_up_packing_round_trips);
+    RUN(p3a_dvs_decode_and_encode);
+    RUN(p3a_dvs_all_zero);
+    RUN(p3a_exp_big_endian_encoding);
+    RUN(p3a_stat_exp_little_endian);
+    RUN(p3a_stats_big_endian_encoding);
+    RUN(p3a_caught_data_decode_encode);
+    RUN(p3a_status_and_current_hp_round_trip);
+    RUN(p3a_nickname_ot_charmap_round_trip);
+    RUN(p3a_full_six_mon_party_import);
+    RUN(p3a_unchanged_party_roundtrip_no_unowned_byte_drift);
+    RUN(p3a_semantic_edit_changes_expected_bytes);
+    RUN(p3a_export_invalid_species_rejected);
+    RUN(p3a_export_invalid_party_count_rejected);
+    RUN(p3a_export_dv_out_of_range_rejected);
+    RUN(p3a_export_unrepresentable_name_rejected);
 
     std::cout << "\n-- Phase 1 closure: symbol-derived offsets, backup boundaries, SRAM identity --\n";    RUN(symbol_derived_offsets_match_expected_layout);
     RUN(event_flags_offset_is_sym_derived_value);
