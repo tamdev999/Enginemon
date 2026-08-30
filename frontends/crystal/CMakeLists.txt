@@ -38,6 +38,10 @@ add_library(enginemon_crystal STATIC
     script/trainer_registry.cpp
     script/pokemail_registry.cpp
     script/text_registry.cpp
+
+    # Crystal .sav codec (Phase 1 foundation)
+    save/crystal_save_reader.cpp
+    save/crystal_save_writer.cpp
 )
 
 # TODO: Add these as they're implemented

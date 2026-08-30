@@ -142,6 +142,25 @@ target_link_libraries(linker_diagnostic PRIVATE
     enginemon_engine
 )
 
+# Crystal .sav codec Phase 1 tests
+# Tests all 10 required categories: valid import, checksum corruption, backup recovery,
+# size rejection, round-trip shadow preservation, field independence, export fidelity, UB safety.
+# Does NOT require a ROM path argument — runs standalone.
+add_executable(crystal_save_test
+    crystal/crystal_save_test.cpp
+)
+target_link_libraries(crystal_save_test PRIVATE
+    enginemon_crystal
+)
+target_include_directories(crystal_save_test PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/frontends/crystal
+)
+if(MSVC)
+    target_compile_options(crystal_save_test PRIVATE /W4 /wd4566)
+endif()
+# Not added to ctest - standalone binary
+
 # Compiler integrity tests (fail-open adversarial tests for asset and map discovery)
 add_executable(compiler_integrity_test
     crystal/compiler_integrity_test.cpp
