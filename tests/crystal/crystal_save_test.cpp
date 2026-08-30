@@ -1145,7 +1145,7 @@ static void make_party_struct(
     uint8_t level,
     uint16_t ot_id,      // LE
     uint32_t exp,        // 3-byte BE
-    uint16_t hp_exp_le,  // LE
+    uint16_t hp_exp_be,  // BE
     uint16_t dvs_le,     // byte0=ATK|DEF nibbles, byte1=SPD|SPC nibbles, LE
     uint8_t  pp_byte0,   // bits7-6=pp_ups, bits5-0=pp
     uint8_t  happiness,
@@ -1167,9 +1167,9 @@ static void make_party_struct(
     s[8]  = static_cast<uint8_t>((exp >> 16) & 0xFF);
     s[9]  = static_cast<uint8_t>((exp >>  8) & 0xFF);
     s[10] = static_cast<uint8_t>( exp        & 0xFF);
-    // stat exp HP LE
-    s[11] = static_cast<uint8_t>(hp_exp_le & 0xFF);
-    s[12] = static_cast<uint8_t>(hp_exp_le >> 8);
+    // stat exp HP BE
+    s[11] = static_cast<uint8_t>(hp_exp_be >> 8);
+    s[12] = static_cast<uint8_t>(hp_exp_be & 0xFF);
     // DVs LE
     s[21] = static_cast<uint8_t>(dvs_le & 0xFF);
     s[22] = static_cast<uint8_t>(dvs_le >> 8);
@@ -1252,7 +1252,7 @@ TEST(p3a_one_mon_import_basic_fields) {
         50,   // level
         12345, // OT_ID LE
         5000,  // exp BE
-        0x0200,// HP exp LE = 512
+        0x0200,// HP exp BE = 512
         0xF3F7,// DVs LE: byte[21]=0xF7=ATK15|DEF7, byte[22]=0xF3=SPD15|SPC3
         (2u<<6)|20u, // pp[0]: 2 PP Ups, 20 current PP
         200,   // happiness
@@ -1478,25 +1478,102 @@ TEST(p3a_exp_big_endian_encoding) {
 
 // ── Stat EXP LE ───────────────────────────────────────────────────────────────
 
-TEST(p3a_stat_exp_little_endian) {
-    // stat_exp_hp = 0x0200 stored LE: byte[11]=0x00, byte[12]=0x02
+// Stat EXP is stored as big-endian u16 in Crystal SRAM.
+// Evidence: suiCune move_mon.c BigEndianToNative16(statExp[c]);
+//           CalcMonStatC reads [hld]=low addr=HIGH byte then [hl]=high addr=LOW byte → DE = HIGH<<8|LOW.
+
+TEST(p3a_stat_exp_big_endian_raw_bytes) {
+    // SRAM bytes 0x02 0x00 → semantic value 0x0200 = 512 (big-endian)
+    // If LE were used: 0x02 0x00 LE = 2, NOT 512
     std::array<uint8_t,48> mon; mon.fill(0);
     mon[0]=1; mon[31]=5;
-    mon[11] = 0x00; mon[12] = 0x02;  // HP EXP = 512 LE
-    mon[13] = 0xFF; mon[14] = 0x01;  // ATK EXP = 0x01FF = 511 LE
+    mon[11] = 0x02; mon[12] = 0x00;  // HP EXP = 0x0200 = 512 BE
     std::array<uint8_t,11> ot; ot.fill(0x50);
     std::array<uint8_t,11> nick; nick.fill(0x50);
     auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
     CrystalImport imp = import_save(sav);
     const auto& pm = imp.snapshot.party.party_mons[0];
-    ASSERT_EQ(pm.stat_exp_hp,  512u);
-    ASSERT_EQ(pm.stat_exp_atk, 511u);
+    ASSERT_EQ(pm.stat_exp_hp, 512u);  // 0x0200 BE
 
+    // Export: semantic 512 → SRAM bytes 0x02 0x00
     auto out = export_save(imp.snapshot, imp.shadow);
-    ASSERT_EQ(out[PARTY_MON_1 + 11], 0x00u);
-    ASSERT_EQ(out[PARTY_MON_1 + 12], 0x02u);
-    ASSERT_EQ(out[PARTY_MON_1 + 13], 0xFFu);
-    ASSERT_EQ(out[PARTY_MON_1 + 14], 0x01u);
+    ASSERT_EQ(out[PARTY_MON_1 + 11], 0x02u);  // HIGH byte first (BE)
+    ASSERT_EQ(out[PARTY_MON_1 + 12], 0x00u);  // LOW byte second
+}
+
+TEST(p3a_stat_exp_be_decode_0x1234) {
+    // SRAM bytes 0x12 0x34 → semantic value 0x1234 = 4660 (big-endian)
+    // LE interpretation would give 0x3412 = 13330 — wrong
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=5;
+    mon[11] = 0x12; mon[12] = 0x34;  // HP EXP BE
+    mon[13] = 0x56; mon[14] = 0x78;  // ATK EXP BE
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& pm = imp.snapshot.party.party_mons[0];
+    ASSERT_EQ(pm.stat_exp_hp,  0x1234u);
+    ASSERT_EQ(pm.stat_exp_atk, 0x5678u);
+}
+
+TEST(p3a_stat_exp_all_five_fields_be) {
+    // All five stat EXP fields independently use big-endian layout.
+    // Layout bytes [11..20]: HP[11-12] ATK[13-14] DEF[15-16] SPD[17-18] SPC[19-20]
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=1; mon[31]=5;
+    mon[11]=0x01; mon[12]=0x00;  // HP  EXP = 256 BE
+    mon[13]=0x02; mon[14]=0x00;  // ATK EXP = 512 BE
+    mon[15]=0x03; mon[16]=0x00;  // DEF EXP = 768 BE
+    mon[17]=0x04; mon[18]=0x00;  // SPD EXP = 1024 BE
+    mon[19]=0x05; mon[20]=0x00;  // SPC EXP = 1280 BE
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+    const auto& pm = imp.snapshot.party.party_mons[0];
+    ASSERT_EQ(pm.stat_exp_hp,   256u);
+    ASSERT_EQ(pm.stat_exp_atk,  512u);
+    ASSERT_EQ(pm.stat_exp_def,  768u);
+    ASSERT_EQ(pm.stat_exp_spd, 1024u);
+    ASSERT_EQ(pm.stat_exp_spc, 1280u);
+
+    // Export: verify each field exports correct BE byte order
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[PARTY_MON_1 + 11], 0x01u); ASSERT_EQ(out[PARTY_MON_1 + 12], 0x00u);
+    ASSERT_EQ(out[PARTY_MON_1 + 13], 0x02u); ASSERT_EQ(out[PARTY_MON_1 + 14], 0x00u);
+    ASSERT_EQ(out[PARTY_MON_1 + 15], 0x03u); ASSERT_EQ(out[PARTY_MON_1 + 16], 0x00u);
+    ASSERT_EQ(out[PARTY_MON_1 + 17], 0x04u); ASSERT_EQ(out[PARTY_MON_1 + 18], 0x00u);
+    ASSERT_EQ(out[PARTY_MON_1 + 19], 0x05u); ASSERT_EQ(out[PARTY_MON_1 + 20], 0x00u);
+}
+
+TEST(p3a_stat_exp_round_trip_unchanged) {
+    // Representative party with non-trivial (non-symmetric) stat EXP values.
+    // Import → export with NO edits → every stat EXP byte must be identical.
+    // Regression guard: a symmetric-but-wrong LE/BE bug would still round-trip
+    // correctly only for values where byte0 == byte1; non-trivial values expose it.
+    std::array<uint8_t,48> mon; mon.fill(0);
+    mon[0]=25; mon[31]=30;   // Pikachu, level 30
+    // Non-symmetric BE values: HIGH != LOW
+    mon[11]=0x01; mon[12]=0xF4;  // HP  EXP = 500 BE
+    mon[13]=0x01; mon[14]=0xC8;  // ATK EXP = 456 BE
+    mon[15]=0x01; mon[16]=0x90;  // DEF EXP = 400 BE
+    mon[17]=0x01; mon[18]=0x2C;  // SPD EXP = 300 BE
+    mon[19]=0x00; mon[20]=0x64;  // SPC EXP = 100 BE
+    std::array<uint8_t,11> ot; ot.fill(0x50);
+    std::array<uint8_t,11> nick; nick.fill(0x50);
+    auto sav = make_sram_with_party(1, {mon}, {ot}, {nick});
+    CrystalImport imp = import_save(sav);
+
+    // Export unchanged
+    auto out = export_save(imp.snapshot, imp.shadow);
+
+    // Every stat EXP byte must be byte-identical to the input
+    ASSERT_EQ(out[PARTY_MON_1 + 11], 0x01u); ASSERT_EQ(out[PARTY_MON_1 + 12], 0xF4u);
+    ASSERT_EQ(out[PARTY_MON_1 + 13], 0x01u); ASSERT_EQ(out[PARTY_MON_1 + 14], 0xC8u);
+    ASSERT_EQ(out[PARTY_MON_1 + 15], 0x01u); ASSERT_EQ(out[PARTY_MON_1 + 16], 0x90u);
+    ASSERT_EQ(out[PARTY_MON_1 + 17], 0x01u); ASSERT_EQ(out[PARTY_MON_1 + 18], 0x2Cu);
+    ASSERT_EQ(out[PARTY_MON_1 + 19], 0x00u); ASSERT_EQ(out[PARTY_MON_1 + 20], 0x64u);
 }
 
 // ── Stats big-endian ─────────────────────────────────────────────────────────
@@ -2084,7 +2161,10 @@ int main() {
     RUN(p3a_dvs_decode_and_encode);
     RUN(p3a_dvs_all_zero);
     RUN(p3a_exp_big_endian_encoding);
-    RUN(p3a_stat_exp_little_endian);
+    RUN(p3a_stat_exp_big_endian_raw_bytes);
+    RUN(p3a_stat_exp_be_decode_0x1234);
+    RUN(p3a_stat_exp_all_five_fields_be);
+    RUN(p3a_stat_exp_round_trip_unchanged);
     RUN(p3a_stats_big_endian_encoding);
     RUN(p3a_caught_data_decode_encode);
     RUN(p3a_status_and_current_hp_round_trip);

@@ -102,12 +102,15 @@ static CrystalPartyMon decode_one_mon(
           | (static_cast<uint32_t>(s[MON_OFF_EXP + 1]) <<  8)
           | static_cast<uint32_t>(s[MON_OFF_EXP + 2]);
 
-    // Stat EXP: 5 × u16 LE
-    m.stat_exp_hp  = read_u16_le(&s[MON_OFF_HP_EXP]);
-    m.stat_exp_atk = read_u16_le(&s[MON_OFF_ATK_EXP]);
-    m.stat_exp_def = read_u16_le(&s[MON_OFF_DEF_EXP]);
-    m.stat_exp_spd = read_u16_le(&s[MON_OFF_SPD_EXP]);
-    m.stat_exp_spc = read_u16_le(&s[MON_OFF_SPC_EXP]);
+    // Stat EXP: 5 × u16 big-endian
+    // Source: suiCune move_mon.c line 2176: BigEndianToNative16(statExp[c])
+    // CalcMonStatC reads [hld] (higher addr = LOW byte of BE pair) then [hl] (lower addr = HIGH byte),
+    // so DE = HIGH<<8|LOW — correct only if storage is big-endian.
+    m.stat_exp_hp  = read_u16_be(&s[MON_OFF_HP_EXP]);
+    m.stat_exp_atk = read_u16_be(&s[MON_OFF_ATK_EXP]);
+    m.stat_exp_def = read_u16_be(&s[MON_OFF_DEF_EXP]);
+    m.stat_exp_spd = read_u16_be(&s[MON_OFF_SPD_EXP]);
+    m.stat_exp_spc = read_u16_be(&s[MON_OFF_SPC_EXP]);
 
     // DVs: 2-byte LE; byte0 = ATK(7-4)|DEF(3-0), byte1 = SPD(7-4)|SPC(3-0)
     {
@@ -221,12 +224,12 @@ static void encode_one_mon(
     s[MON_OFF_EXP + 1] = static_cast<uint8_t>((m.exp >>  8) & 0xFF);
     s[MON_OFF_EXP + 2] = static_cast<uint8_t>( m.exp        & 0xFF);
 
-    // Stat EXP LE
-    write_u16_le(&s[MON_OFF_HP_EXP],  m.stat_exp_hp);
-    write_u16_le(&s[MON_OFF_ATK_EXP], m.stat_exp_atk);
-    write_u16_le(&s[MON_OFF_DEF_EXP], m.stat_exp_def);
-    write_u16_le(&s[MON_OFF_SPD_EXP], m.stat_exp_spd);
-    write_u16_le(&s[MON_OFF_SPC_EXP], m.stat_exp_spc);
+    // Stat EXP big-endian
+    write_u16_be(&s[MON_OFF_HP_EXP],  m.stat_exp_hp);
+    write_u16_be(&s[MON_OFF_ATK_EXP], m.stat_exp_atk);
+    write_u16_be(&s[MON_OFF_DEF_EXP], m.stat_exp_def);
+    write_u16_be(&s[MON_OFF_SPD_EXP], m.stat_exp_spd);
+    write_u16_be(&s[MON_OFF_SPC_EXP], m.stat_exp_spc);
 
     // DVs LE
     if (m.dvs.atk > 15 || m.dvs.def > 15 || m.dvs.spd > 15 || m.dvs.spc > 15) {
