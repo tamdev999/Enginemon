@@ -749,7 +749,7 @@ static std::vector<uint8_t> make_p2_sram(
     d[GAME_TIME_HOURS + 1] = static_cast<uint8_t>(hours & 0xFF);
     d[GAME_TIME_MINUTES]   = mins;
     d[GAME_TIME_SECONDS]   = secs;
-    if (capped) d[GAME_TIME_CAP] |= 0x80;
+    if (capped) d[GAME_TIME_CAP] |= 0x01;  // GAME_TIME_CAPPED EQU 0 = bit 0
     // RTC
     d[RTC_BYTES + 0] = rtc_day;
     d[RTC_BYTES + 1] = rtc_hour;
@@ -961,6 +961,112 @@ TEST(p2_playtime_capped_flag_round_trips) {
     auto out = export_save(imp.snapshot, imp.shadow);
     CrystalImport reimp = import_save(out);
     ASSERT_TRUE(reimp.snapshot.playtime_capped);
+}
+
+// Raw GAME_TIME_CAP byte tests — verify bit 0 is used (GAME_TIME_CAPPED EQU 0).
+
+TEST(p2_playtime_capped_sets_bit0_in_raw_sram) {
+    // capped=true  → GAME_TIME_CAP byte must have bit 0 set
+    auto sav = make_p2_sram(1, "RED", 0, 24, 4, 0, 0, 999, 59, 59, true);
+    CrystalImport imp = import_save(sav);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_TRUE((out[GAME_TIME_CAP] & 0x01) != 0);   // bit 0 set
+    ASSERT_TRUE((out[GAME_TIME_CAP] & 0x80) == 0);   // bit 7 clear (NOT the old wrong bit)
+}
+
+TEST(p2_playtime_uncapped_clears_bit0_in_raw_sram) {
+    // capped=false → GAME_TIME_CAP byte must have bit 0 clear
+    auto sav = make_p2_sram(1, "RED", 0, 24, 4, 0, 0, 50, 20, 10, false);
+    CrystalImport imp = import_save(sav);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_TRUE((out[GAME_TIME_CAP] & 0x01) == 0);   // bit 0 clear
+}
+
+TEST(p2_playtime_capped_unrelated_bits_preserved) {
+    // Bits other than bit 0 in GAME_TIME_CAP must survive the export unchanged.
+    // We set bits 1 and 2 in the shadow before import/export.
+    auto sav = make_valid_sram();
+    // Patch GAME_TIME_CAP with bits 1 and 2 set (not bit 0, not bit 7)
+    sav[GAME_TIME_CAP] = 0x06;   // bits 1 and 2
+    // Rebuild checksums after the patch
+    {
+        uint8_t* d = sav.data();
+        auto cs = [&](uint32_t b, uint32_t e) -> uint16_t {
+            uint16_t s = 0; for (uint32_t i = b; i <= e; ++i) s += d[i]; return s; };
+        d[PRIMARY_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+        d[PRIMARY_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+        uint16_t pcs = cs(PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END);
+        d[PRIMARY_CHECKSUM] = static_cast<uint8_t>(pcs & 0xFF);
+        d[PRIMARY_CHECKSUM+1] = static_cast<uint8_t>(pcs >> 8);
+        std::copy(d+PRIMARY_GAME_DATA, d+PRIMARY_GAME_DATA+CHECKSUM_REGION_SIZE, d+BACKUP_GAME_DATA);
+        std::copy(d+PRIMARY_OPTIONS, d+PRIMARY_OPTIONS+PRIMARY_OPTIONS_SIZE, d+BACKUP_OPTIONS);
+        d[BACKUP_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+        d[BACKUP_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+        uint16_t bcs = cs(BACKUP_GAME_DATA, BACKUP_CHECKSUM_END);
+        d[BACKUP_CHECKSUM] = static_cast<uint8_t>(bcs & 0xFF);
+        d[BACKUP_CHECKSUM+1] = static_cast<uint8_t>(bcs >> 8);
+    }
+    CrystalImport imp = import_save(sav);
+    ASSERT_TRUE(!(imp.snapshot.playtime_capped));  // bit 0 was not set
+    // Export back (capped still false)
+    auto out = export_save(imp.snapshot, imp.shadow);
+    // Bits 1 and 2 must be preserved, bit 0 must stay 0
+    ASSERT_EQ(out[GAME_TIME_CAP] & 0x06, 0x06u);  // bits 1,2 preserved
+    ASSERT_TRUE((out[GAME_TIME_CAP] & 0x01) == 0); // bit 0 clear
+}
+
+TEST(p2_import_raw_bit0_set_decodes_capped_true) {
+    // A SRAM byte with only bit 0 set → playtime_capped must decode as true.
+    // This is the definitive Crystal-format test: bit 0 = GAME_TIME_CAPPED.
+    auto sav = make_valid_sram();
+    sav[GAME_TIME_CAP] = 0x01;   // only bit 0
+    // Rebuild checksums
+    {
+        uint8_t* d = sav.data();
+        auto cs = [&](uint32_t b, uint32_t e) -> uint16_t {
+            uint16_t s = 0; for (uint32_t i = b; i <= e; ++i) s += d[i]; return s; };
+        d[PRIMARY_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+        d[PRIMARY_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+        uint16_t pcs = cs(PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END);
+        d[PRIMARY_CHECKSUM] = static_cast<uint8_t>(pcs & 0xFF);
+        d[PRIMARY_CHECKSUM+1] = static_cast<uint8_t>(pcs >> 8);
+        std::copy(d+PRIMARY_GAME_DATA, d+PRIMARY_GAME_DATA+CHECKSUM_REGION_SIZE, d+BACKUP_GAME_DATA);
+        std::copy(d+PRIMARY_OPTIONS, d+PRIMARY_OPTIONS+PRIMARY_OPTIONS_SIZE, d+BACKUP_OPTIONS);
+        d[BACKUP_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+        d[BACKUP_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+        uint16_t bcs = cs(BACKUP_GAME_DATA, BACKUP_CHECKSUM_END);
+        d[BACKUP_CHECKSUM] = static_cast<uint8_t>(bcs & 0xFF);
+        d[BACKUP_CHECKSUM+1] = static_cast<uint8_t>(bcs >> 8);
+    }
+    CrystalImport imp = import_save(sav);
+    ASSERT_TRUE(imp.snapshot.playtime_capped);  // bit 0 set → capped
+}
+
+TEST(p2_import_raw_bit7_only_does_not_decode_capped) {
+    // A SRAM byte with only bit 7 set → playtime_capped must decode as FALSE.
+    // Proves the old wrong mask (0x80) is no longer used.
+    auto sav = make_valid_sram();
+    sav[GAME_TIME_CAP] = 0x80;   // only bit 7 (the OLD wrong bit)
+    // Rebuild checksums
+    {
+        uint8_t* d = sav.data();
+        auto cs = [&](uint32_t b, uint32_t e) -> uint16_t {
+            uint16_t s = 0; for (uint32_t i = b; i <= e; ++i) s += d[i]; return s; };
+        d[PRIMARY_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+        d[PRIMARY_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+        uint16_t pcs = cs(PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END);
+        d[PRIMARY_CHECKSUM] = static_cast<uint8_t>(pcs & 0xFF);
+        d[PRIMARY_CHECKSUM+1] = static_cast<uint8_t>(pcs >> 8);
+        std::copy(d+PRIMARY_GAME_DATA, d+PRIMARY_GAME_DATA+CHECKSUM_REGION_SIZE, d+BACKUP_GAME_DATA);
+        std::copy(d+PRIMARY_OPTIONS, d+PRIMARY_OPTIONS+PRIMARY_OPTIONS_SIZE, d+BACKUP_OPTIONS);
+        d[BACKUP_CHECK_VALUE_1] = SAVE_CHECK_VALUE_1;
+        d[BACKUP_CHECK_VALUE_2] = SAVE_CHECK_VALUE_2;
+        uint16_t bcs = cs(BACKUP_GAME_DATA, BACKUP_CHECKSUM_END);
+        d[BACKUP_CHECKSUM] = static_cast<uint8_t>(bcs & 0xFF);
+        d[BACKUP_CHECKSUM+1] = static_cast<uint8_t>(bcs >> 8);
+    }
+    CrystalImport imp = import_save(sav);
+    ASSERT_TRUE(!(imp.snapshot.playtime_capped));  // bit 7 only → NOT capped
 }
 
 // ── RTC / time context ────────────────────────────────────────────────────────
@@ -1359,6 +1465,11 @@ int main() {
     RUN(p2_playtime_big_endian_hours_round_trip);
     RUN(p2_playtime_zero_round_trips);
     RUN(p2_playtime_capped_flag_round_trips);
+    RUN(p2_playtime_capped_sets_bit0_in_raw_sram);
+    RUN(p2_playtime_uncapped_clears_bit0_in_raw_sram);
+    RUN(p2_playtime_capped_unrelated_bits_preserved);
+    RUN(p2_import_raw_bit0_set_decodes_capped_true);
+    RUN(p2_import_raw_bit7_only_does_not_decode_capped);
     RUN(p2_rtc_state_round_trips);
     RUN(p2_dst_flag_round_trips);
     RUN(p2_unowned_bytes_unchanged_on_roundtrip);

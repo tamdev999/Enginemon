@@ -246,8 +246,8 @@ static CrystalSaveSnapshot decode_snapshot(const uint8_t* data, uint32_t adj) {
 
     // ── Phase 2: Play time ───────────────────────────────────────────────────
 
-    // wGameTimeCap: bit 7 = capped flag
-    snap.playtime_capped  = (data[GAME_TIME_CAP - adj] & 0x80) != 0;
+    // wGameTimeCap: bit 0 = capped flag (GAME_TIME_CAPPED EQU 0 from ram_constants.asm)
+    snap.playtime_capped  = (data[GAME_TIME_CAP - adj] & 0x01) != 0;
     // wGameTimeHours: 2 bytes BIG-ENDIAN (suiCune fix 2026-08)
     {
         uint32_t off = GAME_TIME_HOURS - adj;

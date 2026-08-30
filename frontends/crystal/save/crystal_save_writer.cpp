@@ -164,8 +164,9 @@ std::vector<uint8_t> export_save(
 
     // wGameTimeCap: preserve other bits, set/clear bit 7
     {
-        uint8_t cap = data[GAME_TIME_CAP] & 0x7F;
-        if (snapshot.playtime_capped) cap |= 0x80;
+        // wGameTimeCap: bit 0 = capped flag (GAME_TIME_CAPPED EQU 0, ram_constants.asm)
+        uint8_t cap = data[GAME_TIME_CAP] & 0xFE;
+        if (snapshot.playtime_capped) cap |= 0x01;
         data[GAME_TIME_CAP] = cap;
     }
     // wGameTimeHours: 2 bytes BIG-ENDIAN
