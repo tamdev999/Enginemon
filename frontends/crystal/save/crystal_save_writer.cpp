@@ -50,16 +50,19 @@ std::vector<uint8_t> export_save(
     using namespace sram_layout;
 
     // ── Step 0: Identity check. ───────────────────────────────────────────────
-    // If both expected_identity and shadow.identity are non-empty, they must
-    // agree on profile_sha1 and codec_version.  A mismatch means the shadow
-    // was imported under a different ROM/profile layout than the one we would
-    // patch — refuse to corrupt it.
+    // Both fields must agree: profile_sha1, codec_version, and rom_sha1 (when
+    // both sides carry a non-empty ROM SHA).  The default policy is SHA-driven:
+    // one ROM SHA → one profile.  A shadow imported under a different ROM may
+    // not be patched by this export.  If cross-ROM compatibility is ever needed
+    // it must be modelled explicitly rather than silently ignoring rom_sha1.
     if (!expected_identity.empty() && !shadow.identity.empty()) {
         if (shadow.identity != expected_identity) {
             std::string msg = "export_save: SRAM identity mismatch — "
                               "shadow was imported under a different layout.\n"
                               "  shadow profile_sha1   = '" + shadow.identity.profile_sha1 + "'\n"
                               "  expected profile_sha1 = '" + expected_identity.profile_sha1 + "'\n"
+                              "  shadow rom_sha1       = '" + shadow.identity.rom_sha1 + "'\n"
+                              "  expected rom_sha1     = '" + expected_identity.rom_sha1 + "'\n"
                               "  shadow codec_version  = '" + shadow.identity.codec_version + "'\n"
                               "  expected codec_version= '" + expected_identity.codec_version + "'";
             throw SaveExportError(msg);

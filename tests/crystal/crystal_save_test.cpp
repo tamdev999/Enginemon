@@ -855,6 +855,103 @@ TEST(identity_error_message_mentions_both_profiles) {
     }
 }
 
+// Same profile_sha1, different rom_sha1 → reject.
+// The default policy is SHA-driven: one ROM SHA → one profile.
+// A save imported from ROM-A must not be patched as if it came from ROM-B,
+// even when both ROMs share the same layout profile.
+TEST(same_profile_different_rom_sha_rejected) {
+    const std::string profile = "f2f52230b536214ef7c9924f483392993e226cfb";
+    const std::string rom_a   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const std::string rom_b   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    // expected_identity carries the rom_sha1 for ROM-A
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = profile;
+    expected.rom_sha1      = rom_a;
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+
+    // Shadow was imported from ROM-B
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, profile, rom_b);
+
+    // Must reject even though profile_sha1 matches
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow, expected), SaveExportError);
+}
+
+// Exact rom_sha1 match → accept.
+TEST(exact_rom_sha1_identity_accepted) {
+    const std::string profile = "f2f52230b536214ef7c9924f483392993e226cfb";
+    const std::string rom_sha = "f2f52230b536214ef7c9924f483392993e226cfb";
+
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = profile;
+    expected.rom_sha1      = rom_sha;
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, profile, rom_sha);
+
+    ASSERT_NO_THROW(export_save(imp.snapshot, imp.shadow, expected));
+}
+
+// Empty rom_sha1 on shadow (synthetic save) still passes — no ROM was imported.
+TEST(empty_shadow_rom_sha1_skips_rom_check) {
+    const std::string profile = "f2f52230b536214ef7c9924f483392993e226cfb";
+
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = profile;
+    expected.rom_sha1      = "f2f52230b536214ef7c9924f483392993e226cfb";
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+
+    // Shadow imported with no rom_sha1
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, profile, "");
+
+    // rom_sha1 empty on shadow → ROM check skipped → export proceeds
+    ASSERT_NO_THROW(export_save(imp.snapshot, imp.shadow, expected));
+}
+
+// Empty expected rom_sha1 (caller doesn't know/care) → ROM check skipped.
+TEST(empty_expected_rom_sha1_skips_rom_check) {
+    const std::string profile = "f2f52230b536214ef7c9924f483392993e226cfb";
+
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = profile;
+    expected.rom_sha1      = "";   // caller doesn't specify
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, profile,
+                                    "cccccccccccccccccccccccccccccccccccccccc");
+
+    // Expected rom_sha1 is empty → ROM check skipped → export proceeds
+    ASSERT_NO_THROW(export_save(imp.snapshot, imp.shadow, expected));
+}
+
+// Error message must mention both ROM SHAs so the caller knows what conflicted.
+TEST(rom_sha1_mismatch_error_mentions_both_hashes) {
+    const std::string profile = "f2f52230b536214ef7c9924f483392993e226cfb";
+    const std::string rom_a   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const std::string rom_b   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = profile;
+    expected.rom_sha1      = rom_a;
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, profile, rom_b);
+
+    try {
+        export_save(imp.snapshot, imp.shadow, expected);
+        throw std::runtime_error("should have thrown");
+    } catch (const SaveExportError& e) {
+        std::string msg = e.what();
+        ASSERT_TRUE(msg.find(rom_a) != std::string::npos);
+        ASSERT_TRUE(msg.find(rom_b) != std::string::npos);
+    }
+}
+
 // Entry point
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -945,6 +1042,11 @@ int main() {
     RUN(export_with_empty_expected_identity_skips_check);
     RUN(export_with_empty_shadow_identity_skips_check);
     RUN(identity_error_message_mentions_both_profiles);
+    RUN(same_profile_different_rom_sha_rejected);
+    RUN(exact_rom_sha1_identity_accepted);
+    RUN(empty_shadow_rom_sha1_skips_rom_check);
+    RUN(empty_expected_rom_sha1_skips_rom_check);
+    RUN(rom_sha1_mismatch_error_mentions_both_hashes);
 
     std::cout << "\n=== Results: " << g_pass << " PASS  " << g_fail << " FAIL ===\n";
     return (g_fail > 0) ? 1 : 0;

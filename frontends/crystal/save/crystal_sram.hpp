@@ -33,6 +33,7 @@ namespace crystal {
 ///                      SRAM layout (e.g. "f2f52230..." for Crystal v1.1).
 /// - `rom_sha1`:        SHA-1 of the actual source ROM bytes, if known.  May be
 ///                      empty for synthetic/test saves that have no source ROM.
+///                      When non-empty on both sides, a mismatch rejects export.
 /// - `codec_version`:   Save codec version string (e.g. "crystal-save-1.0").
 ///                      Bumped when the Phase-1 owned field set or encoding changes.
 ///
@@ -48,10 +49,15 @@ struct SramIdentity {
     bool empty() const { return profile_sha1.empty(); }
 
     bool operator==(const SramIdentity& o) const {
-        return profile_sha1   == o.profile_sha1
-            && codec_version  == o.codec_version;
-        // rom_sha1 is informational; two saves from compatible ROM hacks
-        // sharing the same profile_sha1 are treated as compatible.
+        // ROM SHA-1 is part of the identity.  The default architecture is
+        // SHA-driven: one ROM SHA maps to exactly one frontend/profile.
+        // Two saves with different rom_sha1 values must not silently share
+        // a shadow — reject unless one side has no ROM SHA (synthetic/test
+        // saves where rom_sha1 was not provided at import time).
+        if (!rom_sha1.empty() && !o.rom_sha1.empty() && rom_sha1 != o.rom_sha1)
+            return false;
+        return profile_sha1  == o.profile_sha1
+            && codec_version == o.codec_version;
     }
     bool operator!=(const SramIdentity& o) const { return !(*this == o); }
 };
