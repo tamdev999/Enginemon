@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <filesystem>
 
 // â”€â”€â”€ Minimal test framework â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -708,6 +709,152 @@ TEST(bcd3_decode_invalid_nibble_rejected) {
 }
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 1 CLOSURE: Symbol-derived offsets, backup boundaries, SRAM identity
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Validates every sram_layout constant against the assembled pokecrystal11.sym.
+// Skipped silently if the sym file is not available (CI without references/).
+TEST(symbol_derived_offsets_match_expected_layout) {
+    auto cwd = std::filesystem::current_path();
+    std::filesystem::path sym_path;
+    for (auto dir = cwd; !dir.empty() && dir != dir.parent_path(); dir = dir.parent_path()) {
+        auto c = dir / "references" / "pokecrystal-symbols" / "pokecrystal11.sym";
+        if (std::filesystem::exists(c)) { sym_path = c; break; }
+    }
+    if (sym_path.empty()) {
+        std::cout << "    [sym file not found - skipping layout validation]\n";
+        return;
+    }
+    std::cout << "    [sym: " << sym_path.string() << "]\n";
+    std::string result = crystal::sram_layout::validate_layout_against_sym(sym_path);
+    if (!result.empty()) throw std::runtime_error(result);
+    std::cout << "    [all layout constants match sym]\n";
+}
+
+TEST(event_flags_offset_is_sym_derived_value) {
+    // sym 01:da72: sav = 0x2009 + (0xDA72 - 0xD47B) = 0x2600
+    ASSERT_EQ(crystal::sram_layout::EVENT_FLAGS, 0x2600u);
+}
+
+TEST(event_flags_at_corrected_offset_roundtrips) {
+    std::array<uint8_t, 100> flags{};
+    flags[0]  = 0x01; flags[50] = 0xAB; flags[99] = 0x80;
+    auto sav = make_valid_sram(0, 0, 0, &flags);
+    ASSERT_EQ(sav[0x2600], 0x01);   // flag[0] at corrected offset
+    ASSERT_EQ(sav[0x2601], 0x00);   // flag[1] — old wrong offset, must NOT be flag[0]
+    CrystalImport imp = import_save(sav);
+    ASSERT_EQ(imp.snapshot.event_flags[0],  0x01);
+    ASSERT_EQ(imp.snapshot.event_flags[50], 0xAB);
+    ASSERT_EQ(imp.snapshot.event_flags[99], 0x80);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[0x2600],      0x01);
+    ASSERT_EQ(out[0x2600 + 50], 0xAB);
+    ASSERT_EQ(out[0x2600 + 99], 0x80);
+}
+
+TEST(backup_event_flags_offset_is_correct) {
+    // BACKUP_EVENT_FLAGS = EVENT_FLAGS - BACKUP_OFFSET = 0x2600 - 0xE00 = 0x1800
+    ASSERT_EQ(crystal::sram_layout::BACKUP_EVENT_FLAGS, 0x1800u);
+    std::array<uint8_t, 100> flags{};
+    flags[7] = 0xCC;
+    auto sav = make_valid_sram(0, 0, 0, &flags);
+    CrystalImport imp = import_save(sav);
+    auto out = export_save(imp.snapshot, imp.shadow);
+    ASSERT_EQ(out[EVENT_FLAGS + 7],        0xCC);
+    ASSERT_EQ(out[BACKUP_EVENT_FLAGS + 7], 0xCC);
+}
+
+TEST(backup_boundaries_match_sym_derived_values) {
+    ASSERT_EQ(BACKUP_OPTIONS,       0x1200u);  // sym 00:b200
+    ASSERT_EQ(BACKUP_CHECK_VALUE_1, 0x1208u);  // sym 00:b208
+    ASSERT_EQ(BACKUP_GAME_DATA,     0x1209u);  // sym 00:b209
+    ASSERT_EQ(BACKUP_CHECKSUM_END,  0x1D82u);  // sym sBackupGameDataEnd 00:bd83 -> end=0x1D82
+    ASSERT_EQ(BACKUP_CHECKSUM,      0x1F0Du);  // sym 00:bf0d
+    ASSERT_EQ(BACKUP_CHECK_VALUE_2, 0x1F0Fu);  // sym 00:bf0f
+    ASSERT_EQ(BACKUP_CHECKSUM_END - BACKUP_GAME_DATA + 1, CHECKSUM_REGION_SIZE);
+    ASSERT_EQ(BACKUP_OFFSET, 0xE00u);
+}
+
+TEST(import_binds_empty_identity_by_default) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);
+    ASSERT_TRUE(imp.shadow.identity.profile_sha1.empty());
+    ASSERT_TRUE(imp.shadow.identity.codec_version == std::string(crystal::SRAM_CODEC_VERSION));
+}
+
+TEST(import_binds_profile_sha1_when_supplied) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav,
+        "f2f52230b536214ef7c9924f483392993e226cfb",
+        "f2f52230b536214ef7c9924f483392993e226cfb");
+    ASSERT_TRUE(imp.shadow.identity.profile_sha1 == std::string("f2f52230b536214ef7c9924f483392993e226cfb"));
+    ASSERT_TRUE(imp.shadow.identity.rom_sha1 == std::string("f2f52230b536214ef7c9924f483392993e226cfb"));
+    ASSERT_TRUE(imp.shadow.identity.codec_version == std::string(crystal::SRAM_CODEC_VERSION));
+}
+
+TEST(export_with_matching_identity_succeeds) {
+    crystal::SramIdentity id;
+    id.profile_sha1  = "f2f52230b536214ef7c9924f483392993e226cfb";
+    id.codec_version = crystal::SRAM_CODEC_VERSION;
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav,
+        "f2f52230b536214ef7c9924f483392993e226cfb");
+    ASSERT_NO_THROW(export_save(imp.snapshot, imp.shadow, id));
+}
+
+TEST(export_with_wrong_profile_sha1_rejected) {
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = "f2f52230b536214ef7c9924f483392993e226cfb";
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, "0000000000000000000000000000000000000000");
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow, expected), SaveExportError);
+}
+
+TEST(export_with_wrong_codec_version_rejected) {
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = "f2f52230b536214ef7c9924f483392993e226cfb";
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, "f2f52230b536214ef7c9924f483392993e226cfb");
+    imp.shadow.identity.codec_version = "crystal-save-0.9";
+    ASSERT_THROWS(export_save(imp.snapshot, imp.shadow, expected), SaveExportError);
+}
+
+TEST(export_with_empty_expected_identity_skips_check) {
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, "f2f52230b536214ef7c9924f483392993e226cfb");
+    crystal::SramIdentity empty_id;
+    ASSERT_NO_THROW(export_save(imp.snapshot, imp.shadow, empty_id));
+    ASSERT_NO_THROW(export_save(imp.snapshot, imp.shadow));
+}
+
+TEST(export_with_empty_shadow_identity_skips_check) {
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = "f2f52230b536214ef7c9924f483392993e226cfb";
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav);  // empty shadow identity
+    ASSERT_NO_THROW(export_save(imp.snapshot, imp.shadow, expected));
+}
+
+TEST(identity_error_message_mentions_both_profiles) {
+    crystal::SramIdentity expected;
+    expected.profile_sha1  = "crystal_v11";
+    expected.codec_version = crystal::SRAM_CODEC_VERSION;
+    auto sav = make_valid_sram();
+    CrystalImport imp = import_save(sav, "gold_v10");
+    try {
+        export_save(imp.snapshot, imp.shadow, expected);
+        throw std::runtime_error("should have thrown");
+    } catch (const SaveExportError& e) {
+        std::string msg = e.what();
+        ASSERT_TRUE(msg.find("crystal_v11") != std::string::npos);
+        ASSERT_TRUE(msg.find("gold_v10")    != std::string::npos);
+    }
+}
+
 // Entry point
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -783,6 +930,21 @@ int main() {
     RUN(bcd3_decode_round_trip);
     RUN(bcd3_encode_overflow_rejected);
     RUN(bcd3_decode_invalid_nibble_rejected);
+
+    std::cout << "\n-- Phase 1 closure: symbol-derived offsets, backup boundaries, SRAM identity --\n";
+    RUN(symbol_derived_offsets_match_expected_layout);
+    RUN(event_flags_offset_is_sym_derived_value);
+    RUN(event_flags_at_corrected_offset_roundtrips);
+    RUN(backup_event_flags_offset_is_correct);
+    RUN(backup_boundaries_match_sym_derived_values);
+    RUN(import_binds_empty_identity_by_default);
+    RUN(import_binds_profile_sha1_when_supplied);
+    RUN(export_with_matching_identity_succeeds);
+    RUN(export_with_wrong_profile_sha1_rejected);
+    RUN(export_with_wrong_codec_version_rejected);
+    RUN(export_with_empty_expected_identity_skips_check);
+    RUN(export_with_empty_shadow_identity_skips_check);
+    RUN(identity_error_message_mentions_both_profiles);
 
     std::cout << "\n=== Results: " << g_pass << " PASS  " << g_fail << " FAIL ===\n";
     return (g_fail > 0) ? 1 : 0;

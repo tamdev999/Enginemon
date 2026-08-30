@@ -4,6 +4,7 @@
 // crystal_save_writer — export a Crystal .sav from a snapshot + SRAM shadow.
 //
 // Export path:
+//   0. Validate shadow identity against expected_identity (if both non-empty).
 //   1. Start from the SRAM shadow (preserves all unowned bytes verbatim).
 //   2. Patch owned fields from the snapshot.
 //   3. Copy primary region → backup region.
@@ -16,6 +17,7 @@
 // All other SRAM bytes are carried unchanged from the shadow.
 //
 // Values that Crystal cannot represent are rejected with SaveExportError.
+// Identity mismatch is rejected with SaveExportError.
 
 #include "crystal_save_snapshot.hpp"
 #include "crystal_sram.hpp"
@@ -25,7 +27,9 @@
 
 namespace crystal {
 
-/// Thrown when the snapshot contains values Crystal cannot represent.
+/// Thrown when export cannot proceed:
+///   - snapshot contains values Crystal cannot represent
+///   - shadow identity does not match expected identity
 struct SaveExportError : std::runtime_error {
     explicit SaveExportError(std::string msg)
         : std::runtime_error(std::move(msg)) {}
@@ -33,14 +37,19 @@ struct SaveExportError : std::runtime_error {
 
 /// Export a .sav byte sequence.
 ///
-/// @param snapshot  Semantic fields to patch into the shadow.
-/// @param shadow    The verbatim 32 KB image (from import, or blank template).
-/// @returns         Exactly SRAM_SIZE bytes (32 KB) followed by the trailer.
+/// @param snapshot           Semantic fields to patch into the shadow.
+/// @param shadow             The verbatim 32 KB image (from import, or blank).
+/// @param expected_identity  If non-empty, shadow.identity must match this before
+///                           any patching occurs.  Pass {} to skip the check
+///                           (e.g. for blank-template exports or tests).
 ///
-/// @throws SaveExportError on any unrepresentable field value.
-/// @throws std::out_of_range if an internal patch address is out of bounds (bug).
+/// @returns  Exactly SRAM_SIZE bytes (32 KB) followed by the trailer.
+///
+/// @throws SaveExportError   on unrepresentable field value or identity mismatch.
+/// @throws std::logic_error  on internal self-validation failure (codec bug).
 [[nodiscard]] std::vector<uint8_t> export_save(
     const CrystalSaveSnapshot& snapshot,
-    const Sram&                shadow);
+    const Sram&                shadow,
+    const SramIdentity&        expected_identity = {});
 
 }  // namespace crystal

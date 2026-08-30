@@ -40,6 +40,7 @@ add_library(enginemon_crystal STATIC
     script/text_registry.cpp
 
     # Crystal .sav codec (Phase 1 foundation)
+    save/crystal_sram_layout.cpp
     save/crystal_save_reader.cpp
     save/crystal_save_writer.cpp
 )

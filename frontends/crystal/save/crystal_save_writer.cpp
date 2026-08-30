@@ -17,8 +17,6 @@ namespace crystal {
 
 namespace {
 
-// ─── Checksum computation (shared with reader) ───────────────────────────────
-
 static uint16_t compute_checksum(const uint8_t* data, uint32_t begin, uint32_t end) {
     uint16_t sum = 0;
     for (uint32_t i = begin; i <= end; ++i) {
@@ -26,8 +24,6 @@ static uint16_t compute_checksum(const uint8_t* data, uint32_t begin, uint32_t e
     }
     return sum;
 }
-
-// ─── Validation helpers used in self-check step ──────────────────────────────
 
 static bool sentinel_ok(const uint8_t* data, uint32_t cv1_off, uint32_t cv2_off) {
     using namespace sram_layout;
@@ -38,7 +34,7 @@ static bool sentinel_ok(const uint8_t* data, uint32_t cv1_off, uint32_t cv2_off)
 static bool checksum_ok(const uint8_t* data,
                         uint32_t begin, uint32_t end,
                         uint32_t checksum_off) {
-    uint16_t stored = static_cast<uint16_t>(
+    uint16_t stored   = static_cast<uint16_t>(
         data[checksum_off] | (static_cast<uint32_t>(data[checksum_off + 1]) << 8));
     uint16_t computed = compute_checksum(data, begin, end);
     return stored == computed;
@@ -46,16 +42,31 @@ static bool checksum_ok(const uint8_t* data,
 
 }  // namespace
 
-// ─── Public export ───────────────────────────────────────────────────────────
-
 std::vector<uint8_t> export_save(
     const CrystalSaveSnapshot& snapshot,
-    const Sram&                shadow)
+    const Sram&                shadow,
+    const SramIdentity&        expected_identity)
 {
     using namespace sram_layout;
 
-    // ── Step 1: Validate representability before touching anything. ───────────
+    // ── Step 0: Identity check. ───────────────────────────────────────────────
+    // If both expected_identity and shadow.identity are non-empty, they must
+    // agree on profile_sha1 and codec_version.  A mismatch means the shadow
+    // was imported under a different ROM/profile layout than the one we would
+    // patch — refuse to corrupt it.
+    if (!expected_identity.empty() && !shadow.identity.empty()) {
+        if (shadow.identity != expected_identity) {
+            std::string msg = "export_save: SRAM identity mismatch — "
+                              "shadow was imported under a different layout.\n"
+                              "  shadow profile_sha1   = '" + shadow.identity.profile_sha1 + "'\n"
+                              "  expected profile_sha1 = '" + expected_identity.profile_sha1 + "'\n"
+                              "  shadow codec_version  = '" + shadow.identity.codec_version + "'\n"
+                              "  expected codec_version= '" + expected_identity.codec_version + "'";
+            throw SaveExportError(msg);
+        }
+    }
 
+    // ── Step 1: Validate representability. ───────────────────────────────────
     if (snapshot.money_player > BCD3_MAX) {
         throw SaveExportError(
             "export_save: money_player " + std::to_string(snapshot.money_player) +
@@ -73,29 +84,28 @@ std::vector<uint8_t> export_save(
     }
 
     // ── Step 2: Copy shadow into working buffer. ──────────────────────────────
-    // We work on a local copy of the 32 KB data — the shadow is never mutated.
     std::array<uint8_t, SRAM_SIZE> buf;
     std::copy(shadow.data.begin(), shadow.data.end(), buf.begin());
     uint8_t* data = buf.data();
 
     // ── Step 3: Patch owned fields into primary region. ───────────────────────
 
-    // wMoney (3 bytes BCD)
+    // wMoney (3 bytes BCD big-endian)
     {
         auto enc = bcd3_encode(snapshot.money_player);
         std::copy(enc.begin(), enc.end(), &data[MONEY]);
     }
-    // wMomsMoney (3 bytes BCD)
+    // wMomsMoney (3 bytes BCD big-endian)
     {
         auto enc = bcd3_encode(snapshot.money_mom);
         std::copy(enc.begin(), enc.end(), &data[MOMS_MONEY]);
     }
-    // wCoins (2 bytes big-endian)
+    // wCoins (2 bytes big-endian — high byte at [COINS], low byte at [COINS+1])
     {
         data[COINS]     = static_cast<uint8_t>(snapshot.coins >> 8);
         data[COINS + 1] = static_cast<uint8_t>(snapshot.coins & 0xFF);
     }
-    // wEventFlags (100 bytes bitfield)
+    // wEventFlags (100 bytes verbatim)
     {
         static_assert(snapshot.event_flags.size() == EVENT_FLAGS_SIZE,
                       "event_flags size mismatch");
@@ -104,16 +114,11 @@ std::vector<uint8_t> export_save(
     }
 
     // ── Step 4: Copy primary region → backup region (byte-for-byte). ─────────
-    //
-    //   data[BACKUP_GAME_DATA .. BACKUP_CHECKSUM_END] =
-    //       data[PRIMARY_GAME_DATA .. PRIMARY_CHECKSUM_END]
-    //
-    // CHECKSUM_REGION_SIZE == BACKUP_CHECKSUM_END - BACKUP_GAME_DATA + 1 ✓
     std::copy(&data[PRIMARY_GAME_DATA],
               &data[PRIMARY_GAME_DATA] + CHECKSUM_REGION_SIZE,
               &data[BACKUP_GAME_DATA]);
 
-    // Also mirror the options block (not checksummed but Crystal copies it).
+    // Mirror the options block (not checksummed, but Crystal copies it).
     std::copy(&data[PRIMARY_OPTIONS],
               &data[PRIMARY_OPTIONS] + PRIMARY_OPTIONS_SIZE,
               &data[BACKUP_OPTIONS]);
@@ -137,19 +142,14 @@ std::vector<uint8_t> export_save(
     }
 
     // ── Step 7: Self-validate. ────────────────────────────────────────────────
-    // A checksum error here is an internal bug — the export code is wrong.
-    if (!sentinel_ok(data, PRIMARY_CHECK_VALUE_1, PRIMARY_CHECK_VALUE_2)) {
+    if (!sentinel_ok(data, PRIMARY_CHECK_VALUE_1, PRIMARY_CHECK_VALUE_2))
         throw std::logic_error("export_save: primary sentinels not set correctly (bug)");
-    }
-    if (!sentinel_ok(data, BACKUP_CHECK_VALUE_1, BACKUP_CHECK_VALUE_2)) {
+    if (!sentinel_ok(data, BACKUP_CHECK_VALUE_1, BACKUP_CHECK_VALUE_2))
         throw std::logic_error("export_save: backup sentinels not set correctly (bug)");
-    }
-    if (!checksum_ok(data, PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END, PRIMARY_CHECKSUM)) {
+    if (!checksum_ok(data, PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END, PRIMARY_CHECKSUM))
         throw std::logic_error("export_save: primary checksum self-validation failed (bug)");
-    }
-    if (!checksum_ok(data, BACKUP_GAME_DATA, BACKUP_CHECKSUM_END, BACKUP_CHECKSUM)) {
+    if (!checksum_ok(data, BACKUP_GAME_DATA, BACKUP_CHECKSUM_END, BACKUP_CHECKSUM))
         throw std::logic_error("export_save: backup checksum self-validation failed (bug)");
-    }
 
     // ── Step 8: Emit 32 KB + trailer. ─────────────────────────────────────────
     std::vector<uint8_t> out;

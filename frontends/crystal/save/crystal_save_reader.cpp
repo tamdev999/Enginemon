@@ -8,6 +8,7 @@
 //   3. Verify checksums on copies that passed sentinels.
 //   4. Select authoritative copy (primary preferred).
 //   5. Decode Phase-1 fields.
+//   6. Bind SramIdentity.
 
 #include "crystal_save_reader.hpp"
 #include "crystal_bcd.hpp"
@@ -22,7 +23,6 @@ namespace crystal {
 
 // ─── Checksum computation ────────────────────────────────────────────────────
 
-/// Compute the Crystal 16-bit save checksum: unsigned byte sum over [begin, end].
 static uint16_t compute_checksum(const uint8_t* data, uint32_t begin, uint32_t end) {
     uint16_t sum = 0;
     for (uint32_t i = begin; i <= end; ++i) {
@@ -39,18 +39,16 @@ struct CopyValidity {
     [[nodiscard]] bool fully_valid() const { return sentinel_ok && checksum_ok; }
 };
 
-/// Validate the primary save copy.
 static CopyValidity check_primary(const uint8_t* data) {
     using namespace sram_layout;
     CopyValidity v;
 
-    // Sentinels are checked before checksums (pokecrystal boot order).
     v.sentinel_ok =
         (data[PRIMARY_CHECK_VALUE_1] == SAVE_CHECK_VALUE_1) &&
         (data[PRIMARY_CHECK_VALUE_2] == SAVE_CHECK_VALUE_2);
 
     if (v.sentinel_ok) {
-        uint16_t stored  = static_cast<uint16_t>(
+        uint16_t stored   = static_cast<uint16_t>(
             data[PRIMARY_CHECKSUM] | (static_cast<uint32_t>(data[PRIMARY_CHECKSUM + 1]) << 8));
         uint16_t computed = compute_checksum(data, PRIMARY_GAME_DATA, PRIMARY_CHECKSUM_END);
         v.checksum_ok = (stored == computed);
@@ -59,7 +57,6 @@ static CopyValidity check_primary(const uint8_t* data) {
     return v;
 }
 
-/// Validate the backup save copy.
 static CopyValidity check_backup(const uint8_t* data) {
     using namespace sram_layout;
     CopyValidity v;
@@ -69,7 +66,7 @@ static CopyValidity check_backup(const uint8_t* data) {
         (data[BACKUP_CHECK_VALUE_2] == SAVE_CHECK_VALUE_2);
 
     if (v.sentinel_ok) {
-        uint16_t stored  = static_cast<uint16_t>(
+        uint16_t stored   = static_cast<uint16_t>(
             data[BACKUP_CHECKSUM] | (static_cast<uint32_t>(data[BACKUP_CHECKSUM + 1]) << 8));
         uint16_t computed = compute_checksum(data, BACKUP_GAME_DATA, BACKUP_CHECKSUM_END);
         v.checksum_ok = (stored == computed);
@@ -80,39 +77,30 @@ static CopyValidity check_backup(const uint8_t* data) {
 
 // ─── Snapshot decode (Phase 1) ───────────────────────────────────────────────
 
-/// Decode Phase-1 fields from the selected (validated) primary-layout copy.
-/// `base` is the SRAM offset of the start of the game-data region for the
-/// selected copy.  For the primary copy base == PRIMARY_GAME_DATA.
-/// For backup: offsets are shifted by -BACKUP_OFFSET relative to primary.
-///
-/// Because primary and backup mirror each other with a fixed offset, we can
-/// read everything through the primary-relative offsets and simply subtract
-/// BACKUP_OFFSET when the backup was selected.
+// copy_offset_adj == 0 for primary, BACKUP_OFFSET for backup.
+// primary_addr - copy_offset_adj gives the actual byte address in the buffer.
 static CrystalSaveSnapshot decode_phase1(const uint8_t* data, uint32_t copy_offset_adj) {
-    // copy_offset_adj == 0 for primary, BACKUP_OFFSET for backup.
-    // Primary field address → actual read address = field_addr - copy_offset_adj.
     using namespace sram_layout;
 
     CrystalSaveSnapshot snap;
 
-    // ── Money ────────────────────────────────────────────────────────────────
+    // wMoney — 3-byte BCD big-endian
     {
         const uint8_t* m = &data[MONEY - copy_offset_adj];
         snap.money_player = bcd3_decode(m);
     }
+    // wMomsMoney — 3-byte BCD big-endian
     {
         const uint8_t* m = &data[MOMS_MONEY - copy_offset_adj];
         snap.money_mom = bcd3_decode(m);
     }
-
-    // ── Coins ────────────────────────────────────────────────────────────────
+    // wCoins — 2-byte big-endian (high byte first, confirmed from Crystal source)
     {
         uint32_t off = COINS - copy_offset_adj;
         snap.coins = static_cast<uint16_t>(
             (static_cast<uint32_t>(data[off]) << 8) | data[off + 1]);
     }
-
-    // ── Event flags ──────────────────────────────────────────────────────────
+    // wEventFlags — 100 bytes verbatim
     {
         uint32_t off = EVENT_FLAGS - copy_offset_adj;
         std::copy(&data[off], &data[off + EVENT_FLAGS_SIZE], snap.event_flags.data());
@@ -123,11 +111,15 @@ static CrystalSaveSnapshot decode_phase1(const uint8_t* data, uint32_t copy_offs
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-CrystalImport import_save(const uint8_t* bytes, std::size_t size) {
+CrystalImport import_save(
+    const uint8_t* bytes,
+    std::size_t    size,
+    std::string    profile_sha1,
+    std::string    rom_sha1)
+{
     using namespace sram_layout;
 
-    // 1. Size validation — checked before null so an empty vector (size==0,
-    //    data()!=nullptr on MSVC) is rejected by size rather than null guard.
+    // 1. Size validation — before null check so MSVC empty-vector data() is caught.
     if (size < SRAM_SIZE) {
         throw SaveImportError(
             "import_save: file too small (" + std::to_string(size) +
@@ -143,16 +135,12 @@ CrystalImport import_save(const uint8_t* bytes, std::size_t size) {
     CopyValidity backup_v  = check_backup(bytes);
 
     // 3. Select authoritative copy.
-    //    - Both valid → primary.
-    //    - One valid  → use it.
-    //    - None valid → hard error.
     bool use_primary;
     if (primary_v.fully_valid()) {
-        use_primary = true;  // primary always preferred
+        use_primary = true;
     } else if (backup_v.fully_valid()) {
         use_primary = false;
     } else {
-        // Produce a diagnostic that distinguishes sentinel vs checksum failure.
         std::string diag = "import_save: no valid save copy found. ";
         diag += "Primary: sentinel=" + std::string(primary_v.sentinel_ok ? "OK" : "FAIL");
         diag += " checksum=" + std::string(primary_v.checksum_ok ? "OK" : "FAIL");
@@ -171,6 +159,11 @@ CrystalImport import_save(const uint8_t* bytes, std::size_t size) {
     // 5. Decode Phase-1 fields from the selected copy.
     uint32_t adj = use_primary ? 0 : BACKUP_OFFSET;
     result.snapshot = decode_phase1(bytes, adj);
+
+    // 6. Bind identity to shadow.
+    result.shadow.identity.profile_sha1  = std::move(profile_sha1);
+    result.shadow.identity.rom_sha1      = std::move(rom_sha1);
+    result.shadow.identity.codec_version = SRAM_CODEC_VERSION;
 
     return result;
 }
