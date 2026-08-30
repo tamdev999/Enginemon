@@ -196,7 +196,12 @@ CorpusDiscoveryResult collect_initial_roots(
         }
         
         for (uint8_t i = 0; i < scene_count; ++i) {
-            if (ptr + SCENE_SCRIPT_SIZE > rom.size()) break;
+            if (ptr + SCENE_SCRIPT_SIZE > rom.size()) {
+                throw std::runtime_error(std::format(
+                    "collect_initial_roots: map ({},{}) scene script {} of {} truncated "
+                    "at ROM address 0x{:x} (ROM ends at 0x{:x})",
+                    ref.group, ref.map, i + 1, scene_count, ptr, rom.size()));
+            }
             
             uint16_t scene_script_ptr = rom.read_word(ptr);
             ptr += 4;  // script_ptr + filler
@@ -235,7 +240,12 @@ CorpusDiscoveryResult collect_initial_roots(
         }
         
         for (uint8_t i = 0; i < callback_count; ++i) {
-            if (ptr + CALLBACK_SIZE > rom.size()) break;
+            if (ptr + CALLBACK_SIZE > rom.size()) {
+                throw std::runtime_error(std::format(
+                    "collect_initial_roots: map ({},{}) callback {} of {} truncated "
+                    "at ROM address 0x{:x} (ROM ends at 0x{:x})",
+                    ref.group, ref.map, i + 1, callback_count, ptr, rom.size()));
+            }
             
             ptr++;  // Skip callback type
             uint16_t callback_ptr = rom.read_word(ptr);

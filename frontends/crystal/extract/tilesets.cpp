@@ -93,7 +93,6 @@ bool TilesetExtractor::decompress_lz(uint32_t addr, std::vector<uint8_t>& out) c
     out.reserve(4096);  // Reasonable initial capacity
     
     uint32_t ptr = addr;
-    const uint32_t start_addr = addr;
     
     // Helper to flip bits in a byte (MSB <-> LSB)
     auto flip_byte = [](uint8_t b) -> uint8_t {
@@ -105,11 +104,18 @@ bool TilesetExtractor::decompress_lz(uint32_t addr, std::vector<uint8_t>& out) c
         return result;
     };
     
+    // Fail-closed: partial output must never be treated as success.
+    //
+    // Only the clean LZ_END path returns true.  Every early exit — ROM bounds
+    // overrun, truncated extended command, invalid back-reference, or safety
+    // limit exceeded — returns false so the caller sees a hard failure rather
+    // than a silently truncated tile set.
     while (ptr < rom_.size()) {
         uint8_t control = rom_.read_byte(ptr);
         
         if (control == LZ_END) {
-            break;  // End of compressed data
+            // Clean termination.  Only path that counts as success.
+            return !out.empty();
         }
         
         uint8_t cmd = (control & LZ_CMD) >> 5;
@@ -123,7 +129,10 @@ bool TilesetExtractor::decompress_lz(uint32_t addr, std::vector<uint8_t>& out) c
             cmd = ((control >> 2) & 0x07);  // bits 2-4 become new cmd
             uint8_t hi = control & LZ_LONG_HI;
             ptr++;
-            if (ptr >= rom_.size()) break;
+            if (ptr >= rom_.size()) {
+                stats_.bounds_check_failures++;
+                return false;  // truncated extended command (no second byte)
+            }
             uint8_t lo = rom_.read_byte(ptr);
             count = ((size_t)hi << 8) | lo;
             count++;  // length is n+1
@@ -135,14 +144,21 @@ bool TilesetExtractor::decompress_lz(uint32_t addr, std::vector<uint8_t>& out) c
         
         // Commands 0-3: simple data operations
         if (cmd == LZ_LITERAL) {
-            // Read literal bytes
-            for (size_t i = 0; i < count && ptr < rom_.size(); ++i) {
+            // Read literal bytes — every byte in [ptr, ptr+count) must be in ROM.
+            if (ptr + count > rom_.size()) {
+                stats_.bounds_check_failures++;
+                return false;  // truncated literal run
+            }
+            for (size_t i = 0; i < count; ++i) {
                 out.push_back(rom_.read_byte(ptr++));
             }
         }
         else if (cmd == LZ_ITERATE) {
             // Repeat single byte
-            if (ptr >= rom_.size()) break;
+            if (ptr >= rom_.size()) {
+                stats_.bounds_check_failures++;
+                return false;  // no byte to repeat
+            }
             uint8_t byte = rom_.read_byte(ptr++);
             for (size_t i = 0; i < count; ++i) {
                 out.push_back(byte);
@@ -150,7 +166,10 @@ bool TilesetExtractor::decompress_lz(uint32_t addr, std::vector<uint8_t>& out) c
         }
         else if (cmd == LZ_ALTERNATE) {
             // Alternate two bytes
-            if (ptr + 1 >= rom_.size()) break;
+            if (ptr + 1 >= rom_.size()) {
+                stats_.bounds_check_failures++;
+                return false;  // truncated alternate pair
+            }
             uint8_t byte1 = rom_.read_byte(ptr);
             uint8_t byte2 = rom_.read_byte(ptr + 1);
             for (size_t i = 0; i < count; ++i) {
@@ -159,14 +178,17 @@ bool TilesetExtractor::decompress_lz(uint32_t addr, std::vector<uint8_t>& out) c
             ptr += 2;
         }
         else if (cmd == LZ_ZERO) {
-            // Write zeros
+            // Write zeros — no ROM read needed
             for (size_t i = 0; i < count; ++i) {
                 out.push_back(0);
             }
         }
         // Commands 4-6: rewrite from decompressed output
         else {
-            if (ptr >= rom_.size()) break;
+            if (ptr >= rom_.size()) {
+                stats_.bounds_check_failures++;
+                return false;  // no offset byte
+            }
             uint8_t offset_byte = rom_.read_byte(ptr++);
             
             size_t src_pos;
@@ -174,51 +196,63 @@ bool TilesetExtractor::decompress_lz(uint32_t addr, std::vector<uint8_t>& out) c
                 // Negative offset (7-bit) from current position
                 size_t neg_offset = offset_byte & 0x7F;
                 if (neg_offset > out.size()) {
-                    // Invalid: would read before buffer start
-                    break;
+                    stats_.bounds_check_failures++;
+                    return false;  // invalid negative back-reference
                 }
                 src_pos = out.size() - neg_offset - 1;
             } else {
-                // Positive offset (15-bit) from start
-                if (ptr >= rom_.size()) break;
+                // Positive offset (15-bit) from start — needs a second byte
+                if (ptr >= rom_.size()) {
+                    stats_.bounds_check_failures++;
+                    return false;  // truncated positive offset
+                }
                 uint8_t lo = rom_.read_byte(ptr++);
                 size_t pos_offset = ((size_t)offset_byte << 8) | lo;
                 src_pos = pos_offset;
                 if (src_pos >= out.size()) {
-                    // Invalid: position beyond what we've decompressed
-                    break;
+                    stats_.bounds_check_failures++;
+                    return false;  // forward reference beyond decompressed output
                 }
             }
             
             if (cmd == LZ_REPEAT) {
-                // Copy bytes from earlier in output
+                // Copy bytes from earlier in output.
+                // src_pos can advance into newly written bytes intentionally
+                // (run-length style), so no pre-flight end check here.
                 for (size_t i = 0; i < count; ++i) {
-                    // Note: src_pos can advance into newly written bytes
-                    // for run-length style compression
                     out.push_back(out[src_pos + i]);
                 }
             }
             else if (cmd == LZ_FLIP) {
-                // Copy bitflipped bytes
+                // Copy bitflipped bytes — source range must be within the
+                // previously-written output (not newly written this command).
                 for (size_t i = 0; i < count; ++i) {
                     out.push_back(flip_byte(out[src_pos + i]));
                 }
             }
             else if (cmd == LZ_REVERSE) {
-                // Copy bytes in reverse order
+                // Copy bytes in reverse order — src_pos - (count-1) must be ≥ 0.
+                if (count > 0 && src_pos + 1 < count) {
+                    stats_.bounds_check_failures++;
+                    return false;  // reverse would underflow decompressed buffer
+                }
                 for (size_t i = 0; i < count; ++i) {
                     out.push_back(out[src_pos - i]);
                 }
             }
         }
         
-        // Safety limit to prevent infinite loops
+        // Safety limit — malformed data causing runaway expansion is an error,
+        // not a partial success.
         if (out.size() > 0x10000) {
-            break;
+            stats_.bounds_check_failures++;
+            return false;
         }
     }
     
-    return !out.empty();
+    // Fell off end of ROM without seeing LZ_END — missing terminator.
+    stats_.bounds_check_failures++;
+    return false;
 }
 
 //=============================================================================
@@ -377,10 +411,19 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
     // This handles indoor tilesets that have fewer than 128 metatiles
     size_t metatile_count = tileset_fmt.metatile_count;  // Default 128
     if (meta_bank == coll_bank && coll_addr > meta_addr) {
-        size_t derived_count = (coll_addr - meta_addr) / metatile_size;
-        if (derived_count > 0 && derived_count <= 128) {
-            metatile_count = derived_count;
+        // Minimum floor: the gap must be large enough for at least one metatile.
+        // A gap smaller than metatile_size means the addresses are bogus
+        // (e.g. coll_addr == meta_addr + 1 from a corrupt entry) and the
+        // derived count would be zero — reject it and fall back to default.
+        size_t gap = coll_addr - meta_addr;
+        if (gap >= metatile_size) {
+            size_t derived_count = gap / metatile_size;
+            if (derived_count > 0 && derived_count <= 128) {
+                metatile_count = derived_count;
+            }
         }
+        // If gap < metatile_size: addresses are corrupt; use the default count.
+        // The subsequent metatile OOB check will catch it if that's wrong too.
     }
     
     if (meta_addr + metatile_count * metatile_size <= rom_.size()) {
