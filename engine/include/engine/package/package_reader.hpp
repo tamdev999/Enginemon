@@ -13,6 +13,7 @@
 #include "engine/world/runtime_tileset.hpp"
 #include "engine/world/sprite_atlas.hpp"
 #include "engine/core/types.hpp"
+#include "engine/core/registry.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -71,6 +72,18 @@ public:
     // Returns a map from SpeciesId (1-251) to "pokemon_icon:<icon_type_name>" string.
     // Empty map if chunk absent (old packages without the section).
     std::unordered_map<SpeciesId, std::string> load_species_icon_map() const;
+
+    // Load species base stats registry (BaseStats chunk).
+    // Returns a populated Registry<SpeciesId, SpeciesData> or nullopt if the
+    // chunk is absent or structurally corrupt.
+    // Fail-closed: any read error or duplicate SpeciesId → nullopt, not partial registry.
+    std::optional<Registry<SpeciesId, SpeciesData>> load_base_stats_registry() const;
+
+    // Load move data registry (MoveData chunk).
+    // Returns a populated Registry<MoveId, MoveData> or nullopt if the
+    // chunk is absent or structurally corrupt.
+    // Fail-closed: any read error or duplicate MoveId → nullopt, not partial registry.
+    std::optional<Registry<MoveId, MoveData>> load_move_registry() const;
 
 private:
     PackageReader() = default;

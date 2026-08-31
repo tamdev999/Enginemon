@@ -674,6 +674,79 @@ void PackageWriter::add_obj_palettes(const SpriteObjPalettes& palettes) {
     obj_palettes_data_ = std::vector<uint8_t>(data.begin(), data.end());
 }
 
+void PackageWriter::add_base_stats(const std::vector<SpeciesBaseStatsEntry>& entries) {
+    if (!base_stats_data_.empty()) {
+        throw std::runtime_error("PackageWriter::add_base_stats: called more than once");
+    }
+    std::unordered_set<enginemon::SpeciesId> seen_species;
+    for (const auto& e : entries) {
+        if (!seen_species.insert(e.id).second) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_base_stats: duplicate SpeciesId {}", e.id));
+        }
+    }
+    // Serialize directly into a vector<uint8_t> — no stringstream
+    auto count32 = static_cast<uint32_t>(entries.size());
+    std::vector<uint8_t> buf;
+    buf.reserve(4 + entries.size() * 14);
+    // u32 count LE
+    buf.push_back(static_cast<uint8_t>(count32 & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >> 8) & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >> 16) & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >> 24) & 0xFF));
+    for (const auto& e : entries) {
+        auto sid = static_cast<uint16_t>(e.id);
+        buf.push_back(static_cast<uint8_t>(sid & 0xFF));
+        buf.push_back(static_cast<uint8_t>((sid >> 8) & 0xFF));
+        buf.push_back(e.hp);
+        buf.push_back(e.attack);
+        buf.push_back(e.defense);
+        buf.push_back(e.speed);
+        buf.push_back(e.sp_atk);
+        buf.push_back(e.sp_def);
+        buf.push_back(e.type1);
+        buf.push_back(e.type2);
+        buf.push_back(e.catch_rate);
+        buf.push_back(e.base_exp);
+        buf.push_back(e.gender_ratio);
+        buf.push_back(0);  // reserved
+    }
+    base_stats_data_ = std::move(buf);
+}
+
+void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
+    if (!move_data_data_.empty()) {
+        throw std::runtime_error("PackageWriter::add_move_data: called more than once");
+    }
+    std::unordered_set<enginemon::MoveId> seen_moves;
+    for (const auto& e : entries) {
+        if (!seen_moves.insert(e.id).second) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_move_data: duplicate MoveId {}", e.id));
+        }
+    }
+    auto count32 = static_cast<uint32_t>(entries.size());
+    std::vector<uint8_t> buf;
+    buf.reserve(4 + entries.size() * 9);
+    buf.push_back(static_cast<uint8_t>(count32 & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >> 8) & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >> 16) & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >> 24) & 0xFF));
+    for (const auto& e : entries) {
+        auto mid = static_cast<uint16_t>(e.id);
+        buf.push_back(static_cast<uint8_t>(mid & 0xFF));
+        buf.push_back(static_cast<uint8_t>((mid >> 8) & 0xFF));
+        buf.push_back(e.type_id);
+        buf.push_back(e.power);
+        buf.push_back(e.accuracy);
+        buf.push_back(e.pp);
+        buf.push_back(e.effect_id);
+        buf.push_back(e.effect_chance);
+        buf.push_back(0);  // reserved
+    }
+    move_data_data_ = std::move(buf);
+}
+
 void PackageWriter::add_species_icon_map(
     const std::vector<SpeciesIconEntry>& entries)
 {
@@ -888,6 +961,30 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         toc.push_back(entry);
         all_data.insert(all_data.end(),
                         species_icon_map_data_.begin(), species_icon_map_data_.end());
+    }
+
+    // BaseStats chunk — SpeciesId → base stats, types, misc (single flat blob)
+    if (!base_stats_data_.empty()) {
+        TocEntry bss_entry;
+        bss_entry.type = ChunkType::BaseStats;
+        bss_entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
+        bss_entry.count = 1;
+        bss_entry.size = static_cast<uint32_t>(base_stats_data_.size());
+        bss_entry.crc32 = calculate_crc32(base_stats_data_.data(), base_stats_data_.size());
+        toc.push_back(bss_entry);
+        all_data.insert(all_data.end(), base_stats_data_.begin(), base_stats_data_.end());
+    }
+
+    // MoveData chunk — MoveId → power/type/accuracy/pp/effect (single flat blob)
+    if (!move_data_data_.empty()) {
+        TocEntry mvd_entry;
+        mvd_entry.type = ChunkType::MoveData;
+        mvd_entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
+        mvd_entry.count = 1;
+        mvd_entry.size = static_cast<uint32_t>(move_data_data_.size());
+        mvd_entry.crc32 = calculate_crc32(move_data_data_.data(), move_data_data_.size());
+        toc.push_back(mvd_entry);
+        all_data.insert(all_data.end(), move_data_data_.begin(), move_data_data_.end());
     }
     
     // Write data

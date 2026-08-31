@@ -99,29 +99,52 @@ uint8_t Pokemon::hp_dv() const {
 }
 
 void Pokemon::recalculate_stats(const SpeciesData& species_data) {
-    // Gen 2 stat formula:
-    // HP = ((Base + DV) * 2 + sqrt(StatExp)/4) * Level / 100 + Level + 10
-    // Other = ((Base + DV) * 2 + sqrt(StatExp)/4) * Level / 100 + 5
-    
-    auto calc_stat = [this](uint8_t base, uint8_t dv, uint16_t sexp, bool is_hp) -> uint16_t {
-        // sqrt(StatExp)/4, capped at 63 contribution
-        uint32_t sqrt_sexp = 0;
-        if (sexp > 0) {
-            // Integer square root approximation
-            uint32_t x = sexp;
-            uint32_t y = (x + 1) / 2;
-            while (y < x) {
-                x = y;
-                y = (x + sexp / x) / 2;
-            }
-            sqrt_sexp = x / 4;
-            if (sqrt_sexp > 63) sqrt_sexp = 63;
+    // Gen 2 stat formula — source-proven from pokecrystal CalcMonStatC (move_mon.asm)
+    // and cross-checked against Gen2Recomped Stats.lua.
+    //
+    // Non-HP:  stat = floor(((Base + DV) * 2 + floor(ceil_sqrt(StatExp) / 4)) * Level / 100) + 5
+    // HP:      stat = floor(((Base + DV) * 2 + floor(ceil_sqrt(StatExp) / 4)) * Level / 100) + Level + 10
+    //
+    // STAT_MIN_NORMAL = 5, STAT_MIN_HP = 10  (battle_constants.asm)
+    //
+    // Crystal uses CEILING sqrt (GetSquareRoot: returns smallest b where b² ≥ stat_exp),
+    // capped at 255 (NUM_SQUARE_ROOTS limit), then two right-shifts (>> 2 = floor div 4).
+    // Equivalent C++: min(255u, ceil_sqrt(stat_exp)) >> 2
+    //
+    // Reference: pokecrystal/engine/pokemon/move_mon.asm CalcMonStatC
+    //            pokecrystal/engine/math/get_square_root.asm GetSquareRoot
+    //            pokecrystal/constants/battle_constants.asm  STAT_MIN_NORMAL / STAT_MIN_HP
+    //            Gen2Recomped/src/pokemon/Stats.lua          calcOne()
+
+    // Ceiling integer square root: smallest b where b*b >= n.
+    // Matches Crystal's GetSquareRoot table lookup exactly.
+    // Returns 0 for n==0, capped at 255 (Crystal cap via NUM_SQUARE_ROOTS=255).
+    auto ceil_sqrt_u16 = [](uint16_t n) -> uint32_t {
+        if (n == 0) return 0;
+        // Start from floor sqrt via Newton's method, then round up if needed.
+        uint32_t x = n;
+        uint32_t r = x;
+        uint32_t s = (r + 1) / 2;
+        while (s < r) {
+            r = s;
+            s = (r + x / r) / 2;
         }
-        
-        uint32_t stat = (base + dv) * 2 + sqrt_sexp;
-        stat = stat * level / 100;
-        stat += is_hp ? (level + 10) : 5;
-        
+        // r is now floor(sqrt(n)). Ceil: if r*r < n, increment.
+        if (r * r < static_cast<uint32_t>(n)) ++r;
+        // Crystal's GetSquareRoot caps at 255 (NUM_SQUARE_ROOTS = 255).
+        if (r > 255) r = 255;
+        return r;
+    };
+
+    auto calc_stat = [this, &ceil_sqrt_u16](uint8_t base, uint8_t dv, uint16_t sexp, bool is_hp) -> uint16_t {
+        // floor(ceil_sqrt(stat_exp) / 4), capped at 63 (255 >> 2 = 63).
+        // Crystal: GetSquareRoot result in register b, then srl b; srl b.
+        uint32_t sqrt_term = ceil_sqrt_u16(sexp) >> 2;  // same as floor(ceil_sqrt / 4)
+
+        uint32_t stat = (static_cast<uint32_t>(base) + dv) * 2u + sqrt_term;
+        stat = stat * static_cast<uint32_t>(level) / 100u;
+        stat += is_hp ? (static_cast<uint32_t>(level) + 10u) : 5u;
+
         return static_cast<uint16_t>(std::min(stat, 999u));
     };
     

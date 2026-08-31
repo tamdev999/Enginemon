@@ -116,6 +116,12 @@ enum class ChunkType : uint32_t {
                                  // Compiled from Crystal MonMenuIcons by the
                                  // Crystal frontend. Runtime uses for Day Care
                                  // sprite resolution without Crystal tables.
+    BaseStats = 0x42535453,      // "BSTS" — SpeciesId → SpeciesData (base stats, types, etc.)
+                                 // Compiled from Crystal BaseData ROM table.
+                                 // Runtime populates Registries::species from this chunk.
+    MoveData  = 0x4D564454,      // "MVDT" — MoveId → MoveData (power, type, accuracy, pp, etc.)
+                                 // Compiled from Crystal Moves ROM table.
+                                 // Runtime populates Registries::moves from this chunk.
 };
 
 struct TocEntry {

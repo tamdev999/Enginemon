@@ -24,11 +24,14 @@
 #include "crystal/extract/sprite_ids.hpp"
 #include "crystal/output/native_package.hpp"
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <cassert>
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <functional>
+#include <thread>
 #include <unordered_map>
 
 using namespace enginemon;
@@ -444,6 +447,345 @@ TEST(duplicate_species_entry_fails) {
 }
 
 //=============================================================================
+// REGISTRY PACKAGE ROUNDTRIP TESTS
+//
+// All tests use a temp-file approach: write package to a temp path, then open
+// it with PackageReader and verify the registry contents.
+//
+// No ROM required — synthetic data only.
+//=============================================================================
+
+namespace {
+
+// Build a minimal valid package that only contains BaseStats and/or MoveData.
+// Returns path to the temp file (caller must delete).
+static std::filesystem::path write_registry_package(
+    const std::vector<crystal::PackageWriter::SpeciesBaseStatsEntry>& species_entries,
+    const std::vector<crystal::PackageWriter::MoveDataEntry>& move_entries)
+{
+    auto tmp = std::filesystem::temp_directory_path() /
+               ("reg_test_" + std::to_string(std::hash<std::thread::id>{}(
+                                std::this_thread::get_id())) + ".emon");
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test");
+    if (!species_entries.empty()) writer.add_base_stats(species_entries);
+    if (!move_entries.empty())    writer.add_move_data(move_entries);
+    if (!writer.write(tmp)) {
+        throw std::runtime_error("write_registry_package: write failed");
+    }
+    return tmp;
+}
+
+struct TmpFile {
+    std::filesystem::path path;
+    explicit TmpFile(std::filesystem::path p) : path(std::move(p)) {}
+    ~TmpFile() { std::error_code ec; std::filesystem::remove(path, ec); }
+    TmpFile(const TmpFile&) = delete;
+    TmpFile& operator=(const TmpFile&) = delete;
+};
+
+} // anonymous namespace
+
+#include <thread>
+
+// 1. Full BaseStats round-trip: write one entry, read it back, verify all fields.
+TEST(base_stats_roundtrip_species_lookup) {
+    crystal::PackageWriter::SpeciesBaseStatsEntry e;
+    e.id = SpeciesId{1};
+    e.hp = 45; e.attack = 49; e.defense = 49; e.speed = 45;
+    e.sp_atk = 65; e.sp_def = 65;
+    e.type1 = 11; e.type2 = 22;
+    e.catch_rate = 45; e.base_exp = 64; e.gender_ratio = 31;
+
+    TmpFile tmp(write_registry_package({e}, {}));
+    auto reader = PackageReader::open(tmp.path);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto reg = reader->load_base_stats_registry();
+    ASSERT_TRUE(reg.has_value());
+
+    const SpeciesData* sd = reg->get(SpeciesId{1});
+    ASSERT_TRUE(sd != nullptr);
+    ASSERT_EQ(sd->base_stats.hp,             45u);
+    ASSERT_EQ(sd->base_stats.attack,         49u);
+    ASSERT_EQ(sd->base_stats.defense,        49u);
+    ASSERT_EQ(sd->base_stats.speed,          45u);
+    ASSERT_EQ(sd->base_stats.special_attack,  65u);
+    ASSERT_EQ(sd->base_stats.special_defense, 65u);
+    ASSERT_EQ(sd->type1,        TypeId{11});
+    ASSERT_EQ(sd->type2,        TypeId{22});
+    ASSERT_EQ(sd->catch_rate,   45u);
+    ASSERT_EQ(sd->base_exp,     64u);
+    ASSERT_EQ(sd->gender_ratio, 31u);
+
+    // Missing species → nullptr, not crash
+    ASSERT_TRUE(reg->get(SpeciesId{999}) == nullptr);
+
+    std::cout << "  [base_stats round-trip: species 1 fields all correct; 999 not found ✓]\n";
+}
+
+// 2. Absent BaseStats chunk → nullopt (package with no BaseStats chunk at all).
+TEST(base_stats_absent_chunk_returns_nullopt) {
+    TmpFile tmp(write_registry_package({}, {}));  // no species, no moves
+    auto reader = PackageReader::open(tmp.path);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto reg = reader->load_base_stats_registry();
+    ASSERT_TRUE(!reg.has_value());
+    std::cout << "  [base_stats absent chunk -> nullopt ✓]\n";
+}
+
+// 3. Duplicate SpeciesId → add_base_stats throws.
+TEST(base_stats_duplicate_id_rejected) {
+    crystal::PackageWriter::SpeciesBaseStatsEntry e;
+    e.id = SpeciesId{1};
+    e.hp = 45; e.attack = 49; e.defense = 49; e.speed = 45;
+    e.sp_atk = 65; e.sp_def = 65;
+    e.type1 = 11; e.type2 = 22;
+    e.catch_rate = 45; e.base_exp = 64; e.gender_ratio = 31;
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test");
+    bool threw = false;
+    try {
+        writer.add_base_stats({e, e});  // same id twice
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+    std::cout << "  [base_stats duplicate id -> throws ✓]\n";
+}
+
+// 4. Corrupt BaseStats chunk (truncated payload) → nullopt.
+TEST(base_stats_corrupt_chunk_returns_nullopt) {
+    // Write a valid package then corrupt the BaseStats chunk by patching the
+    // count to a value that implies more bytes than the chunk contains.
+    crystal::PackageWriter::SpeciesBaseStatsEntry e;
+    e.id = SpeciesId{1};
+    e.hp = 45; e.attack = 49; e.defense = 49; e.speed = 45;
+    e.sp_atk = 65; e.sp_def = 65;
+    e.type1 = 11; e.type2 = 22;
+    e.catch_rate = 45; e.base_exp = 64; e.gender_ratio = 31;
+
+    auto tmp_path = write_registry_package({e}, {});
+    TmpFile tmp(tmp_path);
+
+    // Corrupt by setting the count field in the blob to 9999 (well beyond the
+    // actual data), which will make the reader see count*14+4 > chunk_size.
+    {
+        std::fstream f(tmp_path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f.is_open());
+        // Locate the BaseStats chunk via the TOC (brute-force scan for 'BSTS').
+        // 0x42535453 = BaseStats magic in little-endian: 53 54 53 42
+        f.seekg(0, std::ios::end);
+        auto fsize = f.tellg();
+        f.seekg(0);
+        std::vector<uint8_t> buf(static_cast<size_t>(fsize));
+        f.read(reinterpret_cast<char*>(buf.data()), fsize);
+
+        // Find the BSTS blob (count u32 followed by entry bytes).
+        // The count of 1 is written as LE bytes: 01 00 00 00.
+        // Overwrite count with 9999 (0x0F 0x27 0x00 0x00 LE).
+        for (size_t i = 0; i + 3 < buf.size(); ++i) {
+            if (buf[i]==0x01 && buf[i+1]==0x00 && buf[i+2]==0x00 && buf[i+3]==0x00) {
+                // Check this looks like a count (followed by species_id = 0x01 0x00)
+                if (i + 5 < buf.size() && buf[i+4] == 0x01 && buf[i+5] == 0x00) {
+                    buf[i]   = 0x0F;  // 9999 LE
+                    buf[i+1] = 0x27;
+                    f.seekp(static_cast<std::streamoff>(i));
+                    f.write(reinterpret_cast<char*>(&buf[i]), 4);
+                    break;
+                }
+            }
+        }
+    }
+
+    auto reader = PackageReader::open(tmp_path);
+    ASSERT_TRUE(reader != nullptr);
+    auto reg = reader->load_base_stats_registry();
+    ASSERT_TRUE(!reg.has_value());
+    std::cout << "  [base_stats corrupt (inflated count) -> nullopt ✓]\n";
+}
+
+// 5. Multiple species in one chunk, all correct.
+TEST(base_stats_multiple_species_all_correct) {
+    std::vector<crystal::PackageWriter::SpeciesBaseStatsEntry> entries;
+    for (uint16_t i = 1; i <= 3; ++i) {
+        crystal::PackageWriter::SpeciesBaseStatsEntry e{};
+        e.id = SpeciesId{i};
+        e.hp = static_cast<uint8_t>(10 * i);
+        e.attack = static_cast<uint8_t>(20 * i);
+        entries.push_back(e);
+    }
+
+    TmpFile tmp(write_registry_package(entries, {}));
+    auto reader = PackageReader::open(tmp.path);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto reg = reader->load_base_stats_registry();
+    ASSERT_TRUE(reg.has_value());
+
+    for (uint16_t i = 1; i <= 3; ++i) {
+        const SpeciesData* sd = reg->get(SpeciesId{i});
+        ASSERT_TRUE(sd != nullptr);
+        ASSERT_EQ(sd->base_stats.hp,     static_cast<uint8_t>(10 * i));
+        ASSERT_EQ(sd->base_stats.attack, static_cast<uint8_t>(20 * i));
+    }
+    ASSERT_TRUE(reg->get(SpeciesId{4}) == nullptr);
+    std::cout << "  [base_stats 3 species all correct; 4 not found ✓]\n";
+}
+
+// 6. Full MoveData round-trip: write one entry, read it back, verify all fields.
+TEST(move_data_roundtrip_move_lookup) {
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = MoveId{85};         // Thunderbolt
+    e.type_id = 13;            // Electric
+    e.power = 95;
+    e.accuracy = 100;
+    e.pp = 15;
+    e.effect_id = 26;          // 10% paralysis
+    e.effect_chance = 10;
+
+    TmpFile tmp(write_registry_package({}, {e}));
+    auto reader = PackageReader::open(tmp.path);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto reg = reader->load_move_registry();
+    ASSERT_TRUE(reg.has_value());
+
+    const MoveData* md = reg->get(MoveId{85});
+    ASSERT_TRUE(md != nullptr);
+    ASSERT_EQ(md->type,          TypeId{13});
+    ASSERT_EQ(md->power,         95u);
+    ASSERT_EQ(md->accuracy,      100u);
+    ASSERT_EQ(md->pp,            15u);
+    ASSERT_EQ(md->effect_id,     26u);
+    ASSERT_EQ(md->effect_chance, 10u);
+
+    ASSERT_TRUE(reg->get(MoveId{999}) == nullptr);
+    std::cout << "  [move_data round-trip: move 85 (Thunderbolt) fields correct ✓]\n";
+}
+
+// 7. Absent MoveData chunk → nullopt.
+TEST(move_data_absent_chunk_returns_nullopt) {
+    TmpFile tmp(write_registry_package({}, {}));
+    auto reader = PackageReader::open(tmp.path);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto reg = reader->load_move_registry();
+    ASSERT_TRUE(!reg.has_value());
+    std::cout << "  [move_data absent chunk -> nullopt ✓]\n";
+}
+
+// 8. Duplicate MoveId → add_move_data throws.
+TEST(move_data_duplicate_id_rejected) {
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = MoveId{1};
+    e.type_id = 0; e.power = 40; e.accuracy = 100; e.pp = 35;
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test");
+    bool threw = false;
+    try {
+        writer.add_move_data({e, e});  // same id twice
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+    std::cout << "  [move_data duplicate id -> throws ✓]\n";
+}
+
+// 9. Corrupt MoveData chunk (inflated count) → nullopt.
+TEST(move_data_corrupt_chunk_returns_nullopt) {
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = MoveId{1}; e.type_id = 0; e.power = 40; e.accuracy = 100; e.pp = 35;
+
+    auto tmp_path = write_registry_package({}, {e});
+    TmpFile tmp(tmp_path);
+
+    // Corrupt the count field in the MoveData blob.
+    {
+        std::fstream f(tmp_path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f.is_open());
+        f.seekg(0, std::ios::end);
+        auto fsize = f.tellg();
+        f.seekg(0);
+        std::vector<uint8_t> buf(static_cast<size_t>(fsize));
+        f.read(reinterpret_cast<char*>(buf.data()), fsize);
+
+        // count=1 LE followed by move_id=1 LE: 01 00 00 00 01 00
+        for (size_t i = 0; i + 5 < buf.size(); ++i) {
+            if (buf[i]==0x01 && buf[i+1]==0x00 && buf[i+2]==0x00 && buf[i+3]==0x00 &&
+                buf[i+4]==0x01 && buf[i+5]==0x00) {
+                buf[i]   = 0x0F;
+                buf[i+1] = 0x27;
+                f.seekp(static_cast<std::streamoff>(i));
+                f.write(reinterpret_cast<char*>(&buf[i]), 4);
+                break;
+            }
+        }
+    }
+
+    auto reader = PackageReader::open(tmp_path);
+    ASSERT_TRUE(reader != nullptr);
+    auto reg = reader->load_move_registry();
+    ASSERT_TRUE(!reg.has_value());
+    std::cout << "  [move_data corrupt (inflated count) -> nullopt ✓]\n";
+}
+
+// 10. Registry is frozen after load — modification attempt throws.
+TEST(base_stats_frozen_after_load) {
+    crystal::PackageWriter::SpeciesBaseStatsEntry e{};
+    e.id = SpeciesId{1}; e.hp = 45;
+
+    TmpFile tmp(write_registry_package({e}, {}));
+    auto reader = PackageReader::open(tmp.path);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto reg = reader->load_base_stats_registry();
+    ASSERT_TRUE(reg.has_value());
+    ASSERT_TRUE(reg->is_frozen());
+
+    bool threw = false;
+    try {
+        SpeciesData dummy{};
+        reg->register_entry(SpeciesId{99}, dummy);
+    } catch (const RegistryError&) {
+        threw = true;
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+    std::cout << "  [base_stats registry frozen after load -> write throws ✓]\n";
+}
+
+TEST(move_data_frozen_after_load) {
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = MoveId{1}; e.type_id = 0; e.power = 40; e.accuracy = 100; e.pp = 35;
+
+    TmpFile tmp(write_registry_package({}, {e}));
+    auto reader = PackageReader::open(tmp.path);
+    ASSERT_TRUE(reader != nullptr);
+
+    auto reg = reader->load_move_registry();
+    ASSERT_TRUE(reg.has_value());
+    ASSERT_TRUE(reg->is_frozen());
+
+    bool threw = false;
+    try {
+        MoveData dummy{};
+        reg->register_entry(MoveId{99}, dummy);
+    } catch (const RegistryError&) {
+        threw = true;
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+    std::cout << "  [move_data registry frozen after load -> write throws ✓]\n";
+}
+
+//=============================================================================
 // MAIN
 //=============================================================================
 
@@ -467,11 +809,24 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN(daycare_save_load_species_survives);
     RUN(daycare_invalid_species_fails_closed);
 
-    // Species→icon package roundtrip tests
+    // Species->icon package roundtrip tests
     RUN(species_icon_map_roundtrip_through_package);
     RUN(daycare_resolves_via_package_map_not_hardcoded_table);
     RUN(missing_mapped_icon_returns_empty);
     RUN(duplicate_species_entry_fails);
+
+    // BaseStats / MoveData registry package roundtrip tests
+    RUN(base_stats_roundtrip_species_lookup);
+    RUN(base_stats_absent_chunk_returns_nullopt);
+    RUN(base_stats_duplicate_id_rejected);
+    RUN(base_stats_corrupt_chunk_returns_nullopt);
+    RUN(base_stats_multiple_species_all_correct);
+    RUN(move_data_roundtrip_move_lookup);
+    RUN(move_data_absent_chunk_returns_nullopt);
+    RUN(move_data_duplicate_id_rejected);
+    RUN(move_data_corrupt_chunk_returns_nullopt);
+    RUN(base_stats_frozen_after_load);
+    RUN(move_data_frozen_after_load);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

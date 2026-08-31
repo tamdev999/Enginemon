@@ -109,6 +109,35 @@ public:
     // Empty icon_id → throws.
     using SpeciesIconEntry = std::pair<enginemon::SpeciesId, std::string>;
     void add_species_icon_map(const std::vector<SpeciesIconEntry>& entries);
+
+    // Add species base stats registry.
+    // One entry per species (SpeciesId → SpeciesDefinition).
+    // Duplicate SpeciesId → throws.  Empty entries → throws.
+    // Serialised as a flat array keyed by SpeciesId; runtime populates
+    // Registries::species from this chunk via PackageReader::load_base_stats_registry().
+    struct SpeciesBaseStatsEntry {
+        enginemon::SpeciesId id;
+        uint8_t hp, attack, defense, speed, sp_atk, sp_def;
+        uint8_t type1, type2;
+        uint8_t catch_rate, base_exp, gender_ratio;
+    };
+    void add_base_stats(const std::vector<SpeciesBaseStatsEntry>& entries);
+
+    // Add move data registry.
+    // One entry per move (MoveId → MoveData fields).
+    // Duplicate MoveId → throws.
+    // Serialised as a flat array keyed by MoveId; runtime populates
+    // Registries::moves from this chunk via PackageReader::load_move_registry().
+    struct MoveDataEntry {
+        enginemon::MoveId id;
+        uint8_t type_id;
+        uint8_t power;
+        uint8_t accuracy;
+        uint8_t pp;
+        uint8_t effect_id;
+        uint8_t effect_chance;
+    };
+    void add_move_data(const std::vector<MoveDataEntry>& entries);
     
     // Set metadata
     void set_source_rom(const std::string& sha1, const std::string& version);
@@ -138,6 +167,8 @@ private:
     std::vector<std::pair<std::string, std::vector<uint8_t>>> sprite_data_;  // sprite_id → serialized sprite
     std::vector<uint8_t> obj_palettes_data_;  // Serialized OBJ palettes (single chunk)
     std::vector<uint8_t> species_icon_map_data_;  // Serialized species→icon map (single chunk)
+    std::vector<uint8_t> base_stats_data_;        // Serialized species base stats (single chunk)
+    std::vector<uint8_t> move_data_data_;         // Serialized move data (single chunk)
     
     Stats stats_;
     

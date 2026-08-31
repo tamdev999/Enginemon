@@ -112,6 +112,32 @@ bool setup_headless_runtime(
     }
 
     // -------------------------------------------------------------------------
+    // Load species and move registries from the package.
+    // These are needed by Pokemon creation / stat recalculation / battle.
+    // Fail-closed: a corrupt or absent chunk → hard failure; no empty registry.
+    // -------------------------------------------------------------------------
+    {
+        auto species_reg = rt.package->load_base_stats_registry();
+        if (!species_reg) {
+            error = "setup_headless_runtime: failed to load BaseStats chunk from package "
+                    "(chunk absent or corrupt) — recompile the package from ROM";
+            return false;
+        }
+        rt.registries.species = std::move(*species_reg);
+        // species registry is already frozen by load_base_stats_registry()
+    }
+    {
+        auto move_reg = rt.package->load_move_registry();
+        if (!move_reg) {
+            error = "setup_headless_runtime: failed to load MoveData chunk from package "
+                    "(chunk absent or corrupt) — recompile the package from ROM";
+            return false;
+        }
+        rt.registries.moves = std::move(*move_reg);
+        // move registry is already frozen by load_move_registry()
+    }
+
+    // -------------------------------------------------------------------------
     // Load initial world state (map + tileset)
     // -------------------------------------------------------------------------
     if (!load_headless_world_state(*rt.package, map_id, rt.world_state, error)) {

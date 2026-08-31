@@ -23,6 +23,7 @@
 #include "engine/world/collision_types.hpp"
 #include "engine/core/game_loop.hpp"
 #include "engine/core/game_state.hpp"
+#include "engine/core/registry.hpp"
 #include "engine/scripting/lua_runtime.hpp"
 
 #include <string>
@@ -58,6 +59,18 @@ struct HeadlessWorldState {
 struct HeadlessRuntime {
     // Package access (the caller must supply a live PackageReader)
     PackageReader*  package = nullptr;  // non-owning; caller owns the reader
+
+    // Frozen game data registries — populated by setup_headless_runtime() from
+    // the BaseStats and MoveData chunks in the package.  Once populated, these
+    // registries are frozen and safe to use from any thread that reads them.
+    // Species base stats (hp, atk, def, spd, spatk, spdef, type1, type2, …)
+    // and move data (power, type, accuracy, pp, effect) are available via
+    //   rt.registries.species.get(SpeciesId)
+    //   rt.registries.moves.get(MoveId)
+    // registries.species and .moves are frozen after setup_headless_runtime();
+    // other sub-registries (items, types, trainers, type_chart) remain empty
+    // until their respective chunks are added in a future pass.
+    Registries registries;
 
     // Core simulation objects (owned)
     GameState       game_state;

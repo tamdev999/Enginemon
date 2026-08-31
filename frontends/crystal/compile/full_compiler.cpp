@@ -1451,6 +1451,101 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
         }
     }
 
+    // =========================================================================
+    // Stage 8: Emit BaseStats chunk (SpeciesId → base stats/types/misc).
+    // Source: compiled_game_data_.species_defs, populated by build_production_game_data()
+    // from extract_all_species(). No additional ROM access needed here.
+    // Fail-closed: any missing or zero-count species set → FATAL.
+    // =========================================================================
+    {
+        if (compiled_game_data_.species_defs.empty()) {
+            std::cerr << "FATAL: Stage 8 — species_defs is empty; "
+                         "cannot emit BaseStats chunk\n";
+            return false;
+        }
+
+        std::vector<PackageWriter::SpeciesBaseStatsEntry> entries;
+        entries.reserve(compiled_game_data_.species_defs.size());
+
+        for (const auto& [id, def] : compiled_game_data_.species_defs) {
+            PackageWriter::SpeciesBaseStatsEntry e;
+            e.id           = id;
+            e.hp           = def.hp;
+            e.attack       = def.attack;
+            e.defense      = def.defense;
+            e.speed        = def.speed;
+            e.sp_atk       = def.sp_atk;
+            e.sp_def       = def.sp_def;
+            e.type1        = def.type1;
+            e.type2        = def.type2;
+            e.catch_rate   = def.catch_rate;
+            e.base_exp     = def.base_exp;
+            e.gender_ratio = def.gender;
+            entries.push_back(e);
+        }
+
+        // Stable ordering: sort by SpeciesId so the package is deterministic.
+        std::sort(entries.begin(), entries.end(),
+                  [](const auto& a, const auto& b) { return a.id < b.id; });
+
+        writer.add_base_stats(entries);
+        std::cout << "  BaseStats chunk: " << entries.size() << " species\n";
+    }
+
+    // =========================================================================
+    // Stage 9: Emit MoveData chunk (MoveId → power/type/accuracy/pp/effect).
+    // Source: ROM Moves table at profile_.offsets.moves.
+    // Wire format per entry: 7 bytes at offsets 0-6 (anim, effect, power, type,
+    // accuracy, pp, effect_chance) per pokecrystal/data/moves/moves.asm.
+    // Move 0 (no-move) is skipped; moves 1-num_moves are extracted.
+    // Fail-closed: ROM bounds failure → FATAL.
+    // =========================================================================
+    {
+        const auto& o   = profile_.offsets;
+        const auto& fmt = profile_.format.move;
+        const auto& c   = profile_.counts;
+
+        if (o.moves == 0) {
+            std::cerr << "FATAL: Stage 9 — profile_.offsets.moves is zero; "
+                         "cannot emit MoveData chunk\n";
+            return false;
+        }
+
+        uint64_t table_bytes = static_cast<uint64_t>(c.num_moves) *
+                               static_cast<uint64_t>(fmt.move_data_size);
+        if (o.moves + table_bytes > rom_.size()) {
+            std::cerr << "FATAL: Stage 9 — Moves table (base=0x"
+                      << std::hex << o.moves << " count=" << std::dec << c.num_moves
+                      << " record=" << fmt.move_data_size
+                      << ") extends past ROM size 0x" << std::hex << rom_.size() << "\n";
+            return false;
+        }
+
+        std::vector<PackageWriter::MoveDataEntry> move_entries;
+        move_entries.reserve(c.num_moves);
+
+        // Moves are 1-indexed in Crystal (move 0 = no-move/Pound placeholder).
+        // ROM stores moves[0..num_moves-1] contiguously at o.moves.
+        // MoveId 1 = Pound at index 0, MoveId N at index N-1.
+        for (uint16_t i = 1; i <= c.num_moves; ++i) {
+            uint32_t entry_addr = o.moves + static_cast<uint32_t>(i - 1) * fmt.move_data_size;
+            auto rec = rom_.read_bytes(entry_addr, fmt.move_data_size);
+
+            PackageWriter::MoveDataEntry e;
+            e.id            = static_cast<enginemon::MoveId>(i);
+            e.type_id       = rec[fmt.type_offset];
+            e.power         = rec[fmt.power_offset];
+            e.accuracy      = rec[fmt.accuracy_offset];
+            e.pp            = rec[fmt.pp_offset];
+            e.effect_id     = rec[fmt.effect_offset];
+            e.effect_chance = rec[fmt.effect_chance_offset];
+            move_entries.push_back(e);
+        }
+
+        writer.add_move_data(move_entries);
+        std::cout << "  MoveData chunk: " << move_entries.size() << " moves\n";
+    }
+
     return true;
 }
 

@@ -783,4 +783,154 @@ PackageReader::load_species_icon_map() const {
     return result;
 }
 
+//=============================================================================
+// REGISTRY LOADING — BaseStats and MoveData chunks
+//
+// Both loaders are fail-closed: any structural read failure or duplicate ID
+// returns nullopt rather than a partially-populated registry.  Callers must
+// treat nullopt as a hard failure (chunk absent or corrupt).
+//=============================================================================
+
+std::optional<Registry<SpeciesId, SpeciesData>>
+PackageReader::load_base_stats_registry() const {
+    // Locate the BaseStats chunk in the TOC.
+    const TocEntry* chunk = nullptr;
+    for (const auto& entry : toc_) {
+        if (entry.type == ChunkType::BaseStats) {
+            chunk = &entry;
+            break;
+        }
+    }
+    if (!chunk || chunk->size < 4) return std::nullopt;  // absent or too small
+
+    std::ifstream in(path_, std::ios::binary);
+    if (!in) return std::nullopt;
+    in.seekg(chunk->offset);
+
+    // Wire format: u32 count, then per-entry (14 bytes each):
+    //   u16 species_id, u8 hp, atk, def, spd, satk, sdef, type1, type2,
+    //   catch_rate, base_exp, gender_ratio, u8 reserved
+    uint32_t count = read_le<uint32_t>(in);
+    if (!in.good()) return std::nullopt;
+
+    constexpr uint32_t ENTRY_SIZE = 14;
+    // Validate that the declared count fits within the chunk.
+    if (static_cast<uint64_t>(count) * ENTRY_SIZE + 4 > chunk->size) {
+        return std::nullopt;  // count/size mismatch — corrupt chunk
+    }
+    // Reject implausibly large counts.
+    if (count > 65535u) return std::nullopt;
+
+    Registry<SpeciesId, SpeciesData> reg;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint16_t species_id_raw = read_le<uint16_t>(in);
+        if (!in.good()) return std::nullopt;
+
+        uint8_t hp    = static_cast<uint8_t>(in.get());
+        uint8_t atk   = static_cast<uint8_t>(in.get());
+        uint8_t def   = static_cast<uint8_t>(in.get());
+        uint8_t spd   = static_cast<uint8_t>(in.get());
+        uint8_t satk  = static_cast<uint8_t>(in.get());
+        uint8_t sdef  = static_cast<uint8_t>(in.get());
+        uint8_t type1 = static_cast<uint8_t>(in.get());
+        uint8_t type2 = static_cast<uint8_t>(in.get());
+        uint8_t catch_rate   = static_cast<uint8_t>(in.get());
+        uint8_t base_exp     = static_cast<uint8_t>(in.get());
+        uint8_t gender_ratio = static_cast<uint8_t>(in.get());
+        in.get();  // reserved
+        if (!in.good() && !in.eof()) return std::nullopt;
+
+        SpeciesId sid = static_cast<SpeciesId>(species_id_raw);
+
+        // Reject duplicate SpeciesIds — a duplicate means the package is malformed.
+        if (reg.get(sid) != nullptr) {
+            return std::nullopt;  // duplicate id — corrupt chunk
+        }
+
+        SpeciesData sd;
+        sd.id   = sid;
+        sd.base_stats.hp             = hp;
+        sd.base_stats.attack         = atk;
+        sd.base_stats.defense        = def;
+        sd.base_stats.speed          = spd;
+        sd.base_stats.special_attack  = satk;
+        sd.base_stats.special_defense = sdef;
+        sd.type1        = static_cast<TypeId>(type1);
+        sd.type2        = static_cast<TypeId>(type2);
+        sd.catch_rate   = catch_rate;
+        sd.base_exp     = base_exp;
+        sd.gender_ratio = gender_ratio;
+
+        reg.register_entry(sid, std::move(sd));
+    }
+
+    reg.freeze();
+    return reg;
+}
+
+std::optional<Registry<MoveId, MoveData>>
+PackageReader::load_move_registry() const {
+    // Locate the MoveData chunk in the TOC.
+    const TocEntry* chunk = nullptr;
+    for (const auto& entry : toc_) {
+        if (entry.type == ChunkType::MoveData) {
+            chunk = &entry;
+            break;
+        }
+    }
+    if (!chunk || chunk->size < 4) return std::nullopt;
+
+    std::ifstream in(path_, std::ios::binary);
+    if (!in) return std::nullopt;
+    in.seekg(chunk->offset);
+
+    // Wire format: u32 count, then per-entry (9 bytes each):
+    //   u16 move_id, u8 type_id, power, accuracy, pp, effect_id, effect_chance, reserved
+    uint32_t count = read_le<uint32_t>(in);
+    if (!in.good()) return std::nullopt;
+
+    constexpr uint32_t ENTRY_SIZE = 9;
+    if (static_cast<uint64_t>(count) * ENTRY_SIZE + 4 > chunk->size) {
+        return std::nullopt;
+    }
+    if (count > 65535u) return std::nullopt;
+
+    Registry<MoveId, MoveData> reg;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint16_t move_id_raw    = read_le<uint16_t>(in);
+        if (!in.good()) return std::nullopt;
+
+        uint8_t type_id       = static_cast<uint8_t>(in.get());
+        uint8_t power         = static_cast<uint8_t>(in.get());
+        uint8_t accuracy      = static_cast<uint8_t>(in.get());
+        uint8_t pp            = static_cast<uint8_t>(in.get());
+        uint8_t effect_id     = static_cast<uint8_t>(in.get());
+        uint8_t effect_chance = static_cast<uint8_t>(in.get());
+        in.get();  // reserved
+        if (!in.good() && !in.eof()) return std::nullopt;
+
+        MoveId mid = static_cast<MoveId>(move_id_raw);
+
+        if (reg.get(mid) != nullptr) {
+            return std::nullopt;  // duplicate move id — corrupt chunk
+        }
+
+        MoveData md;
+        md.id             = mid;
+        md.type           = static_cast<TypeId>(type_id);
+        md.power          = power;
+        md.accuracy       = accuracy;
+        md.pp             = pp;
+        md.effect_id      = effect_id;
+        md.effect_chance  = effect_chance;
+        // Fields not in the package chunk are left at their zero-initialised defaults:
+        // category, target, priority, makes_contact, is_sound_based, animation_id, name.
+
+        reg.register_entry(mid, std::move(md));
+    }
+
+    reg.freeze();
+    return reg;
+}
+
 } // namespace enginemon

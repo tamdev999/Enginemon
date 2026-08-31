@@ -19712,6 +19712,142 @@ TEST(vm_deferred_failure_propagates_error) {
     std::cout << "  [Deferred script failure â†’ TickResult::script_error=true âœ“]\n";
 }
 
+// =============================================================================
+// Gen 2 stat formula tests — source-proven from pokecrystal CalcMonStatC
+//
+// Formula (move_mon.asm CalcMonStatC):
+//   Non-HP: floor(((base+dv)*2 + floor(ceil_sqrt(stat_exp)/4)) * level / 100) + 5
+//   HP:     floor(((base+dv)*2 + floor(ceil_sqrt(stat_exp)/4)) * level / 100) + level + 10
+//
+// All expected values below were computed by hand from the formula, then
+// cross-checked against Gen2Recomped Stats.lua calcOne().
+// =============================================================================
+
+static SpeciesData make_species(uint8_t hp, uint8_t atk, uint8_t def, uint8_t spd,
+                                 uint8_t satk, uint8_t sdef) {
+    SpeciesData sd;
+    sd.base_stats.hp             = hp;
+    sd.base_stats.attack         = atk;
+    sd.base_stats.defense        = def;
+    sd.base_stats.speed          = spd;
+    sd.base_stats.special_attack  = satk;
+    sd.base_stats.special_defense = sdef;
+    return sd;
+}
+
+// Helper: compute one stat using Enginemon's recalculate_stats.
+// Populates a Pokemon with fixed DV=0, stat_exp=given, level=given, then returns
+// the requested stat field.
+static uint16_t compute_stat(uint8_t base_val, uint8_t dv, uint16_t sexp, uint8_t lvl,
+                              bool is_hp) {
+    // Build a SpeciesData with all bases set to the single base_val.
+    // The HP DV is derived from the other DVs. Set all DVs to dv so the HP DV
+    // equals (dv&1)<<3|(dv&1)<<2|(dv&1)<<1|(dv&1) — but for the stat tests
+    // we only care about individual stats, so we pass the relevant base.
+    SpeciesData sd = make_species(base_val, base_val, base_val, base_val, base_val, base_val);
+
+    Pokemon mon;
+    mon.level   = lvl;
+    mon.dvs.attack  = dv;
+    mon.dvs.defense = dv;
+    mon.dvs.speed   = dv;
+    mon.dvs.special = dv;
+    mon.stat_exp.hp      = sexp;
+    mon.stat_exp.attack  = sexp;
+    mon.stat_exp.defense = sexp;
+    mon.stat_exp.speed   = sexp;
+    mon.stat_exp.special = sexp;
+    mon.current_hp = 1;
+    mon.max_hp     = 1;
+    mon.recalculate_stats(sd);
+
+    return is_hp ? mon.max_hp : mon.attack;
+}
+
+// Non-HP: base=50, dv=0, stat_exp=0, level=5
+// formula: floor(((50+0)*2 + floor(ceil_sqrt(0)/4)) * 5 / 100) + 5
+//        = floor(100 * 5 / 100) + 5 = 5 + 5 = 10
+TEST(stat_formula_non_hp_zero_statexp_level5) {
+    uint16_t result = compute_stat(50, 0, 0, 5, false);
+    ASSERT_EQ(result, 10u);
+    std::cout << "  [stat non-HP base=50 dv=0 sexp=0 lv5 => 10 ✓]\n";
+}
+
+// HP: base=50, dv=0, stat_exp=0, level=5
+// formula: floor(((50+0)*2 + 0) * 5 / 100) + 5 + 10
+//        = floor(100 * 5 / 100) + 15 = 5 + 15 = 20
+TEST(stat_formula_hp_zero_statexp_level5) {
+    uint16_t result = compute_stat(50, 0, 0, 5, true);
+    ASSERT_EQ(result, 20u);
+    std::cout << "  [stat HP base=50 dv=0 sexp=0 lv5 => 20 ✓]\n";
+}
+
+// Non-HP max stat_exp: base=50, dv=0, stat_exp=65535, level=100
+// ceil_sqrt(65535): smallest b where b² >= 65535 → b=256, but Crystal caps at 255.
+// So floor(255/4) = 63.
+// formula: floor(((50+0)*2 + 63) * 100 / 100) + 5 = (100 + 63) + 5 = 168
+TEST(stat_formula_non_hp_max_statexp_level100) {
+    uint16_t result = compute_stat(50, 0, 65535, 100, false);
+    ASSERT_EQ(result, 168u);
+    std::cout << "  [stat non-HP base=50 dv=0 sexp=65535 lv100 => 168 ✓]\n";
+}
+
+// HP max stat_exp: base=50, dv=0, stat_exp=65535, level=100
+// ceil_sqrt(65535) capped at 255 → floor(255/4)=63.
+// formula: floor(((50+0)*2 + 63) * 100 / 100) + 100 + 10 = 163 + 110 = 273
+TEST(stat_formula_hp_max_statexp_level100) {
+    uint16_t result = compute_stat(50, 0, 65535, 100, true);
+    ASSERT_EQ(result, 273u);
+    std::cout << "  [stat HP base=50 dv=0 sexp=65535 lv100 => 273 ✓]\n";
+}
+
+// Ceiling sqrt vs floor sqrt distinction test.
+// Choose stat_exp = 63503, which is NOT a perfect square.
+//   floor_sqrt(63503) = 251 (since 251²=63001, 252²=63504 > 63503)
+//   ceil_sqrt(63503)  = 252 (since 252²=63504 >= 63503)
+// With floor sqrt: term = floor(251/4) = 62
+// With ceil  sqrt: term = floor(252/4) = 63
+// At level 100: floor vs ceil makes a 1-point difference in the final stat.
+// base=50, dv=0, stat_exp=63503, level=100:
+//   ceil path:  floor(((50)*2 + 63)*100/100) + 5 = 163 + 5 = 168
+//   floor path: floor(((50)*2 + 62)*100/100) + 5 = 162 + 5 = 167
+// We require the ceil result (168), matching Crystal's GetSquareRoot.
+TEST(stat_formula_ceil_sqrt_not_floor_sqrt) {
+    // stat_exp=63503: NOT a perfect square (251²=63001, 252²=63504)
+    // ceil_sqrt = 252, floor(252/4)=63 → result 168
+    // floor_sqrt = 251, floor(251/4)=62 → result 167
+    uint16_t result = compute_stat(50, 0, 63503, 100, false);
+    ASSERT_EQ(result, 168u);  // ceiling sqrt path
+    // Verify the off-by-one: floor sqrt would give 167 (mutation check)
+    ASSERT_TRUE(result != 167u);
+    std::cout << "  [stat ceil_sqrt(63503)=252 → term=63 → 168 (floor would give 167) ✓]\n";
+}
+
+// DV contribution: base=50, dv=15, stat_exp=0, level=50
+// formula: floor(((50+15)*2 + 0) * 50 / 100) + 5
+//        = floor(130 * 50 / 100) + 5 = floor(65) + 5 = 65 + 5 = 70
+TEST(stat_formula_dv_contributes_correctly) {
+    uint16_t result = compute_stat(50, 15, 0, 50, false);
+    ASSERT_EQ(result, 70u);
+    std::cout << "  [stat non-HP base=50 dv=15 sexp=0 lv50 => 70 ✓]\n";
+}
+
+// Level 1 boundary: base=50, dv=0, stat_exp=0, level=1
+// Non-HP: floor(100 * 1 / 100) + 5 = 1 + 5 = 6
+TEST(stat_formula_level1_boundary) {
+    uint16_t result = compute_stat(50, 0, 0, 1, false);
+    ASSERT_EQ(result, 6u);
+    std::cout << "  [stat non-HP base=50 dv=0 sexp=0 lv1 => 6 ✓]\n";
+}
+
+// Level 100 boundary: base=50, dv=15, stat_exp=0, level=100
+// Non-HP: floor(((50+15)*2 + 0)*100/100) + 5 = floor(130) + 5 = 130 + 5 = 135
+TEST(stat_formula_level100_boundary) {
+    uint16_t result = compute_stat(50, 15, 0, 100, false);
+    ASSERT_EQ(result, 135u);
+    std::cout << "  [stat non-HP base=50 dv=15 sexp=0 lv100 => 135 ✓]\n";
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <rom_path>\n";
@@ -20397,6 +20533,16 @@ int main(int argc, char* argv[]) {
     RUN_TEST(vm_sdefer_cleared_on_rebind);
     RUN_TEST(vm_sdefer_cleared_on_loop_destroy);
     RUN_TEST(vm_deferred_failure_propagates_error);
+
+    // Gen 2 stat formula correctness — ceiling-sqrt vs floor-sqrt
+    RUN_TEST(stat_formula_non_hp_zero_statexp_level5);
+    RUN_TEST(stat_formula_hp_zero_statexp_level5);
+    RUN_TEST(stat_formula_non_hp_max_statexp_level100);
+    RUN_TEST(stat_formula_hp_max_statexp_level100);
+    RUN_TEST(stat_formula_ceil_sqrt_not_floor_sqrt);
+    RUN_TEST(stat_formula_dv_contributes_correctly);
+    RUN_TEST(stat_formula_level1_boundary);
+    RUN_TEST(stat_formula_level100_boundary);
 
     // Summary
     std::cout << "\n=== Results ===\n";
