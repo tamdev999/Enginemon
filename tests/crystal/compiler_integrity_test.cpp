@@ -31,6 +31,7 @@
 #include "engine/build/package_cache.hpp"
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <filesystem>
 #include <vector>
 #include <cassert>
@@ -63,17 +64,32 @@ void run_test(const char* name, void (*test)()) {
     std::cout << "Running " << name << "... ";
     std::cout.flush();
     g_current_test_failed = false;
+
+    // Silence expected stderr during tests — intentional-failure tests produce
+    // FATAL messages from the compiler on the expected path.  Those are noise on
+    // a passing run; suppress them here and only emit on actual test failure.
+    std::ostringstream captured_stderr;
+    std::streambuf* saved_cerr = std::cerr.rdbuf(captured_stderr.rdbuf());
+
     try {
         test();
+        std::cerr.rdbuf(saved_cerr);  // restore before printing result
         if (g_current_test_failed) {
             std::cout << "FAIL\n";
+            if (!captured_stderr.str().empty()) {
+                std::cerr << "  [captured stderr]:\n" << captured_stderr.str();
+            }
             g_tests_failed++;
         } else {
             std::cout << "PASS\n";
             g_tests_passed++;
         }
     } catch (const std::exception& e) {
+        std::cerr.rdbuf(saved_cerr);
         std::cout << "EXCEPTION: " << e.what() << "\n";
+        if (!captured_stderr.str().empty()) {
+            std::cerr << "  [captured stderr]:\n" << captured_stderr.str();
+        }
         g_tests_failed++;
     }
 }
@@ -93,10 +109,14 @@ static std::filesystem::path temp_emon_path(const std::string& tag) {
 
 // Helper: build a compiler config with caching disabled so every test
 // exercises the full pipeline without short-circuiting via cached packages.
+// verbose=false: suppress compiler progress output on passing runs.
+// Expected FATAL messages on stderr are part of the test's failure semantics
+// and go to stderr only; they are captured and not shown on a passing run.
 static FullCompilerConfig no_cache_config() {
     FullCompilerConfig cfg;
     cfg.use_package_cache = false;
     cfg.worker_count = 1;  // Deterministic single-threaded for tests
+    cfg.verbose = false;   // Silence stdout progress on passing runs
     return cfg;
 }
 

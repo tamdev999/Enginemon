@@ -590,6 +590,8 @@ TEST(random_chance_invalid_percent_throws) {
     GameState gs;
     gs.rng.seed(0x2222ULL);
     rt.set_game_state(&gs);
+    // Silence expected Lua error: ctx.game:set_var may not be bound in bare LuaRuntime.
+    rt.set_error_handler([](const std::string&, const std::string&) {});
 
     std::string code = R"(
 script = {}

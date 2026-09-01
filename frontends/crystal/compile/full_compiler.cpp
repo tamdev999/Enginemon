@@ -21,6 +21,7 @@
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 #include <algorithm>
 #include <format>
 #include <stdexcept>
@@ -91,6 +92,25 @@ bool FullGameCompiler::compile(const std::filesystem::path& output_path,
             "Create a new FullGameCompiler for each compilation.");
     }
     compile_called_ = true;
+
+    // When verbose=false, redirect std::cout to a null sink for the duration of
+    // compile().  This keeps intentional-failure test runs quiet on success.
+    std::streambuf* saved_cout_buf = nullptr;
+    std::ofstream null_sink;
+    if (!config.verbose) {
+        null_sink.open(
+#ifdef _WIN32
+            "NUL"
+#else
+            "/dev/null"
+#endif
+        );
+        saved_cout_buf = std::cout.rdbuf(null_sink.rdbuf());
+    }
+    struct RestoreCout {
+        std::streambuf* buf;
+        ~RestoreCout() { if (buf) std::cout.rdbuf(buf); }
+    } restore_guard{saved_cout_buf};
 
     std::cout << "=== Full Game Crystal Compiler ===\n";
     std::cout << "Source ROM: " << profile_.version_string << "\n";

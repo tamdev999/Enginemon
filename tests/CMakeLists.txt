@@ -14,12 +14,12 @@ target_link_libraries(golden_test PRIVATE
 # Requires engine library (with Lua) + crystal frontend
 if(ENGINEMON_ENABLE_ENGINE)
     # =========================================================================
-    # runtime_test — original monolithic target, kept for run_all_tests.ps1
-    # compatibility.  All 586 tests from all 11 TUs in a single binary with
-    # /O1 /Zm2000.  Still functional but can hit OOM on 32-CPU machines when
-    # all 5 heavy compiler TUs compile simultaneously.
+    # runtime_test — original monolithic target, superseded by split targets.
+    # Coverage is complete: runtime_test_engine (194) + runtime_test_compiler (392).
+    # EXCLUDE_FROM_ALL: never rebuilt during normal or canonical builds.
+    # Still buildable explicitly: cmake --build build --target runtime_test
     # =========================================================================
-    add_executable(runtime_test
+    add_executable(runtime_test EXCLUDE_FROM_ALL
         scripting/runtime_test_core.cpp
         scripting/runtime_test_maps.cpp
         scripting/runtime_test_scripts.cpp
@@ -94,6 +94,13 @@ if(ENGINEMON_ENABLE_ENGINE)
     target_include_directories(runtime_test_compiler PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     if(MSVC)
         target_compile_options(runtime_test_compiler PRIVATE /bigobj /Zm2000 /O1 /wd4566)
+        # Disable intra-project TU parallelism for the two heaviest TUs.
+        # runtime_test_text_rng + runtime_test_pcg_vm each consume ~8 GB; compiling
+        # them together OOMs a 32 GB machine.  BuildInParallel=false serialises TU
+        # compilation within this vcxproj only (cross-project parallelism is unaffected).
+        set_target_properties(runtime_test_compiler PROPERTIES
+            VS_GLOBAL_BuildInParallel "false"
+        )
     endif()
     # Not added to ctest - requires ROM path argument
 
@@ -144,16 +151,16 @@ if(ENGINEMON_ENABLE_ENGINE)
     endif()
 endif()
 
-# Lua demo (show generated Lua output for a script)
-add_executable(lua_demo
+# Lua demo (show generated Lua output for a script) — debug tool, explicit build only
+add_executable(lua_demo EXCLUDE_FROM_ALL
     crystal/lua_demo.cpp
 )
 target_link_libraries(lua_demo PRIVATE
     enginemon_crystal
 )
 
-# Text dump (debug text encoding)
-add_executable(text_dump
+# Text dump (debug text encoding) — debug tool, explicit build only
+add_executable(text_dump EXCLUDE_FROM_ALL
     crystal/text_dump.cpp
 )
 target_link_libraries(text_dump PRIVATE
@@ -182,8 +189,8 @@ if(MSVC)
     target_compile_options(legality_gate_test PRIVATE /bigobj)
 endif()
 
-# Structural compatibility check (field-move actor lifetime analysis)
-add_executable(structural_check
+# Structural compatibility check — debug tool, explicit build only
+add_executable(structural_check EXCLUDE_FROM_ALL
     crystal/structural_check.cpp
 )
 target_link_libraries(structural_check PRIVATE
@@ -206,8 +213,8 @@ if(MSVC)
     target_compile_options(linker_test PRIVATE /bigobj)
 endif()
 
-# Stage 6: Linker diagnostic (deep failure investigation)
-add_executable(linker_diagnostic
+# Stage 6: Linker diagnostic (deep failure investigation) — debug tool, explicit build only
+add_executable(linker_diagnostic EXCLUDE_FROM_ALL
     crystal/linker_diagnostic.cpp
 )
 target_link_libraries(linker_diagnostic PRIVATE
@@ -267,6 +274,10 @@ target_link_libraries(oracle_test PRIVATE
 # /wd4566: suppress C4566 unicode escape warnings
 if(MSVC)
     target_compile_options(oracle_test PRIVATE /bigobj /Zm2000 /O1 /wd4566)
+    # Serialise TU compilation within this vcxproj to prevent OOM on heavy variant TUs.
+    set_target_properties(oracle_test PROPERTIES
+        VS_GLOBAL_BuildInParallel "false"
+    )
 endif()
 
 # TODO: Enable these when GTest is available and dependencies are built
@@ -363,27 +374,27 @@ if(ENGINEMON_ENABLE_ENGINE)
         add_test(NAME golden_test
             COMMAND $<TARGET_FILE:golden_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(golden_test
-            PROPERTIES LABELS "rom-required")
+            PROPERTIES LABELS "rom-required;golden")
 
         add_test(NAME legality_gate_test
             COMMAND $<TARGET_FILE:legality_gate_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(legality_gate_test
-            PROPERTIES LABELS "rom-required")
+            PROPERTIES LABELS "rom-required;corpus")
 
         add_test(NAME corpus_test
             COMMAND $<TARGET_FILE:corpus_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(corpus_test
-            PROPERTIES LABELS "rom-required")
+            PROPERTIES LABELS "rom-required;corpus")
 
         add_test(NAME linker_test
             COMMAND $<TARGET_FILE:linker_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(linker_test
-            PROPERTIES LABELS "rom-required")
+            PROPERTIES LABELS "rom-required;corpus")
 
         add_test(NAME compiler_integrity_test
             COMMAND $<TARGET_FILE:compiler_integrity_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(compiler_integrity_test
-            PROPERTIES LABELS "rom-required" TIMEOUT 120)
+            PROPERTIES LABELS "rom-required;compiler-ir" TIMEOUT 120)
 
         add_test(NAME oracle_test
             COMMAND $<TARGET_FILE:oracle_test> "${ENGINEMON_ROM_PATH}")

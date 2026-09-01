@@ -1031,6 +1031,8 @@ TEST(script_finishes_normally_sets_complete) {
 TEST(script_errors_after_resume_sets_error) {
     HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
+    // Silence expected Lua error output — this test intentionally triggers an error.
+    runtime.set_error_handler([](const std::string&, const std::string&) {});
     loop.set_lua_runtime(&runtime);
     
     // Script yields then errors on resume
@@ -1058,6 +1060,8 @@ TEST(script_errors_after_resume_sets_error) {
 TEST(script_errors_immediately_returns_false) {
     HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
+    // Silence expected Lua error output — this test intentionally triggers a syntax error.
+    runtime.set_error_handler([](const std::string&, const std::string&) {});
     loop.set_lua_runtime(&runtime);
     
     // Script has syntax error
@@ -1077,6 +1081,8 @@ TEST(script_errors_immediately_returns_false) {
 TEST(script_runtime_error_during_start_returns_false) {
     HeadlessGameLoop loop; init_timed_test_loop(loop);
     LuaRuntime runtime;
+    // Silence expected Lua error output — this test intentionally triggers a runtime error.
+    runtime.set_error_handler([](const std::string&, const std::string&) {});
     loop.set_lua_runtime(&runtime);
     
     // Script errors immediately on execution

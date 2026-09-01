@@ -306,6 +306,10 @@ struct FullCompilerConfig {
     
     // Emit address comments in generated Lua (for debugging)
     bool emit_address_comments = false;
+
+    // Print progress to stdout during compilation.
+    // Set false in tests to suppress expected-output noise on passing runs.
+    bool verbose = true;
     
     // Compute options hash for cache identity
     std::string compute_options_hash() const;

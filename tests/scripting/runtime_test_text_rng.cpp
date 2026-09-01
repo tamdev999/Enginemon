@@ -1,4 +1,4 @@
-﻿// runtime_test_text_rng.cpp â€” script_state lowering, text fidelity, batch10, emitter binding, RNG/save
+// runtime_test_text_rng.cpp â€” script_state lowering, text fidelity, batch10, emitter binding, RNG/save
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
 #include "engine/scripting/semantic_ir.hpp"
@@ -2167,6 +2167,9 @@ TEST(emitter_warp_to_spawn_has_binding) {
 
     // Execute â€” must not crash
     LuaRuntime runtime;
+    // Silence expected Lua error: warp_to_spawn throws when warp_fn not wired
+    // in stub mode. The test verifies binding exists, not that the warp succeeds.
+    runtime.set_error_handler([](const std::string&, const std::string&) {});
     runtime.execute_string(lua_code, "warp_to_spawn_test");
     runtime.start_script("script");
 

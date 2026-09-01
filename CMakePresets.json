@@ -1,0 +1,147 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Enginemon (Windows / vcpkg / Release)",
+      "description": "Canonical configuration. Set ENGINEMON_ROM env variable to the Crystal ROM path.",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build",
+      "toolchainFile": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "ENGINEMON_ENABLE_ENGINE":   "ON",
+        "ENGINEMON_ENABLE_VULKAN":   "ON",
+        "ENGINEMON_BUILD_TOOLS":     "ON",
+        "ENGINEMON_BUILD_TESTS":     "ON",
+        "ENGINEMON_ROM_PATH":        "$env{ENGINEMON_ROM}"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    {
+      "name": "all",
+      "displayName": "Build all canonical targets",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "targets": [
+        "runtime_test_engine", "runtime_test_compiler",
+        "battle_test", "emitter_test", "sprite_money_test", "crystal_save_test",
+        "golden_test", "legality_gate_test",
+        "corpus_test", "linker_test", "compiler_integrity_test", "oracle_test",
+        "corpus_lowering_audit", "profile_verify", "trainer_verify",
+        "enginemon_bootstrap", "enginemon_tiles", "emon_smoke", "emon_compile"
+      ]
+    },
+    {
+      "name": "engine",
+      "displayName": "Build engine-only targets",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "targets": ["runtime_test_engine", "battle_test"]
+    },
+    {
+      "name": "compiler",
+      "displayName": "Build compiler/IR targets",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "targets": ["runtime_test_compiler", "emitter_test"]
+    },
+    {
+      "name": "corpus",
+      "displayName": "Build corpus/linker targets",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "targets": ["corpus_test", "corpus_lowering_audit", "linker_test", "legality_gate_test"]
+    },
+    {
+      "name": "oracle",
+      "displayName": "Build oracle target",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "targets": ["oracle_test"]
+    },
+    {
+      "name": "smoke",
+      "displayName": "Build runtime smoke targets",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "targets": ["enginemon_tiles", "enginemon_bootstrap", "emon_compile", "emon_smoke"]
+    },
+    {
+      "name": "save",
+      "displayName": "Build save/codec targets",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "targets": ["crystal_save_test", "sprite_money_test"]
+    }
+  ],
+
+  "testPresets": [
+    {
+      "name": "all",
+      "displayName": "All canonical tests (parallel)",
+      "description": "Runs all 15 registered tests in parallel. Requires ENGINEMON_ROM.",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true, "shortProgress": false },
+      "execution": { "jobs": 8, "timeout": 120, "stopOnFailure": false }
+    },
+    {
+      "name": "engine",
+      "displayName": "Engine-only tests",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "filter": { "include": { "label": "engine-only" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8, "timeout": 60 }
+    },
+    {
+      "name": "compiler",
+      "displayName": "Compiler/IR tests",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "filter": { "include": { "label": "compiler-ir" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 4, "timeout": 120 }
+    },
+    {
+      "name": "corpus",
+      "displayName": "Corpus / linker / legality tests",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "filter": { "include": { "label": "corpus" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8, "timeout": 60 }
+    },
+    {
+      "name": "oracle",
+      "displayName": "Oracle tests",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "filter": { "include": { "label": "oracle" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1, "timeout": 90 }
+    },
+    {
+      "name": "standalone",
+      "displayName": "Standalone tests (no ROM required)",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "filter": { "include": { "label": "standalone" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8, "timeout": 60 }
+    },
+    {
+      "name": "save",
+      "displayName": "Save/codec tests",
+      "configurePreset": "default",
+      "configuration": "Release",
+      "filter": { "include": { "name": "crystal_save_test" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1, "timeout": 60 }
+    }
+  ]
+}
