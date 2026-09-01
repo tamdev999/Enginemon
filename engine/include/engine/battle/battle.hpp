@@ -23,7 +23,7 @@ namespace enginemon {
 // Forward declarations
 class Party;
 class Inventory;
-class TrainerAI;
+class ITrainerAI;
 
 // ============================================================================
 // Battle Pokemon (runtime state during battle)
@@ -37,6 +37,9 @@ struct BattlePokemon {
     SpeciesId species;
     TypeId type1;
     TypeId type2;
+    
+    // Level (needed for damage formula)
+    uint8_t level = 1;
     
     // Current stats (with stat stages applied)
     struct Stats {
@@ -239,19 +242,26 @@ public:
     void use_item(ItemId item, size_t target);
     
     // Callbacks for UI/animation
-    using MessageCallback = std::function<void(const std::string&)>;
+    using MessageCallback   = std::function<void(const std::string&)>;
     using AnimationCallback = std::function<void(uint8_t anim_id, size_t user, size_t target)>;
-    using HpChangeCallback = std::function<void(size_t pokemon, int16_t old_hp, int16_t new_hp)>;
-    using StatusCallback = std::function<void(size_t pokemon, Status old_status, Status new_status)>;
-    using FaintCallback = std::function<void(size_t pokemon)>;
-    using SwitchCallback = std::function<void(size_t side, size_t old_slot, size_t new_slot)>;
+    using HpChangeCallback  = std::function<void(size_t pokemon, int16_t old_hp, int16_t new_hp)>;
+    using StatusCallback    = std::function<void(size_t pokemon, Status old_status, Status new_status)>;
+    using FaintCallback     = std::function<void(size_t pokemon)>;
+    using SwitchCallback    = std::function<void(size_t side, size_t old_slot, size_t new_slot)>;
     
-    void set_message_callback(MessageCallback cb) { on_message_ = std::move(cb); }
-    void set_animation_callback(AnimationCallback cb) { on_animation_ = std::move(cb); }
-    void set_hp_change_callback(HpChangeCallback cb) { on_hp_change_ = std::move(cb); }
-    void set_status_callback(StatusCallback cb) { on_status_change_ = std::move(cb); }
-    void set_faint_callback(FaintCallback cb) { on_faint_ = std::move(cb); }
-    void set_switch_callback(SwitchCallback cb) { on_switch_ = std::move(cb); }
+    void set_message_callback(MessageCallback cb)   { on_message_    = std::move(cb); }
+    void set_animation_callback(AnimationCallback cb){ on_animation_  = std::move(cb); }
+    void set_hp_change_callback(HpChangeCallback cb) { on_hp_change_  = std::move(cb); }
+    void set_status_callback(StatusCallback cb)      { on_status_change_ = std::move(cb); }
+    void set_faint_callback(FaintCallback cb)        { on_faint_      = std::move(cb); }
+    void set_switch_callback(SwitchCallback cb)      { on_switch_     = std::move(cb); }
+    
+    // RNG wiring: production code supplies draws from GameState::rng.
+    // Without a callback, a fallback seeded mt19937 is used (unit tests only).
+    void set_rng_callback(std::function<uint32_t()> rng_fn);
+
+    // Registry access for AI and other consumers
+    const Registries& registries() const { return registries_; }
 
 private:
     BattleType type_;
@@ -272,7 +282,7 @@ private:
     
     // Trainer info
     std::optional<TrainerId> trainer_id_;
-    std::unique_ptr<TrainerAI> trainer_ai_;
+    std::unique_ptr<ITrainerAI> trainer_ai_;
     
     // Field state
     FieldState field_;
@@ -299,9 +309,14 @@ private:
     void determine_turn_order();
     void execute_action(BattlePokemon& user, BattlePokemon& target, 
                        const BattleAction& action, bool is_player);
-    void execute_move(BattlePokemon& user, BattlePokemon& target, MoveId move);
+    void execute_move(BattlePokemon& user, BattlePokemon& target, MoveId move,
+                      size_t move_slot, bool user_is_player);
     void apply_end_of_turn_effects();
+    void apply_residual(BattlePokemon& bp, bool is_player);
     void check_fainted();
+    void finalize_outcome();
+    void apply_stat_stages(BattlePokemon& bp);
+    // build_ai_context() is defined in battle.cpp (returns AIContext from trainer_ai.hpp)
     
     // Damage calculation
     int32_t calculate_damage(const BattlePokemon& attacker, 
@@ -311,9 +326,25 @@ private:
     // Experience calculation
     uint32_t calculate_exp(const BattlePokemon& defeated, bool is_trainer) const;
     
-    // Message helpers
+    // Internal event notification helpers
     void message(const std::string& msg);
     void animate(uint8_t anim_id, size_t user, size_t target);
+    void hp_change(size_t pokemon, int16_t old_hp, int16_t new_hp);
+    void fainted(size_t pokemon);
+    void switched(size_t side, size_t old_slot, size_t new_slot);
+    
+    // Internal RNG wrapper.
+    // Production: caller sets rng_.callback from GameState::rng before each turn.
+    // Tests: fallback mt19937 is used (does NOT touch GameState).
+    struct BattleRng {
+        std::mt19937 fallback{12345u};
+        std::function<uint32_t()> callback;
+        uint32_t next() { return callback ? callback() : fallback(); }
+        uint8_t  next_byte() { return static_cast<uint8_t>(next() & 0xFF); }
+    } rng_;
+
+    // Turn state
+    bool player_goes_first_ = true;
 };
 
 } // namespace enginemon

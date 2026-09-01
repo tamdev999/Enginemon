@@ -25,6 +25,11 @@ add_library(enginemon_engine STATIC
     # Input system
     input/input_system.cpp
     
+    # Battle system (mechanics, AI)
+    battle/calculator.cpp
+    battle/battle.cpp
+    battle/trainer_ai.cpp
+
     # Party/Pokemon management
     party/party.cpp
     party/pokemon.cpp

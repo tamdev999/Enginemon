@@ -15,6 +15,7 @@
 //   - Register new AI implementations
 
 #include "engine/core/types.hpp"
+#include "engine/battle/battle.hpp"
 #include <memory>
 #include <string>
 #include <functional>
@@ -22,10 +23,7 @@
 
 namespace enginemon {
 
-// Forward declarations
-struct BattlePokemon;
-struct BattleAction;
-class Battle;
+// Forward declarations (battle.hpp already included above for BattleAction/Battle)
 class LuaRuntime;
 
 // AI behavior identifier
