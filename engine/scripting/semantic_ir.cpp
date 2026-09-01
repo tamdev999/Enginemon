@@ -3,8 +3,54 @@
 
 #include "engine/scripting/semantic_ir.hpp"
 #include <sstream>
+#include <vector>
 
 namespace enginemon {
+
+// =============================================================================
+// SemanticInstruction — out-of-line special members
+//
+// Declaring these non-inline in the header and defining them here means the
+// compiler only generates the SemanticOp variant's destructor/move/copy
+// machinery ONCE, in this TU, rather than in every TU that includes the header.
+//
+// This is the single most impactful change for reducing per-TU compile memory:
+// the 50% backend (c2.dll) cost in each test TU comes entirely from code-
+// generating these bodies.
+// =============================================================================
+
+SemanticInstruction::SemanticInstruction()                                     = default;
+SemanticInstruction::~SemanticInstruction()                                    = default;
+SemanticInstruction::SemanticInstruction(const SemanticInstruction&)           = default;
+SemanticInstruction::SemanticInstruction(SemanticInstruction&&) noexcept       = default;
+SemanticInstruction& SemanticInstruction::operator=(const SemanticInstruction&) = default;
+SemanticInstruction& SemanticInstruction::operator=(SemanticInstruction&&) noexcept = default;
+
+SemanticBasicBlock::SemanticBasicBlock()                                       = default;
+SemanticBasicBlock::~SemanticBasicBlock()                                      = default;
+SemanticBasicBlock::SemanticBasicBlock(const SemanticBasicBlock&)              = default;
+SemanticBasicBlock::SemanticBasicBlock(SemanticBasicBlock&&) noexcept          = default;
+SemanticBasicBlock& SemanticBasicBlock::operator=(const SemanticBasicBlock&)   = default;
+SemanticBasicBlock& SemanticBasicBlock::operator=(SemanticBasicBlock&&) noexcept = default;
+
+SemanticScriptIR::SemanticScriptIR()                                           = default;
+SemanticScriptIR::~SemanticScriptIR()                                          = default;
+SemanticScriptIR::SemanticScriptIR(const SemanticScriptIR&)                    = default;
+SemanticScriptIR::SemanticScriptIR(SemanticScriptIR&&) noexcept                = default;
+SemanticScriptIR& SemanticScriptIR::operator=(const SemanticScriptIR&)         = default;
+SemanticScriptIR& SemanticScriptIR::operator=(SemanticScriptIR&&) noexcept     = default;
+
+LoweringResult::LoweringResult()                                               = default;
+LoweringResult::~LoweringResult()                                              = default;
+LoweringResult::LoweringResult(const LoweringResult&)                          = default;
+LoweringResult::LoweringResult(LoweringResult&&) noexcept                      = default;
+LoweringResult& LoweringResult::operator=(const LoweringResult&)               = default;
+LoweringResult& LoweringResult::operator=(LoweringResult&&) noexcept           = default;
+
+// Explicit instantiations: force vector<> machinery into this TU only.
+// Paired with extern template in the header.
+template class std::vector<SemanticInstruction>;
+template class std::vector<SemanticBasicBlock>;
 
 // =============================================================================
 // SemanticTextSequence

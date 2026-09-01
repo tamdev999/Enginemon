@@ -14,7 +14,7 @@ target_link_libraries(golden_test PRIVATE
 # Requires engine library (with Lua) + crystal frontend
 if(ENGINEMON_ENABLE_ENGINE)
     # =========================================================================
-    # runtime_test — original monolithic target, superseded by split targets.
+    # runtime_test Ã¢â‚¬â€ original monolithic target, superseded by split targets.
     # Coverage is complete: runtime_test_engine (194) + runtime_test_compiler (392).
     # EXCLUDE_FROM_ALL: never rebuilt during normal or canonical builds.
     # Still buildable explicitly: cmake --build build --target runtime_test
@@ -48,7 +48,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     # Not added to ctest - requires ROM path argument
 
     # =========================================================================
-    # runtime_test_engine — engine-only TUs, no Crystal compiler IR variants.
+    # runtime_test_engine Ã¢â‚¬â€ engine-only TUs, no Crystal compiler IR variants.
     # No CrystalCommandData (171 alts) or SemanticOp (154 alts) instantiation.
     # Safe to compile in full parallelism without OOM risk.
     # Covers: core, maps, blast_radius, integration, warp_semantics, rtc (191 tests)
@@ -73,9 +73,9 @@ if(ENGINEMON_ENABLE_ENGINE)
     # Not added to ctest - requires ROM path argument
 
     # =========================================================================
-    # runtime_test_compiler — Crystal compiler/IR TUs.
+    # runtime_test_compiler Ã¢â‚¬â€ Crystal compiler/IR TUs.
     # Includes semantic_ir.hpp (154-alt SemanticOp) + crystal_command.hpp
-    # (171-alt CrystalCommandData) — each TU peaks at ~8 GB MSVC WS.
+    # (171-alt CrystalCommandData) Ã¢â‚¬â€ each TU peaks at ~8 GB MSVC WS.
     # /O1 /Zm2000 required; at most 5 TUs so peak RAM ~40 GB at full parallelism.
     # Covers: scripts, batches, vm_state, text_rng, pcg_vm (392 tests)
     # =========================================================================
@@ -94,18 +94,13 @@ if(ENGINEMON_ENABLE_ENGINE)
     target_include_directories(runtime_test_compiler PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     if(MSVC)
         target_compile_options(runtime_test_compiler PRIVATE /bigobj /Zm2000 /O1 /wd4566)
-        # Disable intra-project TU parallelism for the two heaviest TUs.
-        # runtime_test_text_rng + runtime_test_pcg_vm each consume ~8 GB; compiling
-        # them together OOMs a 32 GB machine.  BuildInParallel=false serialises TU
-        # compilation within this vcxproj only (cross-project parallelism is unaffected).
-        set_target_properties(runtime_test_compiler PROPERTIES
-            VS_GLOBAL_BuildInParallel "false"
-        )
+        # BuildInParallel=false removed: out-of-line special member fix reduced
+        # worst-TU peak WS from ~6.3 GB to ~2.8 GB. Normal parallelism is safe.
     endif()
     # Not added to ctest - requires ROM path argument
 
     # =========================================================================
-    # battle_test — engine-only battle mechanics tests.
+    # battle_test Ã¢â‚¬â€ engine-only battle mechanics tests.
     # Links ONLY against enginemon_engine (no enginemon_crystal dependency).
     # No variant-heavy compiler IR headers.  All future battle tests go here.
     # =========================================================================
@@ -122,7 +117,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     # Not added to ctest - standalone, no ROM required
 
     # Focused tests for variable sprite identity model + money text state.
-    # Does NOT require a ROM path argument — runs standalone.
+    # Does NOT require a ROM path argument Ã¢â‚¬â€ runs standalone.
     add_executable(sprite_money_test
         scripting/sprite_money_test.cpp
     )
@@ -137,7 +132,7 @@ if(ENGINEMON_ENABLE_ENGINE)
 
     # Stage 7 SemanticLuaEmitter tests + sprite/money emitter tests.
     # Separated to avoid MSVC heap OOM on the large SemanticOp variant.
-    # Does NOT require a ROM path argument — runs standalone.
+    # Does NOT require a ROM path argument Ã¢â‚¬â€ runs standalone.
     add_executable(emitter_test
         scripting/emitter_test.cpp
     )
@@ -151,7 +146,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     endif()
 endif()
 
-# Lua demo (show generated Lua output for a script) — debug tool, explicit build only
+# Lua demo (show generated Lua output for a script) Ã¢â‚¬â€ debug tool, explicit build only
 add_executable(lua_demo EXCLUDE_FROM_ALL
     crystal/lua_demo.cpp
 )
@@ -159,7 +154,7 @@ target_link_libraries(lua_demo PRIVATE
     enginemon_crystal
 )
 
-# Text dump (debug text encoding) — debug tool, explicit build only
+# Text dump (debug text encoding) Ã¢â‚¬â€ debug tool, explicit build only
 add_executable(text_dump EXCLUDE_FROM_ALL
     crystal/text_dump.cpp
 )
@@ -189,7 +184,7 @@ if(MSVC)
     target_compile_options(legality_gate_test PRIVATE /bigobj)
 endif()
 
-# Structural compatibility check — debug tool, explicit build only
+# Structural compatibility check Ã¢â‚¬â€ debug tool, explicit build only
 add_executable(structural_check EXCLUDE_FROM_ALL
     crystal/structural_check.cpp
 )
@@ -213,7 +208,7 @@ if(MSVC)
     target_compile_options(linker_test PRIVATE /bigobj)
 endif()
 
-# Stage 6: Linker diagnostic (deep failure investigation) — debug tool, explicit build only
+# Stage 6: Linker diagnostic (deep failure investigation) Ã¢â‚¬â€ debug tool, explicit build only
 add_executable(linker_diagnostic EXCLUDE_FROM_ALL
     crystal/linker_diagnostic.cpp
 )
@@ -225,7 +220,7 @@ target_link_libraries(linker_diagnostic PRIVATE
 # Crystal .sav codec Phase 1 tests
 # Tests all 10 required categories: valid import, checksum corruption, backup recovery,
 # size rejection, round-trip shadow preservation, field independence, export fidelity, UB safety.
-# Does NOT require a ROM path argument — runs standalone.
+# Does NOT require a ROM path argument Ã¢â‚¬â€ runs standalone.
 add_executable(crystal_save_test
     crystal/crystal_save_test.cpp
 )
@@ -253,7 +248,7 @@ if(MSVC)
     target_compile_options(compiler_integrity_test PRIVATE /bigobj)
 endif()
 
-# Crystal Frontend Oracle — Phase 1
+# Crystal Frontend Oracle Ã¢â‚¬â€ Phase 1
 # Independent source-fidelity tests using RGBDS-derived (or hand-authored) binary fixtures.
 # Expected values come from pokecrystal semantics, NOT from Enginemon encoder output.
 add_executable(oracle_test
@@ -269,15 +264,12 @@ target_link_libraries(oracle_test PRIVATE
     enginemon_engine
 )
 # /bigobj: required for variant-heavy translation units
-# /O1:     minimize size — keeps OBJ small, avoids 550MB+ link bottleneck from /Od
+# /O1:     minimize size Ã¢â‚¬â€ keeps OBJ small, avoids 550MB+ link bottleneck from /Od
 # /Zm2000: raises compiler heap limit
 # /wd4566: suppress C4566 unicode escape warnings
 if(MSVC)
     target_compile_options(oracle_test PRIVATE /bigobj /Zm2000 /O1 /wd4566)
-    # Serialise TU compilation within this vcxproj to prevent OOM on heavy variant TUs.
-    set_target_properties(oracle_test PROPERTIES
-        VS_GLOBAL_BuildInParallel "false"
-    )
+    # BuildInParallel=false removed: out-of-line special member fix reduced peak WS.
 endif()
 
 # TODO: Enable these when GTest is available and dependencies are built

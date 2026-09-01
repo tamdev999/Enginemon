@@ -2022,10 +2022,27 @@ struct SemanticInstruction {
     // Optional provenance (for debugging, not for runtime)
     std::string source_label;
     uint32_t source_index = 0;      // Index in source block's commands
-    
-    // NOTE: is_unlowered() removed - SemanticOp cannot contain unlowered commands
-    // Failed lowering produces UnloweredDiagnostic separately
+
+    // Out-of-line special members: declaring these non-inline suppresses per-TU
+    // instantiation of the full SemanticOp variant destructor/move/copy machinery.
+    // All five are defined in semantic_ir.cpp, which becomes the single TU that
+    // instantiates the variant's generated code.
+    //
+    // The SemanticOp constructor allows brace-initialization from any Sem_* type,
+    // preserving the common call pattern: instructions.push_back({Sem_End{}}).
+    // Non-explicit: allows implicit construction from any SemanticOp alternative.
+    SemanticInstruction(SemanticOp o) : op(std::move(o)) {}  // NOLINT(google-explicit-constructor)
+    SemanticInstruction();
+    ~SemanticInstruction();
+    SemanticInstruction(const SemanticInstruction&);
+    SemanticInstruction(SemanticInstruction&&) noexcept;
+    SemanticInstruction& operator=(const SemanticInstruction&);
+    SemanticInstruction& operator=(SemanticInstruction&&) noexcept;
 };
+
+// extern template: suppress vector<SemanticInstruction> instantiation in every TU.
+// The explicit instantiation lives in semantic_ir.cpp.
+extern template class std::vector<SemanticInstruction>;
 
 // =============================================================================
 // SEMANTIC BASIC BLOCK
@@ -2040,12 +2057,20 @@ struct SemanticBasicBlock {
     // Instructions (all are valid semantic ops - no unlowered)
     std::vector<SemanticInstruction> instructions;
     
-    // Terminator (last instruction should be a terminator)
-    // Terminators: Sem_End, Sem_Return, Sem_Jump, Sem_JumpIf (conditional fallthrough)
-    
     // Statistics
     size_t instruction_count() const { return instructions.size(); }
+
+    // Out-of-line special members (see SemanticInstruction for rationale).
+    SemanticBasicBlock();
+    ~SemanticBasicBlock();
+    SemanticBasicBlock(const SemanticBasicBlock&);
+    SemanticBasicBlock(SemanticBasicBlock&&) noexcept;
+    SemanticBasicBlock& operator=(const SemanticBasicBlock&);
+    SemanticBasicBlock& operator=(SemanticBasicBlock&&) noexcept;
 };
+
+// extern template: suppress vector<SemanticBasicBlock> instantiation in every TU.
+extern template class std::vector<SemanticBasicBlock>;
 
 // =============================================================================
 // SEMANTIC SCRIPT IR
@@ -2068,6 +2093,14 @@ struct SemanticScriptIR {
     
     // Provenance (for debugging)
     uint32_t source_rom_address = 0;
+
+    // Out-of-line special members (see SemanticInstruction for rationale).
+    SemanticScriptIR();
+    ~SemanticScriptIR();
+    SemanticScriptIR(const SemanticScriptIR&);
+    SemanticScriptIR(SemanticScriptIR&&) noexcept;
+    SemanticScriptIR& operator=(const SemanticScriptIR&);
+    SemanticScriptIR& operator=(SemanticScriptIR&&) noexcept;
 };
 
 // =============================================================================
@@ -2094,7 +2127,15 @@ struct LoweringResult {
     // Per-opcode breakdown
     std::unordered_map<uint8_t, size_t> lowered_by_opcode;
     std::unordered_map<uint8_t, size_t> unlowered_by_opcode;
-    std::unordered_map<uint8_t, size_t> absorbed_by_opcode;  // Track which opcodes are absorbed
+    std::unordered_map<uint8_t, size_t> absorbed_by_opcode;
+
+    // Out-of-line special members (see SemanticInstruction for rationale).
+    LoweringResult();
+    ~LoweringResult();
+    LoweringResult(const LoweringResult&);
+    LoweringResult(LoweringResult&&) noexcept;
+    LoweringResult& operator=(const LoweringResult&);
+    LoweringResult& operator=(LoweringResult&&) noexcept;
 };
 
 // =============================================================================

@@ -1148,7 +1148,20 @@ struct CrystalCommand {
     
     // Helper to check if this is a call command
     bool is_call() const;
+
+    // Out-of-line special members: suppresses per-TU instantiation of
+    // CrystalCommandData (171-alt) destructor/move/copy machinery.
+    // Defined in crystal_command.cpp (the single TU that owns the variant cost).
+    CrystalCommand();
+    ~CrystalCommand();
+    CrystalCommand(const CrystalCommand&);
+    CrystalCommand(CrystalCommand&&) noexcept;
+    CrystalCommand& operator=(const CrystalCommand&);
+    CrystalCommand& operator=(CrystalCommand&&) noexcept;
 };
+
+// extern template: suppress vector<CrystalCommand> instantiation in every TU.
+extern template class std::vector<CrystalCommand>;
 
 // =============================================================================
 // ROUND-TRIP ENCODING
@@ -1176,6 +1189,14 @@ struct CrystalScriptIR {
     // Statistics
     size_t unknown_count() const;
     bool is_fully_decoded() const { return unknown_count() == 0; }
+
+    // Out-of-line special members (see CrystalCommand for rationale).
+    CrystalScriptIR();
+    ~CrystalScriptIR();
+    CrystalScriptIR(const CrystalScriptIR&);
+    CrystalScriptIR(CrystalScriptIR&&) noexcept;
+    CrystalScriptIR& operator=(const CrystalScriptIR&);
+    CrystalScriptIR& operator=(CrystalScriptIR&&) noexcept;
 };
 
 } // namespace crystal

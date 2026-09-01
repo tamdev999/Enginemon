@@ -4,8 +4,36 @@
 
 #include "crystal/script/crystal_command.hpp"
 #include "crystal/script/decoder.hpp"  // For CrystalOp constants
+#include <vector>
 
 namespace crystal {
+
+// =============================================================================
+// CrystalCommand + CrystalScriptIR — out-of-line special members
+//
+// Declaring these non-inline in the header and defining them here means
+// CrystalCommandData (171-alt) destructor/move/copy machinery is only
+// generated in this TU (which already pays the cost via std::visit in
+// is_terminator/is_branch/is_call). Every other TU that includes
+// crystal_command.hpp no longer instantiates the variant machinery.
+// =============================================================================
+
+CrystalCommand::CrystalCommand()                                          = default;
+CrystalCommand::~CrystalCommand()                                         = default;
+CrystalCommand::CrystalCommand(const CrystalCommand&)                     = default;
+CrystalCommand::CrystalCommand(CrystalCommand&&) noexcept                 = default;
+CrystalCommand& CrystalCommand::operator=(const CrystalCommand&)          = default;
+CrystalCommand& CrystalCommand::operator=(CrystalCommand&&) noexcept      = default;
+
+CrystalScriptIR::CrystalScriptIR()                                        = default;
+CrystalScriptIR::~CrystalScriptIR()                                       = default;
+CrystalScriptIR::CrystalScriptIR(const CrystalScriptIR&)                  = default;
+CrystalScriptIR::CrystalScriptIR(CrystalScriptIR&&) noexcept              = default;
+CrystalScriptIR& CrystalScriptIR::operator=(const CrystalScriptIR&)       = default;
+CrystalScriptIR& CrystalScriptIR::operator=(CrystalScriptIR&&) noexcept   = default;
+
+// Explicit instantiations: force vector<> machinery into this TU only.
+template class std::vector<CrystalCommand>;
 
 bool CrystalCommand::is_terminator() const {
     return std::visit([](const auto& cmd) -> bool {
