@@ -498,3 +498,74 @@ Linker validates ranges: EventFlags 0-2047, EngineFlags 0-189.
 | J | String Formatting Operand Order | Frontend Hardening | **FIXED** ✓ |
 | K | Round-Trip Validation | Frontend Hardening | **FIXED** ✓ |
 | L | Flag Namespace Distinction | Multi-Frontend | **FIXED** ✓ |
+
+---
+
+## J. state_hash() Insufficient for Long-Playthrough E2E Checkpoints
+
+**Status**: Tracked — prerequisite before E2E replay/TAS regression tests
+
+**Current Behavior**:
+`HeadlessGameLoop::state_hash()` produces a narrow 64-bit XOR of player
+position, facing, is_moving, and loop state:
+
+```cpp
+hash ^= static_cast<uint64_t>(player_.x) << 0;
+hash ^= static_cast<uint64_t>(player_.y) << 8;
+hash ^= static_cast<uint64_t>(player_.facing) << 16;
+hash ^= static_cast<uint64_t>(player_.is_moving) << 20;
+hash ^= static_cast<uint64_t>(state_) << 24;
+```
+
+This does NOT cover flags, variables, RNG state, inventory, or party.
+Two different game states at the same map position produce identical hashes.
+
+**Required Before E2E Tests**:
+Any deterministic long-playthrough regression test that asserts "state at
+checkpoint N equals expected" must compare full `GameState` serialization,
+not `state_hash()`. Either:
+- Use `GameState::serialize()` comparison directly, or
+- Extend `state_hash()` to hash the full serialized `GameState` bytes
+
+The current `state_hash()` is useful only for quick position sanity checks.
+It is not authoritative for E2E regression.
+
+**Intended Milestone**: Before first long-playthrough / TAS-replay E2E test
+**Relevant Files**:
+- `engine/core/game_loop.cpp` — `state_hash()`
+- `engine/core/game_state.cpp` — `serialize()` / `deserialize()`
+
+---
+
+## K. HeadlessGameLoop::player_ vs GameState::player Ownership Divergence
+
+**Status**: Tracked — prerequisite before save/load mid-movement E2E tests
+
+**Current Behavior** (documented in item G above):
+`HeadlessGameLoop::player_` (the simulation's player state) is NOT synced
+back to `GameState::player` during movement. During a move sequence,
+`GameState::player` is stale at the pre-movement position.
+
+**Impact on E2E Tests**:
+Any E2E test that:
+1. Steps the simulation while a movement is in progress
+2. Calls `GameState::serialize()` (save checkpoint)
+3. Then `GameState::deserialize()` (load checkpoint)
+
+will restore the player to the wrong position — the pre-movement tile, not
+the mid-movement interpolated position.
+
+TAS-style input replays that save/load at non-idle frames will produce
+incorrect results until this is resolved.
+
+**Required Before E2E Tests**:
+Resolve the ownership model (see item G for options) before writing any
+E2E test that save/loads during player movement. E2E tests limited to
+idle-frame checkpoints (after movement fully completes) are safe now.
+
+**Intended Milestone**: World/Save System Cleanup (item G) — must land
+before mid-movement E2E checkpoint tests
+**Relevant Files**:
+- `engine/include/engine/core/game_loop.hpp` — `PlayerState`
+- `engine/include/engine/core/game_state.hpp` — `PlayerSaveState`
+- `engine/world/world_manager.cpp` — `execute_warp()`, `remember_backup_warp()`

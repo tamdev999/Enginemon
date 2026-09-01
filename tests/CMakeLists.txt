@@ -14,7 +14,7 @@ target_link_libraries(golden_test PRIVATE
 # Requires engine library (with Lua) + crystal frontend
 if(ENGINEMON_ENABLE_ENGINE)
     # =========================================================================
-    # runtime_test ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â original monolithic target, superseded by split targets.
+    # runtime_test ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â original monolithic target, superseded by split targets.
     # Coverage is complete: runtime_test_engine (194) + runtime_test_compiler (392).
     # EXCLUDE_FROM_ALL: never rebuilt during normal or canonical builds.
     # Still buildable explicitly: cmake --build build --target runtime_test
@@ -48,7 +48,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     # Not added to ctest - requires ROM path argument
 
     # =========================================================================
-    # runtime_test_engine ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â engine-only TUs, no Crystal compiler IR variants.
+    # runtime_test_engine ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â engine-only TUs, no Crystal compiler IR variants.
     # No CrystalCommandData (171 alts) or SemanticOp (154 alts) instantiation.
     # Safe to compile in full parallelism without OOM risk.
     # Covers: core, maps, blast_radius, integration, warp_semantics, rtc (191 tests)
@@ -73,9 +73,9 @@ if(ENGINEMON_ENABLE_ENGINE)
     # Not added to ctest - requires ROM path argument
 
     # =========================================================================
-    # runtime_test_compiler ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Crystal compiler/IR TUs.
+    # runtime_test_compiler ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Crystal compiler/IR TUs.
     # Includes semantic_ir.hpp (154-alt SemanticOp) + crystal_command.hpp
-    # (171-alt CrystalCommandData) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â each TU peaks at ~8 GB MSVC WS.
+    # (171-alt CrystalCommandData) ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â each TU peaks at ~8 GB MSVC WS.
     # /O1 /Zm2000 required; at most 5 TUs so peak RAM ~40 GB at full parallelism.
     # Covers: scripts, batches, vm_state, text_rng, pcg_vm (392 tests)
     # =========================================================================
@@ -100,7 +100,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     # Not added to ctest - requires ROM path argument
 
     # =========================================================================
-    # battle_test ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â engine-only battle mechanics tests.
+    # battle_test ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â engine-only battle mechanics tests.
     # Links ONLY against enginemon_engine (no enginemon_crystal dependency).
     # No variant-heavy compiler IR headers.  All future battle tests go here.
     # =========================================================================
@@ -117,7 +117,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     # Not added to ctest - standalone, no ROM required
 
     # Focused tests for variable sprite identity model + money text state.
-    # Does NOT require a ROM path argument ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â runs standalone.
+    # Does NOT require a ROM path argument ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â runs standalone.
     add_executable(sprite_money_test
         scripting/sprite_money_test.cpp
     )
@@ -132,7 +132,7 @@ if(ENGINEMON_ENABLE_ENGINE)
 
     # Stage 7 SemanticLuaEmitter tests + sprite/money emitter tests.
     # Separated to avoid MSVC heap OOM on the large SemanticOp variant.
-    # Does NOT require a ROM path argument ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â runs standalone.
+    # Does NOT require a ROM path argument ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â runs standalone.
     add_executable(emitter_test
         scripting/emitter_test.cpp
     )
@@ -146,7 +146,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     endif()
 endif()
 
-# Lua demo (show generated Lua output for a script) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â debug tool, explicit build only
+# Lua demo (show generated Lua output for a script) ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â debug tool, explicit build only
 add_executable(lua_demo EXCLUDE_FROM_ALL
     crystal/lua_demo.cpp
 )
@@ -154,7 +154,7 @@ target_link_libraries(lua_demo PRIVATE
     enginemon_crystal
 )
 
-# Text dump (debug text encoding) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â debug tool, explicit build only
+# Text dump (debug text encoding) ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â debug tool, explicit build only
 add_executable(text_dump EXCLUDE_FROM_ALL
     crystal/text_dump.cpp
 )
@@ -184,7 +184,7 @@ if(MSVC)
     target_compile_options(legality_gate_test PRIVATE /bigobj)
 endif()
 
-# Structural compatibility check ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â debug tool, explicit build only
+# Structural compatibility check ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â debug tool, explicit build only
 add_executable(structural_check EXCLUDE_FROM_ALL
     crystal/structural_check.cpp
 )
@@ -208,7 +208,7 @@ if(MSVC)
     target_compile_options(linker_test PRIVATE /bigobj)
 endif()
 
-# Stage 6: Linker diagnostic (deep failure investigation) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â debug tool, explicit build only
+# Stage 6: Linker diagnostic (deep failure investigation) ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â debug tool, explicit build only
 add_executable(linker_diagnostic EXCLUDE_FROM_ALL
     crystal/linker_diagnostic.cpp
 )
@@ -220,7 +220,7 @@ target_link_libraries(linker_diagnostic PRIVATE
 # Crystal .sav codec Phase 1 tests
 # Tests all 10 required categories: valid import, checksum corruption, backup recovery,
 # size rejection, round-trip shadow preservation, field independence, export fidelity, UB safety.
-# Does NOT require a ROM path argument ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â runs standalone.
+# Does NOT require a ROM path argument ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â runs standalone.
 add_executable(crystal_save_test
     crystal/crystal_save_test.cpp
 )
@@ -248,7 +248,7 @@ if(MSVC)
     target_compile_options(compiler_integrity_test PRIVATE /bigobj)
 endif()
 
-# Crystal Frontend Oracle ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Phase 1
+# Crystal Frontend Oracle ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Phase 1
 # Independent source-fidelity tests using RGBDS-derived (or hand-authored) binary fixtures.
 # Expected values come from pokecrystal semantics, NOT from Enginemon encoder output.
 add_executable(oracle_test
@@ -264,7 +264,7 @@ target_link_libraries(oracle_test PRIVATE
     enginemon_engine
 )
 # /bigobj: required for variant-heavy translation units
-# /O1:     minimize size ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â keeps OBJ small, avoids 550MB+ link bottleneck from /Od
+# /O1:     minimize size ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â keeps OBJ small, avoids 550MB+ link bottleneck from /Od
 # /Zm2000: raises compiler heap limit
 # /wd4566: suppress C4566 unicode escape warnings
 if(MSVC)
@@ -346,42 +346,42 @@ if(ENGINEMON_ENABLE_ENGINE)
     add_test(NAME emitter_test      COMMAND $<TARGET_FILE:emitter_test>)
     add_test(NAME sprite_money_test COMMAND $<TARGET_FILE:sprite_money_test>)
     set_tests_properties(battle_test emitter_test sprite_money_test
-        PROPERTIES LABELS "standalone;engine-only")
+        PROPERTIES LABELS "standalone;engine-only" TIMEOUT 30)
 
     add_test(NAME crystal_save_test COMMAND $<TARGET_FILE:crystal_save_test>)
-    set_tests_properties(crystal_save_test PROPERTIES LABELS "standalone")
+    set_tests_properties(crystal_save_test PROPERTIES LABELS "standalone" TIMEOUT 30)
 
     # --- ROM-dependent --------------------------------------------------------
     if(ENGINEMON_ROM_PATH)
         add_test(NAME runtime_test_engine
             COMMAND $<TARGET_FILE:runtime_test_engine> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(runtime_test_engine
-            PROPERTIES LABELS "engine-only;rom-required")
+            PROPERTIES LABELS "engine-only;rom-required" TIMEOUT 60)
 
         add_test(NAME runtime_test_compiler
             COMMAND $<TARGET_FILE:runtime_test_compiler> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(runtime_test_compiler
-            PROPERTIES LABELS "compiler-ir;rom-required")
+            PROPERTIES LABELS "compiler-ir;rom-required" TIMEOUT 60)
 
         add_test(NAME golden_test
             COMMAND $<TARGET_FILE:golden_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(golden_test
-            PROPERTIES LABELS "rom-required;golden")
+            PROPERTIES LABELS "rom-required;golden" TIMEOUT 30)
 
         add_test(NAME legality_gate_test
             COMMAND $<TARGET_FILE:legality_gate_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(legality_gate_test
-            PROPERTIES LABELS "rom-required;corpus")
+            PROPERTIES LABELS "rom-required;corpus" TIMEOUT 30)
 
         add_test(NAME corpus_test
             COMMAND $<TARGET_FILE:corpus_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(corpus_test
-            PROPERTIES LABELS "rom-required;corpus")
+            PROPERTIES LABELS "rom-required;corpus" TIMEOUT 30)
 
         add_test(NAME linker_test
             COMMAND $<TARGET_FILE:linker_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(linker_test
-            PROPERTIES LABELS "rom-required;corpus")
+            PROPERTIES LABELS "rom-required;corpus" TIMEOUT 30)
 
         add_test(NAME compiler_integrity_test
             COMMAND $<TARGET_FILE:compiler_integrity_test> "${ENGINEMON_ROM_PATH}")
@@ -396,17 +396,17 @@ if(ENGINEMON_ENABLE_ENGINE)
         add_test(NAME corpus_lowering_audit
             COMMAND $<TARGET_FILE:corpus_lowering_audit> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(corpus_lowering_audit
-            PROPERTIES LABELS "rom-required")
+            PROPERTIES LABELS "rom-required" TIMEOUT 30)
 
         add_test(NAME profile_verify
             COMMAND $<TARGET_FILE:profile_verify> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(profile_verify
-            PROPERTIES LABELS "rom-required")
+            PROPERTIES LABELS "rom-required" TIMEOUT 30)
 
         add_test(NAME trainer_verify
             COMMAND $<TARGET_FILE:trainer_verify> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(trainer_verify
-            PROPERTIES LABELS "rom-required")
+            PROPERTIES LABELS "rom-required" TIMEOUT 30)
     else()
         message(STATUS
             "CTest: ROM-dependent tests not registered (set -DENGINEMON_ROM_PATH=... to enable)")
