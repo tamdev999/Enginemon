@@ -3,21 +3,30 @@
 # Runs every correctness-relevant test suite and the production runtime compile gates.
 #
 # Required canonical gates:
-#   1.  runtime_test
-#   2.  emitter_test
-#   3.  sprite_money_test        (standalone, no ROM)
-#   4.  golden_test
-#   5.  legality_gate_test
-#   6.  corpus_test
-#   7.  corpus_lowering_audit
-#   8.  linker_test
-#   9.  compiler_integrity_test
-#  10.  oracle_test              (Phases 1-5.5 full-pipe -- SKIP = FAIL)
-#  11.  profile_verify           (profile offset correctness)
-#  12.  trainer_verify           (trainer group extraction correctness)
-#  13.  enginemon_bootstrap      build gate
-#  14.  enginemon_tiles          build gate
-#  15.  emon_smoke                production runtime smoke (package + map + tick)
+#   0.  build                    (single cmake --build invocation for all targets)
+#   1.  enginemon_bootstrap      build gate
+#       enginemon_tiles          build gate
+#   2.  runtime_test_engine      (engine-only, 194 tests)
+#   3.  runtime_test_compiler    (compiler/IR, 392 tests)
+#   4.  battle_test              (engine-only, no ROM)
+#   5.  emitter_test             (no ROM)
+#   6.  sprite_money_test        (standalone, no ROM)
+#   7.  crystal_save_test        (standalone, no ROM)
+#   8.  golden_test
+#   9.  legality_gate_test       (adversarial, 16 tests)
+#  10.  corpus_test              (decoder/CFG integrity)
+#  11.  corpus_lowering_audit    (1788/1788 invariant)
+#  12.  linker_test              (corpus=1788, InvalidOwnership=0)
+#  13.  compiler_integrity_test
+#  14.  oracle_test              (Phases 1-5.5 full-pipe -- SKIP = FAIL)
+#  15.  profile_verify           (profile offset correctness)
+#  16.  trainer_verify           (trainer group extraction correctness)
+#  17.  emon_smoke               (fresh ROM->compile->smoke)
+#
+# NOTE: runtime_test (monolithic) is intentionally excluded from the canonical
+# build.  Coverage is complete: runtime_test_engine (194) + runtime_test_compiler
+# (392) = 586 tests covering all 11 TUs.  The monolithic target remains in
+# CMakeLists.txt for local use but must not be rebuilt during the canonical run.
 #
 # Required invariants:
 #   - corpus lowering = 1788/1788
@@ -33,6 +42,7 @@
 #
 # Usage:
 #   .\run_all_tests.ps1 -RomPath "references\Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc"
+#   .\run_all_tests.ps1 -RomPath "..." -NoBuild   # skip build, use existing binaries
 
 param(
     [Parameter(Mandatory=$true)]
@@ -69,7 +79,6 @@ $decoderCfgOk        = $false
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 function Write-Header($name) {
     Write-Host ""
     Write-Host ("=" * 60) -ForegroundColor Cyan
@@ -122,7 +131,6 @@ function Get-PassFail($lines) {
 # ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
-
 if (-not (Test-Path -LiteralPath $RomPath)) {
     Write-Host "ERROR: ROM not found: $RomPath" -ForegroundColor Red
     exit 1
@@ -136,13 +144,22 @@ Write-Host "Date:  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor Gray
 
 # ---------------------------------------------------------------------------
 # GATE 0 -- Build
+# Single cmake --build invocation builds all canonical targets in one MSBuild
+# session.  Shared dependencies (enginemon_engine, enginemon_crystal) are built
+# once and reused; no redundant dependency-graph evaluation.
+# runtime_test (monolith) is deliberately excluded â€” coverage is complete via
+# runtime_test_engine + runtime_test_compiler.
 # ---------------------------------------------------------------------------
 Write-Header "Build"
 
+# Canonical binaries that must exist for the gates below.
 $requiredExes = @(
-    "$testDir\runtime_test.exe",
+    "$testDir\runtime_test_engine.exe",
+    "$testDir\runtime_test_compiler.exe",
+    "$testDir\battle_test.exe",
     "$testDir\emitter_test.exe",
     "$testDir\sprite_money_test.exe",
+    "$testDir\crystal_save_test.exe",
     "$testDir\golden_test.exe",
     "$testDir\legality_gate_test.exe",
     "$testDir\corpus_test.exe",
@@ -187,26 +204,33 @@ if ($NoBuild) {
         }
     }
 
-    $buildTargets = @(
-        "runtime_test", "emitter_test", "sprite_money_test",
-        "golden_test", "legality_gate_test", "corpus_test",
-        "linker_test", "compiler_integrity_test", "oracle_test",
-        "corpus_lowering_audit", "profile_verify", "trainer_verify",
-        "enginemon_bootstrap", "enginemon_tiles", "emon_smoke", "emon_compile"
-    )
+    # All canonical targets in one MSBuild invocation.
+    # MSBuild schedules shared dependencies (enginemon_engine, enginemon_crystal)
+    # once and parallelises independent leaf targets.
+    Write-Host "  Building all canonical targets..." -ForegroundColor Gray
+    & $cmake --build $buildDir --config Release `
+        --target runtime_test_engine `
+        --target runtime_test_compiler `
+        --target battle_test `
+        --target emitter_test `
+        --target sprite_money_test `
+        --target crystal_save_test `
+        --target golden_test `
+        --target legality_gate_test `
+        --target corpus_test `
+        --target linker_test `
+        --target compiler_integrity_test `
+        --target oracle_test `
+        --target corpus_lowering_audit `
+        --target profile_verify `
+        --target trainer_verify `
+        --target enginemon_bootstrap `
+        --target enginemon_tiles `
+        --target emon_smoke `
+        --target emon_compile `
+        2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
 
-    $buildFailed = $false
-    foreach ($tgt in $buildTargets) {
-        Write-Host "  Building $tgt..." -ForegroundColor Gray
-        & $cmake --build $buildDir --target $tgt --config Release 2>&1 |
-            ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  [build] FAIL: target '$tgt' did not build cleanly" -ForegroundColor Red
-            $buildFailed = $true
-        }
-    }
-
-    if ($buildFailed) {
+    if ($LASTEXITCODE -ne 0) {
         Write-Host ""
         Write-Host "  FATAL: build failure -- aborting verification." -ForegroundColor Red
         exit 1
@@ -236,25 +260,65 @@ if (Test-Path $tilesExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 2 -- Runtime Tests
+# GATE 2 -- Runtime Tests (engine)
+# Engine-only TUs; no Crystal compiler IR variants instantiated.
+# 194 tests covering: core, maps, blast_radius, integration, warp_semantics, rtc
 # ---------------------------------------------------------------------------
-Write-Header "Runtime Tests"
+Write-Header "Runtime Tests (engine)"
 
-$runtimeExe = "$testDir\runtime_test.exe"
-if (Test-Path $runtimeExe) {
-    $r  = Invoke-Exe $runtimeExe @($RomPath)
+$rtEngineExe = "$testDir\runtime_test_engine.exe"
+if (Test-Path $rtEngineExe) {
+    $r  = Invoke-Exe $rtEngineExe @($RomPath)
     $pf = Get-PassFail $r.Lines
     if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
-        Write-Result "runtime_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
+        Write-Result "runtime_test_engine" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
     } else {
-        Write-Result "runtime_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+        Write-Result "runtime_test_engine" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
     }
 } else {
-    Write-Result "runtime_test" $false "Executable not found: $runtimeExe"
+    Write-Result "runtime_test_engine" $false "Executable not found: $rtEngineExe"
 }
 
 # ---------------------------------------------------------------------------
-# GATE 3 -- Emitter Tests  (no ROM argument)
+# GATE 3 -- Runtime Tests (compiler)
+# Crystal compiler/IR TUs (SemanticOp + CrystalCommandData variants).
+# 392 tests covering: scripts, batches, vm_state, text_rng, pcg_vm
+# ---------------------------------------------------------------------------
+Write-Header "Runtime Tests (compiler)"
+
+$rtCompilerExe = "$testDir\runtime_test_compiler.exe"
+if (Test-Path $rtCompilerExe) {
+    $r  = Invoke-Exe $rtCompilerExe @($RomPath)
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "runtime_test_compiler" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
+    } else {
+        Write-Result "runtime_test_compiler" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+    }
+} else {
+    Write-Result "runtime_test_compiler" $false "Executable not found: $rtCompilerExe"
+}
+
+# ---------------------------------------------------------------------------
+# GATE 4 -- Battle Tests (engine-only, no ROM needed)
+# ---------------------------------------------------------------------------
+Write-Header "Battle Tests"
+
+$battleExe = "$testDir\battle_test.exe"
+if (Test-Path $battleExe) {
+    $r  = Invoke-Exe $battleExe @()
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "battle_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
+    } else {
+        Write-Result "battle_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+    }
+} else {
+    Write-Result "battle_test" $false "Executable not found: $battleExe"
+}
+
+# ---------------------------------------------------------------------------
+# GATE 5 -- Emitter Tests  (no ROM argument)
 # ---------------------------------------------------------------------------
 Write-Header "Emitter Tests"
 
@@ -272,7 +336,7 @@ if (Test-Path $emitterExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 4 -- Sprite/Money Tests  (no ROM argument)
+# GATE 6 -- Sprite/Money Tests  (no ROM argument)
 # Covers GameState variable-sprite identity, money account isolation,
 # Day Care species save/load, and PackageWriter->PackageReader species-icon roundtrip.
 # ---------------------------------------------------------------------------
@@ -292,7 +356,26 @@ if (Test-Path $spriteMoneyExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 5 -- Golden Tests
+# GATE 7 -- Crystal Save Tests  (standalone, no ROM)
+# Crystal .sav codec round-trip, checksum, shadow preservation.
+# ---------------------------------------------------------------------------
+Write-Header "Crystal Save Tests"
+
+$crystalSaveExe = "$testDir\crystal_save_test.exe"
+if (Test-Path $crystalSaveExe) {
+    $r  = Invoke-Exe $crystalSaveExe @()
+    $pf = Get-PassFail $r.Lines
+    if ($pf.PassCount -ne $null -and $pf.FailCount -ne $null) {
+        Write-Result "crystal_save_test" ($r.ExitCode -eq 0) "Passed: $($pf.PassCount), Failed: $($pf.FailCount)"
+    } else {
+        Write-Result "crystal_save_test" ($r.ExitCode -eq 0) "Exit code: $($r.ExitCode)"
+    }
+} else {
+    Write-Result "crystal_save_test" $false "Executable not found: $crystalSaveExe"
+}
+
+# ---------------------------------------------------------------------------
+# GATE 8 -- Golden Tests
 # ---------------------------------------------------------------------------
 Write-Header "Golden Tests"
 
@@ -310,7 +393,7 @@ if (Test-Path $goldenExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 6 -- Legality Gate Tests (adversarial)
+# GATE 9 -- Legality Gate Tests (adversarial)
 # ---------------------------------------------------------------------------
 Write-Header "Legality Gate Tests"
 
@@ -328,7 +411,7 @@ if (Test-Path $legalityExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 7 -- Corpus Test (Decoder/CFG Integrity)
+# GATE 10 -- Corpus Test (Decoder/CFG Integrity)
 # ---------------------------------------------------------------------------
 Write-Header "Corpus Test (Decoder/CFG Integrity)"
 
@@ -342,7 +425,7 @@ if (Test-Path $corpusExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 8 -- Corpus Lowering Audit  (1788/1788 invariant)
+# GATE 11 -- Corpus Lowering Audit  (1788/1788 invariant)
 # ---------------------------------------------------------------------------
 Write-Header "Corpus Lowering Audit"
 
@@ -370,7 +453,7 @@ if (Test-Path $loweringExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 9 -- Linker Test  (corpus=1788, InvalidOwnership=0)
+# GATE 12 -- Linker Test  (corpus=1788, InvalidOwnership=0)
 # ---------------------------------------------------------------------------
 Write-Header "Linker Test"
 
@@ -399,7 +482,7 @@ if (Test-Path $linkerExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 10 -- Compiler Integrity Tests
+# GATE 13 -- Compiler Integrity Tests
 # ---------------------------------------------------------------------------
 Write-Header "Compiler Integrity Tests"
 
@@ -417,7 +500,7 @@ if (Test-Path $integrityExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 11 -- Crystal Frontend Oracle (Phases 1-5.5)
+# GATE 14 -- Crystal Frontend Oracle (Phases 1-5.5)
 #
 # SKIP policy (hard rule):
 #   Any SKIP output emitted by the oracle binary is a canonical failure.
@@ -462,7 +545,7 @@ if (Test-Path $oracleExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 12 -- Profile Verify
+# GATE 15 -- Profile Verify
 # Validates ExtractionProfile base-data and move offsets against known-good
 # values from the Crystal ROM.  Returns 1 on any stat mismatch.
 # ---------------------------------------------------------------------------
@@ -471,7 +554,6 @@ Write-Header "Profile Verify"
 $profileExe = "$toolsDir\profile_verify.exe"
 if (Test-Path $profileExe) {
     $r = Invoke-Exe $profileExe @($RomPath)
-    # Tool reports "Profile verification: PASSED" or "FAILED"
     $passLine = $r.Lines | Select-String -Pattern "Profile verification:\s*PASSED" | Select-Object -First 1
     $failLine = $r.Lines | Select-String -Pattern "Profile verification:\s*FAILED" | Select-Object -First 1
     if ($passLine) {
@@ -486,7 +568,7 @@ if (Test-Path $profileExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 13 -- Trainer Verify
+# GATE 16 -- Trainer Verify
 # Validates TrainerRegistry extraction counts against authoritative
 # per-group counts from pokecrystal/data/trainers/parties.asm.
 # Returns 1 on any group count mismatch.
@@ -510,7 +592,7 @@ if (Test-Path $trainerExe) {
 }
 
 # ---------------------------------------------------------------------------
-# GATE 15 -- Production Runtime Smoke
+# GATE 17 -- Production Runtime Smoke
 # Compiles a FRESH temporary .emon from the same ROM used by all other gates,
 # then runs emon_smoke against that package.  This proves the smoke exercises
 # the current compiler output, not an arbitrary pre-existing crystal.emon.

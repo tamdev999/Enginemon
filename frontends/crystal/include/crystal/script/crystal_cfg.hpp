@@ -361,50 +361,9 @@ struct CorpusCFGStats {
     size_t orphan_command_scripts = 0;
     size_t overlapping_block_scripts = 0;
     
-    void accumulate(const CrystalCFG& cfg) {
-        total_scripts++;
-        total_blocks += cfg.blocks.size();
-        total_commands += cfg.source_ir ? cfg.source_ir->commands.size() : 0;
-        
-        if (cfg.is_closed()) {
-            closed_cfgs++;
-        }
-        if (cfg.has_computed_exits()) {
-            computed_exit_scripts++;
-        }
-        if (cfg.has_native_call_exits()) {
-            native_call_scripts++;
-        }
-        if (cfg.has_unresolved_exits()) {
-            unresolved_exit_scripts++;
-        }
-        
-        fallthrough_edges += cfg.validation.fallthrough_edges;
-        static_jump_edges += cfg.validation.static_jump_edges;
-        conditional_edges += cfg.validation.conditional_edges;
-        static_call_edges += cfg.validation.static_call_edges;
-        return_edges += cfg.validation.return_edges;
-        terminal_exits += cfg.validation.terminal_exits;
-        computed_exits += cfg.validation.computed_exits;
-        native_call_exits += cfg.validation.native_call_exits;
-        unresolved_exits += cfg.validation.unresolved_exits;
-        
-        invalid_target_edges += cfg.validation.invalid_targets;
-        
-        if (cfg.validation.orphan_commands > 0) {
-            orphan_command_scripts++;
-        }
-        if (cfg.validation.overlapping_commands > 0) {
-            overlapping_block_scripts++;
-        }
-        
-        // Sample bad edges
-        for (const auto& edge : cfg.validation.bad_edges) {
-            if (sample_bad_edges.size() < 10) {
-                sample_bad_edges.push_back({cfg.entry_address, edge.second});
-            }
-        }
-    }
+    // Implementation in crystal_cfg.cpp — moved out of header to reduce
+    // per-TU code-generation cost from the CrystalCFG field accesses.
+    void accumulate(const CrystalCFG& cfg);
     
     bool all_invariants_hold() const {
         return invalid_target_edges == 0 &&

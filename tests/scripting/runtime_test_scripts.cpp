@@ -15,13 +15,8 @@
 #include "engine/party/pokemon.hpp"
 #include "crystal/output/native_package.hpp"
 #include "crystal/extract/map_extractor.hpp"
-#include "crystal/script/crystal_command.hpp"
-#include "crystal/script/crystal_cfg.hpp"
-#include "crystal/script/semantic_legalizer.hpp"
-#include "crystal/script/legality_gate.hpp"
 #include "crystal/script/crystal_state_vars.hpp"
 #include "crystal/script/semantic_lua_emitter.hpp"
-#include "crystal/legality_test_helpers.hpp"
 #include <array>
 #include <filesystem>
 #include <optional>

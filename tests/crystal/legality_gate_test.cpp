@@ -825,6 +825,53 @@ bool test_valid_script_passes() {
 }
 
 // =============================================================================
+// STAGE 5 REGRESSIONS
+// =============================================================================
+
+// REGRESSION: Confirm that removing ReferenceType::Special from the linker
+// did NOT break Stage 5 rejection of Sem_Special.
+// Migrated from runtime_test_pcg_vm.cpp — belongs here as a legality gate test.
+static bool test_reject_sem_special_post_registry_cleanup() {
+    CrystalScriptIR ir  = make_minimal_ir(0x2000);
+    CrystalCFG      cfg = make_minimal_cfg(ir, "test_sem_special_post_cleanup");
+    LoweringResult lowering = make_minimal_lowering(ir, cfg);
+
+    // Inject Sem_Special directly (simulates what Stage 4 must never produce).
+    SemanticBasicBlock sblock;
+    sblock.id = 0; sblock.label = "block_0"; sblock.is_entry = true;
+    SemanticInstruction inst;
+    Sem_Special op;
+    op.special_id = 17;
+    op.name = "special_17";
+    inst.op = std::move(op);
+    sblock.instructions.push_back(std::move(inst));
+    lowering.ir.blocks = {std::move(sblock)};
+
+    LegalityInput input = make_minimal_input(ir, cfg, lowering);
+    LegalityGate gate;
+    auto result = gate.validate(input);
+
+    // Must still be rejected — registry cleanup must not have weakened Stage 5.
+    if (result.is_legal) {
+        std::cout << "(expected illegal, gate accepted Sem_Special) ";
+        return false;
+    }
+    bool found_rejection = false;
+    for (const auto& d : result.diagnostics()) {
+        if (d.reason.find("Sem_Special") != std::string::npos ||
+            d.reason.find("raw Crystal") != std::string::npos) {
+            found_rejection = true;
+        }
+    }
+    if (!found_rejection) {
+        std::cout << "(rejected but no Sem_Special reason in diagnostics) ";
+        return false;
+    }
+    std::cout << "[Sem_Special still rejected at Stage 5 after registry cleanup] ";
+    return true;
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -856,6 +903,7 @@ int main() {
     
     std::cout << "\n--- Stage 5 Rejections ---\n";
     RUN_TEST(test_reject_invalid_semantic_id);
+    RUN_TEST(test_reject_sem_special_post_registry_cleanup);
     
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << tests_passed << "\n";

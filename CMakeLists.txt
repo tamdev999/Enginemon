@@ -13,6 +13,12 @@ option(ENGINEMON_ENABLE_RT "Enable raytracing support" OFF)
 option(ENGINEMON_ENABLE_VULKAN "Enable Vulkan renderer (required for runtime)" OFF)
 option(ENGINEMON_ENABLE_ENGINE "Build engine library (requires Lua)" OFF)
 
+# ROM path for CTest integration.
+# Set to the path of a Crystal ROM to enable ROM-dependent test registration.
+# Tests requiring a ROM are skipped (not registered) when this is empty.
+# Example: cmake -B build -DENGINEMON_ROM_PATH="path/to/crystal.gbc"
+set(ENGINEMON_ROM_PATH "" CACHE STRING "Path to Crystal ROM for CTest ROM-dependent tests")
+
 # Find packages conditionally
 # Lua only required when building engine
 if(ENGINEMON_ENABLE_ENGINE)

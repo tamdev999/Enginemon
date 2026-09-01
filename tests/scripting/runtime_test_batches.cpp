@@ -1,4 +1,4 @@
-// runtime_test_batches.cpp — 11-finding fidelity, emitter binding, species linker, text semantic
+﻿// runtime_test_batches.cpp â€” 11-finding fidelity, emitter binding, species linker, text semantic
 #include "engine/scripting/lua_runtime.hpp"
 #include "engine/scripting/api_bindings.hpp"
 #include "engine/scripting/semantic_ir.hpp"
@@ -26,15 +26,13 @@
 #include "crystal/script/ir.hpp"
 #include "crystal/script/lua_emitter.hpp"
 #include "crystal/script/semantic_legalizer.hpp"
-#include "crystal/script/legality_gate.hpp"
-#include "crystal/script/semantic_linker.hpp"
 #include "crystal/script/text_registry.hpp"
 #include "crystal/script/crystal_state_vars.hpp"
-#include "crystal/legality_test_helpers.hpp"
 #include <array>
 #include <filesystem>
 #include <optional>
 #include <algorithm>
+#include <map>
 #include "scripting/runtime_test_shared.hpp"
 
 TEST(batch3_special_27_production_lowering) {
@@ -90,7 +88,7 @@ TEST(batch3_special_27_production_lowering) {
     // 8. ASSERT: no Special ID 27 survives in SemanticOp
     // (This is implicit since Sem_HealParty has no special_id field)
     
-    std::cout << "  [Production lowering: Cmd_Special{27} → Sem_HealParty VERIFIED]\n";
+    std::cout << "  [Production lowering: Cmd_Special{27} â†’ Sem_HealParty VERIFIED]\n";
 }
 
 TEST(batch3_heal_party_pp_restoration) {
@@ -280,7 +278,7 @@ TEST(batch4_special_79_production_lowering) {
     const auto& balance_op = std::get<Sem_ShowBalanceOverlay>(op);
     ASSERT_EQ(static_cast<int>(balance_op.contents), static_cast<int>(BalanceContent::Coins));
     
-    std::cout << "  [Production lowering: Cmd_Special{79} → Sem_ShowBalanceOverlay{Coins} VERIFIED]\n";
+    std::cout << "  [Production lowering: Cmd_Special{79} â†’ Sem_ShowBalanceOverlay{Coins} VERIFIED]\n";
 }
 
 TEST(batch4_special_80_production_lowering) {
@@ -333,7 +331,7 @@ TEST(batch4_special_80_production_lowering) {
     const auto& balance_op = std::get<Sem_ShowBalanceOverlay>(op);
     ASSERT_EQ(static_cast<int>(balance_op.contents), static_cast<int>(BalanceContent::MoneyAndCoins));
     
-    std::cout << "  [Production lowering: Cmd_Special{80} → Sem_ShowBalanceOverlay{MoneyAndCoins} VERIFIED]\n";
+    std::cout << "  [Production lowering: Cmd_Special{80} â†’ Sem_ShowBalanceOverlay{MoneyAndCoins} VERIFIED]\n";
 }
 
 TEST(batch4_special_81_production_lowering) {
@@ -386,7 +384,7 @@ TEST(batch4_special_81_production_lowering) {
     const auto& balance_op = std::get<Sem_ShowBalanceOverlay>(op);
     ASSERT_EQ(static_cast<int>(balance_op.contents), static_cast<int>(BalanceContent::Money));
     
-    std::cout << "  [Production lowering: Cmd_Special{81} → Sem_ShowBalanceOverlay{Money} VERIFIED]\n";
+    std::cout << "  [Production lowering: Cmd_Special{81} â†’ Sem_ShowBalanceOverlay{Money} VERIFIED]\n";
 }
 
 TEST(batch4_balance_overlay_semantic_distinctions) {
@@ -456,7 +454,7 @@ TEST(batch4_balance_overlay_semantic_distinctions) {
     ASSERT_EQ(static_cast<int>(*content_80), static_cast<int>(BalanceContent::MoneyAndCoins));
     ASSERT_EQ(static_cast<int>(*content_81), static_cast<int>(BalanceContent::Money));
     
-    std::cout << "  [Semantic distinctions: 79≠80, 80≠81, 79≠81 VERIFIED]\n";
+    std::cout << "  [Semantic distinctions: 79â‰ 80, 80â‰ 81, 79â‰ 81 VERIFIED]\n";
 }
 
 TEST(batch4_no_sem_special_for_79_80_81) {
@@ -544,9 +542,9 @@ TEST(batch4_balance_overlay_no_script_result) {
 //=============================================================================
 // BATCH 5 SPECIAL SEMANTIC OP TESTS - CheckPokerus (ID 78), GameboyCheck (ID 102)
 // Verifies:
-//   - Special 78 → Sem_CheckPartyPokerus{} (no Sem_Special)
-//   - Special 102 → Sem_SetVar (frontend absorption, no hardware query)
-//   - Special 144 → remains Sem_Special (NOT generalized)
+//   - Special 78 â†’ Sem_CheckPartyPokerus{} (no Sem_Special)
+//   - Special 102 â†’ Sem_SetVar (frontend absorption, no hardware query)
+//   - Special 144 â†’ remains Sem_Special (NOT generalized)
 //=============================================================================
 
 TEST(batch5_special_78_production_lowering) {
@@ -599,7 +597,7 @@ TEST(batch5_special_78_production_lowering) {
     bool is_check_pokerus = std::holds_alternative<Sem_CheckPartyPokerus>(op);
     ASSERT_TRUE(is_check_pokerus);
     
-    std::cout << "  [Special 78 → Sem_CheckPartyPokerus VERIFIED]\n";
+    std::cout << "  [Special 78 â†’ Sem_CheckPartyPokerus VERIFIED]\n";
 }
 
 TEST(batch5_special_102_production_lowering) {
@@ -660,13 +658,13 @@ TEST(batch5_special_102_production_lowering) {
     ASSERT_TRUE(set_var.source.is_literal());
     ASSERT_EQ(set_var.source.value, 2);  // GBCHECK_CGB
     
-    std::cout << "  [Special 102 → Sem_SetVar(literal=2) ABSORBED]\n";
+    std::cout << "  [Special 102 â†’ Sem_SetVar(literal=2) ABSORBED]\n";
 }
 
 TEST(batch5_special_144_remains_sem_special) {
     // UPDATED: Special 144 (CheckCaughtCelebi) is now lowered to Sem_GameSpecificEvent
     // via the game-specific behaviors table. It writes wScriptVar (writes_var=true).
-    // This is NOT a Pokédex check - it checks whether Celebi was caught.
+    // This is NOT a PokÃ©dex check - it checks whether Celebi was caught.
     using namespace crystal;
     using namespace enginemon;
     using namespace lowering_rules;
@@ -715,7 +713,7 @@ TEST(batch5_special_144_remains_sem_special) {
     ASSERT_STR_EQ(gse->behavior_name.c_str(), "CheckCaughtCelebi");
     ASSERT_TRUE(gse->writes_script_var);  // writes wScriptVar
 
-    std::cout << "  [Special 144 → Sem_GameSpecificEvent{CheckCaughtCelebi} (writes_var=true) ✓]\n";
+    std::cout << "  [Special 144 â†’ Sem_GameSpecificEvent{CheckCaughtCelebi} (writes_var=true) âœ“]\n";
 }
 
 TEST(batch5_no_sem_special_for_78_102) {
@@ -780,7 +778,7 @@ TEST(batch5_gameboy_check_absorption_proof) {
     
     // The absorption sets wScriptVar to GBCHECK_CGB (2)
     // The subsequent ifnotequal GBCHECK_CGB branch condition:
-    //   wScriptVar != 2 → 2 != 2 → FALSE → branch not taken → CGB path
+    //   wScriptVar != 2 â†’ 2 != 2 â†’ FALSE â†’ branch not taken â†’ CGB path
     
     // This proves the absorption is semantically equivalent:
     // Original: hardware query returns CGB on real Crystal hardware
@@ -794,8 +792,8 @@ TEST(batch5_gameboy_check_absorption_proof) {
     // Branch should NOT be taken (CGB path continues)
     ASSERT_FALSE(branch_taken);
     
-    std::cout << "  [GameboyCheck absorption: wScriptVar=2, ifnotequal 2 → false]\n";
-    std::cout << "  [CGB branch correctly selected, non-CGB branch dead ✓]\n";
+    std::cout << "  [GameboyCheck absorption: wScriptVar=2, ifnotequal 2 â†’ false]\n";
+    std::cout << "  [CGB branch correctly selected, non-CGB branch dead âœ“]\n";
 }
 
 TEST(batch5_check_pokerus_script_result) {
@@ -807,12 +805,12 @@ TEST(batch5_check_pokerus_script_result) {
     // This test verifies the contract, not the runtime implementation
     
     // Contract: script_var receives boolean result
-    // 1 = at least one party member has ACTIVE Pokérus (days > 0)
+    // 1 = at least one party member has ACTIVE PokÃ©rus (days > 0)
     // 0 = no active infections
     
     // The runtime implementation will:
     // 1. Iterate all party members (no egg exclusion per source)
-    // 2. Check lower nibble of Pokérus byte (days remaining)
+    // 2. Check lower nibble of PokÃ©rus byte (days remaining)
     // 3. Return true if any > 0
     
     // This is a Stage 7 concern (runtime execution)
@@ -825,7 +823,7 @@ TEST(batch5_check_pokerus_script_result) {
 //=============================================================================
 // BATCH 6 SPECIAL SEMANTIC OP TESTS - StubbedTrainerRankings_Healings (ID 157)
 // Verifies:
-//   - Special 157 → frontend-absorbed no-op (zero semantic instructions)
+//   - Special 157 â†’ frontend-absorbed no-op (zero semantic instructions)
 //   - Source command fully accounted via absorbed_opcodes
 //   - Unknown/unhandled specials still produce Sem_Special (negative control)
 //=============================================================================
@@ -878,7 +876,7 @@ TEST(batch6_special_157_production_absorption) {
     ASSERT_EQ(result.absorbed_opcodes.size(), 1);
     ASSERT_EQ(result.absorbed_opcodes[0], 0x0F);  // special opcode
     
-    std::cout << "  [Special 157 → ABSORBED (0 instructions, 1 absorbed_opcode)]\n";
+    std::cout << "  [Special 157 â†’ ABSORBED (0 instructions, 1 absorbed_opcode)]\n";
 }
 
 TEST(batch6_special_157_no_sem_special) {
@@ -973,7 +971,7 @@ TEST(batch6_unhandled_special_produces_sem_special) {
     ASSERT_TRUE(gse != nullptr);
     ASSERT_STR_EQ(gse->behavior_name.c_str(), "SetBitsForLinkTradeRequest");
     
-    std::cout << "  [Special 1 → Sem_GameSpecificEvent{SetBitsForLinkTradeRequest} (not Sem_Special) ✓]\n";
+    std::cout << "  [Special 1 â†’ Sem_GameSpecificEvent{SetBitsForLinkTradeRequest} (not Sem_Special) âœ“]\n";
     std::cout << "  [All non-explicit-rule specials now produce Sem_GameSpecificEvent, not unlowered]\n";
 }
 
@@ -1036,13 +1034,13 @@ TEST(batch6_absorption_accounting_invariant) {
     ASSERT_EQ(result.absorbed_by_opcode.at(0x0F), 1);
     
     std::cout << "  [Accounting: consumed=1, lowered=0, unlowered=0, absorbed=1]\n";
-    std::cout << "  [Invariant: 1 = 0 + 0 + 1 ✓]\n";
+    std::cout << "  [Invariant: 1 = 0 + 0 + 1 âœ“]\n";
 }
 
 //=============================================================================
 // BATCH 7 SPECIAL SEMANTIC OP TESTS - CheckMobileAdapterStatusSpecial (ID 160)
 // Verifies:
-//   - Special 160 → Sem_SetVar{var=0, source=literal(0)}
+//   - Special 160 â†’ Sem_SetVar{var=0, source=literal(0)}
 //   - Result is explicitly written (not absorbed to zero instructions)
 //   - Previous script_var value is overwritten
 //   - Branch behavior matches source FALSE result
@@ -1106,7 +1104,7 @@ TEST(batch7_special_160_production_lowering) {
     ASSERT_TRUE(set_var.source.is_literal());
     ASSERT_EQ(set_var.source.value, 0);  // FALSE
     
-    std::cout << "  [Special 160 → Sem_SetVar{var=0, literal=0} (verified)]\n";
+    std::cout << "  [Special 160 â†’ Sem_SetVar{var=0, literal=0} (verified)]\n";
 }
 
 TEST(batch7_special_160_no_sem_special) {
@@ -1193,7 +1191,7 @@ TEST(batch7_special_160_not_zero_instructions) {
     // ASSERT: NOT tracked as absorbed (it's lowered, not absorbed)
     ASSERT_EQ(result.absorbed_opcodes.size(), 0);
     
-    std::cout << "  [Special 160 → 1 instruction (NOT absorbed to zero)]\n";
+    std::cout << "  [Special 160 â†’ 1 instruction (NOT absorbed to zero)]\n";
 }
 
 TEST(batch7_special_160_overwrites_stale_script_var) {
@@ -1253,7 +1251,7 @@ TEST(batch7_special_160_overwrites_stale_script_var) {
     // This proves: regardless of prior script_var value, we WRITE 0
     ASSERT_EQ(set_var.source.value, 0);
     
-    std::cout << "  [Sem_SetVar writes literal 0 → overwrites any stale value]\n";
+    std::cout << "  [Sem_SetVar writes literal 0 â†’ overwrites any stale value]\n";
     std::cout << "  [Previous script_var state is irrelevant - we WRITE 0]\n";
 }
 
@@ -1309,17 +1307,17 @@ TEST(batch7_special_160_branch_equivalence) {
     ASSERT_FALSE(iftrue_taken);   // "iftrue .mobile" is NOT taken
     
     std::cout << "  [wScriptVar = 0 (FALSE)]\n";
-    std::cout << "  [iffalse .NoMobile → TAKEN (mobile features skipped)]\n";
-    std::cout << "  [iftrue .mobile → NOT TAKEN (mobile text skipped)]\n";
+    std::cout << "  [iffalse .NoMobile â†’ TAKEN (mobile features skipped)]\n";
+    std::cout << "  [iftrue .mobile â†’ NOT TAKEN (mobile text skipped)]\n";
     std::cout << "  [Branch equivalence with source: VERIFIED]\n";
 }
 
 //=============================================================================
 // CORPUS CLOSURE: BATTLE TOWER DEFERRED SCRIPT TESTS
 // Verifies the 3 Battle Tower corpus closure lowerings:
-//   - battletowertext (0xa4) → Sem_TrainerText{domain=BattleTower}
-//   - readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)
-//   - callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)
+//   - battletowertext (0xa4) â†’ Sem_TrainerText{domain=BattleTower}
+//   - readmem 0xcf64 â†’ Sem_ReadStateVar(BattleTowerBeatenTrainers)
+//   - callasm 0x9f5cb â†’ Sem_ReadStateVar(BattleTowerLevelGroup)
 // Plus adversarial tests proving nearby unknown addresses are still rejected.
 //=============================================================================
 
@@ -1370,7 +1368,7 @@ TEST(corpus_battletowertext_produces_trainer_text) {
         ASSERT_EQ(trainer_text.text_id, bttext_id);
     }
     
-    std::cout << "  [battletowertext → Sem_TrainerText{BattleTower} for IDs 1,2,3]\n";
+    std::cout << "  [battletowertext â†’ Sem_TrainerText{BattleTower} for IDs 1,2,3]\n";
 }
 
 TEST(corpus_battletowertext_no_sem_special) {
@@ -1489,11 +1487,11 @@ TEST(corpus_battletowertext_distinct_from_normal_trainer_text) {
     ASSERT_EQ(normal_op.domain, TrainerTextDomain::Normal);
     ASSERT_TRUE(bt_op.domain != normal_op.domain);
     
-    std::cout << "  [BattleTower ≠ Normal domain: PROVEN]\n";
+    std::cout << "  [BattleTower â‰  Normal domain: PROVEN]\n";
 }
 
 TEST(corpus_readmem_0xcf64_produces_read_state_var) {
-    // CRITICAL: readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)
+    // CRITICAL: readmem 0xcf64 â†’ Sem_ReadStateVar(BattleTowerBeatenTrainers)
     using namespace crystal;
     using namespace enginemon;
     using namespace lowering_rules;
@@ -1534,7 +1532,7 @@ TEST(corpus_readmem_0xcf64_produces_read_state_var) {
     ASSERT_EQ(static_cast<uint16_t>(read_state.state_var), 
               crystal_state_var_id(CrystalStateVar::BattleTowerBeatenTrainers));
     
-    std::cout << "  [readmem 0xcf64 → Sem_ReadStateVar(BattleTowerBeatenTrainers)]\n";
+    std::cout << "  [readmem 0xcf64 â†’ Sem_ReadStateVar(BattleTowerBeatenTrainers)]\n";
 }
 
 TEST(corpus_readmem_nearby_addresses_rejected) {
@@ -1583,7 +1581,7 @@ TEST(corpus_readmem_nearby_addresses_rejected) {
 }
 
 TEST(corpus_callasm_0x9f5cb_produces_read_state_var) {
-    // CRITICAL: callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)
+    // CRITICAL: callasm 0x9f5cb â†’ Sem_ReadStateVar(BattleTowerLevelGroup)
     using namespace crystal;
     using namespace enginemon;
     using namespace lowering_rules;
@@ -1634,7 +1632,7 @@ TEST(corpus_callasm_0x9f5cb_produces_read_state_var) {
     ASSERT_EQ(static_cast<uint16_t>(read_state.state_var), 
               crystal_state_var_id(CrystalStateVar::BattleTowerLevelGroup));
     
-    std::cout << "  [callasm 0x9f5cb → Sem_ReadStateVar(BattleTowerLevelGroup)]\n";
+    std::cout << "  [callasm 0x9f5cb â†’ Sem_ReadStateVar(BattleTowerLevelGroup)]\n";
 }
 
 TEST(corpus_callasm_nearby_addresses_rejected) {
@@ -1691,9 +1689,9 @@ TEST(corpus_callasm_nearby_addresses_rejected) {
 //=============================================================================
 // BATCH 8 SPECIAL SEMANTIC OP TESTS
 // Verifies:
-//   - Special 163 (AskRememberPassword) → Sem_YesNo{}
-//   - Special 166 (InitialSetDSTFlag) → Sem_SetDaylightSaving{enabled=true}
-//   - Special 167 (InitialClearDSTFlag) → Sem_SetDaylightSaving{enabled=false}
+//   - Special 163 (AskRememberPassword) â†’ Sem_YesNo{}
+//   - Special 166 (InitialSetDSTFlag) â†’ Sem_SetDaylightSaving{enabled=true}
+//   - Special 167 (InitialClearDSTFlag) â†’ Sem_SetDaylightSaving{enabled=false}
 //   - None produce Sem_Special
 //   - 163 is semantically equivalent to ordinary yesorno opcode
 //   - 166 and 167 differ only by enabled flag
@@ -1748,7 +1746,7 @@ TEST(batch8_special_163_emits_sem_yesno) {
     bool is_yes_no = std::holds_alternative<Sem_YesNo>(op);
     ASSERT_TRUE(is_yes_no);
     
-    std::cout << "  [Special 163 → Sem_YesNo{} (verified)]\n";
+    std::cout << "  [Special 163 â†’ Sem_YesNo{} (verified)]\n";
 }
 
 TEST(batch8_special_163_no_sem_special) {
@@ -1866,8 +1864,8 @@ TEST(batch8_special_163_yesorno_equivalence) {
     ASSERT_TRUE(std::holds_alternative<Sem_YesNo>(special_op));
     
     // 5. Sem_YesNo is an empty struct, so type equality is sufficient
-    std::cout << "  [yesorno opcode → Sem_YesNo{}]\n";
-    std::cout << "  [Special 163 → Sem_YesNo{}]\n";
+    std::cout << "  [yesorno opcode â†’ Sem_YesNo{}]\n";
+    std::cout << "  [Special 163 â†’ Sem_YesNo{}]\n";
     std::cout << "  [Semantic equivalence: PROVEN]\n";
 }
 
@@ -1915,7 +1913,7 @@ TEST(batch8_special_166_emits_dst_true) {
     const auto& dst_op = std::get<Sem_SetDaylightSaving>(op);
     ASSERT_TRUE(dst_op.enabled);
     
-    std::cout << "  [Special 166 → Sem_SetDaylightSaving{enabled=true} (verified)]\n";
+    std::cout << "  [Special 166 â†’ Sem_SetDaylightSaving{enabled=true} (verified)]\n";
 }
 
 TEST(batch8_special_167_emits_dst_false) {
@@ -1962,7 +1960,7 @@ TEST(batch8_special_167_emits_dst_false) {
     const auto& dst_op = std::get<Sem_SetDaylightSaving>(op);
     ASSERT_FALSE(dst_op.enabled);
     
-    std::cout << "  [Special 167 → Sem_SetDaylightSaving{enabled=false} (verified)]\n";
+    std::cout << "  [Special 167 â†’ Sem_SetDaylightSaving{enabled=false} (verified)]\n";
 }
 
 TEST(batch8_special_166_167_differ_by_enabled) {
@@ -2186,7 +2184,7 @@ TEST(batch9_setval_establishes_context) {
     ASSERT_TRUE(ctx.block_ctx.has_value());
     ASSERT_EQ(ctx.block_ctx.value(), 25);
     
-    std::cout << "  [setval establishes known_script_var = 25 ✓]\n";
+    std::cout << "  [setval establishes known_script_var = 25 âœ“]\n";
 }
 
 TEST(batch9_special_40_with_context) {
@@ -2227,7 +2225,7 @@ TEST(batch9_special_40_with_context) {
     ASSERT_TRUE(play_radio != nullptr);
     ASSERT_EQ(play_radio->channel, 4);
     
-    std::cout << "  [Special 40 + context → Sem_PlayRadio{channel=4} ✓]\n";
+    std::cout << "  [Special 40 + context â†’ Sem_PlayRadio{channel=4} âœ“]\n";
 }
 
 TEST(batch9_special_40_no_context_fallback) {
@@ -2262,13 +2260,13 @@ TEST(batch9_special_40_no_context_fallback) {
     ASSERT_FALSE(ctx.block_ctx.has_value());
     RuleResult result = rule_special(ctx);
 
-    // Without context, Special 40 cannot be lowered → returns {} (unmatched).
+    // Without context, Special 40 cannot be lowered â†’ returns {} (unmatched).
     // The Sem_Special fallback is gone; context-dependent specials produce
     // UnloweredDiagnostic via the outer lower() loop and fail legality.
     ASSERT_FALSE(result.matched);
     ASSERT_EQ(result.instructions.size(), 0u);
 
-    std::cout << "  [Special 40 no context → unmatched (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [Special 40 no context â†’ unmatched (no Sem_Special fallback) âœ“]\n";
 }
 
 TEST(batch9_special_152_palette_normalization) {
@@ -2276,7 +2274,7 @@ TEST(batch9_special_152_palette_normalization) {
     using namespace enginemon;
     using namespace lowering_rules;
     
-    // Test mapping: Crystal encoding → palette selector
+    // Test mapping: Crystal encoding â†’ palette selector
     // Source-proven: ALL selectors 0-7 are valid (from _SetPlayerPalette: swap & 0x07)
     // Vanilla corpus uses only 0 and 1, but we must accept all source-valid selectors
     for (auto [crystal_val, expected_selector] : {
@@ -2321,11 +2319,11 @@ TEST(batch9_special_152_palette_normalization) {
         ASSERT_EQ(set_pal->selector, expected_selector);
     }
     
-    std::cout << "  [Special 152: selectors 0-7 ALL accepted ✓]\n";
+    std::cout << "  [Special 152: selectors 0-7 ALL accepted âœ“]\n";
 }
 
 TEST(batch9_special_152_invalid_encoding_rejected) {
-    // ADVERSARIAL TEST: Bit 7 not set → source routine is no-op
+    // ADVERSARIAL TEST: Bit 7 not set â†’ source routine is no-op
     // Source: _SetPlayerPalette does `and 1 << 7; ret z` at entry
     // Values without bit 7 set are source-invalid, should fall through to Sem_Special
     using namespace crystal;
@@ -2361,14 +2359,14 @@ TEST(batch9_special_152_invalid_encoding_rejected) {
         ctx.current_block = &block;
         
         RuleResult result = rule_special(ctx);
-        // Invalid encoding (bit7 clear) → no lowering rule for this encoding.
-        // Returns {} (unmatched) — Sem_Special fallback has been removed.
+        // Invalid encoding (bit7 clear) â†’ no lowering rule for this encoding.
+        // Returns {} (unmatched) â€” Sem_Special fallback has been removed.
         // These encodings are source-invalid (routine returns immediately).
         ASSERT_FALSE(result.matched);
         ASSERT_EQ(result.instructions.size(), 0u);
     }
     
-    std::cout << "  [Special 152 bit7-clear values → unmatched (no Sem_Special fallback) ✓]\n";
+    std::cout << "  [Special 152 bit7-clear values â†’ unmatched (no Sem_Special fallback) âœ“]\n";
 }
 
 TEST(batch9_special_152_all_source_valid_selectors_accepted) {
@@ -2420,7 +2418,7 @@ TEST(batch9_special_152_all_source_valid_selectors_accepted) {
         ASSERT_EQ(set_pal->selector, expected_selector);
     }
     
-    std::cout << "  [All source-valid selectors 0-7 produce Sem_SetPlayerPalette ✓]\n";
+    std::cout << "  [All source-valid selectors 0-7 produce Sem_SetPlayerPalette âœ“]\n";
 }
 
 TEST(batch9_species_domain_from_profile_not_hardcoded) {
@@ -2470,43 +2468,43 @@ TEST(batch9_species_domain_from_profile_not_hardcoded) {
         return ctx;
     };
     
-    // Test 1: Species 200 with vanilla profile (num_pokemon=251) → should succeed
+    // Test 1: Species 200 with vanilla profile (num_pokemon=251) â†’ should succeed
     {
         auto* ctx = make_context(200, 251);
         RuleResult result = rule_special(*ctx);
         auto* sem_find = std::get_if<Sem_FindPartyMon>(&result.instructions[0].op);
         ASSERT_TRUE(sem_find != nullptr);
         ASSERT_EQ(sem_find->species, 200);
-        std::cout << "  [Species 200 + num_pokemon=251 → Sem_FindPartyMon ✓]\n";
+        std::cout << "  [Species 200 + num_pokemon=251 â†’ Sem_FindPartyMon âœ“]\n";
     }
     
-    // Test 2: Species 252 with vanilla profile (num_pokemon=251) → should REJECT
+    // Test 2: Species 252 with vanilla profile (num_pokemon=251) â†’ should REJECT
     {
         auto* ctx = make_context(252, 251);  // 252 > 251
         RuleResult result = rule_special(*ctx);
-        // Out-of-domain species → no lowering rule matches → returns {} (unmatched).
+        // Out-of-domain species â†’ no lowering rule matches â†’ returns {} (unmatched).
         // Sem_Special fallback has been removed; unlowered path used instead.
         ASSERT_FALSE(result.matched);
         ASSERT_EQ(result.instructions.size(), 0u);
-        std::cout << "  [Species 252 + num_pokemon=251 → unmatched (out of domain, no Sem_Special) ✓]\n";
+        std::cout << "  [Species 252 + num_pokemon=251 â†’ unmatched (out of domain, no Sem_Special) âœ“]\n";
     }
     
-    // Test 3: Species 252 with extended profile (num_pokemon=256) → should SUCCEED
+    // Test 3: Species 252 with extended profile (num_pokemon=256) â†’ should SUCCEED
     {
         auto* ctx = make_context(252, 256);  // 252 <= 256
         RuleResult result = rule_special(*ctx);
         auto* sem_find = std::get_if<Sem_FindPartyMon>(&result.instructions[0].op);
         ASSERT_TRUE(sem_find != nullptr);
         ASSERT_EQ(sem_find->species, 252);
-        std::cout << "  [Species 252 + num_pokemon=256 → Sem_FindPartyMon ✓]\n";
+        std::cout << "  [Species 252 + num_pokemon=256 â†’ Sem_FindPartyMon âœ“]\n";
     }
     
-    std::cout << "  [Species domain validated from profile, not hardcoded 251 ✓]\n";
+    std::cout << "  [Species domain validated from profile, not hardcoded 251 âœ“]\n";
 }
 
 //=============================================================================
 // DECODER UNIQUE COMMAND IDENTITY TESTS
-// Verifies: one ROM instruction → one decoded CrystalCommand
+// Verifies: one ROM instruction â†’ one decoded CrystalCommand
 // This tests the fix for the duplicate command identity bug where loops
 // caused the same ROM instruction to be decoded multiple times.
 //=============================================================================
@@ -2536,7 +2534,7 @@ TEST(decoder_unique_command_identity_loop) {
     uint32_t script_addr = 0x7a582;  // PlayersHouse1F MeetMomScript
     auto ir = decoder.decode_script(script_addr, "MeetMomScript");
     
-    // Build address → index map to check uniqueness
+    // Build address â†’ index map to check uniqueness
     std::map<uint32_t, std::vector<size_t>> addr_to_indices;
     for (size_t i = 0; i < ir.commands.size(); ++i) {
         addr_to_indices[ir.commands[i].span.rom_address].push_back(i);
@@ -2568,8 +2566,8 @@ TEST(decoder_unique_command_identity_loop) {
     ASSERT_EQ(special_166_count, 1);
     
     std::cout << "  [" << ir.commands.size() << " commands, " 
-              << addr_to_indices.size() << " unique ROM addresses ✓]\n";
-    std::cout << "  [Special 166 @ 0x7a520 decoded exactly once ✓]\n";
+              << addr_to_indices.size() << " unique ROM addresses âœ“]\n";
+    std::cout << "  [Special 166 @ 0x7a520 decoded exactly once âœ“]\n";
 }
 
 TEST(decoder_unique_command_identity_cfg_integrity) {
@@ -2622,9 +2620,9 @@ TEST(decoder_unique_command_identity_cfg_integrity) {
     // Note: The exact block entry address depends on CFG construction
     // The key invariant is no duplicate commands, which we verified above
     
-    std::cout << "  [CFG valid: " << cfg.blocks.size() << " blocks ✓]\n";
-    std::cout << "  [No overlapping commands ✓]\n";
-    std::cout << "  [All " << cfg.validation.commands_covered << " commands covered ✓]\n";
+    std::cout << "  [CFG valid: " << cfg.blocks.size() << " blocks âœ“]\n";
+    std::cout << "  [No overlapping commands âœ“]\n";
+    std::cout << "  [All " << cfg.validation.commands_covered << " commands covered âœ“]\n";
 }
 
 TEST(decoder_unique_command_identity_semantic_ir) {
@@ -2686,9 +2684,9 @@ TEST(decoder_unique_command_identity_semantic_ir) {
     // ASSERT: Exactly one Sem_SetDaylightSaving{false} (Special 167)
     ASSERT_EQ(dst_false_count, 1);
     
-    std::cout << "  [Sem_SetDaylightSaving{true} count = 1 ✓]\n";
-    std::cout << "  [Sem_SetDaylightSaving{false} count = 1 ✓]\n";
-    std::cout << "  [No SemanticIR instruction duplication ✓]\n";
+    std::cout << "  [Sem_SetDaylightSaving{true} count = 1 âœ“]\n";
+    std::cout << "  [Sem_SetDaylightSaving{false} count = 1 âœ“]\n";
+    std::cout << "  [No SemanticIR instruction duplication âœ“]\n";
 }
 
 //=============================================================================
@@ -2744,7 +2742,7 @@ TEST(timing_60hz_rendering_produces_consistent_ticks) {
     ASSERT_EQ(total_ticks, 60);
     ASSERT_EQ(scheduler.total_ticks(), 60);
     
-    std::cout << "  [60Hz rendering → 60 ticks per second]\n";
+    std::cout << "  [60Hz rendering â†’ 60 ticks per second]\n";
 }
 
 TEST(timing_144hz_rendering_produces_same_ticks) {
@@ -2761,10 +2759,10 @@ TEST(timing_144hz_rendering_produces_same_ticks) {
         total_ticks += result.ticks_to_run;
     }
     
-    // Should produce approximately 60 ticks (±1 due to rounding)
+    // Should produce approximately 60 ticks (Â±1 due to rounding)
     ASSERT_TRUE(total_ticks >= 59 && total_ticks <= 61);
     
-    std::cout << "  [144Hz rendering → ~60 simulation ticks (got " << total_ticks << ")]\n";
+    std::cout << "  [144Hz rendering â†’ ~60 simulation ticks (got " << total_ticks << ")]\n";
 }
 
 TEST(timing_irregular_frames_same_result) {
@@ -2800,7 +2798,7 @@ TEST(timing_irregular_frames_same_result) {
     // 500ms at 60Hz = 30 ticks
     ASSERT_TRUE(total_ticks >= 28 && total_ticks <= 32);
     
-    std::cout << "  [Irregular frame times → " << total_ticks << " ticks for 500ms]\n";
+    std::cout << "  [Irregular frame times â†’ " << total_ticks << " ticks for 500ms]\n";
 }
 
 TEST(timing_equivalent_elapsed_same_tick_count) {
@@ -2839,26 +2837,26 @@ TEST(timing_equivalent_elapsed_same_tick_count) {
         ticks_irregular += sched_irregular.advance(dt).ticks_to_run;
     }
     
-    // All three should produce ~30 ticks (±1 for rounding)
+    // All three should produce ~30 ticks (Â±1 for rounding)
     ASSERT_TRUE(ticks_60hz >= 29 && ticks_60hz <= 31);
     ASSERT_TRUE(ticks_144hz >= 29 && ticks_144hz <= 31);
     ASSERT_TRUE(ticks_irregular >= 29 && ticks_irregular <= 31);
     
     std::cout << "  [60Hz=" << ticks_60hz << ", 144Hz=" << ticks_144hz 
               << ", irregular=" << ticks_irregular << " ticks for 500ms]\n";
-    std::cout << "  [Simulation cadence independent of render rate ✓]\n";
+    std::cout << "  [Simulation cadence independent of render rate âœ“]\n";
 }
 
 //=============================================================================
 // INPUT EDGE CONSUMPTION ADVERSARIAL TESTS (Audit 8)
-// Proves: one physical rising edge → at most one simulation edge event
+// Proves: one physical rising edge â†’ at most one simulation edge event
 //=============================================================================
 
 TEST(input_edge_one_press_one_tick_consumed_once) {
-    // One physical press + 1 simulation tick → pressed observed exactly once
+    // One physical press + 1 simulation tick â†’ pressed observed exactly once
     InputSystem input;
     
-    // Simulate: host polls events → key_down
+    // Simulate: host polls events â†’ key_down
     input.begin_frame();
     input.on_key_down(Sdl3Scancode::Z);  // A button
     
@@ -2872,15 +2870,15 @@ TEST(input_edge_one_press_one_tick_consumed_once) {
     // Key is still held
     ASSERT_TRUE(input.snapshot().is_held(InputButton::A));
     
-    std::cout << "  [1 press + 1 tick → pressed consumed once ✓]\n";
+    std::cout << "  [1 press + 1 tick â†’ pressed consumed once âœ“]\n";
 }
 
 TEST(input_edge_one_press_four_ticks_consumed_once) {
     // ADVERSARIAL: One physical press + 4 catch-up simulation ticks
-    // → pressed observed by exactly ONE tick, not all four
+    // â†’ pressed observed by exactly ONE tick, not all four
     InputSystem input;
     
-    // Simulate: host polls events → key_down
+    // Simulate: host polls events â†’ key_down
     input.begin_frame();
     input.on_key_down(Sdl3Scancode::Z);  // A button
     
@@ -2897,7 +2895,7 @@ TEST(input_edge_one_press_four_ticks_consumed_once) {
     // CRITICAL: Pressed must be consumed exactly ONCE, not 4 times
     ASSERT_EQ(pressed_count, 1);
     
-    std::cout << "  [1 press + 4 catch-up ticks → pressed consumed exactly 1 time ✓]\n";
+    std::cout << "  [1 press + 4 catch-up ticks â†’ pressed consumed exactly 1 time âœ“]\n";
 }
 
 TEST(input_edge_held_across_multiple_ticks) {
@@ -2912,7 +2910,7 @@ TEST(input_edge_held_across_multiple_ticks) {
         ASSERT_TRUE(input.snapshot().is_held(InputButton::Up));
     }
     
-    std::cout << "  [Held input across 4 ticks → is_held true on all ticks ✓]\n";
+    std::cout << "  [Held input across 4 ticks â†’ is_held true on all ticks âœ“]\n";
 }
 
 TEST(input_edge_release_consumed_once) {
@@ -2938,16 +2936,16 @@ TEST(input_edge_release_consumed_once) {
     
     ASSERT_EQ(released_count, 1);
     
-    std::cout << "  [Release edge consumed exactly 1 time ✓]\n";
+    std::cout << "  [Release edge consumed exactly 1 time âœ“]\n";
 }
 
 TEST(input_edge_zero_tick_frame_preserves_press) {
     // CRITICAL ADVERSARIAL TEST: Zero-tick frame must NOT lose pending press
     // Scenario:
-    //   Frame 1: host key_down → pending_pressed = true
+    //   Frame 1: host key_down â†’ pending_pressed = true
     //   Frame 1: scheduler returns 0 ticks (no simulation)
     //   Frame 2: begin_frame() called
-    //   Frame 2: scheduler returns 1 tick → consume_pressed must return TRUE
+    //   Frame 2: scheduler returns 1 tick â†’ consume_pressed must return TRUE
     InputSystem input;
     
     // Frame 1: Press arrives
@@ -2970,7 +2968,7 @@ TEST(input_edge_zero_tick_frame_preserves_press) {
     // After consumption, no longer pending
     ASSERT_FALSE(input.has_pending_pressed(InputButton::A));
     
-    std::cout << "  [Press + 0-tick frame + 1-tick frame → press observed ✓]\n";
+    std::cout << "  [Press + 0-tick frame + 1-tick frame â†’ press observed âœ“]\n";
 }
 
 TEST(input_edge_zero_tick_frame_preserves_release) {
@@ -3001,11 +2999,11 @@ TEST(input_edge_zero_tick_frame_preserves_release) {
     // After consumption, no longer pending
     ASSERT_FALSE(input.has_pending_released(InputButton::A));
     
-    std::cout << "  [Release + 0-tick frame + 1-tick frame → release observed ✓]\n";
+    std::cout << "  [Release + 0-tick frame + 1-tick frame â†’ release observed âœ“]\n";
 }
 
 TEST(input_edge_press_release_before_tick) {
-    // Test: press → release before any simulation tick
+    // Test: press â†’ release before any simulation tick
     // For Crystal semantics, the press may be lost (key released before observed)
     // This is acceptable - we're testing the final state is correct
     InputSystem input;
@@ -3032,6 +3030,6 @@ TEST(input_edge_press_release_before_tick) {
     bool release_consumed = input.consume_released(InputButton::A);
     ASSERT_TRUE(release_consumed);
     
-    std::cout << "  [Press→release before tick → release observed, held=false ✓]\n";
+    std::cout << "  [Pressâ†’release before tick â†’ release observed, held=false âœ“]\n";
 }
 

@@ -13,6 +13,12 @@ target_link_libraries(golden_test PRIVATE
 # Lua Runtime tests (end-to-end script execution)
 # Requires engine library (with Lua) + crystal frontend
 if(ENGINEMON_ENABLE_ENGINE)
+    # =========================================================================
+    # runtime_test — original monolithic target, kept for run_all_tests.ps1
+    # compatibility.  All 586 tests from all 11 TUs in a single binary with
+    # /O1 /Zm2000.  Still functional but can hit OOM on 32-CPU machines when
+    # all 5 heavy compiler TUs compile simultaneously.
+    # =========================================================================
     add_executable(runtime_test
         scripting/runtime_test_core.cpp
         scripting/runtime_test_maps.cpp
@@ -40,6 +46,73 @@ if(ENGINEMON_ENABLE_ENGINE)
         target_compile_options(runtime_test PRIVATE /bigobj /Zm2000 /O1 /wd4566)
     endif()
     # Not added to ctest - requires ROM path argument
+
+    # =========================================================================
+    # runtime_test_engine — engine-only TUs, no Crystal compiler IR variants.
+    # No CrystalCommandData (171 alts) or SemanticOp (154 alts) instantiation.
+    # Safe to compile in full parallelism without OOM risk.
+    # Covers: core, maps, blast_radius, integration, warp_semantics, rtc (191 tests)
+    # =========================================================================
+    add_executable(runtime_test_engine
+        scripting/runtime_test_core.cpp
+        scripting/runtime_test_maps.cpp
+        scripting/runtime_test_blast_radius.cpp
+        scripting/runtime_test_integration.cpp
+        scripting/runtime_test_warp_semantics.cpp
+        scripting/runtime_test_rtc.cpp
+        scripting/runtime_test_engine_main.cpp
+    )
+    target_link_libraries(runtime_test_engine PRIVATE
+        enginemon_crystal
+        enginemon_engine
+    )
+    target_include_directories(runtime_test_engine PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    if(MSVC)
+        target_compile_options(runtime_test_engine PRIVATE /bigobj /wd4566)
+    endif()
+    # Not added to ctest - requires ROM path argument
+
+    # =========================================================================
+    # runtime_test_compiler — Crystal compiler/IR TUs.
+    # Includes semantic_ir.hpp (154-alt SemanticOp) + crystal_command.hpp
+    # (171-alt CrystalCommandData) — each TU peaks at ~8 GB MSVC WS.
+    # /O1 /Zm2000 required; at most 5 TUs so peak RAM ~40 GB at full parallelism.
+    # Covers: scripts, batches, vm_state, text_rng, pcg_vm (392 tests)
+    # =========================================================================
+    add_executable(runtime_test_compiler
+        scripting/runtime_test_scripts.cpp
+        scripting/runtime_test_batches.cpp
+        scripting/runtime_test_vm_state.cpp
+        scripting/runtime_test_text_rng.cpp
+        scripting/runtime_test_pcg_vm.cpp
+        scripting/runtime_test_compiler_main.cpp
+    )
+    target_link_libraries(runtime_test_compiler PRIVATE
+        enginemon_crystal
+        enginemon_engine
+    )
+    target_include_directories(runtime_test_compiler PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    if(MSVC)
+        target_compile_options(runtime_test_compiler PRIVATE /bigobj /Zm2000 /O1 /wd4566)
+    endif()
+    # Not added to ctest - requires ROM path argument
+
+    # =========================================================================
+    # battle_test — engine-only battle mechanics tests.
+    # Links ONLY against enginemon_engine (no enginemon_crystal dependency).
+    # No variant-heavy compiler IR headers.  All future battle tests go here.
+    # =========================================================================
+    add_executable(battle_test
+        scripting/battle_test.cpp
+    )
+    target_link_libraries(battle_test PRIVATE
+        enginemon_engine
+    )
+    target_include_directories(battle_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    if(MSVC)
+        target_compile_options(battle_test PRIVATE /bigobj)
+    endif()
+    # Not added to ctest - standalone, no ROM required
 
     # Focused tests for variable sprite identity model + money text state.
     # Does NOT require a ROM path argument — runs standalone.
@@ -244,4 +317,95 @@ target_link_libraries(parity_tests PRIVATE
 )
 add_test(NAME ParityTests COMMAND parity_tests)
 
+endif()
+
+# =============================================================================
+# CTest registration
+# =============================================================================
+# Standalone tests (no ROM required) are always registered when engine is enabled.
+# ROM-dependent tests are registered only when ENGINEMON_ROM_PATH is set.
+#
+# Usage:
+#   cmake -B build -DENGINEMON_ROM_PATH="path/to/crystal.gbc"
+#   ctest --test-dir build -j8 --output-on-failure
+#
+# Labels:
+#   engine-only  -- no Crystal compiler IR, no ROM needed; safe at full parallelism
+#   compiler-ir  -- Crystal compiler/IR variants; high memory per TU
+#   standalone   -- no ROM, no compiler IR
+#   rom-required -- requires ENGINEMON_ROM_PATH
+#   oracle       -- heavyweight (2.5s); run last in parallel batch
+# =============================================================================
+
+if(ENGINEMON_ENABLE_ENGINE)
+    # --- Standalone (no ROM) ---------------------------------------------------
+    add_test(NAME battle_test       COMMAND $<TARGET_FILE:battle_test>)
+    add_test(NAME emitter_test      COMMAND $<TARGET_FILE:emitter_test>)
+    add_test(NAME sprite_money_test COMMAND $<TARGET_FILE:sprite_money_test>)
+    set_tests_properties(battle_test emitter_test sprite_money_test
+        PROPERTIES LABELS "standalone;engine-only")
+
+    add_test(NAME crystal_save_test COMMAND $<TARGET_FILE:crystal_save_test>)
+    set_tests_properties(crystal_save_test PROPERTIES LABELS "standalone")
+
+    # --- ROM-dependent --------------------------------------------------------
+    if(ENGINEMON_ROM_PATH)
+        add_test(NAME runtime_test_engine
+            COMMAND $<TARGET_FILE:runtime_test_engine> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(runtime_test_engine
+            PROPERTIES LABELS "engine-only;rom-required")
+
+        add_test(NAME runtime_test_compiler
+            COMMAND $<TARGET_FILE:runtime_test_compiler> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(runtime_test_compiler
+            PROPERTIES LABELS "compiler-ir;rom-required")
+
+        add_test(NAME golden_test
+            COMMAND $<TARGET_FILE:golden_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(golden_test
+            PROPERTIES LABELS "rom-required")
+
+        add_test(NAME legality_gate_test
+            COMMAND $<TARGET_FILE:legality_gate_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(legality_gate_test
+            PROPERTIES LABELS "rom-required")
+
+        add_test(NAME corpus_test
+            COMMAND $<TARGET_FILE:corpus_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(corpus_test
+            PROPERTIES LABELS "rom-required")
+
+        add_test(NAME linker_test
+            COMMAND $<TARGET_FILE:linker_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(linker_test
+            PROPERTIES LABELS "rom-required")
+
+        add_test(NAME compiler_integrity_test
+            COMMAND $<TARGET_FILE:compiler_integrity_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(compiler_integrity_test
+            PROPERTIES LABELS "rom-required" TIMEOUT 120)
+
+        add_test(NAME oracle_test
+            COMMAND $<TARGET_FILE:oracle_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(oracle_test
+            PROPERTIES LABELS "rom-required;oracle" TIMEOUT 60)
+
+        add_test(NAME corpus_lowering_audit
+            COMMAND $<TARGET_FILE:corpus_lowering_audit> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(corpus_lowering_audit
+            PROPERTIES LABELS "rom-required")
+
+        add_test(NAME profile_verify
+            COMMAND $<TARGET_FILE:profile_verify> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(profile_verify
+            PROPERTIES LABELS "rom-required")
+
+        add_test(NAME trainer_verify
+            COMMAND $<TARGET_FILE:trainer_verify> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(trainer_verify
+            PROPERTIES LABELS "rom-required")
+    else()
+        message(STATUS
+            "CTest: ROM-dependent tests not registered (set -DENGINEMON_ROM_PATH=... to enable)")
+    endif()
 endif()

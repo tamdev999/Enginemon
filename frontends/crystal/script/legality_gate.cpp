@@ -2,6 +2,10 @@
 // Stage 5: Hard per-script legality gate implementation
 
 #include "crystal/script/legality_gate.hpp"
+#include "crystal/script/crystal_command.hpp"  // CrystalScriptIR, CrystalCommand (fwd-decl in .hpp)
+#include "crystal/script/crystal_cfg.hpp"      // CrystalCFG (fwd-decl in .hpp)
+#include "crystal/script/native_registry.hpp"  // NativeCallRegistry, RamAddressRegistry
+#include "crystal/script/semantic_linker.hpp"  // Full CompiledGameData definition
 #include <sstream>
 #include <iomanip>
 #include <iostream>

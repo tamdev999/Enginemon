@@ -13,10 +13,10 @@
 //
 // The legality gate is a hard compiler error, not a warning.
 
-#include "crystal/script/crystal_command.hpp"
-#include "crystal/script/crystal_cfg.hpp"
-#include "crystal/script/native_registry.hpp"
-#include "crystal/script/semantic_linker.hpp"
+// legality_gate.hpp only needs semantic_ir.hpp (LegalScript::ir is SemanticScriptIR by value).
+// All Crystal-stage types are stored by pointer — forward declarations are sufficient.
+// TUs that need to construct or dereference CrystalScriptIR / CrystalCFG /
+// NativeCallRegistry / RamAddressRegistry must include those headers directly.
 #include "engine/scripting/semantic_ir.hpp"
 #include <cstdint>
 #include <string>
@@ -26,6 +26,22 @@
 #include <unordered_set>
 
 namespace crystal {
+
+// Forward declarations — full definitions in their respective headers.
+// Callers that build LegalityInput or dereference these pointers must include:
+//   crystal/script/crystal_command.hpp  (CrystalScriptIR)
+//   crystal/script/crystal_cfg.hpp      (CrystalCFG)
+//   crystal/script/native_registry.hpp  (NativeCallRegistry, RamAddressRegistry)
+struct CrystalScriptIR;
+struct CrystalCFG;
+class NativeCallRegistry;
+class RamAddressRegistry;
+
+// Forward declaration — full definition is in semantic_linker.hpp.
+// legality_gate.hpp only stores a const pointer to CompiledGameData in
+// LegalityInput.  TUs that need the full definition must include
+// crystal/script/semantic_linker.hpp directly.
+struct CompiledGameData;
 
 // =============================================================================
 // LEGALITY FAILURE REASONS
