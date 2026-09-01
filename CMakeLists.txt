@@ -68,3 +68,41 @@ if(ENGINEMON_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# =============================================================================
+# Aggregate canonical build target
+# =============================================================================
+# A single target that depends on every canonical deliverable: production
+# runtime, tools, and test binaries.  cmake --build --preset all resolves
+# to this one target, which gives MSBuild a single dependency graph to
+# evaluate — shared libraries (enginemon_engine, enginemon_crystal) are built
+# once, and independent leaf targets are parallelized automatically.
+#
+# Debug/diagnostic targets remain excluded via EXCLUDE_FROM_ALL on their
+# individual add_executable() calls.
+if(ENGINEMON_ENABLE_ENGINE AND ENGINEMON_BUILD_TESTS AND ENGINEMON_BUILD_TOOLS AND ENGINEMON_ENABLE_VULKAN)
+    add_custom_target(enginemon_canonical ALL
+        COMMENT "Build all canonical Enginemon targets (runtime + tools + tests)"
+    )
+    add_dependencies(enginemon_canonical
+        enginemon_tiles
+        enginemon_bootstrap
+        emon_compile
+        emon_smoke
+        corpus_lowering_audit
+        profile_verify
+        trainer_verify
+        runtime_test_engine
+        runtime_test_compiler
+        battle_test
+        emitter_test
+        sprite_money_test
+        crystal_save_test
+        golden_test
+        legality_gate_test
+        corpus_test
+        linker_test
+        compiler_integrity_test
+        oracle_test
+    )
+endif()

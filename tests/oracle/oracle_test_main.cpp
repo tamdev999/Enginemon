@@ -140,10 +140,18 @@ int main(int argc, char* argv[]) {
             g_rom     = rom_owned.get();
             g_profile = profile;
         } else {
-            std::cerr << "Warning: ROM hash not in ProfileRegistry — live extraction tests will be skipped\n";
+            // Unrecognized ROM: canonical oracle requires a known Crystal profile.
+            // Phase 5 and 5.5 tests cannot run without it.  Hard fail rather than
+            // silently skipping 35 live tests and reporting PASS with reduced coverage.
+            std::cerr << "FATAL: ROM hash not in ProfileRegistry.\n"
+                      << "  oracle_test requires a recognized Crystal ROM.\n"
+                      << "  Unrecognized ROM → exit 1 (not a silent skip).\n";
+            return 1;
         }
     } else {
-        std::cerr << "Warning: Could not load ROM — live extraction tests will be skipped\n";
+        std::cerr << "FATAL: Could not load ROM from '" << argv[1] << "'.\n"
+                  << "  oracle_test requires a readable Crystal ROM.\n";
+        return 1;
     }
 
     // =========================================================================
@@ -359,7 +367,9 @@ int main(int argc, char* argv[]) {
         RUN_TEST(p5_negative_missing_script_explicit_failure);
         RUN_TEST(p5_negative_unimplemented_behavior_explicit_failure);
     } else {
-        std::cout << "[Phase 5] SKIP: oracle package not available (compile failed or ROM not loaded)\n";
+        std::cerr << "[Phase 5] FATAL: oracle package not available (ROM compile failed).\n"
+                  << "  oracle_test requires a full working Crystal compilation.\n";
+        g_tests_failed++; // count as a failed gate
     }
 
     // =========================================================================
@@ -384,7 +394,8 @@ int main(int argc, char* argv[]) {
         RUN_TEST(p55_endall_no_behavior_table_in_corpus);
         RUN_TEST(p55_closure_scall_abc);
     } else {
-        std::cout << "[Phase 5.5] SKIP: oracle package not available\n";
+        std::cerr << "[Phase 5.5] FATAL: oracle package not available.\n";
+        g_tests_failed++;
     }
     // Phase 5.5 closure tests that use ROM+profile but not oracle package
     RUN_TEST(p55_closure_farscall_fullpipe);

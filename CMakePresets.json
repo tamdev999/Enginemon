@@ -23,17 +23,10 @@
   "buildPresets": [
     {
       "name": "all",
-      "displayName": "Build all canonical targets",
+      "displayName": "Build all canonical targets (single MSBuild graph)",
       "configurePreset": "default",
       "configuration": "Release",
-      "targets": [
-        "runtime_test_engine", "runtime_test_compiler",
-        "battle_test", "emitter_test", "sprite_money_test", "crystal_save_test",
-        "golden_test", "legality_gate_test",
-        "corpus_test", "linker_test", "compiler_integrity_test", "oracle_test",
-        "corpus_lowering_audit", "profile_verify", "trainer_verify",
-        "enginemon_bootstrap", "enginemon_tiles", "emon_smoke", "emon_compile"
-      ]
+      "targets": ["enginemon_canonical"]
     },
     {
       "name": "engine",
