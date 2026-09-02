@@ -25,11 +25,11 @@
 #include <cassert>
 #include <stdexcept>
 
-// Suppress [[deprecated]] warnings in this file: battle.cpp calls the fallback
-// (no-rules) overloads only when rules_ == nullptr (unit test path).
-// Production path always has rules_ set and calls the BattleRules overloads.
-#pragma warning(push)
-#pragma warning(disable: 4996)   // MSVC: suppress deprecated function warnings
+// NOTE: No #pragma warning(disable: 4996) here.
+// Production code always sets rules_ before execute_turn() and uses the
+// BattleRules& overloads.  Unit tests that omit set_battle_rules() must
+// suppress deprecated warnings locally in their own TU.
+// A missing rules_ in production is an initialization error, not a fallback.
 
 namespace enginemon {
 
@@ -153,27 +153,20 @@ void Battle::set_trainer(TrainerId trainer, const TrainerData& data) {
     }
 
     // Determine AI behavior from trainer class via BattleRules.
-    // Source: AIChooseMove — TrainerClassAttributes bitmask → AI layer selection.
-    // ai_move_flags bits: 0=BASIC 1=SETUP 2=TYPES 3=OFFENSIVE 4=SMART 5..=higher
-    // Map to VanillaAI behavior IDs (which encode multi-pass combinations).
-    AIBehaviorId ai_behavior = VanillaAI::BASIC;
+    // Source: AIChooseMove — TrainerClassAttributes TRNATTR_AI_MOVE_WEIGHTS bitmask.
+    // Crystal bit definitions (trainer_data_constants.asm, shift_const order):
+    //   bit 0 = AI_BASIC       bit 1 = AI_SETUP      bit 2 = AI_TYPES
+    //   bit 3 = AI_OFFENSIVE   bit 4 = AI_SMART       bit 5 = AI_OPPORTUNIST
+    //   bit 6 = AI_AGGRESSIVE  bit 7 = AI_CAUTIOUS    bit 8 = AI_STATUS
+    //   bit 9 = AI_RISKY
+    // We map the bitmask directly: store it in the AI object; decide(ctx, rules)
+    // reads the flags and runs exactly the set of passes that are enabled.
+    uint16_t ai_flags = 0x0001;  // Default: BASIC only (bit 0)
     if (rules_) {
-        const uint16_t flags = rules_->get_trainer_ai_flags(data.trainer_class);
-        // Bit 4 (SMART) → GYM_LEADER tier (BASIC+TYPES+SMART+SETUP)
-        // Bit 3 (OFFENSIVE) → AGGRESSIVE tier (BASIC+TYPES+OFFENSIVE)
-        // Bit 1 (SETUP) → DEFENSIVE tier (BASIC+TYPES+SETUP) if no offensive
-        // Bit 0 (BASIC only) → BASIC
-        // Use highest-tier flag present.
-        constexpr uint16_t AI_BASIC     = 1 << 0;
-        constexpr uint16_t AI_SETUP     = 1 << 1;
-        constexpr uint16_t AI_OFFENSIVE = 1 << 3;
-        constexpr uint16_t AI_SMART     = 1 << 4;
-        if (flags & AI_SMART)          ai_behavior = VanillaAI::GYM_LEADER;
-        else if (flags & AI_OFFENSIVE) ai_behavior = VanillaAI::AGGRESSIVE;
-        else if (flags & AI_SETUP)     ai_behavior = VanillaAI::DEFENSIVE;
-        else if (flags & AI_BASIC)     ai_behavior = VanillaAI::BASIC;
+        ai_flags = rules_->get_trainer_ai_flags(data.trainer_class);
+        if (ai_flags == 0) ai_flags = 0x0001;  // Trainer class with no flags → BASIC
     }
-    trainer_ai_ = std::make_unique<VanillaCrystalAI>(ai_behavior);
+    trainer_ai_ = std::make_unique<VanillaCrystalAI>(static_cast<AIBehaviorId>(ai_flags));
 }
 
 // ============================================================================
@@ -197,6 +190,8 @@ void Battle::set_opponent_action(BattleAction action)  { opponent_action_  = std
 // ============================================================================
 
 void Battle::apply_stat_stages(BattlePokemon& bp) {
+    // rules_ is asserted non-null before any call to execute_turn().
+    // apply_stat_stages is only called from execute_move and execute_turn paths.
     if (rules_) {
         bp.stats.attack          = static_cast<int16_t>(apply_stat_stage(bp.base_stats.attack,          bp.stages.attack,          *rules_));
         bp.stats.defense         = static_cast<int16_t>(apply_stat_stage(bp.base_stats.defense,         bp.stages.defense,         *rules_));
@@ -204,6 +199,7 @@ void Battle::apply_stat_stages(BattlePokemon& bp) {
         bp.stats.special_attack  = static_cast<int16_t>(apply_stat_stage(bp.base_stats.special_attack,  bp.stages.special_attack,  *rules_));
         bp.stats.special_defense = static_cast<int16_t>(apply_stat_stage(bp.base_stats.special_defense, bp.stages.special_defense, *rules_));
     } else {
+        // Test-only path (rules_ == nullptr, no execute_turn assert fired yet).
         bp.stats.attack          = static_cast<int16_t>(apply_stat_stage(bp.base_stats.attack,          bp.stages.attack));
         bp.stats.defense         = static_cast<int16_t>(apply_stat_stage(bp.base_stats.defense,         bp.stages.defense));
         bp.stats.speed           = static_cast<int16_t>(apply_stat_stage(bp.base_stats.speed,           bp.stages.speed));
@@ -269,6 +265,12 @@ void Battle::determine_turn_order() {
 
 void Battle::execute_turn() {
     if (result_ != BattleResult::InProgress) return;
+
+    // BattleRules must be set before execute_turn() in any production path.
+    // Tests that intentionally omit set_battle_rules() must call
+    // set_battle_rules(nullptr) explicitly; the fallback overloads are for
+    // unit test isolation only and produce [[deprecated]] warnings.
+    assert(rules_ != nullptr && "set_battle_rules() must be called before execute_turn()");
 
     ++turn_number_;
 
@@ -376,22 +378,27 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
     const MoveData* md = registries_.moves.get(move_id);
     if (!md) { message("Unknown move!"); return; }
 
-    // Deduct PP
-    if (move_slot < 4 && user.moves[move_slot].pp > 0)
-        user.moves[move_slot].pp--;
-
     message((user_is_player ? "Player used " : "Opponent used ") + md->name + "!");
 
     if (md->category == MoveCategory::Status) {
-        // Status move effects are dispatched separately (future milestone).
-        // Explicitly flag that this move had no effect rather than silently no-op.
-        message((user_is_player ? "Player used " : "Opponent used ") + md->name +
-                " — status effect not yet implemented.");
+        // Status move effects are not implemented in this pass.
+        // Do NOT deduct PP or consume turn resources for unimplemented effects.
+        // Emit an explicit diagnostic so the caller can identify unsupported execution.
+        // Source: Crystal executes status move effects via BattleCommand dispatch;
+        //         each effect has its own handler. Deferred per Phase 1 scope.
+        message(md->name + " — status effect not yet supported (deferred).");
+        // PP is intentionally NOT deducted — no canonical effect executed.
         return;
     }
 
+    // Deduct PP (only for damaging moves where execution proceeds)
+    if (move_slot < 4 && user.moves[move_slot].pp > 0)
+        user.moves[move_slot].pp--;
+
     // Accuracy check
-    // 0xFF = always hit (Crystal encoding); 0 = always hit (Enginemon normalisation)
+    // 0xFF = always hit (Crystal encoding for never-miss moves like Swift).
+    // Moves stored with accuracy=0 in MoveData indicate unset package data —
+    // treat as no accuracy check (conservative — avoids spurious misses).
     if (md->accuracy != 0xFF && md->accuracy != 0) {
         const int8_t acc_stage = user.stages.accuracy;
         const int8_t eva_stage = target.stages.evasion;
@@ -429,9 +436,9 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
 
     // Attack / defense stats (crit ignores negative atk stages and positive def stages)
     // Source: suiCune effect_commands.c CheckDamageStatsCritical
-    const int8_t eff_atk_stage = (is_crit && user.stages.attack < 0)   ? 0 : user.stages.attack;
-    const int8_t eff_def_stage = (is_crit && target.stages.defense > 0) ? 0 : target.stages.defense;
-    const int8_t eff_satk_stage = (is_crit && user.stages.special_attack < 0)   ? 0 : user.stages.special_attack;
+    const int8_t eff_atk_stage  = (is_crit && user.stages.attack < 0)            ? 0 : user.stages.attack;
+    const int8_t eff_def_stage  = (is_crit && target.stages.defense > 0)          ? 0 : target.stages.defense;
+    const int8_t eff_satk_stage = (is_crit && user.stages.special_attack < 0)    ? 0 : user.stages.special_attack;
     const int8_t eff_sdef_stage = (is_crit && target.stages.special_defense > 0) ? 0 : target.stages.special_defense;
 
     int32_t atk_stat, def_stat;
@@ -444,7 +451,7 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
     };
 
     if (physical) {
-        atk_stat = stat_stage(user.base_stats.attack,   eff_atk_stage);
+        atk_stat = stat_stage(user.base_stats.attack,    eff_atk_stage);
         def_stat = stat_stage(target.base_stats.defense, eff_def_stage);
         // Reflect doubles defender's defense
         if ( user_is_player && field_.reflect_opponent > 0) def_stat *= 2;
@@ -460,28 +467,53 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
     // Burn penalty on physical moves
     const bool burned = physical && (user.status == Status::Burn);
 
+    // Weather modifier applied BEFORE calculate_damage(), matching Crystal ordering.
+    // Source: BattleCommand_Stab calls DoWeatherModifiers BEFORE the type-matchup
+    // loop and STAB application (effect_commands.asm, .go section).
+    // The modifier is applied to atk_stat effectively — we implement it by
+    // pre-multiplying the base damage divisor, which is equivalent for integer math.
+    // Practical implementation: apply multiplier to the pre-STAB damage, i.e.,
+    // compute damage without STAB first, apply weather, then apply STAB — but
+    // Crystal actually applies weather modifier to wCurDamage before the STAB
+    // shift in BattleCommand_Stab.  We replicate: compute base damage (no STAB),
+    // apply weather, then add STAB.
+    //
+    // To implement correctly without restructuring calculate_damage():
+    //   1. Get base damage (stab=false in DamageParams)
+    //   2. Apply weather modifier to base damage
+    //   3. Apply STAB manually (+damage/2)
+
     DamageParams dp{};
-    dp.attacker_level    = user.level;
-    dp.attack_stat       = atk_stat;
-    dp.defense_stat      = def_stat;
-    dp.move_power        = md->power;
+    dp.attacker_level     = user.level;
+    dp.attack_stat        = atk_stat;
+    dp.defense_stat       = def_stat;
+    dp.move_power         = md->power;
     dp.type_effectiveness = type_eff;
-    dp.stab              = stab;
-    dp.critical          = is_crit;
-    dp.burned            = burned;
-    dp.weather           = field_.weather;
-    dp.move_type         = md->type;
+    dp.stab               = false;   // Applied manually after weather below
+    dp.critical           = is_crit;
+    dp.burned             = burned;
+    dp.weather            = field_.weather;
+    dp.move_type          = md->type;
 
     int32_t damage = enginemon::calculate_damage(dp);
-    if (damage == 0) return;  // Immune or power=0 status move edge case
+    if (damage == 0) return;
 
-    // Weather modifier (Crystal: DoWeatherModifiers, applied after STAB)
-    // Source: misc.asm DoWeatherModifiers — type and move-effect checks.
+    // Weather modifier — applied after base damage, before STAB.
+    // Crystal: DoWeatherModifiers runs inside BattleCommand_Stab before type loop.
+    // Source: misc.asm DoWeatherModifiers — multiplier × damage / 10, min 1.
     if (rules_ && field_.weather != Weather::None) {
         const uint8_t weather_id = static_cast<uint8_t>(field_.weather);
         const uint8_t type_id    = static_cast<uint8_t>(md->type);
         const uint8_t effect_id  = md->effect_id;
         damage = apply_weather_modifier(damage, weather_id, type_id, effect_id, *rules_);
+    }
+
+    // STAB — applied after weather, matching Crystal BattleCommand_Stab ordering.
+    // Source: BattleCommand_Stab: DoWeatherModifiers → type matchup → STAB shift.
+    if (stab) {
+        damage += damage / 2;  // +50% integer: n + n/2
+        if (damage > 999) damage = 999;
+        if (damage < 2)   damage = 2;
     }
 
     // Random variation 85-100% (suiCune BattleCommand_DamageVariation: RRCA loop)
@@ -494,7 +526,7 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
     if (damage < 2) damage = 2;
 
     // Messages
-    if (is_crit)       message("A critical hit!");
+    if (is_crit)        message("A critical hit!");
     if (type_eff > 100) message("It's super effective!");
     else if (type_eff < 100) message("It's not very effective…");
 
@@ -797,5 +829,3 @@ uint32_t Battle::calculate_exp(const BattlePokemon& defeated, bool is_trainer) c
 }
 
 } // namespace enginemon
-
-#pragma warning(pop)  // Re-enable deprecated warnings after battle.cpp

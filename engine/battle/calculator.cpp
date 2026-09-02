@@ -353,17 +353,22 @@ uint8_t build_crit_stage(const BattlePokemon& user, const MoveData& move,
                           const BattleRules& rules) {
     // Source: effect_commands.asm BattleCommand_Critical
     //   c = 0 (base)
-    //   +2 if move ID is in CriticalHitMoves list
+    //   +2 if move is in CriticalHitMoves list (checked against MOVE_ANIM = move ID)
     //   +1 if user has Focus Energy volatile (SUBSTATUS_FOCUS_ENERGY)
-    //   Scope Lens (+1) and Lucky Punch/Stick (+2) require held-item checks
-    //   which are not yet representable in BattlePokemon; leave those at 0
-    //   and add explicit gating comments so future held-item work can wire in.
+    //   Scope Lens (+1) and Lucky Punch/Stick (+2) require held-item checks not yet
+    //   representable in BattlePokemon — leave those at 0 with explicit comment.
+    //
+    // Crystal's CriticalHitMoves list stores MOVE_ANIM byte values from the move
+    // struct, which for all standard Crystal moves equals the move's constant
+    // (= MoveId as uint8_t).  rules.high_crit_moves contains these same values
+    // extracted from the ROM.  We compare against (uint8_t)move.id — valid for
+    // MoveId ≤ 255, which covers all 251 Crystal standard moves.
     uint8_t stage = 0;
 
     // High-crit move: +2 (source: data/moves/critical_hit_moves.asm)
-    // rules.high_crit_moves stores Crystal move animation IDs.
-    // MoveData::animation_id matches Crystal's MOVE_ANIM field.
-    if (rules.is_high_crit_move(move.animation_id)) {
+    // Compare move.id (truncated to uint8_t) against the extracted list.
+    // All Crystal standard moves have MoveId ≤ 251, so truncation is safe.
+    if (rules.is_high_crit_move(static_cast<uint8_t>(move.id & 0xFF))) {
         stage += 2;
     }
 
@@ -372,8 +377,8 @@ uint8_t build_crit_stage(const BattlePokemon& user, const MoveData& move,
         stage += 1;
     }
 
-    // Scope Lens (HELD_CRITICAL_UP): +1 — not yet: held items not in BattlePokemon
-    // Lucky Punch (Chansey) / Stick (Farfetch'd): +2 — not yet: same reason
+    // Scope Lens (HELD_CRITICAL_UP): +1 — held items not yet in BattlePokemon
+    // Lucky Punch (Chansey) / Stick (Farfetch'd): +2 — same reason
 
     return std::min<uint8_t>(stage, 6);
 }
@@ -410,8 +415,10 @@ static uint32_t apply_acc_mult_entry(uint32_t val, const StageMultiplierEntry& e
 bool roll_accuracy(uint8_t move_accuracy, int8_t acc_stage,
                    int8_t eva_stage, uint32_t random,
                    const BattleRules& rules) {
-    // 0xFF = always hit (Crystal encoding); 0 = always hit (Enginemon normalisation)
-    if (move_accuracy == 0xFF || move_accuracy == 0) return true;
+    // 0xFF = always hit (Crystal encoding for never-miss moves like Swift).
+    // 0 is NOT a valid always-hit encoding; it indicates missing package data.
+    // Call sites in execute_move guard against 0 before calling roll_accuracy.
+    if (move_accuracy == 0xFF) return true;
 
     // Pass 1: apply attacker accuracy stage
     const auto e1 = rules.get_acc_mult(acc_stage);
@@ -435,7 +442,7 @@ bool roll_accuracy(uint8_t move_accuracy, int8_t acc_stage,
 #pragma warning(disable: 4996)
 bool roll_accuracy(uint8_t move_accuracy, int8_t acc_stage,
                    int8_t eva_stage, uint32_t random) {
-    if (move_accuracy == 0xFF || move_accuracy == 0) return true;
+    if (move_accuracy == 0xFF) return true;
 
     // Two-pass floor using internal static table
     auto apply_entry = [](uint32_t v, int8_t stage) -> uint32_t {

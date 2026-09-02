@@ -109,6 +109,8 @@ bool roll_critical(uint8_t crit_stage, uint32_t random, const BattleRules& rules
 // Source: effect_commands.asm BattleCommand_Critical
 //   base stage = 0
 //   +2 if move ID is in BattleRules::high_crit_moves
+//     (rules stores Crystal MOVE_ANIM bytes = MoveId for standard Crystal moves;
+//      build_crit_stage compares (uint8_t)move.id against the list)
 //   +1 if user has Focus Energy volatile (VolatileStatus::FocusEnergy)
 //   +2 if user holds Lucky Punch (Chansey) or Stick (Farfetch'd) — not yet representable
 //   +1 if user holds Scope Lens (HELD_CRITICAL_UP) — not yet representable
@@ -122,12 +124,16 @@ uint8_t build_crit_stage(const BattlePokemon& user, const MoveData& move,
 // Algorithm (two-pass, each with separate floor):
 //   Step 1: acc  = floor(move_accuracy  * acc_mult[acc_stage].num  / acc_mult[acc_stage].den)
 //           acc  = max(1, acc)
-//   Step 2: acc  = floor(acc * acc_mult[(MAX_STAT_LEVEL+1) - eva_stage].num
-//                               / acc_mult[(MAX_STAT_LEVEL+1) - eva_stage].den)
+//   Step 2: acc  = floor(acc * acc_mult[-eva_stage].num / acc_mult[-eva_stage].den)
 //           acc  = max(1, min(acc, 255))
 //   Hit if random < acc  (miss if random >= acc)
 //   move_accuracy == 0xFF → always hit (Crystal encoding for "never misses")
-//   move_accuracy == 0   → always hit (Enginemon normalisation for same)
+//
+// NOTE: move_accuracy == 0 does NOT mean always-hit.  In the Crystal ROM, always-hit
+// moves use 0xFF in the accuracy byte (MOVE_ACC field).  MoveData::accuracy stores
+// the raw ROM byte verbatim.  A 0 value in MoveData indicates missing/unset data
+// (the package reader leaves accuracy=0 if the move was not extracted); the call
+// sites in execute_move() guard this explicitly.
 //
 // Production code must use the BattleRules& overload.
 bool roll_accuracy(uint8_t move_accuracy, int8_t acc_stage,

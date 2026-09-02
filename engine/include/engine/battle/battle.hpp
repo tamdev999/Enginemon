@@ -199,8 +199,10 @@ public:
     Battle(BattleType type, Party& player_party, const Registries& reg);
 
     // Attach ROM-derived battle rules.  Must be called before execute_turn() in
-    // production.  Tests may omit this; the fallback static tables in calculator.cpp
-    // are used if rules_ is null, but this triggers [[deprecated]] warnings.
+    // production.  Passing null explicitly to test without a package is allowed;
+    // execute_turn() will assert non-null in production, but tests may use
+    // set_battle_rules(nullptr) explicitly to enter test-only fallback mode.
+    // Enforcement: execute_turn() asserts rules_ != nullptr when called.
     void set_battle_rules(const BattleRules* rules) { rules_ = rules; }
 
     ~Battle();

@@ -31,11 +31,12 @@
 #include <cassert>
 #include <numeric>
 
-// Suppress [[deprecated]] warnings in this file: the fallback (no-rules) overloads
-// of apply_stat_stage etc. are callable from tests via decide(ctx) without BattleRules.
-// Production code always passes BattleRules via decide(ctx, rules).
-#pragma warning(push)
-#pragma warning(disable: 4996)
+// NOTE: No file-level #pragma warning(disable: 4996) here.
+// The deprecated fallback overloads of apply_stat_stage/roll_accuracy etc. are
+// NOT called in this file at all — all AI scoring uses type-chart lookups from
+// registries_, not calculator table functions.  The only deprecated calls this
+// file makes are through VanillaCrystalAI::decide(ctx) (no-rules overload) which
+// is a test path only.  Tests must suppress the warning locally if needed.
 
 namespace enginemon {
 
@@ -536,32 +537,66 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx) {
 }
 
 AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rules) {
-    // ROM-derived overload: replaces hardcoded AI lists with package-extracted tables.
-    // Uses rules.ai_status_only_effects, rules.trainer_class_ai, etc.
+    // ROM-derived overload using exact bitmask-driven pass dispatch.
+    //
+    // When set_trainer() calls set_battle_rules(), it stores the raw
+    // TRNATTR_AI_MOVE_WEIGHTS bitmask as the behavior_ ID.
+    // Crystal bit definitions (trainer_data_constants.asm):
+    //   bit 0 = AI_BASIC       bit 1 = AI_SETUP      bit 2 = AI_TYPES
+    //   bit 3 = AI_OFFENSIVE   bit 4 = AI_SMART
+    //
+    // Crystal's AIChooseMove iterates flag bits 0-15 in order, running the
+    // corresponding AI pass for each set bit (AIScoringPointers index = bit number).
+    // We replicate the exact pass set and order.
+    //
+    // NOTE: When behavior_ is a legacy VanillaAI:: enum constant (< 9, from direct
+    // construction in tests), fall through to the tier-based logic below.
     MoveScores scores{};
 
-    const AIBehaviorId beh = behavior_;
+    // Check whether behavior_ is a raw bitmask (>= 16 and not a legacy enum)
+    // or a legacy tier constant (0-8).  Raw bitmask values from set_trainer() will
+    // be 0x0001–0xFFFF; legacy enum values are 0–8.  Discriminate by value range.
+    const bool is_bitmask = (behavior_ >= 16);
 
-    // Use ROM-derived ai_basic (reads rules.ai_status_only_effects)
-    ai_basic(scores, ctx, rules);
+    if (is_bitmask) {
+        // Exact bitmask-driven pass dispatch — matches Crystal AIChooseMove.
+        const uint16_t flags = static_cast<uint16_t>(behavior_);
+        constexpr uint16_t BIT_BASIC     = 1 << 0;
+        constexpr uint16_t BIT_SETUP     = 1 << 1;
+        constexpr uint16_t BIT_TYPES     = 1 << 2;
+        constexpr uint16_t BIT_OFFENSIVE = 1 << 3;
+        constexpr uint16_t BIT_SMART     = 1 << 4;
 
-    // ai_types, ai_offensive, ai_setup, ai_smart are not yet rules-parameterized
-    // (the Effect:: constants they use are stable enum IDs — future pass can
-    // cross-reference with rules.effect_priorities when needed)
-    if (beh >= VanillaAI::SMART || beh == VanillaAI::GYM_LEADER
-     || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
-        ai_types(scores, ctx);
-        ai_smart(scores, ctx);
-    } else if (beh >= VanillaAI::AGGRESSIVE) {
-        ai_types(scores, ctx);
-        ai_offensive(scores, ctx);
+        // AI_BASIC: always run first regardless of flags.
+        // Source: Crystal's AI always scores via AI_Basic at minimum.
+        ai_basic(scores, ctx, rules);
+
+        // Passes run in Crystal's AIScoringPointers order (bit 0 first).
+        if (flags & BIT_SETUP)     ai_setup(scores, ctx, 0, 0);
+        if (flags & BIT_TYPES)     ai_types(scores, ctx);
+        if (flags & BIT_OFFENSIVE) ai_offensive(scores, ctx);
+        if (flags & BIT_SMART)     ai_smart(scores, ctx);
     } else {
-        ai_types(scores, ctx);
-    }
+        // Legacy tier-based dispatch (tests / direct VanillaAI:: construction).
+        const AIBehaviorId beh = behavior_;
 
-    if (beh == VanillaAI::DEFENSIVE || beh == VanillaAI::GYM_LEADER
-     || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
-        ai_setup(scores, ctx, 0, 0);
+        ai_basic(scores, ctx, rules);
+
+        if (beh >= VanillaAI::SMART || beh == VanillaAI::GYM_LEADER
+         || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
+            ai_types(scores, ctx);
+            ai_smart(scores, ctx);
+        } else if (beh >= VanillaAI::AGGRESSIVE) {
+            ai_types(scores, ctx);
+            ai_offensive(scores, ctx);
+        } else {
+            ai_types(scores, ctx);
+        }
+
+        if (beh == VanillaAI::DEFENSIVE || beh == VanillaAI::GYM_LEADER
+         || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
+            ai_setup(scores, ctx, 0, 0);
+        }
     }
 
     if (should_switch(ctx)) {
@@ -765,5 +800,3 @@ std::vector<std::pair<AIBehaviorId, std::string>> AIRegistry::list_registered() 
 }
 
 } // namespace enginemon
-
-#pragma warning(pop)

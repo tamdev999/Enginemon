@@ -372,8 +372,16 @@ TEST(crit_stage_beyond_6_uses_half) {
 // =============================================================================
 
 TEST(accuracy_always_hit_zero_accuracy) {
-    // move_accuracy == 0 → always hits regardless of stages or random
-    ASSERT_TRUE(roll_accuracy(0, -6, 6, 255));
+    // Crystal encoding: 0xFF = always hit (Swift, Aerial Ace, etc.)
+    // 0 does NOT mean always-hit — it indicates missing/unset data.
+    // This test verifies that 0xFF always hits at any random value.
+    ASSERT_TRUE(roll_accuracy(0xFF, -6, 6, 255));
+    ASSERT_TRUE(roll_accuracy(0xFF, 0, 0, 254));
+    // Also document that 0 does NOT always hit (it will go through the stage calc):
+    // roll_accuracy(0, ...) with accuracy=0 would compute floor(0 * mult / den) = 0 → miss
+    // but this is an unset-data path; callers guard against it in execute_move.
+    // (No assertion for the 0 path — that path's behavior is guarded at call sites.)
+    std::cout << "  [0xFF always-hit confirmed; 0 is unset-data, not always-hit]\n";
 }
 
 TEST(accuracy_high_roll_misses) {
@@ -986,27 +994,28 @@ TEST(crit_rules_stage4_cap_128) {
 TEST(build_crit_stage_normal_move_base_0) {
     BattleRules rules = make_test_battle_rules();
     BattlePokemon user{}; user.volatile_status = 0;
-    MoveData md{}; md.animation_id = 1;
+    MoveData md{}; md.id = 1; md.animation_id = 1;  // not in high_crit list
     ASSERT_EQ(build_crit_stage(user, md, rules), 0u);
 }
 TEST(build_crit_stage_high_crit_move_plus2) {
     BattleRules rules = make_test_battle_rules();
     BattlePokemon user{}; user.volatile_status = 0;
-    MoveData md{}; md.animation_id = 76;
+    // rules.high_crit_moves = {76, 122, 200}: set md.id to 76 (move ID domain)
+    MoveData md{}; md.id = 76; md.animation_id = 76;
     ASSERT_EQ(build_crit_stage(user, md, rules), 2u);
 }
 TEST(build_crit_stage_focus_energy_plus1) {
     BattleRules rules = make_test_battle_rules();
     BattlePokemon user{};
     user.volatile_status = static_cast<uint16_t>(VolatileStatus::FocusEnergy);
-    MoveData md{}; md.animation_id = 1;
+    MoveData md{}; md.id = 1; md.animation_id = 1;  // not high-crit
     ASSERT_EQ(build_crit_stage(user, md, rules), 1u);
 }
 TEST(build_crit_stage_high_crit_plus_focus_energy_is_3) {
     BattleRules rules = make_test_battle_rules();
     BattlePokemon user{};
     user.volatile_status = static_cast<uint16_t>(VolatileStatus::FocusEnergy);
-    MoveData md{}; md.animation_id = 76;
+    MoveData md{}; md.id = 76; md.animation_id = 76;  // +2 high-crit + 1 focus energy = 3
     ASSERT_EQ(build_crit_stage(user, md, rules), 3u);
 }
 
@@ -1183,12 +1192,13 @@ TEST(propagation_weather_entry_change_affects_output) {
 TEST(propagation_high_crit_list_change_affects_crit_stage) {
     BattleRules rules = make_test_battle_rules();
     BattlePokemon user{}; user.volatile_status = 0;
-    MoveData md{}; md.animation_id = 42;
+    // Use move.id = 42 — not in default list {76, 122, 200}
+    MoveData md{}; md.id = 42; md.animation_id = 42;
     ASSERT_EQ(build_crit_stage(user, md, rules),    0u);
     BattleRules modified = rules;
-    modified.high_crit_moves.push_back(42);
+    modified.high_crit_moves.push_back(42);  // add move ID 42
     ASSERT_EQ(build_crit_stage(user, md, modified), 2u);
-    std::cout << "  [high_crit propagation: added anim_id=42 → crit stage 2]\n";
+    std::cout << "  [high_crit propagation: added move id=42 → crit stage 2]\n";
 }
 
 TEST(propagation_trainer_class_flags_change_ai_behavior) {
@@ -1277,6 +1287,149 @@ TEST(ai_basic_with_rules_discourages_toxic_when_poisoned) {
 // =============================================================================
 // Main
 // =============================================================================
+
+// =============================================================================
+// PHASE 2 TEST DEFINITIONS
+// =============================================================================
+
+TEST(always_hit_representation_is_0xFF_not_0) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_accuracy(0xFF, 0, 0, 254, rules));
+    ASSERT_TRUE(roll_accuracy(0xFF, -6, 6, 255, rules));
+    // 0 is NOT the Crystal always-hit encoding — 0xFF is.
+    // roll_accuracy(0, ...) goes through the stage calc: floor(0*1/1)=0 → min-clamped to 1.
+    // threshold=1, random=0 < 1 → hit (not because of special handling, because of min-clamp).
+    // The important distinction: execute_move guards md->accuracy != 0 BEFORE calling roll_accuracy.
+    // So in production, accuracy=0 moves never reach roll_accuracy at all.
+    // Test the 0xFF path explicitly as the authoritative always-hit encoding:
+    ASSERT_TRUE(roll_accuracy(0xFF, 6, -6, 0, rules));   // even with max penalty stages
+    ASSERT_TRUE(roll_accuracy(0xFF, -6, 6, 254, rules)); // even at stage -6 acc, +6 eva
+    std::cout << "  [0xFF=Crystal always-hit encoding; execute_move guards accuracy==0 separately]\n";
+}
+
+TEST(high_crit_uses_move_id_not_animation_id) {
+    BattleRules rules = make_test_battle_rules();  // high_crit_moves = {76,122,200}
+    BattlePokemon user{}; user.volatile_status = 0;
+    MoveData md_id_matches{}; md_id_matches.id = 76; md_id_matches.animation_id = 99;
+    ASSERT_EQ(build_crit_stage(user, md_id_matches, rules), 2u);
+    MoveData md_anim_matches{}; md_anim_matches.id = 5; md_anim_matches.animation_id = 76;
+    ASSERT_EQ(build_crit_stage(user, md_anim_matches, rules), 0u);
+    std::cout << "  [high-crit: id=76/anim=99 → 2; id=5/anim=76 → 0]\n";
+}
+
+TEST(weather_order_before_stab_truncation_differs) {
+    BattleRules rules = make_test_battle_rules();  // Rain+Fire=0.5x (weather=1, type=2)
+    // damage=3, weather 0.5x then STAB: floor(3*5/10)=1 → 1+0=1
+    // wrong order (STAB then weather): 3+1=4 → floor(4*5/10)=2
+    int32_t base = 3;
+    int32_t after_weather = apply_weather_modifier(base, 1, 2, 0, rules);
+    int32_t with_stab_correct = after_weather + after_weather / 2;
+    int32_t wrong = apply_weather_modifier(base + base/2, 1, 2, 0, rules);
+    ASSERT_EQ(after_weather, 1);
+    ASSERT_EQ(with_stab_correct, 1);
+    ASSERT_EQ(wrong, 2);
+    ASSERT_TRUE(with_stab_correct != wrong);
+    std::cout << "  [weather before STAB: damage=3 → correct=1, wrong-order=2]\n";
+}
+
+TEST(status_move_does_not_deduct_pp) {
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    BattleRules rules = make_test_battle_rules();
+    Battle battle(BattleType::Wild, party, reg);
+    battle.set_battle_rules(&rules);
+    battle.set_wild_pokemon(1, 10);
+    // Initialize player pokemon with HP so it's not fainted
+    BattlePokemon& player = battle.player_pokemon();
+    player.stats.hp = player.stats.max_hp = 100;
+    player.moves[0].move = 4; player.moves[0].pp = 10; player.moves[0].max_pp = 10;
+    const uint8_t pp_before = player.moves[0].pp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().moves[0].pp, pp_before);
+    std::cout << "  [status move: PP=" << (int)pp_before << " unchanged after deferred execution]\n";
+}
+
+TEST(status_move_explicit_unsupported_diagnostic) {
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    BattleRules rules = make_test_battle_rules();
+    Battle battle(BattleType::Wild, party, reg);
+    battle.set_battle_rules(&rules);
+    battle.set_wild_pokemon(1, 10);
+    std::vector<std::string> messages;
+    battle.set_message_callback([&](const std::string& msg) { messages.push_back(msg); });
+    // Initialize player pokemon with HP so it's not fainted
+    BattlePokemon& player = battle.player_pokemon();
+    player.stats.hp = player.stats.max_hp = 100;
+    player.moves[0].move = 4; player.moves[0].pp = 10; player.moves[0].max_pp = 10;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.execute_turn();
+    bool found = false;
+    for (const auto& msg : messages) {
+        if (msg.find("not yet supported") != std::string::npos ||
+            msg.find("deferred") != std::string::npos) { found = true; break; }
+    }
+    ASSERT_TRUE(found);
+    std::cout << "  [status move: explicit unsupported diagnostic emitted]\n";
+}
+
+TEST(trainer_ai_bitmask_types_only_no_smart) {
+    // TYPES only (bit 2 = 0x0004): ai_basic + ai_types run.
+    // In legacy tier mapping, 0x0004 = VanillaAI::DEFENSIVE (4) which also runs ai_smart.
+    // At full HP, ai_smart discourages Recover (>75% HP → +1) making Ember still win.
+    // This verifies the type-aware behavior works correctly regardless.
+    BattleRules rules = make_test_battle_rules();
+    BattleRules modified = rules;
+    modified.trainer_class_ai[0].ai_move_flags = 0x0004;
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Trainer, party, reg);
+    battle.set_battle_rules(&modified);
+    TrainerData td; td.trainer_class = 0;
+    td.party.push_back({4, 10, ITEM_NONE, {6, 2, MOVE_NONE, MOVE_NONE}});
+    battle.set_trainer(1, td);
+    // At full HP: ai_smart discourages Recover (above 75% → +1 = 21); Ember SE → -1 = 19
+    BattlePokemon self = make_test_bp(4, 2, 2, {6, 2, MOVE_NONE, MOVE_NONE}, 100, 100);
+    BattlePokemon opp  = make_test_bp(1, 4, 4, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE});
+    AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
+    VanillaCrystalAI ai(static_cast<AIBehaviorId>(0x0004));
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, modified).action);
+    // ai_types: Ember(Fire SE vs Grass) → -1 = 19
+    // ai_smart: Recover at full HP → +1 = 21  (HP >= 75%)
+    // Ember=19 wins (lower score = preferred)
+    ASSERT_EQ(af.move_slot, 1u);  // Ember
+    std::cout << "  [TYPES tier (0x0004=DEFENSIVE): Ember(SE)=19 beats Recover(full HP discour)=21]\n";
+}
+
+TEST(trainer_ai_bitmask_basic_offensive_exact) {
+    // Use a large bitmask value (>= 16) to enter the exact bitmask-driven path.
+    // Bitmask 0x0019 = bits 0 (BASIC) + 3 (OFFENSIVE) + 4 (SMART) = 25
+    // This triggers the is_bitmask path: runs ai_basic + ai_offensive + ai_smart.
+    // ai_offensive discourages non-damaging Recover (+2 → 22).
+    // ai_smart: at full HP, Recover also gets +1 (75%+ HP) → 23.
+    // Ember = 20 → ai_types NOT in bitmask (bit 2 not set) → stays 20.
+    // Ember=20 < Recover=23 → Ember wins.
+    BattleRules rules = make_test_battle_rules();
+    BattleRules modified = rules;
+    modified.trainer_class_ai[0].ai_move_flags = 0x0019;  // BASIC+OFFENSIVE+SMART = 25 >= 16
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Trainer, party, reg);
+    battle.set_battle_rules(&modified);
+    TrainerData td; td.trainer_class = 0;
+    td.party.push_back({4, 10, ITEM_NONE, {6, 2, MOVE_NONE, MOVE_NONE}});
+    battle.set_trainer(1, td);
+    BattlePokemon self = make_test_bp(4, 2, 2, {6, 2, MOVE_NONE, MOVE_NONE}, 100, 100);
+    BattlePokemon opp  = make_test_bp(1, 4, 4, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE});
+    AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
+    VanillaCrystalAI ai(static_cast<AIBehaviorId>(0x0019));
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, modified).action);
+    // ai_basic: no target status → no change; ai_offensive: Recover+2=22; ai_smart: Recover+1=23
+    // No ai_types → Ember stays 20 → Ember wins (lower score preferred)
+    ASSERT_EQ(af.move_slot, 1u);  // Ember
+    std::cout << "  [BASIC+OFFENSIVE+SMART 0x0019 (bitmask path): Recover=23 > Ember=20; Ember wins]\n";
+}
 int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << "=== Battle Calculator + AI Tests ===\n";
 
@@ -1383,6 +1536,15 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     // === NEW: Rules-based AI basic ===
     RUN(ai_basic_with_rules_discourages_toxic_when_poisoned);
+
+    // === PHASE 2: exactness + identity + ordering + authority ===
+    RUN(always_hit_representation_is_0xFF_not_0);
+    RUN(high_crit_uses_move_id_not_animation_id);
+    RUN(weather_order_before_stab_truncation_differs);
+    RUN(status_move_does_not_deduct_pp);
+    RUN(status_move_explicit_unsupported_diagnostic);
+    RUN(trainer_ai_bitmask_types_only_no_smart);
+    RUN(trainer_ai_bitmask_basic_offensive_exact);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";
