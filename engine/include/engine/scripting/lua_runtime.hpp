@@ -5,7 +5,7 @@
 // Lua yields for multi-frame operations; C++ handles core mechanics
 
 #include "engine/core/types.hpp"
-#include "engine/scripting/semantic_ir.hpp"  // For ScriptExecutionContext
+#include "engine/scripting/script_context.hpp"  // ScriptExecutionContext (lean — no SemanticOp)
 #include "engine/world/movement_manager.hpp"  // For MovementManager (stub services)
 #include <lua.hpp>
 #include <string>

@@ -14,6 +14,7 @@
 // operations that map directly to runtime/Lua emission.
 
 #include "engine/core/types.hpp"
+#include "engine/scripting/script_context.hpp"  // ScriptExecutionContext + context types (lean, no SemanticOp)
 #include <variant>
 #include <vector>
 #include <string>
@@ -421,140 +422,11 @@ struct Sem_SetStateVar { StateVarId state_var; uint8_t value; };  // Set immedia
 struct Sem_CheckLinkMode {};  // Sets wScriptVar to 0 if Gen1 or not connected, non-zero if Gen2
 
 // =============================================================================
-// SCRIPT EXECUTION CONTEXT - TYPED SEMANTIC STATE
+// SCRIPT EXECUTION CONTEXT — imported from script_context.hpp (included above)
 // =============================================================================
-// These structures represent typed semantic context that persists across script
-// operations and block boundaries. They replace Crystal's GB RAM state (wCurPartyMon,
-// wTempWildMonSpecies, etc.) with explicit typed structures.
-//
-// Lifecycle is managed by semantic operations:
-// - Capability checks ESTABLISH context (presence = std::optional has value)
-// - Operations CONSUME context (read then clear, or read and preserve)
-// - Script termination CLEARS all context
-// - Absence = std::nullopt (no hidden boolean needed)
-
-// Party slot identifier (0-5 for 6-Pokemon party)
-using PartySlotId = uint8_t;
-constexpr PartySlotId PARTY_SLOT_NONE = 0xFF;
-
-// =============================================================================
-// FIELD MOVE SEMANTIC OPERATIONS
-// =============================================================================
-// These operations support HM field moves (Strength, Rock Smash) with typed context.
-// The selected actor context carries semantic information (species, move type) across
-// block boundaries without exposing wCurPartyMon or other GB RAM addresses.
-//
-// Reference: pokecrystal/engine/events/overworld.asm (TryStrengthOW, SetStrengthFlag, HasRockSmash)
-//            pokecrystal/engine/events/treemons.asm (RockMonEncounter)
-
-// Field move types for capability checks
-enum class FieldMoveType : uint8_t {
-    Strength,       // Pushing boulders
-    RockSmash,      // Breaking rocks (may trigger encounter)
-    // Note: Cut, Surf, Fly, Flash, Waterfall, Whirlpool not in corpus - don't add speculatively
-};
-
-// Strength capability check result (semantic, not Crystal 0/1/2)
-enum class StrengthCapabilityResult : uint8_t {
-    Available,      // Party has move AND badge, not yet active
-    Unavailable,    // No move OR no badge
-    AlreadyActive,  // Strength already activated this session
-};
-
-// Rock Smash capability check result (semantic)
-enum class RockSmashCapabilityResult : uint8_t {
-    Available,      // Party has Rock Smash
-    Unavailable,    // No Rock Smash in party
-};
-
-// =============================================================================
-// SelectedFieldActor - Context for field move actor selection
-// =============================================================================
-// Lifecycle:
-//   ESTABLISHED by: Sem_CheckStrengthCapability (on Available)
-//                   Sem_CheckRockSmashCapability (on Available)
-//   CONSUMED by:    Sem_PrepareFieldMoveNickname (reads, preserves)
-//                   Sem_ActivateStrength (reads, clears)
-//                   Sem_PlayFieldActorCry (reads, preserves)
-//   CLEARED by:     Script termination
-//                   Explicit clear after field-move completion
-//
-// Absence (std::nullopt) means no field actor is selected.
-// No separate boolean needed - use optional presence.
-
-struct SelectedFieldActor {
-    PartySlotId slot;           // Which party member has the move (0-5)
-    FieldMoveType move;         // Which field move was checked
-    SpeciesId species;          // Species for cry/nickname lookup
-    
-    SelectedFieldActor(PartySlotId s, FieldMoveType m, SpeciesId sp)
-        : slot(s), move(m), species(sp) {}
-};
-
-// =============================================================================
-// PendingFieldEncounter - Context for field-triggered wild encounter
-// =============================================================================
-// Lifecycle:
-//   ESTABLISHED by: Sem_TryRockSmashEncounter (on encounter success, 40% chance)
-//                   (Future: Sem_TryHeadbuttEncounter, Sem_TrySweetScentEncounter)
-//   CONSUMED by:    Sem_LoadPendingEncounter (reads species/level, clears)
-//                   Sem_ReadEncounterSpecies (reads species only, preserves)
-//   CLEARED by:     Script termination
-//                   Sem_LoadPendingEncounter consumption
-//
-// Absence (std::nullopt) means no pending encounter exists.
-// This is distinct from "encounter check failed" - failure means context was
-// never established (optional remains nullopt), not cleared after establishment.
-
-struct PendingFieldEncounter {
-    SpeciesId species;          // Species to battle
-    uint8_t level;              // Level of wild Pokemon
-    
-    PendingFieldEncounter(SpeciesId sp, uint8_t lv)
-        : species(sp), level(lv) {}
-};
-
-// =============================================================================
-// ScriptExecutionContext - Full typed context for script execution
-// =============================================================================
-// This structure holds ALL typed semantic context needed during script execution.
-// It replaces Crystal's scattered GB RAM state with explicit, typed fields.
-//
-// Rules:
-// - NO arbitrary key/value scratch storage
-// - NO generic temporary integer slots
-// - NO raw RAM-like state
-// - Every field has explicit semantic meaning
-// - Absence is represented by std::nullopt, not sentinel values
-
-struct ScriptExecutionContext {
-    // Field move actor selection (set by capability checks)
-    std::optional<SelectedFieldActor> selected_field_actor;
-    
-    // Pending field encounter (set by encounter attempts)
-    std::optional<PendingFieldEncounter> pending_field_encounter;
-    
-    // Script variable (wScriptVar equivalent - result of checks/operations)
-    // This IS needed as it's the primary communication channel for conditionals
-    int16_t script_var = 0;
-    
-    // Strength active flag - set when Strength is activated for current map session
-    // This is session-level state (survives script termination until map change)
-    bool strength_active = false;
-    
-    // Clear all context (called on script termination)
-    // Note: strength_active is session-level and NOT cleared here
-    void clear() {
-        selected_field_actor = std::nullopt;
-        pending_field_encounter = std::nullopt;
-        script_var = 0;
-    }
-    
-    // Check if any field-move context exists
-    bool has_field_context() const {
-        return selected_field_actor.has_value() || pending_field_encounter.has_value();
-    }
-};
+// ScriptExecutionContext, SelectedFieldActor, PendingFieldEncounter,
+// FieldMoveType, StrengthCapabilityResult, RockSmashCapabilityResult, PartySlotId
+// are defined in script_context.hpp and included at the top of this file.
 
 // =============================================================================
 // FIELD MOVE SEMANTIC OPERATIONS
