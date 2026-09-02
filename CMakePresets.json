@@ -5,9 +5,43 @@
   "configurePresets": [
     {
       "name": "default",
-      "displayName": "Enginemon (Windows / vcpkg / Release)",
-      "description": "Canonical configuration. Set ENGINEMON_ROM env variable to the Crystal ROM path.",
-      "generator": "Visual Studio 17 2022",
+      "displayName": "Enginemon (Windows / clang-cl / lld / Ninja / Release) [DEFAULT]",
+      "description": "Default toolchain: clang-cl + lld + Ninja. binaryDir=build_clang. Set ENGINEMON_ROM.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build_clang",
+      "toolchainFile": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/clang-cl-msvc.cmake",
+        "CMAKE_BUILD_TYPE":              "Release",
+        "ENGINEMON_ENABLE_ENGINE":       "ON",
+        "ENGINEMON_ENABLE_VULKAN":       "ON",
+        "ENGINEMON_BUILD_TOOLS":         "ON",
+        "ENGINEMON_BUILD_TESTS":         "ON",
+        "ENGINEMON_ROM_PATH":            "$env{ENGINEMON_ROM}"
+      }
+    },
+    {
+      "name": "clang",
+      "displayName": "Enginemon (Windows / clang-cl / lld / Ninja / Release)",
+      "description": "Alias for default. clang-cl + lld + Ninja. binaryDir=build_clang.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build_clang",
+      "toolchainFile": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/clang-cl-msvc.cmake",
+        "CMAKE_BUILD_TYPE":              "Release",
+        "ENGINEMON_ENABLE_ENGINE":       "ON",
+        "ENGINEMON_ENABLE_VULKAN":       "ON",
+        "ENGINEMON_BUILD_TOOLS":         "ON",
+        "ENGINEMON_BUILD_TESTS":         "ON",
+        "ENGINEMON_ROM_PATH":            "$env{ENGINEMON_ROM}"
+      }
+    },
+    {
+      "name": "msvc",
+      "displayName": "Enginemon (Windows / MSVC / VS2026 / Release) [SECONDARY]",
+      "description": "Secondary toolchain: MSVC + MSBuild/VS. binaryDir=build. /Ob0 applied to heavy variant TUs.",
+      "generator": "Visual Studio 18 2026",
       "binaryDir": "${sourceDir}/build",
       "toolchainFile": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
@@ -23,51 +57,66 @@
   "buildPresets": [
     {
       "name": "all",
-      "displayName": "Build all canonical targets (single MSBuild graph)",
+      "displayName": "Build all canonical targets (clang-cl / Ninja / -j12) [DEFAULT]",
+      "description": "Default build: clang-cl, Ninja, -j12. Calibrated for 32 GB / 32-thread.",
       "configurePreset": "default",
+      "nativeToolOptions": ["-j12"],
+      "targets": ["enginemon_canonical"]
+    },
+    {
+      "name": "clang-all",
+      "displayName": "Build all canonical targets (clang-cl / Ninja / -j12)",
+      "configurePreset": "clang",
+      "nativeToolOptions": ["-j12"],
+      "targets": ["enginemon_canonical"]
+    },
+    {
+      "name": "msvc-all",
+      "displayName": "Build all canonical targets (MSVC / MSBuild / Release) [SECONDARY]",
+      "configurePreset": "msvc",
       "configuration": "Release",
       "targets": ["enginemon_canonical"]
     },
     {
       "name": "engine",
-      "displayName": "Build engine-only targets",
+      "displayName": "Build engine-only targets (clang-cl)",
       "configurePreset": "default",
-      "configuration": "Release",
+      "nativeToolOptions": ["-j12"],
       "targets": ["runtime_test_engine", "battle_test"]
     },
     {
       "name": "compiler",
-      "displayName": "Build compiler/IR targets",
+      "displayName": "Build compiler/IR targets (clang-cl)",
       "configurePreset": "default",
-      "configuration": "Release",
+      "nativeToolOptions": ["-j12"],
       "targets": ["runtime_test_compiler", "emitter_test"]
     },
     {
       "name": "corpus",
-      "displayName": "Build corpus/linker targets",
+      "displayName": "Build corpus/linker targets (clang-cl)",
       "configurePreset": "default",
-      "configuration": "Release",
+      "nativeToolOptions": ["-j12"],
       "targets": ["corpus_test", "corpus_lowering_audit", "linker_test", "legality_gate_test"]
     },
     {
       "name": "oracle",
-      "displayName": "Build oracle target",
+      "displayName": "Build oracle target (clang-cl)",
       "configurePreset": "default",
-      "configuration": "Release",
+      "nativeToolOptions": ["-j12"],
       "targets": ["oracle_test"]
     },
     {
       "name": "smoke",
-      "displayName": "Build runtime smoke targets",
+      "displayName": "Build runtime smoke targets (clang-cl)",
       "configurePreset": "default",
-      "configuration": "Release",
+      "nativeToolOptions": ["-j12"],
       "targets": ["enginemon_tiles", "enginemon_bootstrap", "emon_compile", "emon_smoke"]
     },
     {
       "name": "save",
-      "displayName": "Build save/codec targets",
+      "displayName": "Build save/codec targets (clang-cl)",
       "configurePreset": "default",
-      "configuration": "Release",
+      "nativeToolOptions": ["-j12"],
       "targets": ["crystal_save_test", "sprite_money_test"]
     }
   ],
@@ -75,9 +124,25 @@
   "testPresets": [
     {
       "name": "all",
-      "displayName": "All canonical tests (parallel)",
-      "description": "Runs all 15 registered tests in parallel. Requires ENGINEMON_ROM.",
+      "displayName": "All 15 canonical tests (clang-cl build) [DEFAULT]",
+      "description": "Runs all 15 gates in parallel against build_clang. Requires ENGINEMON_ROM.",
       "configurePreset": "default",
+      "output": { "outputOnFailure": true, "shortProgress": false },
+      "execution": { "jobs": 8, "timeout": 120, "stopOnFailure": false }
+    },
+    {
+      "name": "clang-all",
+      "displayName": "All 15 canonical tests (clang-cl build)",
+      "description": "Alias for all. Requires ENGINEMON_ROM.",
+      "configurePreset": "clang",
+      "output": { "outputOnFailure": true, "shortProgress": false },
+      "execution": { "jobs": 8, "timeout": 120, "stopOnFailure": false }
+    },
+    {
+      "name": "msvc-all",
+      "displayName": "All 15 canonical tests (MSVC build) [SECONDARY]",
+      "description": "Runs all 15 gates against build/. Requires ENGINEMON_ROM.",
+      "configurePreset": "msvc",
       "configuration": "Release",
       "output": { "outputOnFailure": true, "shortProgress": false },
       "execution": { "jobs": 8, "timeout": 120, "stopOnFailure": false }
@@ -86,7 +151,6 @@
       "name": "engine",
       "displayName": "Engine-only tests",
       "configurePreset": "default",
-      "configuration": "Release",
       "filter": { "include": { "label": "engine-only" } },
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 8, "timeout": 60 }
@@ -95,7 +159,6 @@
       "name": "compiler",
       "displayName": "Compiler/IR tests",
       "configurePreset": "default",
-      "configuration": "Release",
       "filter": { "include": { "label": "compiler-ir" } },
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 4, "timeout": 120 }
@@ -104,7 +167,6 @@
       "name": "corpus",
       "displayName": "Corpus / linker / legality tests",
       "configurePreset": "default",
-      "configuration": "Release",
       "filter": { "include": { "label": "corpus" } },
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 8, "timeout": 60 }
@@ -113,7 +175,6 @@
       "name": "oracle",
       "displayName": "Oracle tests",
       "configurePreset": "default",
-      "configuration": "Release",
       "filter": { "include": { "label": "oracle" } },
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 1, "timeout": 90 }
@@ -122,7 +183,6 @@
       "name": "standalone",
       "displayName": "Standalone tests (no ROM required)",
       "configurePreset": "default",
-      "configuration": "Release",
       "filter": { "include": { "label": "standalone" } },
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 8, "timeout": 60 }
@@ -131,7 +191,6 @@
       "name": "save",
       "displayName": "Save/codec tests",
       "configurePreset": "default",
-      "configuration": "Release",
       "filter": { "include": { "name": "crystal_save_test" } },
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 1, "timeout": 60 }

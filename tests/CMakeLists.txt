@@ -144,6 +144,13 @@ if(ENGINEMON_ENABLE_ENGINE)
     if(MSVC)
         target_compile_options(emitter_test PRIVATE /bigobj /Zm500)
     endif()
+    # MSVC /Ob0 on emitter_test.cpp: measured 3.87 GB at /Ob2, ~1.0 GB at /Ob0.
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        set_source_files_properties(
+            scripting/emitter_test.cpp
+            PROPERTIES COMPILE_OPTIONS "/Ob0"
+        )
+    endif()
 endif()
 
 # Lua demo (show generated Lua output for a script) ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â debug tool, explicit build only
@@ -233,6 +240,11 @@ target_include_directories(crystal_save_test PRIVATE
 )
 if(MSVC)
     target_compile_options(crystal_save_test PRIVATE /W4 /wd4566)
+endif()
+# clang-cl inlines all 115 test bodies into main() at /O2, requiring > 1 MB stack.
+# Set stack reserve to 4 MB for this binary only.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND WIN32)
+    target_link_options(crystal_save_test PRIVATE /STACK:4194304)
 endif()
 # Not added to ctest - standalone binary
 

@@ -32,9 +32,7 @@ CrystalScriptIR::CrystalScriptIR(CrystalScriptIR&&) noexcept              = defa
 CrystalScriptIR& CrystalScriptIR::operator=(const CrystalScriptIR&)       = default;
 CrystalScriptIR& CrystalScriptIR::operator=(CrystalScriptIR&&) noexcept   = default;
 
-// Explicit instantiations: force vector<> machinery into this TU only.
-template class std::vector<CrystalCommand>;
-
+// Explicit instantiation moved to file scope — see bottom of file.
 bool CrystalCommand::is_terminator() const {
     return std::visit([](const auto& cmd) -> bool {
         using T = std::decay_t<decltype(cmd)>;
@@ -584,3 +582,7 @@ bool validate_round_trip(const CrystalCommand& cmd) {
 }
 
 } // namespace crystal
+
+// File-scope explicit instantiation — paired with extern template in crystal_command.hpp.
+// Must be at file scope so the enclosing namespace of std::vector is std ([temp.explicit]/7).
+template class std::vector<crystal::CrystalCommand>;

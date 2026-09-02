@@ -12,11 +12,15 @@ Usage:
     python tools/emon.py verify [--rom PATH] [--no-build]
     python tools/emon.py status
 
-Build presets:   all (default), engine, compiler, corpus, oracle, smoke, save
-Test presets:    all (default), engine, compiler, corpus, oracle, standalone, save
+Default toolchain: clang-cl + Ninja (build_clang/).
+Secondary toolchain: MSVC + MSBuild (build/).  Use --preset msvc-all.
+
+Build presets:   all (default), engine, compiler, corpus, oracle, smoke, save, msvc-all
+Test presets:    all (default), engine, compiler, corpus, oracle, standalone, save, msvc-all
 
 Environment:
-    ENGINEMON_ROM   Path to Crystal ROM (used by verify and test ROM presets)
+    ENGINEMON_ROM          Path to Crystal ROM (used by verify and test ROM presets)
+    ENGINEMON_SCCACHE=1    Enable sccache compiler cache (clang-cl only)
 """
 
 import argparse
@@ -29,9 +33,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).resolve().parent.parent
-BUILD_DIR = REPO_ROOT / "build"
-LOG_DIR   = BUILD_DIR / "emon_logs"
+REPO_ROOT  = Path(__file__).resolve().parent.parent
+BUILD_DIR  = REPO_ROOT / "build_clang"   # default: clang-cl build
+BUILD_DIR_MSVC = REPO_ROOT / "build"     # secondary: MSVC build
+LOG_DIR    = REPO_ROOT / "build" / "emon_logs"  # logs always go to build/
 
 CMAKE = Path(r"C:\Program Files\CMake\bin\cmake.exe")
 CTEST = Path(r"C:\Program Files\CMake\bin\ctest.exe")
@@ -134,9 +139,7 @@ def cmd_build(preset: str = "all", clean: bool = False, configure: bool = False)
         rc = run(cfg_cmd, LOG_DIR / "configure.log")
         if rc != 0:
             fail(f"Configure failed (exit {rc})  log: {LOG_DIR / 'configure.log'}")
-            return 1
-
-    if clean:
+            return 1    if clean:
         print("  Cleaning...")
         run([str(CMAKE), "--build", "--preset", preset, "--target", "clean"],
             LOG_DIR / "clean.log")
@@ -174,7 +177,6 @@ def cmd_test(preset: str = "all", rom: Path | None = None) -> int:
             [str(CMAKE), "-B", str(BUILD_DIR), f"-DENGINEMON_ROM_PATH={rom}"],
             capture_output=True
         )
-
     t0 = time.perf_counter()
     log_path = LOG_DIR / f"test_{preset}.log"
     rc = run(
@@ -219,9 +221,12 @@ def cmd_verify(rom: Path | None = None, no_build: bool = False) -> int:
 
     # Smoke: compile a fresh package and run emon_smoke
     section("Smoke")
-    test_dir = BUILD_DIR / "tests" / "Release"
-    tools_dir = BUILD_DIR / "tools" / "Release"
-    smoke_exe  = tools_dir / "emon_smoke.exe"
+    # clang build: binaries at build_clang/tools/  (Ninja flat layout)
+    # MSVC build:  binaries at build/tools/Release/
+    tools_dir = BUILD_DIR / "tools"
+    if not (tools_dir / "emon_smoke.exe").exists():
+        tools_dir = BUILD_DIR / "tools" / "Release"
+    smoke_exe   = tools_dir / "emon_smoke.exe"
     compile_exe = tools_dir / "emon_compile.exe"
 
     import tempfile
@@ -272,18 +277,23 @@ def cmd_status() -> int:
                        cwd=REPO_ROOT)
 
     # Check required binaries
-    test_dir  = BUILD_DIR / "tests"  / "Release"
-    tools_dir = BUILD_DIR / "tools"  / "Release"
-    rt_dir    = BUILD_DIR / "runtime"/ "Release"
+    # clang build (flat layout): build_clang/tests/, build_clang/tools/, build_clang/runtime/
+    # MSVC build (Release subdir): build/tests/Release/, etc.
+    def _find_bin(rel: str) -> Path:
+        flat = BUILD_DIR / rel
+        if flat.exists():
+            return flat
+        return BUILD_DIR / Path(rel).parent / "Release" / Path(rel).name
+
     required = [
-        test_dir  / "runtime_test_engine.exe",
-        test_dir  / "runtime_test_compiler.exe",
-        test_dir  / "oracle_test.exe",
-        test_dir  / "corpus_test.exe",
-        test_dir  / "linker_test.exe",
-        tools_dir / "emon_compile.exe",
-        tools_dir / "emon_smoke.exe",
-        rt_dir    / "enginemon_tiles.exe",
+        _find_bin("tests/runtime_test_engine.exe"),
+        _find_bin("tests/runtime_test_compiler.exe"),
+        _find_bin("tests/oracle_test.exe"),
+        _find_bin("tests/corpus_test.exe"),
+        _find_bin("tests/linker_test.exe"),
+        _find_bin("tools/emon_compile.exe"),
+        _find_bin("tools/emon_smoke.exe"),
+        _find_bin("runtime/enginemon_tiles.exe"),
     ]
     print("\n  Binary status:")
     missing = 0

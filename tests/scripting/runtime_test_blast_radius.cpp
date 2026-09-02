@@ -13,6 +13,9 @@
 #include <string>
 #include <stdexcept>
 
+// Bring Direction into scope — this file has no crystal includes so no ambiguity.
+using enginemon::Direction;
+
 #define ASSERT_EQ(a, b)   do { auto _a=(a); auto _b=(b); if(_a!=_b){std::cerr<<"ASSERT_EQ("<<#a<<"="<<_a<<"!="<<#b<<"="<<_b<<") at "<<__FILE__<<":"<<__LINE__<<"\n";std::abort();} } while(0)
 #define ASSERT_TRUE(x)    do { if(!(x)){std::cerr<<"ASSERT_TRUE("<<#x<<") at "<<__FILE__<<":"<<__LINE__<<"\n";std::abort();} } while(0)
 #define ASSERT_FALSE(x)   do { if((x)){std::cerr<<"ASSERT_FALSE("<<#x<<") at "<<__FILE__<<":"<<__LINE__<<"\n";std::abort();} } while(0)

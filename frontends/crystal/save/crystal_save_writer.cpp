@@ -113,7 +113,7 @@ std::vector<uint8_t> export_save(
     }
     // wEventFlags (100 bytes verbatim)
     {
-        static_assert(snapshot.event_flags.size() == EVENT_FLAGS_SIZE,
+        static_assert(std::tuple_size_v<decltype(CrystalSaveSnapshot::event_flags)> == EVENT_FLAGS_SIZE,
                       "event_flags size mismatch");
         std::copy(snapshot.event_flags.begin(), snapshot.event_flags.end(),
                   &data[EVENT_FLAGS]);
@@ -155,7 +155,7 @@ std::vector<uint8_t> export_save(
     // ── Phase 2: Scene state ─────────────────────────────────────────────────
 
     {
-        static_assert(snapshot.scene_ids.size() == SCENE_IDS_COUNT,
+        static_assert(std::tuple_size_v<decltype(CrystalSaveSnapshot::scene_ids)> == SCENE_IDS_COUNT,
                       "scene_ids size mismatch");
         std::copy(snapshot.scene_ids.begin(), snapshot.scene_ids.end(),
                   &data[SCENE_IDS_BASE]);

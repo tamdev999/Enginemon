@@ -7798,7 +7798,7 @@ TEST(npc_rng_save_restore_determinism) {
     
     // Run N more ticks and record positions
     constexpr int N_TICKS = 200;
-    std::vector<std::tuple<int32_t, int32_t, Direction, int32_t>> future_states;
+    std::vector<std::tuple<int32_t, int32_t, enginemon::Direction, int32_t>> future_states;
     for (int i = 0; i < N_TICKS; i++) {
         loop.tick();
         if (i % 20 == 0) {
@@ -7856,7 +7856,7 @@ TEST(npc_rng_save_restore_determinism) {
     ASSERT_EQ(restored_npc->idle_timer, save_idle);
     
     // Run same N ticks â€” MUST match exactly because canonical RNG was restored
-    std::vector<std::tuple<int32_t, int32_t, Direction, int32_t>> restored_future_states;
+    std::vector<std::tuple<int32_t, int32_t, enginemon::Direction, int32_t>> restored_future_states;
     for (int i = 0; i < N_TICKS; i++) {
         loop2.tick();
         if (i % 20 == 0) {

@@ -1160,8 +1160,7 @@ struct CrystalCommand {
     CrystalCommand& operator=(CrystalCommand&&) noexcept;
 };
 
-// extern template: suppress vector<CrystalCommand> instantiation in every TU.
-extern template class std::vector<CrystalCommand>;
+// extern template declared at file scope after namespace (see bottom of file).
 
 // =============================================================================
 // ROUND-TRIP ENCODING
@@ -1200,3 +1199,7 @@ struct CrystalScriptIR {
 };
 
 } // namespace crystal
+
+// File-scope explicit instantiation suppression.
+// Both MSVC and clang-cl require the enclosing namespace of std::vector to be std.
+extern template class std::vector<crystal::CrystalCommand>;

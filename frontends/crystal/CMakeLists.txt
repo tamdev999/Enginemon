@@ -15,6 +15,7 @@ add_library(enginemon_crystal STATIC
     extract/sprites.cpp
     extract/fonts.cpp
     extract/species.cpp
+    extract/battle_rules.cpp
     
     # Output/packaging
     output/native_package.cpp
@@ -61,4 +62,14 @@ target_include_directories(enginemon_crystal PUBLIC
 # Link engine when available (needed for more complete type definitions)
 if(TARGET enginemon_engine)
     target_link_libraries(enginemon_crystal PRIVATE enginemon_engine)
+endif()
+
+# MSVC /Ob0 on proven pathological TUs.
+# Measured peak: crystal_command.cpp 4.8 GB at /Ob2, 1.02 GB at /Ob0.
+# clang-cl does not need this — its /O2 peaks at 2.8 GB on the same TU.
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties(
+        script/crystal_command.cpp
+        PROPERTIES COMPILE_OPTIONS "/Ob0"
+    )
 endif()

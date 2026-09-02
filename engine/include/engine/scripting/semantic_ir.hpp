@@ -1912,9 +1912,7 @@ struct SemanticInstruction {
     SemanticInstruction& operator=(SemanticInstruction&&) noexcept;
 };
 
-// extern template: suppress vector<SemanticInstruction> instantiation in every TU.
-// The explicit instantiation lives in semantic_ir.cpp.
-extern template class std::vector<SemanticInstruction>;
+// extern template declared at file scope after namespace (see bottom of file).
 
 // =============================================================================
 // SEMANTIC BASIC BLOCK
@@ -1941,8 +1939,7 @@ struct SemanticBasicBlock {
     SemanticBasicBlock& operator=(SemanticBasicBlock&&) noexcept;
 };
 
-// extern template: suppress vector<SemanticBasicBlock> instantiation in every TU.
-extern template class std::vector<SemanticBasicBlock>;
+// extern template declared at file scope after namespace (see bottom of file).
 
 // =============================================================================
 // SEMANTIC SCRIPT IR
@@ -2058,3 +2055,10 @@ struct Stage4CorpusStats {
 };
 
 } // namespace enginemon
+
+// File-scope explicit instantiation suppression.
+// Must be outside all user namespaces so the enclosing namespace of std::vector is std.
+// Both MSVC and clang-cl accept this form; MSVC also accepts the in-namespace form
+// but clang-cl strictly requires file scope per [temp.explicit]/7.
+extern template class std::vector<enginemon::SemanticInstruction>;
+extern template class std::vector<enginemon::SemanticBasicBlock>;

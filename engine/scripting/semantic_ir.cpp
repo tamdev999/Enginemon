@@ -47,10 +47,7 @@ LoweringResult::LoweringResult(LoweringResult&&) noexcept                      =
 LoweringResult& LoweringResult::operator=(const LoweringResult&)               = default;
 LoweringResult& LoweringResult::operator=(LoweringResult&&) noexcept           = default;
 
-// Explicit instantiations: force vector<> machinery into this TU only.
-// Paired with extern template in the header.
-template class std::vector<SemanticInstruction>;
-template class std::vector<SemanticBasicBlock>;
+// Explicit instantiations moved to file scope (after namespace) — see bottom of file.
 
 // =============================================================================
 // SemanticTextSequence
@@ -185,3 +182,8 @@ void Stage4CorpusStats::accumulate(const LoweringResult& result) {
 }
 
 } // namespace enginemon
+
+// File-scope explicit instantiations — paired with extern template in semantic_ir.hpp.
+// Must be at file scope so enclosing namespace of std::vector is std ([temp.explicit]/7).
+template class std::vector<enginemon::SemanticInstruction>;
+template class std::vector<enginemon::SemanticBasicBlock>;
