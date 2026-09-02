@@ -14,6 +14,8 @@
 //   suiCune/data/battle/weather_modifiers.c        (weather modifiers)
 
 #include "engine/battle/calculator.hpp"
+#include "engine/battle/battle.hpp"
+#include "engine/battle/battle_rules.hpp"
 #include "engine/core/registry.hpp"
 #include <algorithm>
 #include <cassert>
@@ -112,23 +114,36 @@ static constexpr uint8_t kWobble[24][2] = {
 // Stat stage multipliers
 // ============================================================================
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma warning(push)
+#pragma warning(disable: 4996)
+
 int32_t apply_stat_stage(int32_t base_stat, int8_t stage) {
-    // Clamp stage to -6..+6
+    // Fallback: uses internal static table (test-only)
     const int8_t clamped = std::clamp(stage, static_cast<int8_t>(-6), static_cast<int8_t>(6));
     const int idx = clamped + 6;
     const auto [num, den] = kStatMult[idx];
-    // Integer multiply then divide (floor), minimum 1, capped at 999
     int32_t result = (base_stat * num) / den;
     if (result < 1) result = 1;
     if (result > 999) result = 999;
     return result;
 }
 
+#pragma warning(pop)
+#pragma clang diagnostic pop
+
+int32_t apply_stat_stage(int32_t base_stat, int8_t stage, const BattleRules& rules) {
+    // ROM-derived overload: uses rules.stat_stage_mult (from BattleRules package chunk).
+    const auto e = rules.get_stat_mult(stage);
+    int32_t result = (base_stat * e.numerator) / e.denominator;
+    if (result < 1) result = 1;
+    if (result > 999) result = 999;
+    return result;
+}
+
 int32_t apply_accuracy_stage(int32_t base_accuracy, int8_t acc_stage, int8_t eva_stage) {
-    // Combined net stage: attacker's accuracy stage minus defender's evasion stage,
-    // clamped to -6..+6.
-    // suiCune core.c:ApplyStatLevelMultiplier uses net stage approach:
-    //   acc_level - eva_level gives net stage
+    // Fallback: single net-stage (test-only).
     const int8_t net = std::clamp(
         static_cast<int8_t>(acc_stage - eva_stage),
         static_cast<int8_t>(-6),
@@ -136,6 +151,19 @@ int32_t apply_accuracy_stage(int32_t base_accuracy, int8_t acc_stage, int8_t eva
     const int idx = net + 6;
     const auto [num, den] = kAccMult[idx];
     int32_t result = (base_accuracy * num) / den;
+    if (result < 1) result = 1;
+    return result;
+}
+
+int32_t apply_accuracy_stage(int32_t base_accuracy, int8_t acc_stage, int8_t eva_stage,
+                              const BattleRules& rules) {
+    // ROM-derived overload: uses rules.acc_stage_mult.
+    const int8_t net = std::clamp(
+        static_cast<int8_t>(acc_stage - eva_stage),
+        static_cast<int8_t>(-6),
+        static_cast<int8_t>(6));
+    const auto e = rules.get_acc_mult(net);
+    int32_t result = (base_accuracy * e.numerator) / e.denominator;
     if (result < 1) result = 1;
     return result;
 }
@@ -280,6 +308,31 @@ int32_t apply_weather_modifier(int32_t damage, bool apply, bool boosted) {
     return result;
 }
 
+int32_t apply_weather_modifier(int32_t damage, uint8_t weather_id, uint8_t type_id,
+                                uint8_t effect_id, const BattleRules& rules) {
+    // suiCune misc.c DoWeatherModifiers — check WeatherTypeModifiers then
+    // WeatherMoveModifiers.  First matching entry wins.
+    // Multiplier is in Crystal's per-10 notation: 15 = ×1.5, 5 = ×0.5.
+    // Result = max(1, floor(damage × multiplier / 10)).
+    if (weather_id == 0) return damage;  // No weather active
+
+    // Check type modifiers (weather × move type)
+    for (const auto& e : rules.weather_type_modifiers) {
+        if (e.weather_id == weather_id && e.type_id == type_id) {
+            int32_t result = damage * static_cast<int32_t>(e.multiplier) / 10;
+            return result < 1 ? 1 : result;
+        }
+    }
+    // Check move-effect modifiers (weather × move effect)
+    for (const auto& e : rules.weather_move_modifiers) {
+        if (e.weather_id == weather_id && e.type_id == effect_id) {
+            int32_t result = damage * static_cast<int32_t>(e.multiplier) / 10;
+            return result < 1 ? 1 : result;
+        }
+    }
+    return damage;  // No modifier found
+}
+
 // ============================================================================
 // Critical hit check
 // ============================================================================
@@ -291,25 +344,116 @@ bool roll_critical(uint8_t crit_stage, uint32_t random) {
     return (random & 0xFF) < kCritChance[stage_idx];
 }
 
+bool roll_critical(uint8_t crit_stage, uint32_t random, const BattleRules& rules) {
+    // ROM-derived overload: uses rules.crit_chances (from BattleRules package chunk).
+    return (random & 0xFF) < rules.get_crit_chance(crit_stage);
+}
+
+uint8_t build_crit_stage(const BattlePokemon& user, const MoveData& move,
+                          const BattleRules& rules) {
+    // Source: effect_commands.asm BattleCommand_Critical
+    //   c = 0 (base)
+    //   +2 if move ID is in CriticalHitMoves list
+    //   +1 if user has Focus Energy volatile (SUBSTATUS_FOCUS_ENERGY)
+    //   Scope Lens (+1) and Lucky Punch/Stick (+2) require held-item checks
+    //   which are not yet representable in BattlePokemon; leave those at 0
+    //   and add explicit gating comments so future held-item work can wire in.
+    uint8_t stage = 0;
+
+    // High-crit move: +2 (source: data/moves/critical_hit_moves.asm)
+    // rules.high_crit_moves stores Crystal move animation IDs.
+    // MoveData::animation_id matches Crystal's MOVE_ANIM field.
+    if (rules.is_high_crit_move(move.animation_id)) {
+        stage += 2;
+    }
+
+    // Focus Energy: +1 (source: BattleCommand_Critical .FocusEnergy check)
+    if (user.has_volatile(VolatileStatus::FocusEnergy)) {
+        stage += 1;
+    }
+
+    // Scope Lens (HELD_CRITICAL_UP): +1 — not yet: held items not in BattlePokemon
+    // Lucky Punch (Chansey) / Stick (Farfetch'd): +2 — not yet: same reason
+
+    return std::min<uint8_t>(stage, 6);
+}
+
 // ============================================================================
 // Accuracy check
 // ============================================================================
 
+// Crystal source: effect_commands.asm BattleCommand_CheckHit .StatModifiers
+//
+// Two-pass algorithm matching Crystal exactly:
+//   Pass 1: apply acc_stage multiplier to move_accuracy (floor, min 1)
+//   Pass 2: apply evasion-derived stage (inverted: MAX_STAT_LEVEL+1 - eva_stage_value,
+//           but we use the matching index in acc_mult) (floor, min 1, max 255)
+//   Hit if random < result  (miss if random >= result)
+//   move_accuracy == 0xFF or 0 → always hit
+//
+// Crystal's evasion application: instead of net stage, Crystal applies the accuracy
+// table again using (MAX_STAT_LEVEL+1 - eva_level) as the stage index.
+// MAX_STAT_LEVEL = 13 (see constants/battle_constants.asm), so the loop uses
+// stage index = 14 - eva_level_value.  The acc_stage_mult table is 13 entries
+// indexed 0..12 (stage -6..+6). The crystal "level" values run 1..13 mapping
+// to indices 0..12 (stage -6..+6).  evasion level 7 = stage 0 (neutral).
+// So the evasion stage (-6..+6) maps to neutral index 6.  For the second pass,
+// Crystal uses the *inverted* table entry: at eva_stage +1 (level 8), Crystal
+// uses level 14-8=6 → stage index 5 (acc stage -1, so 0.75×). This exactly
+// matches applying accuracy stage = -(eva_stage) in the same table.
+// Therefore: pass2 uses acc_mult[-eva_stage] which equals acc_mult[0 - eva_stage].
+static uint32_t apply_acc_mult_entry(uint32_t val, const StageMultiplierEntry& e) {
+    uint32_t r = val * e.numerator / e.denominator;
+    return r < 1 ? 1 : r;
+}
+
+bool roll_accuracy(uint8_t move_accuracy, int8_t acc_stage,
+                   int8_t eva_stage, uint32_t random,
+                   const BattleRules& rules) {
+    // 0xFF = always hit (Crystal encoding); 0 = always hit (Enginemon normalisation)
+    if (move_accuracy == 0xFF || move_accuracy == 0) return true;
+
+    // Pass 1: apply attacker accuracy stage
+    const auto e1 = rules.get_acc_mult(acc_stage);
+    uint32_t acc = apply_acc_mult_entry(static_cast<uint32_t>(move_accuracy), e1);
+
+    // Pass 2: apply defender evasion stage (inverted)
+    // Crystal applies stage (14 - eva_level), which equals -eva_stage in our notation.
+    const auto e2 = rules.get_acc_mult(static_cast<int8_t>(-eva_stage));
+    acc = apply_acc_mult_entry(acc, e2);
+    if (acc > 255) acc = 255;
+
+    // Hit if random < acc (miss if random >= acc)
+    // Crystal: BattleRandom() cp [hl]; jr nc, .Miss  — miss if random >= acc
+    return (random & 0xFF) < acc;
+}
+
+// Fallback (test-only, uses internal static table)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma warning(push)
+#pragma warning(disable: 4996)
 bool roll_accuracy(uint8_t move_accuracy, int8_t acc_stage,
                    int8_t eva_stage, uint32_t random) {
-    // suiCune: effect_commands.c BattleCommand_CheckHit
-    // Moves with accuracy == 0 always hit (e.g. Swift).
-    if (move_accuracy == 0) return true;
+    if (move_accuracy == 0xFF || move_accuracy == 0) return true;
 
-    const int32_t effective = apply_accuracy_stage(
-        static_cast<int32_t>(move_accuracy), acc_stage, eva_stage);
+    // Two-pass floor using internal static table
+    auto apply_entry = [](uint32_t v, int8_t stage) -> uint32_t {
+        const int8_t clamped = std::clamp(stage, static_cast<int8_t>(-6), static_cast<int8_t>(6));
+        const int idx = clamped + 6;
+        const auto [num, den] = kAccMult[idx];
+        uint32_t r = v * num / den;
+        return r < 1 ? 1 : r;
+    };
 
-    // Crystal accuracy check: random(0-255) < effective_accuracy * 255 / 100
-    // But suiCune normalizes differently: the check is random < (accuracy * mult / denom).
-    // Simplification: compare random(0-255) against scaled value out of 255.
-    const int32_t threshold = effective * 255 / 100;
-    return (random & 0xFF) < static_cast<uint32_t>(std::min(threshold, 255));
+    uint32_t acc = apply_entry(static_cast<uint32_t>(move_accuracy), acc_stage);
+    acc = apply_entry(acc, static_cast<int8_t>(-eva_stage));
+    if (acc > 255) acc = 255;
+
+    return (random & 0xFF) < acc;
 }
+#pragma warning(pop)
+#pragma clang diagnostic pop
 
 // ============================================================================
 // Type effectiveness
@@ -474,6 +618,11 @@ uint8_t capture_wobble_chance(uint16_t final_catch_rate) {
         }
     }
     return 255;  // Should not reach; last entry covers 255
+}
+
+uint8_t capture_wobble_chance(uint16_t final_catch_rate, const BattleRules& rules) {
+    // ROM-derived overload: uses rules.wobble_probabilities.
+    return rules.get_wobble_chance(static_cast<uint8_t>(final_catch_rate));
 }
 
 } // namespace enginemon

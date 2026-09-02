@@ -9,6 +9,7 @@
 // EMON package format.
 
 #include "engine/package/package_format.hpp"
+#include "engine/battle/battle_rules.hpp"
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/runtime_tileset.hpp"
 #include "engine/world/sprite_atlas.hpp"
@@ -84,6 +85,11 @@ public:
     // chunk is absent or structurally corrupt.
     // Fail-closed: any read error or duplicate MoveId → nullopt, not partial registry.
     std::optional<Registry<MoveId, MoveData>> load_move_registry() const;
+
+    // Load battle rules (BattleRules chunk).
+    // Returns a populated BattleRules or nullopt if the chunk is absent or corrupt.
+    // Fail-closed: any structural error → nullopt, not partial rules.
+    std::optional<BattleRules> load_battle_rules() const;
 
 private:
     PackageReader() = default;

@@ -122,6 +122,12 @@ enum class ChunkType : uint32_t {
     MoveData  = 0x4D564454,      // "MVDT" — MoveId → MoveData (power, type, accuracy, pp, etc.)
                                  // Compiled from Crystal Moves ROM table.
                                  // Runtime populates Registries::moves from this chunk.
+    BattleRules = 0x42524C53,   // "BRLS" — ROM-derived battle rule tables.
+                                 // Compiled from Crystal stat_multipliers, crit_chances,
+                                 // wobble_probabilities, weather_modifiers, high_crit_moves,
+                                 // MoveEffectPriorities, AI move/effect lists, and
+                                 // TrainerClassAttributes.
+                                 // Runtime populates HeadlessRuntime::battle_rules from this chunk.
 };
 
 struct TocEntry {

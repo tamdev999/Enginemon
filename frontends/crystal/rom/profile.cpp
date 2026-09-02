@@ -383,6 +383,29 @@ void ProfileRegistry::register_crystal_v11() {
     }
 
     //-------------------------------------------------------------------------
+    // Battle rule table addresses — moved from hardcoded tables in
+    // calculator.cpp / trainer_ai.cpp.  These are now profile-driven so ROM
+    // hacks that relocate any of these tables remain compatible.
+    // All addresses from pokecrystal.sym (Crystal v1.1).
+    //-------------------------------------------------------------------------
+    o.stat_level_multipliers     = flat_offset(0x0f, 0x6d2b); // 0f:6d2b StatLevelMultipliers_Applied
+    o.accuracy_level_multipliers = flat_offset(0x0d, 0x4eb2); // 0d:4eb2 AccuracyLevelMultipliers
+    o.critical_hit_chances       = flat_offset(0x0d, 0x46ab); // 0d:46ab CriticalHitChances
+    o.wobble_probabilities       = flat_offset(0x03, 0x79ba); // 03:79ba WobbleProbabilities
+    o.weather_type_modifiers     = flat_offset(0x3e, 0x7e13); // 3e:7e13 WeatherTypeModifiers
+    o.weather_move_modifiers     = flat_offset(0x3e, 0x7e20); // 3e:7e20 WeatherMoveModifiers
+    o.critical_hit_moves         = flat_offset(0x0d, 0x46a3); // 0d:46a3 CriticalHitMoves
+    o.move_effect_priorities     = flat_offset(0x0f, 0x45df); // 0f:45df MoveEffectPriorities
+    o.ai_status_only_effects     = flat_offset(0x0e, 0x45db); // 0e:45db StatusOnlyEffects
+    o.ai_risky_effects           = flat_offset(0x0e, 0x54ff); // 0e:54ff RiskyEffects
+    o.ai_stall_moves             = flat_offset(0x0e, 0x5348); // 0e:5348 StallMoves
+    o.ai_useful_moves            = flat_offset(0x0e, 0x5301); // 0e:5301 UsefulMoves
+    o.ai_residual_moves          = flat_offset(0x0e, 0x5446); // 0e:5446 ResidualMoves
+    o.ai_encore_moves            = flat_offset(0x0e, 0x4c85); // 0e:4c85 EncoreMoves
+    o.trainer_class_attributes   = flat_offset(0x0e, 0x559c); // 0e:559c TrainerClassAttributes
+    o.num_wobble_entries         = 24; // 24 entries in Crystal v1.1 WobbleProbabilities
+
+    //-------------------------------------------------------------------------
     // Register
     //-------------------------------------------------------------------------
     hash_to_version_[profile.sha1] = profile.version;

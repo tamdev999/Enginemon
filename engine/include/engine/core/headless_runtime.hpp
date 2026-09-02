@@ -17,6 +17,7 @@
 #pragma once
 
 #include "engine/package/package_reader.hpp"
+#include "engine/battle/battle_rules.hpp"
 #include "engine/world/world_manager.hpp"
 #include "engine/world/runtime_tileset.hpp"
 #include "engine/world/johto_collision.hpp"
@@ -71,6 +72,12 @@ struct HeadlessRuntime {
     // other sub-registries (items, types, trainers, type_chart) remain empty
     // until their respective chunks are added in a future pass.
     Registries registries;
+
+    // ROM-derived battle rule tables (BattleRules chunk).
+    // Populated by setup_headless_runtime().  Valid after successful setup.
+    // calculator functions and VanillaCrystalAI accept a const BattleRules&
+    // reference; pass rt.battle_rules to them.
+    BattleRules battle_rules;
 
     // Core simulation objects (owned)
     GameState       game_state;

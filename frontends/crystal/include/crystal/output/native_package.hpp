@@ -16,6 +16,7 @@
 // - Script bytecode (compiled Lua)
 
 #include "crystal/extract/tileset_extractor.hpp"
+#include "engine/battle/battle_rules.hpp"
 #include "engine/package/package_format.hpp"   // canonical PackageHeader/ChunkType/TocEntry
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/sprite_atlas.hpp"
@@ -138,6 +139,12 @@ public:
         uint8_t effect_chance;
     };
     void add_move_data(const std::vector<MoveDataEntry>& entries);
+
+    // Add battle rules (BRLS chunk).
+    // Serialises all ROM-derived battle tables extracted by BattleRulesExtractor.
+    // Called once. Called more than once → throws.
+    // rules.is_valid() must be true; invalid rules → throws.
+    void add_battle_rules(const enginemon::BattleRules& rules);
     
     // Set metadata
     void set_source_rom(const std::string& sha1, const std::string& version);
@@ -169,6 +176,7 @@ private:
     std::vector<uint8_t> species_icon_map_data_;  // Serialized species→icon map (single chunk)
     std::vector<uint8_t> base_stats_data_;        // Serialized species base stats (single chunk)
     std::vector<uint8_t> move_data_data_;         // Serialized move data (single chunk)
+    std::vector<uint8_t> battle_rules_data_;      // Serialized battle rules (single chunk)
     
     Stats stats_;
     

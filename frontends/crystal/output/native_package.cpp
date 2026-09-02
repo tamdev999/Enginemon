@@ -747,6 +747,129 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
     move_data_data_ = std::move(buf);
 }
 
+void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
+    if (!battle_rules_data_.empty()) {
+        throw std::runtime_error("PackageWriter::add_battle_rules: called more than once");
+    }
+    if (!rules.is_valid()) {
+        throw std::runtime_error("PackageWriter::add_battle_rules: rules.is_valid() is false — "
+                                 "extract_battle_rules must succeed before calling this");
+    }
+
+    // Wire format (all little-endian where multi-byte):
+    //
+    //  [stat_stage_mult]      13 × {u8 num, u8 den}          = 26 bytes
+    //  [acc_stage_mult]       13 × {u8 num, u8 den}          = 26 bytes
+    //  [crit_chances]         7  × u8                        =  7 bytes
+    //  [wobble_count]         u8                             =  1 byte
+    //  [wobble_probabilities] wobble_count × {u8 thr, u8 wob}= N×2 bytes
+    //  [weather_type_count]   u8                             =  1 byte
+    //  [weather_type_mods]    count × {u8 wid, u8 tid, u8 mul}= N×3 bytes
+    //  [weather_move_count]   u8                             =  1 byte
+    //  [weather_move_mods]    count × {u8 wid, u8 eid, u8 mul}= N×3 bytes
+    //  [high_crit_count]      u8                             =  1 byte
+    //  [high_crit_moves]      count × u8                     = N bytes
+    //  [eff_priority_count]   u8                             =  1 byte
+    //  [eff_priorities]       count × {u8 eid, u8 pri}       = N×2 bytes
+    //  [status_only_count]    u8                             =  1 byte
+    //  [status_only_effects]  count × u8                     = N bytes
+    //  [risky_count]          u8                             =  1 byte
+    //  [risky_effects]        count × u8                     = N bytes
+    //  [stall_count]          u8                             =  1 byte
+    //  [stall_move_ids]       count × u8                     = N bytes
+    //  [useful_count]         u8                             =  1 byte
+    //  [useful_move_ids]      count × u8                     = N bytes
+    //  [residual_count]       u8                             =  1 byte
+    //  [residual_move_ids]    count × u8                     = N bytes
+    //  [encore_count]         u8                             =  1 byte
+    //  [encore_move_ids]      count × u8                     = N bytes
+    //  [trainer_class_count]  u16 LE                         =  2 bytes
+    //  [trainer_class_ai]     count × {u8 item1, u8 item2, u8 reward, u16 LE move_flags, u16 LE item_flags}
+    //                                                        = count×7 bytes
+
+    std::vector<uint8_t> buf;
+    buf.reserve(512);
+
+    auto push_u8  = [&](uint8_t v) { buf.push_back(v); };
+    auto push_u16 = [&](uint16_t v) {
+        buf.push_back(static_cast<uint8_t>(v & 0xFF));
+        buf.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    };
+
+    // stat_stage_mult: 13 × {num, den}
+    for (const auto& e : rules.stat_stage_mult) {
+        push_u8(e.numerator);
+        push_u8(e.denominator);
+    }
+
+    // acc_stage_mult: 13 × {num, den}
+    for (const auto& e : rules.acc_stage_mult) {
+        push_u8(e.numerator);
+        push_u8(e.denominator);
+    }
+
+    // crit_chances: 7 × u8
+    for (uint8_t c : rules.crit_chances) push_u8(c);
+
+    // wobble_probabilities: u8 count + count × {thr, wob}
+    push_u8(static_cast<uint8_t>(rules.wobble_probabilities.size()));
+    for (const auto& w : rules.wobble_probabilities) {
+        push_u8(w[0]);
+        push_u8(w[1]);
+    }
+
+    // weather_type_modifiers: u8 count + count × {wid, tid, mul}
+    push_u8(static_cast<uint8_t>(rules.weather_type_modifiers.size()));
+    for (const auto& w : rules.weather_type_modifiers) {
+        push_u8(w.weather_id);
+        push_u8(w.type_id);
+        push_u8(w.multiplier);
+    }
+
+    // weather_move_modifiers: u8 count + count × {wid, eid, mul}
+    push_u8(static_cast<uint8_t>(rules.weather_move_modifiers.size()));
+    for (const auto& w : rules.weather_move_modifiers) {
+        push_u8(w.weather_id);
+        push_u8(w.type_id);
+        push_u8(w.multiplier);
+    }
+
+    // high_crit_moves: u8 count + count × u8
+    push_u8(static_cast<uint8_t>(rules.high_crit_moves.size()));
+    for (uint8_t m : rules.high_crit_moves) push_u8(m);
+
+    // effect_priorities: u8 count + count × {eid, priority}
+    push_u8(static_cast<uint8_t>(rules.effect_priorities.size()));
+    for (const auto& e : rules.effect_priorities) {
+        push_u8(e.effect_id);
+        push_u8(e.priority);
+    }
+
+    // ai lists: each is u8 count + count × u8
+    auto push_byte_list = [&](const std::vector<uint8_t>& list) {
+        push_u8(static_cast<uint8_t>(list.size()));
+        for (uint8_t b : list) push_u8(b);
+    };
+    push_byte_list(rules.ai_status_only_effects);
+    push_byte_list(rules.ai_risky_effects);
+    push_byte_list(rules.ai_stall_move_ids);
+    push_byte_list(rules.ai_useful_move_ids);
+    push_byte_list(rules.ai_residual_move_ids);
+    push_byte_list(rules.ai_encore_move_ids);
+
+    // trainer_class_ai: u16 LE count + count × 7 bytes
+    push_u16(static_cast<uint16_t>(rules.trainer_class_ai.size()));
+    for (const auto& t : rules.trainer_class_ai) {
+        push_u8(t.item1);
+        push_u8(t.item2);
+        push_u8(t.base_reward);
+        push_u16(t.ai_move_flags);
+        push_u16(t.ai_item_flags);
+    }
+
+    battle_rules_data_ = std::move(buf);
+}
+
 void PackageWriter::add_species_icon_map(
     const std::vector<SpeciesIconEntry>& entries)
 {
@@ -985,6 +1108,18 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         mvd_entry.crc32 = calculate_crc32(move_data_data_.data(), move_data_data_.size());
         toc.push_back(mvd_entry);
         all_data.insert(all_data.end(), move_data_data_.begin(), move_data_data_.end());
+    }
+
+    // BattleRules chunk — ROM-derived battle tables (single flat blob)
+    if (!battle_rules_data_.empty()) {
+        TocEntry brl_entry;
+        brl_entry.type   = ChunkType::BattleRules;
+        brl_entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
+        brl_entry.count  = 1;
+        brl_entry.size   = static_cast<uint32_t>(battle_rules_data_.size());
+        brl_entry.crc32  = calculate_crc32(battle_rules_data_.data(), battle_rules_data_.size());
+        toc.push_back(brl_entry);
+        all_data.insert(all_data.end(), battle_rules_data_.begin(), battle_rules_data_.end());
     }
     
     // Write data

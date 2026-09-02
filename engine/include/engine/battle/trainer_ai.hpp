@@ -16,6 +16,7 @@
 
 #include "engine/core/types.hpp"
 #include "engine/battle/battle.hpp"
+#include "engine/battle/battle_rules.hpp"
 #include <memory>
 #include <string>
 #include <functional>
@@ -97,8 +98,14 @@ public:
 class VanillaCrystalAI : public ITrainerAI {
 public:
     explicit VanillaCrystalAI(AIBehaviorId behavior);
-    
+
+    // Base overload (uses internal static fallback tables — for tests without a package).
     AIDecision decide(const AIContext& ctx) override;
+
+    // ROM-derived overload: uses BattleRules extracted from the package.
+    // Production code should use this overload.
+    AIDecision decide(const AIContext& ctx, const BattleRules& rules);
+
     AIBehaviorId behavior_id() const override { return behavior_; }
     std::string name() const override;
 

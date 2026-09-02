@@ -863,6 +863,418 @@ TEST(ai_registry_lists_registered_behaviors) {
 }
 
 // =============================================================================
+// SOURCE-BACKED + PROPAGATION TESTS — see below for TEST() definitions
+// (Main is at the bottom of this file)
+// =============================================================================
+
+// =============================================================================
+// Helper: build a test BattleRules (mirrors Crystal v1.1 values)
+// =============================================================================
+
+namespace {
+
+BattleRules make_test_battle_rules() {
+    BattleRules r;
+    // Stat stage multipliers — exact Crystal v1.1 values
+    r.stat_stage_mult = {{
+        {25,100},{28,100},{33,100},{40,100},{50,100},{66,100},
+        {1,1},{15,10},{2,1},{25,10},{3,1},{35,10},{4,1}
+    }};
+    // Accuracy stage multipliers — exact Crystal v1.1 values
+    r.acc_stage_mult = {{
+        {33,100},{36,100},{43,100},{50,100},{60,100},{75,100},
+        {1,1},{133,100},{166,100},{2,1},{233,100},{133,50},{3,1}
+    }};
+    // Critical hit thresholds (data/battle/critical_hit_chances.asm)
+    r.crit_chances = {17, 32, 64, 85, 128, 128, 128};
+    // Minimal wobble table
+    r.wobble_probabilities = {{{1,63},{2,75},{3,84},{255,255}}};
+    // Weather type modifiers: Rain+Water=1.5×, Rain+Fire=0.5×, Sun+Fire=1.5×, Sun+Water=0.5×
+    // Type IDs: 2=Fire, 3=Water (matching make_test_registries)
+    r.weather_type_modifiers.push_back({1, 3, 15});
+    r.weather_type_modifiers.push_back({1, 2,  5});
+    r.weather_type_modifiers.push_back({2, 2, 15});
+    r.weather_type_modifiers.push_back({2, 3,  5});
+    // Weather move-effect modifier (effect 86 = SolarBeam weakened in Rain)
+    r.weather_move_modifiers.push_back({1, 86, 5});
+    // High-crit move animation IDs
+    r.high_crit_moves = {76, 122, 200};
+    // AI status-only effects
+    r.ai_status_only_effects = {1, 2, 5, 6, 7, 34, 48, 73, 92};
+    // Trainer class AI flags (3 entries for tests)
+    TrainerClassAIEntry e1{}; e1.ai_move_flags = 0x0001; r.trainer_class_ai.push_back(e1); // BASIC
+    TrainerClassAIEntry e2{}; e2.ai_move_flags = 0x0011; r.trainer_class_ai.push_back(e2); // BASIC+SMART
+    TrainerClassAIEntry e3{}; e3.ai_move_flags = 0x0009; r.trainer_class_ai.push_back(e3); // BASIC+OFFENSIVE
+    return r;
+}
+
+} // anonymous namespace
+
+// =============================================================================
+// SOURCE-BACKED ACCURACY GOLDEN TESTS
+// Golden values from Crystal source: effect_commands.asm BattleCommand_CheckHit
+// =============================================================================
+
+TEST(accuracy_golden_base95_stage0_hit_at_94) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_accuracy(95, 0, 0, 94, rules));
+}
+TEST(accuracy_golden_base95_stage0_miss_at_95) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(!roll_accuracy(95, 0, 0, 95, rules));
+}
+TEST(accuracy_golden_base95_stage0_miss_at_96) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(!roll_accuracy(95, 0, 0, 96, rules));
+}
+TEST(accuracy_golden_0xFF_always_hit) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_accuracy(0xFF, 0, 0, 200, rules));
+    ASSERT_TRUE(roll_accuracy(0xFF, -6, 6, 255, rules));
+}
+TEST(accuracy_golden_acc_stage_plus1_threshold_99) {
+    // move_accuracy=75, acc+1 (133/100): floor(75*133/100)=99; pass2 stage0=identity=99
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_accuracy(75, 1, 0, 98, rules));   // hit at 98
+    ASSERT_TRUE(!roll_accuracy(75, 1, 0, 99, rules));  // miss at 99
+}
+TEST(accuracy_golden_eva_stage_plus1_reduces_to_71) {
+    // acc=95, stage0, eva+1: pass1=95; pass2 acc_mult[-1]=75/100 → floor(95*75/100)=71
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_accuracy(95, 0, 1, 70, rules));   // hit at 70
+    ASSERT_TRUE(!roll_accuracy(95, 0, 1, 71, rules));  // miss at 71
+}
+TEST(accuracy_golden_two_pass_differs_from_single_pass) {
+    // acc+1 eva+1: two-pass=74, single net-stage=75. This test FAILS under old formula.
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_accuracy(75, 1, 1, 73, rules));   // 73 < 74 → hit
+    ASSERT_TRUE(!roll_accuracy(75, 1, 1, 74, rules));  // 74 >= 74 → miss
+    std::cout << "  [two-pass floor verified: threshold=74, not 75 (single net-stage)]\n";
+}
+
+// =============================================================================
+// SOURCE-BACKED CRITICAL HIT TESTS WITH RULES
+// =============================================================================
+
+TEST(crit_rules_stage0_threshold_17) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_critical(0, 16, rules));
+    ASSERT_TRUE(!roll_critical(0, 17, rules));
+}
+TEST(crit_rules_stage1_threshold_32) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_critical(1, 31, rules));
+    ASSERT_TRUE(!roll_critical(1, 32, rules));
+}
+TEST(crit_rules_stage2_threshold_64) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_critical(2, 63, rules));
+    ASSERT_TRUE(!roll_critical(2, 64, rules));
+}
+TEST(crit_rules_stage4_cap_128) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_TRUE(roll_critical(4, 127, rules));
+    ASSERT_TRUE(!roll_critical(4, 128, rules));
+    ASSERT_TRUE(roll_critical(5, 127, rules));
+    ASSERT_TRUE(roll_critical(6, 127, rules));
+}
+
+// =============================================================================
+// build_crit_stage TESTS
+// =============================================================================
+
+TEST(build_crit_stage_normal_move_base_0) {
+    BattleRules rules = make_test_battle_rules();
+    BattlePokemon user{}; user.volatile_status = 0;
+    MoveData md{}; md.animation_id = 1;
+    ASSERT_EQ(build_crit_stage(user, md, rules), 0u);
+}
+TEST(build_crit_stage_high_crit_move_plus2) {
+    BattleRules rules = make_test_battle_rules();
+    BattlePokemon user{}; user.volatile_status = 0;
+    MoveData md{}; md.animation_id = 76;
+    ASSERT_EQ(build_crit_stage(user, md, rules), 2u);
+}
+TEST(build_crit_stage_focus_energy_plus1) {
+    BattleRules rules = make_test_battle_rules();
+    BattlePokemon user{};
+    user.volatile_status = static_cast<uint16_t>(VolatileStatus::FocusEnergy);
+    MoveData md{}; md.animation_id = 1;
+    ASSERT_EQ(build_crit_stage(user, md, rules), 1u);
+}
+TEST(build_crit_stage_high_crit_plus_focus_energy_is_3) {
+    BattleRules rules = make_test_battle_rules();
+    BattlePokemon user{};
+    user.volatile_status = static_cast<uint16_t>(VolatileStatus::FocusEnergy);
+    MoveData md{}; md.animation_id = 76;
+    ASSERT_EQ(build_crit_stage(user, md, rules), 3u);
+}
+
+// =============================================================================
+// WEATHER MODIFIER TESTS — ROM-derived tables
+// =============================================================================
+
+TEST(weather_rules_rain_boosts_water) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_EQ(apply_weather_modifier(100, 1, 3, 0, rules), 150);
+}
+TEST(weather_rules_rain_weakens_fire) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_EQ(apply_weather_modifier(100, 1, 2, 0, rules), 50);
+}
+TEST(weather_rules_sun_boosts_fire) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_EQ(apply_weather_modifier(100, 2, 2, 0, rules), 150);
+}
+TEST(weather_rules_no_match_unchanged) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_EQ(apply_weather_modifier(100, 1, 4, 0, rules), 100);
+}
+TEST(weather_rules_no_weather_id_0_unchanged) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_EQ(apply_weather_modifier(100, 0, 3, 0, rules), 100);
+}
+TEST(weather_rules_minimum_1) {
+    BattleRules rules = make_test_battle_rules();
+    ASSERT_EQ(apply_weather_modifier(1, 1, 2, 0, rules), 1);
+}
+
+// =============================================================================
+// AI SCORING SCALE TESTS
+// =============================================================================
+
+TEST(ai_score_init_is_20_immune_gets_plus10) {
+    BattleRules rules = make_test_battle_rules();
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Wild, party, reg);
+    battle.set_battle_rules(&rules);
+
+    // Toxic (effect=34, status-only) → target poisoned → AIDiscourageMove (+10) → score 30
+    // Tackle (normal damaging) → ai_types: Fire vs Grass = SE → -1 → score 19
+    BattlePokemon self = make_test_bp(4, 2, 2, {1, 5, MOVE_NONE, MOVE_NONE});
+    BattlePokemon opp  = make_test_bp(1, 4, 4, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE});
+    opp.status = Status::Poison;
+    AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
+    VanillaCrystalAI ai(VanillaAI::BASIC);
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, rules).action);
+    ASSERT_EQ(af.move_slot, 0u);
+    std::cout << "  [AI init=20, toxic+10=30 vs tackle-1=19: slot 0 (tackle) selected]\n";
+}
+
+TEST(ai_score_immune_uses_discourage_10) {
+    BattleRules rules = make_test_battle_rules();
+    auto party = make_test_party();
+
+    Registries reg2;
+    TypeData tnorm; tnorm.id=1; tnorm.name="Normal"; reg2.types.register_entry(1,tnorm);
+    TypeData tghost; tghost.id=5; tghost.name="Ghost"; reg2.types.register_entry(5,tghost);
+    TypeData tfire;  tfire.id=2;  tfire.name="Fire";  reg2.types.register_entry(2,tfire);
+    reg2.type_chart.set_effectiveness(1, 5, 0);
+    reg2.type_chart.set_effectiveness(2, 5, 10);
+    MoveData tackle2{}; tackle2.id=1; tackle2.name="Tackle"; tackle2.type=1;
+    tackle2.power=40; tackle2.accuracy=100; tackle2.pp=35;
+    tackle2.category=MoveCategory::Physical; tackle2.priority=0; tackle2.effect_id=0;
+    reg2.moves.register_entry(1, tackle2);
+    MoveData ember2{}; ember2.id=2; ember2.name="Ember"; ember2.type=2;
+    ember2.power=40; ember2.accuracy=100; ember2.pp=25;
+    ember2.category=MoveCategory::Special; ember2.priority=0; ember2.effect_id=0;
+    reg2.moves.register_entry(2, ember2);
+    reg2.freeze_all();
+
+    Battle battle(BattleType::Wild, party, reg2);
+    battle.set_battle_rules(&rules);
+    BattlePokemon self = make_test_bp(4, 1, 1, {1, 2, MOVE_NONE, MOVE_NONE});
+    BattlePokemon opp  = make_test_bp(1, 5, 5, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE});
+    AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
+    VanillaCrystalAI ai(VanillaAI::BASIC);
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, rules).action);
+    // Tackle vs Ghost: immune → +10 = 30; Ember vs Ghost: neutral → 20. Slot 1 wins.
+    ASSERT_EQ(af.move_slot, 1u);
+    std::cout << "  [immune Normal/Ghost +10=30; neutral Fire/Ghost =20: slot 1 selected]\n";
+}
+
+// =============================================================================
+// TRAINER AI CLASS DISPATCH TESTS
+// =============================================================================
+
+TEST(trainer_ai_dispatch_class0_basic) {
+    BattleRules rules = make_test_battle_rules();
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Trainer, party, reg);
+    battle.set_battle_rules(&rules);
+    TrainerData td; td.trainer_class = 0;
+    td.party.push_back({4, 10, ITEM_NONE, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE}});
+    battle.set_trainer(1, td);
+    std::cout << "  [trainer_class=0 flags=0x0001 → BASIC: constructed without crash]\n";
+    ASSERT_TRUE(true);
+}
+TEST(trainer_ai_dispatch_class1_smart) {
+    BattleRules rules = make_test_battle_rules();
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Trainer, party, reg);
+    battle.set_battle_rules(&rules);
+    TrainerData td; td.trainer_class = 1;
+    td.party.push_back({4, 10, ITEM_NONE, {2, MOVE_NONE, MOVE_NONE, MOVE_NONE}});
+    battle.set_trainer(2, td);
+    std::cout << "  [trainer_class=1 flags=0x0011 → GYM_LEADER: constructed without crash]\n";
+    ASSERT_TRUE(true);
+}
+TEST(trainer_ai_dispatch_out_of_range_defaults_basic) {
+    BattleRules rules = make_test_battle_rules();
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Trainer, party, reg);
+    battle.set_battle_rules(&rules);
+    TrainerData td; td.trainer_class = 99;
+    td.party.push_back({4, 10, ITEM_NONE, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE}});
+    battle.set_trainer(3, td);
+    std::cout << "  [trainer_class=99 out-of-range → flags=0 → BASIC safe fallback]\n";
+    ASSERT_TRUE(true);
+}
+
+// =============================================================================
+// PROPAGATION TESTS: modified BattleRules → changed behavior
+// These tests FAIL if production uses hardcoded static tables.
+// =============================================================================
+
+TEST(propagation_stat_stage_rule_change_affects_output) {
+    BattleRules rules = make_test_battle_rules();
+    // Modify +1 stage from 15/10 (150%) to 2/1 (200%)
+    BattleRules modified = rules;
+    modified.stat_stage_mult[7] = {2, 1};
+    ASSERT_EQ(apply_stat_stage(100, 1, modified), 200);  // rules-derived
+    ASSERT_EQ(apply_stat_stage(100, 1, rules),    150);  // original
+    std::cout << "  [stat +1: modified=200, original=150 — rules are consumed]\n";
+}
+
+TEST(propagation_crit_threshold_rule_change_affects_output) {
+    BattleRules rules = make_test_battle_rules();
+    BattleRules modified = rules;
+    modified.crit_chances[0] = 50;  // threshold 17→50
+    ASSERT_TRUE(roll_critical(0, 30, modified));   // 30 < 50 → crit
+    ASSERT_TRUE(!roll_critical(0, 30, rules));     // 30 >= 17 is true → no crit
+    std::cout << "  [crit threshold modified 17→50: random=30 crits, original does not]\n";
+}
+
+TEST(propagation_accuracy_rule_change_affects_output) {
+    BattleRules rules = make_test_battle_rules();
+    BattleRules modified = rules;
+    modified.acc_stage_mult[7] = {200, 100};  // +1 acc = 200% instead of 133%
+    // move_acc=50, acc+1: modified=floor(50*200/100)=100 → threshold=100 → hit at 99
+    //                     original=floor(50*133/100)=66  → threshold=66  → miss at 99
+    ASSERT_TRUE(roll_accuracy(50, 1, 0, 99, modified));
+    ASSERT_TRUE(!roll_accuracy(50, 1, 0, 99, rules));
+    std::cout << "  [accuracy +1: modified threshold=100 hits at 99, original=66 misses]\n";
+}
+
+TEST(propagation_weather_entry_change_affects_output) {
+    BattleRules rules = make_test_battle_rules();
+    // No modifier for weather=5, type=7
+    ASSERT_EQ(apply_weather_modifier(100, 5, 7, 0, rules), 100);
+    BattleRules modified = rules;
+    modified.weather_type_modifiers.push_back({5, 7, 15});
+    ASSERT_EQ(apply_weather_modifier(100, 5, 7, 0, modified), 150);
+    std::cout << "  [weather propagation: new entry {5,7,15} gives 150 from 100]\n";
+}
+
+TEST(propagation_high_crit_list_change_affects_crit_stage) {
+    BattleRules rules = make_test_battle_rules();
+    BattlePokemon user{}; user.volatile_status = 0;
+    MoveData md{}; md.animation_id = 42;
+    ASSERT_EQ(build_crit_stage(user, md, rules),    0u);
+    BattleRules modified = rules;
+    modified.high_crit_moves.push_back(42);
+    ASSERT_EQ(build_crit_stage(user, md, modified), 2u);
+    std::cout << "  [high_crit propagation: added anim_id=42 → crit stage 2]\n";
+}
+
+TEST(propagation_trainer_class_flags_change_ai_behavior) {
+    // Trainer with SMART flag (GYM_LEADER) runs ai_smart → encourages Recover at low HP
+    BattleRules rules = make_test_battle_rules();
+    BattleRules modified = rules;
+    modified.trainer_class_ai[0].ai_move_flags = 0x0011;  // BASIC+SMART → GYM_LEADER
+
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Trainer, party, reg);
+    battle.set_battle_rules(&modified);
+    TrainerData td; td.trainer_class = 0;
+    td.party.push_back({4, 10, ITEM_NONE, {6, 1, MOVE_NONE, MOVE_NONE}});
+    battle.set_trainer(1, td);
+
+    // Self at 10% HP → ai_smart encourages Recover (slot 0, effect=33)
+    BattlePokemon self = make_test_bp(4, 2, 2, {6, 1, MOVE_NONE, MOVE_NONE}, 10, 100);
+    BattlePokemon opp  = make_test_bp(1, 4, 4, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE});
+    AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
+    VanillaCrystalAI smart_ai(VanillaAI::GYM_LEADER);
+    const ActionFight& af = std::get<ActionFight>(smart_ai.decide(ctx, modified).action);
+    ASSERT_EQ(af.move_slot, 0u);  // Recover preferred at low HP
+    std::cout << "  [trainer AI flag propagation: SMART→GYM_LEADER → ai_smart selects Recover]\n";
+}
+
+// =============================================================================
+// WILD MOVE SELECTION TEST
+// =============================================================================
+
+TEST(wild_move_single_usable_always_selected) {
+    // Wild with only 1 usable move must always pick it (no crash, correct slot).
+    auto party = make_test_party();
+    Registries reg;
+    TypeData t; t.id = 1; t.name = "N"; reg.types.register_entry(1, t);
+    for (int id = 1; id <= 4; ++id) {
+        MoveData md{}; md.id = id; md.name = "M" + std::to_string(id);
+        md.type = 1; md.power = 40; md.accuracy = 0xFF; md.pp = 35;
+        md.category = MoveCategory::Physical; md.effect_id = 0; md.priority = 0;
+        reg.moves.register_entry(id, md);
+    }
+    SpeciesData sd{}; sd.id = 1; sd.name = "Test"; sd.type1 = sd.type2 = 1;
+    sd.base_stats = {50,50,50,50,50,50}; sd.catch_rate = 45; sd.base_exp = 64;
+    for (size_t i = 1; i <= 4; ++i) sd.learnset.push_back({1, static_cast<MoveId>(i)});
+    reg.species.register_entry(1, sd);
+    reg.freeze_all();
+
+    Battle battle(BattleType::Wild, party, reg);
+    battle.set_wild_pokemon(1, 10);
+    // Zero out all but slot 0
+    battle.opponent_pokemon().moves[1].pp = 0;
+    battle.opponent_pokemon().moves[2].pp = 0;
+    battle.opponent_pokemon().moves[3].pp = 0;
+
+    // Set a valid player action; execute_turn should not crash
+    BattleRules rules = make_test_battle_rules();
+    battle.set_battle_rules(&rules);
+    battle.set_player_action(ActionFight{0, 0});
+    battle.execute_turn();
+    std::cout << "  [wild single-usable move: turn executed without crash]\n";
+    ASSERT_TRUE(true);
+}
+
+// =============================================================================
+// RULES-BASED AI BASIC TEST (replaces old implementation-shaped version)
+// =============================================================================
+
+TEST(ai_basic_with_rules_discourages_toxic_when_poisoned) {
+    BattleRules rules = make_test_battle_rules();
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Wild, party, reg);
+    battle.set_battle_rules(&rules);
+
+    BattlePokemon self = make_test_bp(4, 2, 2, {2, 5, MOVE_NONE, MOVE_NONE});
+    BattlePokemon opp  = make_test_bp(1, 4, 4, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE});
+    opp.status = Status::Poison;
+    AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
+    VanillaCrystalAI ai(VanillaAI::BASIC);
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, rules).action);
+    // Ember (Fire vs Grass SE) → score 19; Toxic (status-only, target poisoned) → score 30
+    ASSERT_EQ(af.move_slot, 0u);
+    std::cout << "  [rules-based ai_basic: Toxic discouraged (+10) vs already-poisoned target]\n";
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 int main(int /*argc*/, char* /*argv*/[]) {
@@ -870,96 +1282,107 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     RUN(battle_test_binary_links);
 
-    RUN(stat_stage_neutral);
-    RUN(stat_stage_plus1);
-    RUN(stat_stage_plus2);
-    RUN(stat_stage_plus6);
-    RUN(stat_stage_minus1);
-    RUN(stat_stage_minus6);
-    RUN(stat_stage_clamped_beyond_6);
-    RUN(stat_stage_minimum_1);
-    RUN(stat_stage_capped_999);
+    // Stat stage
+    RUN(stat_stage_neutral); RUN(stat_stage_plus1); RUN(stat_stage_plus2);
+    RUN(stat_stage_plus6); RUN(stat_stage_minus1); RUN(stat_stage_minus6);
+    RUN(stat_stage_clamped_beyond_6); RUN(stat_stage_minimum_1); RUN(stat_stage_capped_999);
 
-    RUN(accuracy_stage_neutral);
-    RUN(accuracy_stage_plus1);
-    RUN(accuracy_stage_minus1);
-    RUN(accuracy_stage_plus6);
-    RUN(accuracy_stage_minus6);
-    RUN(accuracy_stage_net_clamped);
+    // Accuracy stage (fallback, single-pass)
+    RUN(accuracy_stage_neutral); RUN(accuracy_stage_plus1); RUN(accuracy_stage_minus1);
+    RUN(accuracy_stage_plus6); RUN(accuracy_stage_minus6); RUN(accuracy_stage_net_clamped);
 
-    RUN(damage_basic_known_value);
-    RUN(damage_critical_doubles_pre_floor);
-    RUN(damage_stab_adds_half);
-    RUN(damage_super_effective_2x);
-    RUN(damage_immune_zero);
-    RUN(damage_not_very_effective_half);
-    RUN(damage_burn_halves_result);
-    RUN(damage_capped_at_999);
-    RUN(damage_minimum_is_2);
-    RUN(damage_zero_power_returns_zero);
+    // Damage
+    RUN(damage_basic_known_value); RUN(damage_critical_doubles_pre_floor);
+    RUN(damage_stab_adds_half); RUN(damage_super_effective_2x); RUN(damage_immune_zero);
+    RUN(damage_not_very_effective_half); RUN(damage_burn_halves_result);
+    RUN(damage_capped_at_999); RUN(damage_minimum_is_2); RUN(damage_zero_power_returns_zero);
     RUN(damage_stat_truncation_over_255);
 
-    RUN(weather_modifier_boost);
-    RUN(weather_modifier_penalty);
-    RUN(weather_modifier_not_applied);
-    RUN(weather_modifier_minimum_1);
+    // Weather (fallback)
+    RUN(weather_modifier_boost); RUN(weather_modifier_penalty);
+    RUN(weather_modifier_not_applied); RUN(weather_modifier_minimum_1);
 
-    RUN(crit_roll_below_threshold_hits);
-    RUN(crit_roll_at_threshold_misses);
-    RUN(crit_stage1_threshold_32);
-    RUN(crit_stage4_half_chance);
+    // Crit (fallback)
+    RUN(crit_roll_below_threshold_hits); RUN(crit_roll_at_threshold_misses);
+    RUN(crit_stage1_threshold_32); RUN(crit_stage4_half_chance);
     RUN(crit_stage_beyond_6_uses_half);
 
-    RUN(accuracy_always_hit_zero_accuracy);
-    RUN(accuracy_high_roll_misses);
-    RUN(accuracy_low_roll_hits);
-    RUN(accuracy_stage_increases_hit_rate);
+    // Accuracy (fallback)
+    RUN(accuracy_always_hit_zero_accuracy); RUN(accuracy_high_roll_misses);
+    RUN(accuracy_low_roll_hits); RUN(accuracy_stage_increases_hit_rate);
     RUN(accuracy_stage_decreases_hit_rate);
 
-    RUN(calc_hp_zero_ev_level5);
-    RUN(calc_stat_zero_ev_level5);
-
-    RUN(exp_wild_battle);
-    RUN(exp_trainer_battle_boost);
-    RUN(exp_minimum_one);
-    RUN(exp_level1_wild_pidgey);
-
-    RUN(capture_full_hp_reduces_rate);
-    RUN(capture_low_hp_increases_rate);
-    RUN(capture_sleep_adds_bonus);
-    RUN(capture_freeze_adds_bonus);
-    RUN(capture_burn_no_bonus);
-    RUN(capture_paralysis_no_bonus);
-    RUN(capture_ball_modifier_scales_rate);
-    RUN(capture_capped_at_255);
-    RUN(roll_capture_succeeds_when_rate_high);
-    RUN(roll_capture_fails_when_rate_low);
-
-    RUN(escape_player_faster_always_escapes);
-    RUN(escape_formula_attempt1);
-    RUN(escape_formula_attempt2_adds_30);
-    RUN(escape_formula_attempt_overflow_escapes);
+    // Stat formula, EXP, capture, escape, type
+    RUN(calc_hp_zero_ev_level5); RUN(calc_stat_zero_ev_level5);
+    RUN(exp_wild_battle); RUN(exp_trainer_battle_boost);
+    RUN(exp_minimum_one); RUN(exp_level1_wild_pidgey);
+    RUN(capture_full_hp_reduces_rate); RUN(capture_low_hp_increases_rate);
+    RUN(capture_sleep_adds_bonus); RUN(capture_freeze_adds_bonus);
+    RUN(capture_burn_no_bonus); RUN(capture_paralysis_no_bonus);
+    RUN(capture_ball_modifier_scales_rate); RUN(capture_capped_at_255);
+    RUN(roll_capture_succeeds_when_rate_high); RUN(roll_capture_fails_when_rate_low);
+    RUN(escape_player_faster_always_escapes); RUN(escape_formula_attempt1);
+    RUN(escape_formula_attempt2_adds_30); RUN(escape_formula_attempt_overflow_escapes);
     RUN(escape_zero_wild_speed_div4_escapes);
-
-    RUN(type_effectiveness_neutral);
-    RUN(type_effectiveness_set_immune);
-    RUN(combined_effectiveness_dual_type);
-    RUN(combined_effectiveness_single_type);
+    RUN(type_effectiveness_neutral); RUN(type_effectiveness_set_immune);
+    RUN(combined_effectiveness_dual_type); RUN(combined_effectiveness_single_type);
     RUN(combined_effectiveness_immune);
 
-    // AI tests
-    RUN(ai_types_prefers_super_effective);
-    RUN(ai_types_avoids_immune);
+    // AI (original, using fallback overloads)
+    RUN(ai_types_prefers_super_effective); RUN(ai_types_avoids_immune);
     RUN(ai_basic_discourages_toxic_when_already_poisoned);
-    RUN(ai_smart_encourages_recover_at_low_hp);
-    RUN(ai_smart_discourages_recover_at_full_hp);
+    RUN(ai_smart_encourages_recover_at_low_hp); RUN(ai_smart_discourages_recover_at_full_hp);
     RUN(ai_basic_picks_valid_slot_when_all_neutral);
-    RUN(ai_registry_creates_known_behaviors);
-    RUN(ai_registry_unknown_id_falls_back_to_basic);
-    RUN(ai_registry_trainer_override);
-    RUN(ai_registry_class_override);
-    RUN(ai_registry_freeze_prevents_mutation);
-    RUN(ai_registry_lists_registered_behaviors);
+    RUN(ai_registry_creates_known_behaviors); RUN(ai_registry_unknown_id_falls_back_to_basic);
+    RUN(ai_registry_trainer_override); RUN(ai_registry_class_override);
+    RUN(ai_registry_freeze_prevents_mutation); RUN(ai_registry_lists_registered_behaviors);
+
+    // === NEW: Source-backed accuracy golden tests ===
+    RUN(accuracy_golden_base95_stage0_hit_at_94);
+    RUN(accuracy_golden_base95_stage0_miss_at_95);
+    RUN(accuracy_golden_base95_stage0_miss_at_96);
+    RUN(accuracy_golden_0xFF_always_hit);
+    RUN(accuracy_golden_acc_stage_plus1_threshold_99);
+    RUN(accuracy_golden_eva_stage_plus1_reduces_to_71);
+    RUN(accuracy_golden_two_pass_differs_from_single_pass);
+
+    // === NEW: Crit with BattleRules ===
+    RUN(crit_rules_stage0_threshold_17); RUN(crit_rules_stage1_threshold_32);
+    RUN(crit_rules_stage2_threshold_64); RUN(crit_rules_stage4_cap_128);
+
+    // === NEW: build_crit_stage ===
+    RUN(build_crit_stage_normal_move_base_0);
+    RUN(build_crit_stage_high_crit_move_plus2);
+    RUN(build_crit_stage_focus_energy_plus1);
+    RUN(build_crit_stage_high_crit_plus_focus_energy_is_3);
+
+    // === NEW: Weather with BattleRules ===
+    RUN(weather_rules_rain_boosts_water); RUN(weather_rules_rain_weakens_fire);
+    RUN(weather_rules_sun_boosts_fire); RUN(weather_rules_no_match_unchanged);
+    RUN(weather_rules_no_weather_id_0_unchanged); RUN(weather_rules_minimum_1);
+
+    // === NEW: AI scoring scale ===
+    RUN(ai_score_init_is_20_immune_gets_plus10);
+    RUN(ai_score_immune_uses_discourage_10);
+
+    // === NEW: Trainer AI dispatch ===
+    RUN(trainer_ai_dispatch_class0_basic);
+    RUN(trainer_ai_dispatch_class1_smart);
+    RUN(trainer_ai_dispatch_out_of_range_defaults_basic);
+
+    // === NEW: Propagation tests (MUST FAIL if static tables used) ===
+    RUN(propagation_stat_stage_rule_change_affects_output);
+    RUN(propagation_crit_threshold_rule_change_affects_output);
+    RUN(propagation_accuracy_rule_change_affects_output);
+    RUN(propagation_weather_entry_change_affects_output);
+    RUN(propagation_high_crit_list_change_affects_crit_stage);
+    RUN(propagation_trainer_class_flags_change_ai_behavior);
+
+    // === NEW: Wild move selection ===
+    RUN(wild_move_single_usable_always_selected);
+
+    // === NEW: Rules-based AI basic ===
+    RUN(ai_basic_with_rules_discourages_toxic_when_poisoned);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

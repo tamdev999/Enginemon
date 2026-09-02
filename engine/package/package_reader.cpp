@@ -933,4 +933,140 @@ PackageReader::load_move_registry() const {
     return reg;
 }
 
+std::optional<BattleRules>
+PackageReader::load_battle_rules() const {
+    // Locate the BattleRules chunk in the TOC.
+    const TocEntry* chunk = nullptr;
+    for (const auto& entry : toc_) {
+        if (entry.type == ChunkType::BattleRules) {
+            chunk = &entry;
+            break;
+        }
+    }
+    if (!chunk || chunk->size < 64) return std::nullopt;  // 64 = minimum sane size
+
+    std::ifstream in(path_, std::ios::binary);
+    if (!in) return std::nullopt;
+    in.seekg(chunk->offset);
+
+    BoundsReader r(in, chunk->size);
+    BattleRules rules;
+
+    // -----------------------------------------------------------------------
+    // Helper lambdas — all return false on read failure
+    // -----------------------------------------------------------------------
+    auto read_u8 = [&](uint8_t& out) { return r.read_le(out); };
+
+    auto read_stage_mult = [&](StageMult13& tbl) -> bool {
+        for (auto& e : tbl) {
+            if (!r.read_le(e.numerator))   return false;
+            if (!r.read_le(e.denominator)) return false;
+            if (e.denominator == 0)        return false;  // would div-by-zero
+        }
+        return true;
+    };
+
+    auto read_byte_list = [&](std::vector<uint8_t>& out) -> bool {
+        uint8_t count = 0;
+        if (!r.read_le(count)) return false;
+        out.resize(count);
+        for (uint8_t i = 0; i < count; ++i)
+            if (!r.read_le(out[i])) return false;
+        return true;
+    };
+
+    // -----------------------------------------------------------------------
+    // Deserialise (must match wire format in PackageWriter::add_battle_rules)
+    // -----------------------------------------------------------------------
+
+    // stat_stage_mult: 13 × {num, den}
+    if (!read_stage_mult(rules.stat_stage_mult)) return std::nullopt;
+
+    // acc_stage_mult: 13 × {num, den}
+    if (!read_stage_mult(rules.acc_stage_mult)) return std::nullopt;
+
+    // crit_chances: 7 × u8
+    for (uint8_t& c : rules.crit_chances)
+        if (!r.read_le(c)) return std::nullopt;
+    if (rules.crit_chances[0] == 0) return std::nullopt;  // stage-0 crit of 0 → corrupt
+
+    // wobble_probabilities: u8 count + count × {thr, wob}
+    {
+        uint8_t n = 0;
+        if (!r.read_le(n)) return std::nullopt;
+        rules.wobble_probabilities.resize(n);
+        for (uint8_t i = 0; i < n; ++i) {
+            if (!r.read_le(rules.wobble_probabilities[i][0])) return std::nullopt;
+            if (!r.read_le(rules.wobble_probabilities[i][1])) return std::nullopt;
+        }
+    }
+
+    // weather_type_modifiers: u8 count + count × {wid, tid, mul}
+    {
+        uint8_t n = 0;
+        if (!r.read_le(n)) return std::nullopt;
+        rules.weather_type_modifiers.resize(n);
+        for (uint8_t i = 0; i < n; ++i) {
+            auto& e = rules.weather_type_modifiers[i];
+            if (!r.read_le(e.weather_id)) return std::nullopt;
+            if (!r.read_le(e.type_id))    return std::nullopt;
+            if (!r.read_le(e.multiplier)) return std::nullopt;
+        }
+    }
+
+    // weather_move_modifiers: u8 count + count × {wid, eid, mul}
+    {
+        uint8_t n = 0;
+        if (!r.read_le(n)) return std::nullopt;
+        rules.weather_move_modifiers.resize(n);
+        for (uint8_t i = 0; i < n; ++i) {
+            auto& e = rules.weather_move_modifiers[i];
+            if (!r.read_le(e.weather_id)) return std::nullopt;
+            if (!r.read_le(e.type_id))    return std::nullopt;
+            if (!r.read_le(e.multiplier)) return std::nullopt;
+        }
+    }
+
+    // high_crit_moves: u8 count + count × u8
+    if (!read_byte_list(rules.high_crit_moves)) return std::nullopt;
+
+    // effect_priorities: u8 count + count × {eid, priority}
+    {
+        uint8_t n = 0;
+        if (!r.read_le(n)) return std::nullopt;
+        rules.effect_priorities.resize(n);
+        for (uint8_t i = 0; i < n; ++i) {
+            if (!r.read_le(rules.effect_priorities[i].effect_id)) return std::nullopt;
+            if (!r.read_le(rules.effect_priorities[i].priority))  return std::nullopt;
+        }
+    }
+
+    // AI byte lists
+    if (!read_byte_list(rules.ai_status_only_effects)) return std::nullopt;
+    if (!read_byte_list(rules.ai_risky_effects))       return std::nullopt;
+    if (!read_byte_list(rules.ai_stall_move_ids))      return std::nullopt;
+    if (!read_byte_list(rules.ai_useful_move_ids))     return std::nullopt;
+    if (!read_byte_list(rules.ai_residual_move_ids))   return std::nullopt;
+    if (!read_byte_list(rules.ai_encore_move_ids))     return std::nullopt;
+
+    // trainer_class_ai: u16 LE count + count × 7 bytes
+    {
+        uint16_t n = 0;
+        if (!r.read_le(n)) return std::nullopt;
+        if (n > 256u)      return std::nullopt;  // sanity: Crystal has 67 classes
+        rules.trainer_class_ai.resize(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            auto& t = rules.trainer_class_ai[i];
+            if (!r.read_le(t.item1))         return std::nullopt;
+            if (!r.read_le(t.item2))         return std::nullopt;
+            if (!r.read_le(t.base_reward))   return std::nullopt;
+            if (!r.read_le(t.ai_move_flags)) return std::nullopt;
+            if (!r.read_le(t.ai_item_flags)) return std::nullopt;
+        }
+    }
+
+    if (!rules.is_valid()) return std::nullopt;
+    return rules;
+}
+
 } // namespace enginemon

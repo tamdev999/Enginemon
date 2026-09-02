@@ -25,6 +25,12 @@
 #include <cassert>
 #include <stdexcept>
 
+// Suppress [[deprecated]] warnings in this file: battle.cpp calls the fallback
+// (no-rules) overloads only when rules_ == nullptr (unit test path).
+// Production path always has rules_ set and calls the BattleRules overloads.
+#pragma warning(push)
+#pragma warning(disable: 4996)   // MSVC: suppress deprecated function warnings
+
 namespace enginemon {
 
 // ============================================================================
@@ -146,7 +152,29 @@ void Battle::set_trainer(TrainerId trainer, const TrainerData& data) {
         opponent_pokemon_ = opponent_party_[0];
     }
 
-    trainer_ai_ = std::make_unique<VanillaCrystalAI>(VanillaAI::BASIC);}
+    // Determine AI behavior from trainer class via BattleRules.
+    // Source: AIChooseMove — TrainerClassAttributes bitmask → AI layer selection.
+    // ai_move_flags bits: 0=BASIC 1=SETUP 2=TYPES 3=OFFENSIVE 4=SMART 5..=higher
+    // Map to VanillaAI behavior IDs (which encode multi-pass combinations).
+    AIBehaviorId ai_behavior = VanillaAI::BASIC;
+    if (rules_) {
+        const uint16_t flags = rules_->get_trainer_ai_flags(data.trainer_class);
+        // Bit 4 (SMART) → GYM_LEADER tier (BASIC+TYPES+SMART+SETUP)
+        // Bit 3 (OFFENSIVE) → AGGRESSIVE tier (BASIC+TYPES+OFFENSIVE)
+        // Bit 1 (SETUP) → DEFENSIVE tier (BASIC+TYPES+SETUP) if no offensive
+        // Bit 0 (BASIC only) → BASIC
+        // Use highest-tier flag present.
+        constexpr uint16_t AI_BASIC     = 1 << 0;
+        constexpr uint16_t AI_SETUP     = 1 << 1;
+        constexpr uint16_t AI_OFFENSIVE = 1 << 3;
+        constexpr uint16_t AI_SMART     = 1 << 4;
+        if (flags & AI_SMART)          ai_behavior = VanillaAI::GYM_LEADER;
+        else if (flags & AI_OFFENSIVE) ai_behavior = VanillaAI::AGGRESSIVE;
+        else if (flags & AI_SETUP)     ai_behavior = VanillaAI::DEFENSIVE;
+        else if (flags & AI_BASIC)     ai_behavior = VanillaAI::BASIC;
+    }
+    trainer_ai_ = std::make_unique<VanillaCrystalAI>(ai_behavior);
+}
 
 // ============================================================================
 // Accessors
@@ -169,11 +197,19 @@ void Battle::set_opponent_action(BattleAction action)  { opponent_action_  = std
 // ============================================================================
 
 void Battle::apply_stat_stages(BattlePokemon& bp) {
-    bp.stats.attack          = static_cast<int16_t>(apply_stat_stage(bp.base_stats.attack,          bp.stages.attack));
-    bp.stats.defense         = static_cast<int16_t>(apply_stat_stage(bp.base_stats.defense,         bp.stages.defense));
-    bp.stats.speed           = static_cast<int16_t>(apply_stat_stage(bp.base_stats.speed,           bp.stages.speed));
-    bp.stats.special_attack  = static_cast<int16_t>(apply_stat_stage(bp.base_stats.special_attack,  bp.stages.special_attack));
-    bp.stats.special_defense = static_cast<int16_t>(apply_stat_stage(bp.base_stats.special_defense, bp.stages.special_defense));
+    if (rules_) {
+        bp.stats.attack          = static_cast<int16_t>(apply_stat_stage(bp.base_stats.attack,          bp.stages.attack,          *rules_));
+        bp.stats.defense         = static_cast<int16_t>(apply_stat_stage(bp.base_stats.defense,         bp.stages.defense,         *rules_));
+        bp.stats.speed           = static_cast<int16_t>(apply_stat_stage(bp.base_stats.speed,           bp.stages.speed,           *rules_));
+        bp.stats.special_attack  = static_cast<int16_t>(apply_stat_stage(bp.base_stats.special_attack,  bp.stages.special_attack,  *rules_));
+        bp.stats.special_defense = static_cast<int16_t>(apply_stat_stage(bp.base_stats.special_defense, bp.stages.special_defense, *rules_));
+    } else {
+        bp.stats.attack          = static_cast<int16_t>(apply_stat_stage(bp.base_stats.attack,          bp.stages.attack));
+        bp.stats.defense         = static_cast<int16_t>(apply_stat_stage(bp.base_stats.defense,         bp.stages.defense));
+        bp.stats.speed           = static_cast<int16_t>(apply_stat_stage(bp.base_stats.speed,           bp.stages.speed));
+        bp.stats.special_attack  = static_cast<int16_t>(apply_stat_stage(bp.base_stats.special_attack,  bp.stages.special_attack));
+        bp.stats.special_defense = static_cast<int16_t>(apply_stat_stage(bp.base_stats.special_defense, bp.stages.special_defense));
+    }
     // HP is never stage-modified
 }
 
@@ -213,8 +249,14 @@ void Battle::determine_turn_order() {
     if (p_prio != o_prio) { player_goes_first_ = (p_prio > o_prio); return; }
 
     // Speed
-    const int32_t p_spd = apply_stat_stage(player_pokemon_.base_stats.speed,   player_pokemon_.stages.speed);
-    const int32_t o_spd = apply_stat_stage(opponent_pokemon_.base_stats.speed, opponent_pokemon_.stages.speed);
+    int32_t p_spd, o_spd;
+    if (rules_) {
+        p_spd = apply_stat_stage(player_pokemon_.base_stats.speed,   player_pokemon_.stages.speed,   *rules_);
+        o_spd = apply_stat_stage(opponent_pokemon_.base_stats.speed, opponent_pokemon_.stages.speed, *rules_);
+    } else {
+        p_spd = apply_stat_stage(player_pokemon_.base_stats.speed,   player_pokemon_.stages.speed);
+        o_spd = apply_stat_stage(opponent_pokemon_.base_stats.speed, opponent_pokemon_.stages.speed);
+    }
     if (p_spd != o_spd) { player_goes_first_ = (p_spd > o_spd); return; }
 
     // Tie: random 50/50
@@ -243,14 +285,25 @@ void Battle::execute_turn() {
                     ctx.available_switches.push_back(i);
                 }
             }
-            opponent_action_ = trainer_ai_->decide(ctx).action;
+            // Use ROM-derived AI if BattleRules available; fallback otherwise
+            AIDecision decision = rules_
+                ? static_cast<VanillaCrystalAI*>(trainer_ai_.get())->decide(ctx, *rules_)
+                : trainer_ai_->decide(ctx);
+            opponent_action_ = decision.action;
         }
     } else if (type_ == BattleType::Wild) {
-        // Wild: pick a random usable move
+        // Wild: uniform random selection among usable moves.
+        // Source: Crystal AIChooseMove — wild uses Random() % num_usable_moves,
+        // not per-slot biased selection.
         ActionFight af; af.target = 0; af.move_slot = 0;
+        std::vector<size_t> usable;
         for (size_t i = 0; i < 4; ++i) {
-            if (opponent_pokemon_.can_use_move(i) && (rng_.next_byte() & 3) == 0)
-                af.move_slot = i;
+            if (opponent_pokemon_.can_use_move(i)) usable.push_back(i);
+        }
+        if (!usable.empty()) {
+            // Uniform selection: draw a byte, take modulo over usable count.
+            // For count <= 4 the bias is negligible (max 1/256 error per slot).
+            af.move_slot = usable[rng_.next_byte() % usable.size()];
         }
         opponent_action_ = af;
     }
@@ -330,22 +383,38 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
     message((user_is_player ? "Player used " : "Opponent used ") + md->name + "!");
 
     if (md->category == MoveCategory::Status) {
-        // Status move effects are dispatched separately (future milestone)
+        // Status move effects are dispatched separately (future milestone).
+        // Explicitly flag that this move had no effect rather than silently no-op.
+        message((user_is_player ? "Player used " : "Opponent used ") + md->name +
+                " — status effect not yet implemented.");
         return;
     }
 
-    // Accuracy check (0 = always hits)
-    if (md->accuracy != 0) {
-        const int8_t acc_stage = user_is_player ? user.stages.accuracy  : user.stages.accuracy;
-        const int8_t eva_stage = user_is_player ? target.stages.evasion : target.stages.evasion;
-        if (!roll_accuracy(md->accuracy, acc_stage, eva_stage, rng_.next_byte())) {
+    // Accuracy check
+    // 0xFF = always hit (Crystal encoding); 0 = always hit (Enginemon normalisation)
+    if (md->accuracy != 0xFF && md->accuracy != 0) {
+        const int8_t acc_stage = user.stages.accuracy;
+        const int8_t eva_stage = target.stages.evasion;
+        bool hit;
+        if (rules_) {
+            hit = roll_accuracy(md->accuracy, acc_stage, eva_stage, rng_.next_byte(), *rules_);
+        } else {
+            hit = roll_accuracy(md->accuracy, acc_stage, eva_stage, rng_.next_byte());
+        }
+        if (!hit) {
             message("The attack missed!");
             return;
         }
     }
 
-    // Critical hit (stage 0 by default; high-crit moves would use stage 1)
-    const bool is_crit = roll_critical(0, rng_.next_byte());
+    // Critical hit — build stage from BattleRules + volatile state
+    uint8_t crit_stage = 0;
+    if (rules_) {
+        crit_stage = build_crit_stage(user, *md, *rules_);
+    }
+    const bool is_crit = rules_
+        ? roll_critical(crit_stage, rng_.next_byte(), *rules_)
+        : roll_critical(crit_stage, rng_.next_byte());
 
     // Type effectiveness
     const uint16_t type_eff = get_combined_effectiveness(
@@ -368,15 +437,21 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
     int32_t atk_stat, def_stat;
     const bool physical = (md->category == MoveCategory::Physical);
 
+    // Helper lambda: applies stat stage using BattleRules if available
+    auto stat_stage = [this](int32_t base, int8_t stage) -> int32_t {
+        return rules_ ? apply_stat_stage(base, stage, *rules_)
+                      : apply_stat_stage(base, stage);
+    };
+
     if (physical) {
-        atk_stat = apply_stat_stage(user.base_stats.attack,   eff_atk_stage);
-        def_stat = apply_stat_stage(target.base_stats.defense, eff_def_stage);
+        atk_stat = stat_stage(user.base_stats.attack,   eff_atk_stage);
+        def_stat = stat_stage(target.base_stats.defense, eff_def_stage);
         // Reflect doubles defender's defense
         if ( user_is_player && field_.reflect_opponent > 0) def_stat *= 2;
         if (!user_is_player && field_.reflect_player   > 0) def_stat *= 2;
     } else {
-        atk_stat = apply_stat_stage(user.base_stats.special_attack,   eff_satk_stage);
-        def_stat = apply_stat_stage(target.base_stats.special_defense, eff_sdef_stage);
+        atk_stat = stat_stage(user.base_stats.special_attack,   eff_satk_stage);
+        def_stat = stat_stage(target.base_stats.special_defense, eff_sdef_stage);
         // Light Screen doubles defender's special defense
         if ( user_is_player && field_.light_screen_opponent > 0) def_stat *= 2;
         if (!user_is_player && field_.light_screen_player   > 0) def_stat *= 2;
@@ -399,6 +474,15 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
 
     int32_t damage = enginemon::calculate_damage(dp);
     if (damage == 0) return;  // Immune or power=0 status move edge case
+
+    // Weather modifier (Crystal: DoWeatherModifiers, applied after STAB)
+    // Source: misc.asm DoWeatherModifiers — type and move-effect checks.
+    if (rules_ && field_.weather != Weather::None) {
+        const uint8_t weather_id = static_cast<uint8_t>(field_.weather);
+        const uint8_t type_id    = static_cast<uint8_t>(md->type);
+        const uint8_t effect_id  = md->effect_id;
+        damage = apply_weather_modifier(damage, weather_id, type_id, effect_id, *rules_);
+    }
 
     // Random variation 85-100% (suiCune BattleCommand_DamageVariation: RRCA loop)
     uint8_t variation;
@@ -604,8 +688,14 @@ bool Battle::can_run() const { return type_ == BattleType::Wild; }
 bool Battle::attempt_run() {
     if (!can_run()) { message("There's no running from a trainer battle!"); return false; }
     run_attempts_++;
-    const int32_t p_spd = apply_stat_stage(player_pokemon_.base_stats.speed, player_pokemon_.stages.speed);
-    const int32_t o_spd = apply_stat_stage(opponent_pokemon_.base_stats.speed, opponent_pokemon_.stages.speed);
+    int32_t p_spd, o_spd;
+    if (rules_) {
+        p_spd = apply_stat_stage(player_pokemon_.base_stats.speed,   player_pokemon_.stages.speed,   *rules_);
+        o_spd = apply_stat_stage(opponent_pokemon_.base_stats.speed, opponent_pokemon_.stages.speed, *rules_);
+    } else {
+        p_spd = apply_stat_stage(player_pokemon_.base_stats.speed,   player_pokemon_.stages.speed);
+        o_spd = apply_stat_stage(opponent_pokemon_.base_stats.speed, opponent_pokemon_.stages.speed);
+    }
     if (roll_escape(p_spd, o_spd, run_attempts_, rng_.next_byte())) {
         result_ = BattleResult::PlayerRan;
         message("Got away safely!");
@@ -641,6 +731,9 @@ bool Battle::attempt_capture(ItemId ball) {
     if (sd) cp.catch_rate = sd->catch_rate;
 
     if (roll_capture(cp, rng_.next_byte(), rng_.next_byte())) {
+        const uint16_t final_rate = calculate_catch_value(cp);
+        (void)(rules_ ? capture_wobble_chance(final_rate, *rules_)
+                      : capture_wobble_chance(final_rate));  // wobble count for animation — not yet rendered
         result_ = BattleResult::Captured;
         outcome_.captured_species = opponent_pokemon_.species;
         message("Gotcha! Pokémon was caught!");
@@ -704,3 +797,5 @@ uint32_t Battle::calculate_exp(const BattlePokemon& defeated, bool is_trainer) c
 }
 
 } // namespace enginemon
+
+#pragma warning(pop)  // Re-enable deprecated warnings after battle.cpp

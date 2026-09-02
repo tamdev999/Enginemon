@@ -18,6 +18,7 @@
 #include "crystal/script/semantic_lua_emitter.hpp"
 #include "crystal/extract/sprite_ids.hpp"
 #include "crystal/extract/species_extractor.hpp"
+#include "crystal/extract/battle_rules_extractor.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
 #include <iomanip>
@@ -1564,6 +1565,27 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
 
         writer.add_move_data(move_entries);
         std::cout << "  MoveData chunk: " << move_entries.size() << " moves\n";
+    }
+
+    // =========================================================================
+    // Stage 10: Emit BattleRules chunk (BRLS).
+    // Source: all battle rule tables extracted from the Crystal ROM at known
+    //         profile-provided addresses.
+    // Fail-closed: extraction failure → FATAL (no degraded output).
+    // =========================================================================
+    {
+        auto br_result = crystal::extract_battle_rules(rom_, profile_);
+        if (!br_result.success) {
+            std::cerr << "FATAL: Stage 10 — BattleRules extraction failed: "
+                      << br_result.error << "\n";
+            return false;
+        }
+        writer.add_battle_rules(br_result.rules);
+        std::cout << "  BattleRules chunk: "
+                  << br_result.rules.trainer_class_ai.size()
+                  << " trainer classes, "
+                  << br_result.rules.wobble_probabilities.size()
+                  << " wobble entries\n";
     }
 
     return true;

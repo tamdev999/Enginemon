@@ -11,6 +11,7 @@
 
 #include "engine/core/types.hpp"
 #include "engine/core/registry.hpp"
+#include "engine/battle/battle_rules.hpp"
 #include <memory>
 #include <vector>
 #include <optional>
@@ -196,6 +197,12 @@ struct FieldState {
 class Battle {
 public:
     Battle(BattleType type, Party& player_party, const Registries& reg);
+
+    // Attach ROM-derived battle rules.  Must be called before execute_turn() in
+    // production.  Tests may omit this; the fallback static tables in calculator.cpp
+    // are used if rules_ is null, but this triggers [[deprecated]] warnings.
+    void set_battle_rules(const BattleRules* rules) { rules_ = rules; }
+
     ~Battle();
     
     // Setup
@@ -260,6 +267,9 @@ public:
     // Without a callback, a fallback seeded mt19937 is used (unit tests only).
     void set_rng_callback(std::function<uint32_t()> rng_fn);
 
+    // Draw one byte from the battle RNG — used by AI for tie-breaking.
+    uint8_t rng_byte() { return rng_.next_byte(); }
+
     // Registry access for AI and other consumers
     const Registries& registries() const { return registries_; }
 
@@ -271,6 +281,7 @@ private:
     // References
     Party& player_party_;
     const Registries& registries_;
+    const BattleRules* rules_ = nullptr;  // Non-owning; set via set_battle_rules()
     
     // Active pokemon
     BattlePokemon player_pokemon_;

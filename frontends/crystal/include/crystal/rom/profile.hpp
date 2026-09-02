@@ -348,6 +348,36 @@ struct ProfileOffsets {
 
     std::array<RamAddressSpec, MAX_RAM_ADDRESSES> ram_addresses{};
     uint8_t ram_address_count = 0;
+
+    // Battle rule tables — ROM addresses for all tables extracted into the BRLS chunk.
+    // These were previously hardcoded as static constexpr in calculator.cpp / trainer_ai.cpp.
+    // Moving them here makes them profile-driven and ROM-hack compatible.
+    //
+    // Sentinel-terminated tables (extractor scans until 0xFF): all weather/AI/move lists.
+    // Fixed-length tables (extractor reads exact count): stat_mult, acc_mult, crit_chances.
+    // Count-driven tables: wobble_probabilities (num_wobble_entries), trainer_class_ai
+    //   uses profile.counts.num_trainer_classes.
+    //
+    // Crystal v1.1 addresses from pokecrystal.sym:
+    uint32_t stat_level_multipliers;    // 0f:6d2b  StatLevelMultipliers_Applied — 13×2 bytes
+    uint32_t accuracy_level_multipliers;// 0d:4eb2  AccuracyLevelMultipliers    — 13×2 bytes
+    uint32_t critical_hit_chances;      // 0d:46ab  CriticalHitChances          — 7 bytes
+    uint32_t wobble_probabilities;      // 03:79ba  WobbleProbabilities         — num_wobble_entries×2
+    uint32_t weather_type_modifiers;    // 3e:7e13  WeatherTypeModifiers        — 3 bytes/entry, 0xFF sentinel
+    uint32_t weather_move_modifiers;    // 3e:7e20  WeatherMoveModifiers        — 3 bytes/entry, 0xFF sentinel
+    uint32_t critical_hit_moves;        // 0d:46a3  CriticalHitMoves            — 1 byte/entry, 0xFF sentinel
+    uint32_t move_effect_priorities;    // 0f:45df  MoveEffectPriorities        — 2 bytes/entry, 0xFF sentinel
+    uint32_t ai_status_only_effects;    // 0e:45db  StatusOnlyEffects           — 1 byte/entry, 0xFF sentinel
+    uint32_t ai_risky_effects;          // 0e:54ff  RiskyEffects                — 1 byte/entry, 0xFF sentinel
+    uint32_t ai_stall_moves;            // 0e:5348  StallMoves                  — 1 byte/entry, 0xFF sentinel
+    uint32_t ai_useful_moves;           // 0e:5301  UsefulMoves                 — 1 byte/entry, 0xFF sentinel
+    uint32_t ai_residual_moves;         // 0e:5446  ResidualMoves               — 1 byte/entry, 0xFF sentinel
+    uint32_t ai_encore_moves;           // 0e:4c85  EncoreMoves                 — 1 byte/entry, 0xFF sentinel
+    uint32_t trainer_class_attributes;  // 0e:559c  TrainerClassAttributes      — num_trainer_classes×7 bytes
+
+    // Fixed count for WobbleProbabilities (24 in vanilla; may differ in hacks that
+    // rewrite the table but keep the same format).
+    uint8_t  num_wobble_entries = 24;
 };
 
 //=============================================================================

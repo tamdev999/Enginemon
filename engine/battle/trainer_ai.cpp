@@ -31,17 +31,29 @@
 #include <cassert>
 #include <numeric>
 
+// Suppress [[deprecated]] warnings in this file: the fallback (no-rules) overloads
+// of apply_stat_stage etc. are callable from tests via decide(ctx) without BattleRules.
+// Production code always passes BattleRules via decide(ctx, rules).
+#pragma warning(push)
+#pragma warning(disable: 4996)
+
 namespace enginemon {
 
 // ============================================================================
 // Constants matching Crystal AI behavior
 // ============================================================================
 
-// Score adjustment magnitudes (Crystal uses absolute values of 1-2)
-static constexpr int kStrongDiscourage = 2;  // discourage by +2
-static constexpr int kDiscourage       = 1;  // discourage by +1
-static constexpr int kEncourage        = -1; // encourage by -1
-static constexpr int kStrongEncourage  = -2; // encourage by -2
+// Score adjustment magnitudes — Crystal source: scoring.asm
+//   Default score: 20 (all moves start at 20)
+//   AIDiscourageMove: +10 (strongly discourage)
+//   Individual pass discourage: +1 or +2
+//   Individual pass encourage: -1 or -2
+static constexpr int kInitScore       = 20;   // Crystal: default = 20, disabled = 80
+static constexpr int kDiscourageStrong = 10;  // AIDiscourageMove in Crystal (+10)
+static constexpr int kStrongDiscourage = 2;   // individual pass strong discourage (+2)
+static constexpr int kDiscourage       = 1;   // individual pass discourage (+1)
+static constexpr int kEncourage        = -1;  // individual pass encourage (-1)
+static constexpr int kStrongEncourage  = -2;  // individual pass strong encourage (-2)
 
 // Crystal move effect IDs (from constants/battle_constants.asm).
 // We use the effect_id field of MoveData for these comparisons.
@@ -126,7 +138,11 @@ static bool is_status_only(uint8_t effect) {
 // ============================================================================
 
 struct MoveScores {
-    int scores[4] = {0, 0, 0, 0};  // Lower = more favored (Crystal convention)
+    int scores[4];
+    MoveScores() {
+        // Crystal initializes all move scores to 20 (AIChooseMove, line "ld a, 20")
+        scores[0] = scores[1] = scores[2] = scores[3] = kInitScore;
+    }
 };
 
 // ============================================================================
@@ -175,7 +191,22 @@ static void ai_basic(MoveScores& scores, const AIContext& ctx) {
             const bool target_already_statused =
                 (ctx.opponent.status != Status::None);
             if (target_already_statused) {
-                scores.scores[i] += kStrongDiscourage;
+                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove = +10
+            }
+        }
+    }
+}
+
+// ROM-derived variant: uses rules.ai_status_only_effects instead of kStatusOnlyEffects.
+static void ai_basic(MoveScores& scores, const AIContext& ctx, const BattleRules& rules) {
+    for (size_t i = 0; i < 4; ++i) {
+        const MoveId mid = ctx.self.moves[i].move;
+        if (mid == MOVE_NONE) continue;
+        const MoveData* md = ctx.battle.registries().moves.get(mid);
+        if (!md) continue;
+        if (rules.is_ai_status_only(md->effect_id)) {
+            if (ctx.opponent.status != Status::None) {
+                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove = +10
             }
         }
     }
@@ -211,18 +242,18 @@ static void ai_types(MoveScores& scores, const AIContext& ctx) {
             ctx.battle.registries().type_chart);
 
         if (eff == 0) {
-            // Immune — strongly discourage
-            scores.scores[i] += kStrongDiscourage;
+            // Immune — AIDiscourageMove (+10) — Crystal: strongly discourages immune moves
+            scores.scores[i] += kDiscourageStrong;
             continue;
         }
 
         if (md->power == 0) continue;  // Status move; type matchup irrelevant
 
         if (eff > 100) {
-            // Super-effective
-            scores.scores[i] += kStrongEncourage;
+            // Super-effective: encourage (-1)
+            scores.scores[i] += kEncourage;
         } else if (eff < 100) {
-            // Not very effective — discourage only if there's a better-type alternative
+            // Not very effective — discourage (+1) only if there's a better-type alternative
             if (has_multi_type_damaging) {
                 scores.scores[i] += kDiscourage;
             }
@@ -242,6 +273,7 @@ static void ai_offensive(MoveScores& scores, const AIContext& ctx) {
         const MoveData* md = ctx.battle.registries().moves.get(ctx.self.moves[i].move);
         if (!md) continue;
         if (md->power == 0) {
+            // Crystal AI_Offensive: inc [hl]; inc [hl] = +2
             scores.scores[i] += kStrongDiscourage;
         }
     }
@@ -344,7 +376,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
         // Dream Eater: only useful if target is asleep
         if (eff == Effect::DreamEater) {
             if (ctx.opponent.status != Status::Sleep) {
-                scores.scores[i] += kStrongDiscourage;
+                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove
             }
             continue;
         }
@@ -352,7 +384,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
         // Nightmare: only useful if target is asleep
         if (eff == Effect::Nightmare) {
             if (ctx.opponent.status != Status::Sleep) {
-                scores.scores[i] += kStrongDiscourage;
+                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove
             }
             continue;
         }
@@ -361,7 +393,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
         if (eff == Effect::Toxic || eff == Effect::Poison) {
             if (ctx.opponent.status == Status::Poison
              || ctx.opponent.status == Status::BadPoison) {
-                scores.scores[i] += kStrongDiscourage;
+                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove
             }
             continue;
         }
@@ -369,7 +401,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
         // Paralyze: discourage if target already paralyzed
         if (eff == Effect::Paralyze) {
             if (ctx.opponent.status == Status::Paralysis) {
-                scores.scores[i] += kStrongDiscourage;
+                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove
             }
             continue;
         }
@@ -492,10 +524,85 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx) {
         return d;
     }
 
-    // Pick randomly among tied candidates
-    const size_t chosen = candidates[0];  // Deterministic first-choice; caller may randomize
+    // Crystal tie-breaking: Random() % num_tied_moves (uniform among tied slots).
+    // Source: AIChooseMove .ChooseMove — maskbits NUM_MOVES, retry until non-zero.
+    const size_t chosen = candidates.size() == 1
+        ? candidates[0]
+        : candidates[const_cast<Battle&>(ctx.battle).rng_byte() % candidates.size()];
     d.action     = ActionFight{chosen, 0};
     d.reasoning  = "Move slot " + std::to_string(chosen) + " score=" + std::to_string(best_score);
+    d.confidence = 0.8f;
+    return d;
+}
+
+AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rules) {
+    // ROM-derived overload: replaces hardcoded AI lists with package-extracted tables.
+    // Uses rules.ai_status_only_effects, rules.trainer_class_ai, etc.
+    MoveScores scores{};
+
+    const AIBehaviorId beh = behavior_;
+
+    // Use ROM-derived ai_basic (reads rules.ai_status_only_effects)
+    ai_basic(scores, ctx, rules);
+
+    // ai_types, ai_offensive, ai_setup, ai_smart are not yet rules-parameterized
+    // (the Effect:: constants they use are stable enum IDs — future pass can
+    // cross-reference with rules.effect_priorities when needed)
+    if (beh >= VanillaAI::SMART || beh == VanillaAI::GYM_LEADER
+     || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
+        ai_types(scores, ctx);
+        ai_smart(scores, ctx);
+    } else if (beh >= VanillaAI::AGGRESSIVE) {
+        ai_types(scores, ctx);
+        ai_offensive(scores, ctx);
+    } else {
+        ai_types(scores, ctx);
+    }
+
+    if (beh == VanillaAI::DEFENSIVE || beh == VanillaAI::GYM_LEADER
+     || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
+        ai_setup(scores, ctx, 0, 0);
+    }
+
+    if (should_switch(ctx)) {
+        size_t switch_to = choose_switch_target(ctx);
+        if (switch_to < SIZE_MAX) {
+            AIDecision d;
+            d.action    = ActionSwitch{switch_to};
+            d.reasoning = "Low HP — switching (rules-derived)";
+            d.confidence = 0.7f;
+            return d;
+        }
+    }
+
+    int best_score = INT_MAX;
+    std::vector<size_t> candidates;
+    for (size_t i = 0; i < 4; ++i) {
+        if (!ctx.self.can_use_move(i)) continue;
+        if (scores.scores[i] < best_score) {
+            best_score = scores.scores[i];
+            candidates.clear();
+            candidates.push_back(i);
+        } else if (scores.scores[i] == best_score) {
+            candidates.push_back(i);
+        }
+    }
+
+    AIDecision d;
+    if (candidates.empty()) {
+        d.action = ActionFight{0, 0};
+        d.reasoning = "Struggle";
+        d.confidence = 1.0f;
+        return d;
+    }
+
+    // Crystal tie-breaking: uniform random among tied slots
+    const size_t chosen = candidates.size() == 1
+        ? candidates[0]
+        : candidates[const_cast<Battle&>(ctx.battle).rng_byte() % candidates.size()];
+    d.action     = ActionFight{chosen, 0};
+    d.reasoning  = "Move slot " + std::to_string(chosen) + " score=" + std::to_string(best_score)
+                 + " (rules-derived)";
     d.confidence = 0.8f;
     return d;
 }
@@ -658,3 +765,5 @@ std::vector<std::pair<AIBehaviorId, std::string>> AIRegistry::list_registered() 
 }
 
 } // namespace enginemon
+
+#pragma warning(pop)

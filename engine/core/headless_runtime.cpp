@@ -136,6 +136,15 @@ bool setup_headless_runtime(
         rt.registries.moves = std::move(*move_reg);
         // move registry is already frozen by load_move_registry()
     }
+    {
+        auto br = rt.package->load_battle_rules();
+        if (!br) {
+            error = "setup_headless_runtime: failed to load BattleRules chunk from package "
+                    "(chunk absent or corrupt) — recompile the package from ROM";
+            return false;
+        }
+        rt.battle_rules = std::move(*br);
+    }
 
     // -------------------------------------------------------------------------
     // Load initial world state (map + tileset)
