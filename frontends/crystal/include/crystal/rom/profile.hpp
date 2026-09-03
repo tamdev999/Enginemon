@@ -546,11 +546,20 @@ public:
     // Moves: same approach — scans Moves records until an invalid type byte.
     // StdScripts: scans 3-byte entries until a ptr < 0x4000 (invalid bank-local
     //   pointer sentinel) is found, then confirms profile count matches.
+    // TypeMatchups: validates that the configured address actually points at a
+    //   valid TypeMatchups table (>= 30 entries, 0xFF sentinel). Searches for
+    //   a better candidate and emits a diagnostic if the address is wrong.
+    // Moves: also validates that the configured address starts with the Pound
+    //   (MoveId 1) signature; searches for a candidate if not.
+    //
+    // NOTE: Type boundary for species/move scanning uses 0x3F (generous) so
+    //   hacks adding new types (Fairy=0x1C, etc.) are counted correctly.
     struct CountMismatch {
-        std::string field;    // "num_pokemon", "num_moves", "std_scripts_count"
-        uint16_t profile_count;
-        uint16_t rom_derived_count;
-        std::string detail;
+        std::string field;    // "num_pokemon", "num_moves", "std_scripts_count",
+                              // "num_map_groups", "type_matchups_address", "moves_address"
+        uint16_t profile_count;      // value from profile (0 for address-mismatch fields)
+        uint16_t rom_derived_count;  // value from ROM probe (0 for address-mismatch fields)
+        std::string detail;  // human-readable explanation with suggested fix
     };
     static std::vector<CountMismatch> probe_profile_counts(
         const ExtractionProfile& profile,

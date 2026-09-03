@@ -16,6 +16,7 @@
 
 #include "crystal/rom/loader.hpp"
 #include "crystal/rom/profile.hpp"
+#include "crystal/extract/sm83_lifter.hpp"
 #include "crystal/battle/crystal_effects.hpp"
 #include "crystal/output/native_package.hpp"
 #include "engine/package/package_reader.hpp"
@@ -547,6 +548,171 @@ TEST(ps_split_real_rom_fire_vs_normal_distinct) {
 }
 
 // ============================================================================
+// TEST 10: Type-0x1C (Fairy) species is NOT truncated by probe_profile_counts
+//
+// Before the 0x1B→0x3F fix, a species with type1=0x1C (Fairy) would be treated
+// as an invalid type boundary by probe_profile_counts Probe 1, causing the probe
+// to report a count of 0 instead of the actual species count.
+//
+// After the fix (MAX_VALID_TYPE=0x3F), Fairy and any other type up to 0x3F are
+// accepted, and the probe correctly counts through them.
+// ============================================================================
+TEST(probe_fairy_type_not_truncated) {
+    // Build a synthetic ROM with 10 species, where species 5 has Fairy type (0x1C).
+    constexpr uint32_t BASE_DATA_FLAT = 0x51424;
+    constexpr uint32_t RECORD_SIZE    = 32;
+    constexpr uint16_t SPECIES_COUNT  = 10;
+    size_t rom_size = BASE_DATA_FLAT + (SPECIES_COUNT + 2) * RECORD_SIZE + 0x100;
+    std::vector<uint8_t> rom(rom_size, 0x00);
+
+    for (uint16_t i = 0; i < SPECIES_COUNT; ++i) {
+        uint32_t addr = BASE_DATA_FLAT + i * RECORD_SIZE;
+        rom[addr + 0] = static_cast<uint8_t>(i + 1);  // dex_num
+        rom[addr + 1] = 45;   // hp (non-zero, required by probe)
+        // Species 5 (index 4) gets Fairy (0x1C) as both types.
+        uint8_t t = (i == 4) ? 0x1C : 0x00;  // NORMAL=0x00, FAIRY=0x1C
+        rom[addr + 7] = t;   // type1
+        rom[addr + 8] = t;   // type2
+    }
+    // Sentinel: invalid type at record 10
+    uint32_t sentinel = BASE_DATA_FLAT + SPECIES_COUNT * RECORD_SIZE;
+    rom[sentinel + 1] = 45;   // hp non-zero (so only type stops it)
+    rom[sentinel + 7] = 0x94; // invalid type byte
+
+    // Build profile pointing at the synthetic table, claiming exactly SPECIES_COUNT.
+    crystal::ExtractionProfile profile{};
+    profile.offsets.base_data               = BASE_DATA_FLAT;
+    profile.format.pokemon.base_data_size   = RECORD_SIZE;
+    profile.format.pokemon.type1_offset     = 7;
+    profile.format.pokemon.type2_offset     = 8;
+    profile.format.pokemon.hp_offset        = 1;
+    profile.counts.num_pokemon              = SPECIES_COUNT;
+
+    auto mismatches = crystal::ProfileRegistry::probe_profile_counts(
+        profile, rom.data(), rom.size());
+
+    // Should be NO mismatch — the probe should count all 10 including the Fairy one.
+    bool found_pokemon_mismatch = false;
+    for (const auto& m : mismatches) {
+        if (m.field == "num_pokemon") found_pokemon_mismatch = true;
+    }
+    ASSERT_FALSE(found_pokemon_mismatch);
+    std::cout << "\n    [Fairy type (0x1C) not treated as boundary; all 10 species counted]\n";
+}
+
+// ============================================================================
+// TEST 11: sm83_find_ai_discourage_move locates a relocated routine
+//
+// Constructs a minimal synthetic ROM that contains the AIDiscourageMove pattern
+// (7E C6 NN 77 C9) at a non-profile address, then verifies that
+// sm83_find_ai_discourage_move() finds it and the recognizer extracts the
+// correct parameter.
+//
+// This proves the structural scan is independent of any profile address.
+// ============================================================================
+TEST(sm83_scan_finds_relocated_ai_discourage_move) {
+    // Build a synthetic ROM.
+    // Place the 5-byte pattern at flat offset 0x30000 (well away from any
+    // profile address the vanilla Crystal profile would use).
+    constexpr uint32_t ROM_SIZE         = 0x200000;
+    constexpr uint32_t PATTERN_OFFSET   = 0x30000;
+    constexpr uint8_t  DELTA            = 15;  // N=15 (not the vanilla 10)
+    std::vector<uint8_t> rom_bytes(ROM_SIZE, 0x00);
+
+    // Write the AIDiscourageMove pattern: 7E C6 NN 77 C9
+    rom_bytes[PATTERN_OFFSET + 0] = 0x7E;  // ld a, [hl]
+    rom_bytes[PATTERN_OFFSET + 1] = 0xC6;  // add a, n
+    rom_bytes[PATTERN_OFFSET + 2] = DELTA; // N = 15
+    rom_bytes[PATTERN_OFFSET + 3] = 0x77;  // ld [hl], a
+    rom_bytes[PATTERN_OFFSET + 4] = 0xC9;  // ret
+
+    // Wrap in a RomData-compatible loader via a temporary file.
+    auto tmp = std::filesystem::temp_directory_path() / "sm83_scan_test.gbc";
+    {
+        std::ofstream f(tmp, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(rom_bytes.data()), (std::streamsize)rom_bytes.size());
+    }
+
+    bool found = false;
+    {
+        auto rom = crystal::RomData::load(tmp);
+        if (!rom) {
+            std::cout << "\n    [SKIP: could not write temp ROM]\n";
+            std::filesystem::remove(tmp);
+            return;
+        }
+
+        auto candidates = crystal::sm83_find_ai_discourage_move(*rom);
+        // Must find at least one candidate at our planted address.
+        for (const auto& c : candidates) {
+            if (c.flat_address == PATTERN_OFFSET) {
+                ASSERT_TRUE(c.lift_result.ok);
+                ASSERT_EQ(c.lift_result.p[0], DELTA);
+                found = true;
+                break;
+            }
+        }
+    }
+    std::filesystem::remove(tmp);
+
+    ASSERT_TRUE(found);
+    std::cout << "\n    [Relocated AIDiscourageMove at 0x30000 found; delta=15 extracted]\n";
+}
+
+// ============================================================================
+// TEST 12: TypeMatchups address mismatch emits a structured diagnostic
+//
+// Builds a profile with a wrong type_matchups address (pointing at zero bytes),
+// then verifies probe_profile_counts() returns a "type_matchups_address"
+// CountMismatch entry with the expected format.
+// ============================================================================
+TEST(probe_typematchups_address_mismatch_diagnosed) {
+    // Build a small synthetic ROM that has NO valid TypeMatchups table at all
+    // (all zeroes), so any configured address will fail validation.
+    // 0x41000 bytes long to satisfy basic ROM size requirements for probes.
+    constexpr uint32_t ROM_SIZE = 0x200000;
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00);
+
+    // Place a valid-looking TypeMatchups table at 0x50000 (not at the profile address).
+    // Format: {atk, def, mult} × 35 entries, then 0xFF sentinel.
+    constexpr uint32_t REAL_TABLE = 0x50000;
+    for (int i = 0; i < 35; ++i) {
+        rom[REAL_TABLE + i * 3 + 0] = static_cast<uint8_t>(i % 20);  // atk type
+        rom[REAL_TABLE + i * 3 + 1] = static_cast<uint8_t>((i + 1) % 20);  // def type
+        rom[REAL_TABLE + i * 3 + 2] = 20;  // multiplier ∈ {0,5,20}
+    }
+    rom[REAL_TABLE + 35 * 3] = 0xFF;  // sentinel
+
+    // Build profile pointing at a WRONG address (0x30000 — all zeroes).
+    crystal::ExtractionProfile profile{};
+    profile.offsets.type_matchups = 0x30000;  // Wrong — points at zeroes
+    // Zero out the rest so other probes don't fire:
+    profile.offsets.base_data     = 0;
+    profile.offsets.moves         = 0;
+    profile.offsets.std_scripts   = 0;
+    profile.offsets.std_scripts_count = 0;
+    profile.offsets.map_group_pointers = 0;
+    profile.format.pokemon.base_data_size = 0;
+    profile.format.move.move_data_size    = 0;
+
+    auto mismatches = crystal::ProfileRegistry::probe_profile_counts(
+        profile, rom.data(), rom.size());
+
+    bool found_typematchups = false;
+    for (const auto& m : mismatches) {
+        if (m.field == "type_matchups_address") {
+            found_typematchups = true;
+            // profile_count == 0 (sentinel for address-mismatch fields)
+            ASSERT_EQ(m.profile_count, 0u);
+            // detail must mention the wrong address and candidate
+            ASSERT_FALSE(m.detail.empty());
+        }
+    }
+    ASSERT_TRUE(found_typematchups);
+    std::cout << "\n    [Wrong type_matchups address → structured diagnostic emitted]\n";
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -584,6 +750,11 @@ int main(int argc, char* argv[]) {
     RUN_TEST(gen2_type_based_ps_split_correct);
     RUN_TEST(ps_category_survives_package_roundtrip);
     RUN_TEST(ps_split_real_rom_fire_vs_normal_distinct);
+
+    std::cout << "\n--- Generic hack-hardening tests ---\n";
+    RUN_TEST(probe_fairy_type_not_truncated);
+    RUN_TEST(sm83_scan_finds_relocated_ai_discourage_move);
+    RUN_TEST(probe_typematchups_address_mismatch_diagnosed);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

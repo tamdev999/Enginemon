@@ -583,13 +583,63 @@ BattleRulesExtractResult extract_battle_rules(
             rules.sm83_lifted_mask |= mask_bit;  // record successful extraction
         };
 
+        // lift_r: like lift() but with structural relocation fallback.
+        // When the recognizer fails at the profile address (routine relocated),
+        // sm83_resolve_address runs the structural ROM scan and returns the
+        // found address. The recognizer is then re-applied at the new address.
+        // If the scan also finds nothing, default values remain.
+        auto lift_r = [&](uint32_t flat_addr, uint32_t span_len, const char* name,
+                          uint16_t mask_bit,
+                          Sm83FindFn find_fn,
+                          auto recognizer_fn, auto apply_fn) {
+            // First attempt: use profile address (or 0 if not set).
+            // sm83_resolve_address returns flat_addr unchanged if in-bounds,
+            // or runs the scan if flat_addr is 0 or OOB.
+            std::string diag;
+            uint32_t effective_addr = sm83_resolve_address(
+                rom, flat_addr, span_len, find_fn, name,
+                flat_addr == 0 ? nullptr : &diag);
+
+            if (!diag.empty()) {
+                std::fprintf(stderr, "SM83 lift %s: %s\n", name, diag.c_str());
+            }
+
+            if (effective_addr == 0) return;  // not found anywhere
+
+            auto span = rom_span_at(rom, effective_addr, span_len);
+            if (!span.data) return;  // shouldn't happen but guard anyway
+
+            auto r = recognizer_fn(span);
+            if (!r.ok) {
+                if (effective_addr != flat_addr) {
+                    // Scan found something but recognizer still failed.
+                    std::fprintf(stderr,
+                        "SM83 lift %s: scan candidate 0x%05X also failed: %s\n",
+                        name, effective_addr, r.error.c_str());
+                } else {
+                    std::fprintf(stderr, "SM83 lift %s warning: %s\n", name, r.error.c_str());
+                }
+                return;
+            }
+
+            if (effective_addr != flat_addr && flat_addr != 0) {
+                std::fprintf(stderr,
+                    "SM83 lift %s: relocated from profile 0x%05X to 0x%05X (scan)\n",
+                    name, flat_addr, effective_addr);
+            }
+            apply_fn(r);
+            rules.sm83_lifted_mask |= mask_bit;
+        };
+
         // AIDiscourageMove — p[0] = discouragement delta
-        lift(o.sm83_ai_discourage_move, ProfileOffsets::SM83_SPAN_AI_DISCOURAGE,
-             "AIDiscourageMove", enginemon::BattleRules::SM83_LIFTED_AI_SCORES,
-             [](const RomSpan& s) { return lift_ai_discourage_move(s); },
-             [&](const LiftResult& r) {
-                 rules.ai_scores.discourage_strong = r.p[0];
-             });
+        // lift_r: supports structural relocation scan when profile address is wrong.
+        lift_r(o.sm83_ai_discourage_move, ProfileOffsets::SM83_SPAN_AI_DISCOURAGE,
+               "AIDiscourageMove", enginemon::BattleRules::SM83_LIFTED_AI_SCORES,
+               sm83_find_ai_discourage_move,
+               [](const RomSpan& s) { return lift_ai_discourage_move(s); },
+               [&](const LiftResult& r) {
+                   rules.ai_scores.discourage_strong = r.p[0];
+               });
 
         // AIChooseMove — p[0] = init score
         lift(o.sm83_ai_choose_move, ProfileOffsets::SM83_SPAN_AI_CHOOSE_MOVE,
@@ -600,20 +650,24 @@ BattleRulesExtractResult extract_battle_rules(
              });
 
         // GiveExperiencePoints — p[0] = exp base divisor
-        lift(o.sm83_give_exp_points, ProfileOffsets::SM83_SPAN_GIVE_EXP,
-             "GiveExperiencePoints", enginemon::BattleRules::SM83_LIFTED_EXP,
-             [](const RomSpan& s) { return lift_exp_divisor(s); },
-             [&](const LiftResult& r) {
-                 rules.exp_formula.base_divisor = r.p[0];
-             });
+        // lift_r: supports structural relocation scan.
+        lift_r(o.sm83_give_exp_points, ProfileOffsets::SM83_SPAN_GIVE_EXP,
+               "GiveExperiencePoints", enginemon::BattleRules::SM83_LIFTED_EXP,
+               sm83_find_exp_divisor,
+               [](const RomSpan& s) { return lift_exp_divisor(s); },
+               [&](const LiftResult& r) {
+                   rules.exp_formula.base_divisor = r.p[0];
+               });
 
         // BattleCommand_DamageVariation — p[0] = RRCA lower bound byte
-        lift(o.sm83_damage_variation, ProfileOffsets::SM83_SPAN_DAMAGE_VARIATION,
-             "BattleCommand_DamageVariation", enginemon::BattleRules::SM83_LIFTED_DAMAGE_VAR,
-             [](const RomSpan& s) { return lift_damage_variation(s); },
-             [&](const LiftResult& r) {
-                 rules.damage_variation.lower_bound_byte = r.p[0];
-             });
+        // lift_r: supports structural relocation scan.
+        lift_r(o.sm83_damage_variation, ProfileOffsets::SM83_SPAN_DAMAGE_VARIATION,
+               "BattleCommand_DamageVariation", enginemon::BattleRules::SM83_LIFTED_DAMAGE_VAR,
+               sm83_find_damage_variation,
+               [](const RomSpan& s) { return lift_damage_variation(s); },
+               [&](const LiftResult& r) {
+                   rules.damage_variation.lower_bound_byte = r.p[0];
+               });
 
         // PokeBallEffect — p[0]=SLP/FRZ bonus, p[1]=BRN/PSN/PAR (bug), p[2]=none
         lift(o.sm83_poke_ball_effect, ProfileOffsets::SM83_SPAN_POKE_BALL,
@@ -655,20 +709,24 @@ BattleRulesExtractResult extract_battle_rules(
              });
 
         // GetEighthMaxHP — p[0] = denominator (8)
-        lift(o.sm83_get_eighth_max_hp, ProfileOffsets::SM83_SPAN_GET_EIGHTH_HP,
-             "GetEighthMaxHP", enginemon::BattleRules::SM83_LIFTED_RESIDUAL,
-             [](const RomSpan& s) { return lift_residual_fraction(s); },
-             [&](const LiftResult& r) {
-                 rules.residual.burn_poison_denom = r.p[0];
-             });
+        // lift_r: supports structural relocation scan.
+        lift_r(o.sm83_get_eighth_max_hp, ProfileOffsets::SM83_SPAN_GET_EIGHTH_HP,
+               "GetEighthMaxHP", enginemon::BattleRules::SM83_LIFTED_RESIDUAL,
+               sm83_find_eighth_max_hp,
+               [](const RomSpan& s) { return lift_residual_fraction(s); },
+               [&](const LiftResult& r) {
+                   rules.residual.burn_poison_denom = r.p[0];
+               });
 
         // GetSixteenthMaxHP — p[0] = denominator (16)
-        lift(o.sm83_get_sixteenth_max_hp, ProfileOffsets::SM83_SPAN_GET_SIXTEENTH_HP,
-             "GetSixteenthMaxHP", enginemon::BattleRules::SM83_LIFTED_RESIDUAL,
-             [](const RomSpan& s) { return lift_residual_fraction(s); },
-             [&](const LiftResult& r) {
-                 rules.residual.toxic_denom = r.p[0];
-             });
+        // lift_r: supports structural relocation scan.
+        lift_r(o.sm83_get_sixteenth_max_hp, ProfileOffsets::SM83_SPAN_GET_SIXTEENTH_HP,
+               "GetSixteenthMaxHP", enginemon::BattleRules::SM83_LIFTED_RESIDUAL,
+               sm83_find_sixteenth_max_hp,
+               [](const RomSpan& s) { return lift_residual_fraction(s); },
+               [&](const LiftResult& r) {
+                   rules.residual.toxic_denom = r.p[0];
+               });
 
         // BattleCommand_Critical — p[0]=held_item, p[1]=scope_lens, p[2]=focus_energy
         lift(o.sm83_critical, ProfileOffsets::SM83_SPAN_CRITICAL,

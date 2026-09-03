@@ -478,18 +478,25 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     };
 
     // ── Probe 1: species count from BaseData type-byte boundary ──────────────
-    // Crystal type IDs occupy only 0x00-0x1B (18 types + ???=0x13 + gap).
-    // Values >= 0x1C at either type1 or type2 indicate non-species data (text, etc.)
-    // Scan records until a type byte is invalid; that gives the structural count.
+    // Scans BaseData records until a type byte is clearly outside the valid
+    // Crystal/hack type range. Uses 0x3F as the generous upper bound —
+    // the same value used by TypeMatchups sanity-checking — so hacks that
+    // add new types (e.g. Fairy = 0x1C) are still counted correctly.
+    // Values >= 0x40 reliably indicate non-species data (text, code, etc.)
+    // At the end of the table in all known Crystal-family ROMs.
     if (o.base_data != 0 && fmt.pokemon.base_data_size > 0) {
-        constexpr uint8_t MAX_VALID_TYPE = 0x1B;
+        // MAX_VALID_TYPE must be generous enough for expansion hacks (Fairy, etc.)
+        // 0x3F = 63 allows up to 64 types, well beyond any current hack.
+        constexpr uint8_t MAX_VALID_TYPE = 0x3F;
         uint32_t structural_count = 0;
         for (uint32_t i = 0; i < 512u; ++i) {
             uint32_t entry_addr = o.base_data + i * fmt.pokemon.base_data_size;
             if (entry_addr + fmt.pokemon.base_data_size > rom_size) break;
             uint8_t t1 = read_byte(entry_addr + fmt.pokemon.type1_offset);
             uint8_t t2 = read_byte(entry_addr + fmt.pokemon.type2_offset);
-            if (t1 > MAX_VALID_TYPE || t2 > MAX_VALID_TYPE) break;
+            // Also require non-zero HP to exclude padding/all-zero entries
+            uint8_t hp = read_byte(entry_addr + fmt.pokemon.hp_offset);
+            if (t1 > MAX_VALID_TYPE || t2 > MAX_VALID_TYPE || hp == 0) break;
             ++structural_count;
         }
         if (structural_count != c.num_pokemon) {
@@ -505,8 +512,10 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     }
 
     // ── Probe 2: move count from Moves table type-byte boundary ──────────────
+    // Uses the same generous type bound (0x3F) as Probe 1 so hacks adding
+    // new types (Fairy=0x1C, etc.) are counted correctly rather than truncated.
     if (o.moves != 0 && fmt.move.move_data_size > 0) {
-        constexpr uint8_t MAX_VALID_TYPE = 0x1B;
+        constexpr uint8_t MAX_VALID_TYPE = 0x3F;  // generous; same as TypeMatchups guard
         uint32_t structural_count = 0;
         for (uint32_t i = 0; i < 512u; ++i) {
             uint32_t entry_addr = o.moves + i * fmt.move.move_data_size;
@@ -576,6 +585,158 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
                             "update profile.offsets.std_scripts_count",
                             structural_count, o.std_scripts_count)
             });
+        }
+    }
+
+    // ── Probe 4: Structural address candidates — search when profile address
+    //    is wrong. These probes scan the ROM for the table using its structural
+    //    signature and emit a diagnostic if the found address differs from the
+    //    profile's configured address.  They do NOT auto-update the profile —
+    //    that requires a new per-hack profile registration.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Probe 4a: TypeMatchups table — pure sentinel + {0,5,20} multiplier ──
+    // The TypeMatchups table is identified by:
+    //   • 3-byte entries: {atk_type, def_type, multiplier}
+    //   • multiplier ∈ {0, 5, 20} exactly
+    //   • separated by optional 0xFE bytes (Gen2 boundary marker)
+    //   • terminated by 0xFF
+    // We require at least 30 valid entries before the 0xFF sentinel to
+    // distinguish it from random data that happens to have valid multipliers.
+    if (o.type_matchups != 0) {
+        // Scan forward from configured address, counting valid entries.
+        // The existing extractor already validates this; here we check whether
+        // the configured address actually reaches enough entries.
+        constexpr uint32_t MIN_EXPECTED_ENTRIES = 30u;
+        uint32_t valid_entries = 0;
+        uint32_t ptr = o.type_matchups;
+        bool found_sentinel = false;
+        for (uint32_t i = 0; i < 2048u && ptr < rom_size; ++i) {
+            uint8_t b = read_byte(ptr);
+            if (b == 0xFF) { found_sentinel = true; break; }
+            if (b == 0xFE) { ptr += 1; continue; }  // Gen2 separator
+            if (ptr + 3u > rom_size) break;
+            uint8_t mult = read_byte(ptr + 2);
+            if (mult == 0 || mult == 5 || mult == 20) {
+                ++valid_entries;
+                ptr += 3;
+            } else {
+                break;  // invalid multiplier: not a type matchup table
+            }
+        }
+        if (!found_sentinel || valid_entries < MIN_EXPECTED_ENTRIES) {
+            // Configured address does not look like a valid TypeMatchups table.
+            // Search for a better candidate with generous type-ID limit.
+            constexpr uint8_t MAX_TYPE_ID_SEARCH = 0x3F;
+            uint32_t best_candidate = 0;
+            uint32_t best_count = 0;
+            for (uint32_t search = 0;
+                 search + 12 <= rom_size && best_count < MIN_EXPECTED_ENTRIES;
+                 search += 3)
+            {
+                if (read_byte(search) == 0xFE || read_byte(search) == 0xFF) {
+                    search -= 2; continue;  // align on entry boundary
+                }
+                uint32_t p2 = search;
+                uint32_t cnt = 0;
+                bool ok = false;
+                for (uint32_t j = 0; j < 2048u && p2 < rom_size; ++j) {
+                    uint8_t a2 = read_byte(p2);
+                    if (a2 == 0xFF) { ok = true; break; }
+                    if (a2 == 0xFE) { p2 += 1; continue; }
+                    if (p2 + 3u > rom_size) break;
+                    uint8_t d2 = read_byte(p2 + 1);
+                    uint8_t m2 = read_byte(p2 + 2);
+                    if (a2 > MAX_TYPE_ID_SEARCH || d2 > MAX_TYPE_ID_SEARCH) break;
+                    if (m2 != 0 && m2 != 5 && m2 != 20) break;
+                    ++cnt; p2 += 3;
+                }
+                if (ok && cnt > best_count) { best_count = cnt; best_candidate = search; }
+            }
+            if (best_count >= MIN_EXPECTED_ENTRIES && best_candidate != o.type_matchups) {
+                mismatches.push_back({
+                    "type_matchups_address",
+                    0,  // not a count field; reuse profile_count=0 as sentinel
+                    0,  // structural_count unused here
+                    std::format("profile.offsets.type_matchups=0x{:05X} does not point to a "
+                                "valid TypeMatchups table ({} valid entries, sentinel={}).\n"
+                                "  Structural search found candidate at 0x{:05X} "
+                                "({} entries).\n"
+                                "  Update profile.offsets.type_matchups=0x{:05X} for this ROM.",
+                                o.type_matchups, valid_entries, found_sentinel,
+                                best_candidate, best_count, best_candidate)
+                });
+            } else if (!found_sentinel || valid_entries < MIN_EXPECTED_ENTRIES) {
+                mismatches.push_back({
+                    "type_matchups_address",
+                    0, 0,
+                    std::format("profile.offsets.type_matchups=0x{:05X} does not look like a "
+                                "valid TypeMatchups table ({} valid entries, sentinel={}).\n"
+                                "  No structural candidate found in ROM scan.\n"
+                                "  TypeMatchups table may have been relocated or reformatted.",
+                                o.type_matchups, valid_entries, found_sentinel)
+                });
+            }
+        }
+    }
+
+    // ── Probe 4b: Moves table — Pound (MoveId 1) signature ───────────────────
+    // Move record 0 (MoveId 1 = Pound) has a known signature independent of
+    // animation byte: effect=0, power=40(0x28), type=0(Normal), acc=255(0xFF),
+    // pp=35(0x23), effect_chance=0.  This is unique enough to locate the table.
+    if (o.moves != 0 && fmt.move.move_data_size > 0) {
+        // Quick sanity check: does the profile address look like it starts with Pound?
+        // Pound bytes at: [effect_off]=0, [power_off]=0x28, [type_off]=0x00,
+        //                 [accuracy_off]=0xFF, [pp_off]=0x23, [ec_off]=0x00
+        auto check_pound_at = [&](uint32_t base) -> bool {
+            if (base + fmt.move.move_data_size > rom_size) return false;
+            return read_byte(base + fmt.move.effect_offset)        == 0x00 &&
+                   read_byte(base + fmt.move.power_offset)         == 0x28 &&
+                   read_byte(base + fmt.move.type_offset)          == 0x00 &&
+                   read_byte(base + fmt.move.accuracy_offset)      == 0xFF &&
+                   read_byte(base + fmt.move.pp_offset)            == 0x23 &&
+                   read_byte(base + fmt.move.effect_chance_offset) == 0x00;
+        };
+        if (!check_pound_at(o.moves)) {
+            // Profile address doesn't start with Pound — search for it.
+            // Pound: effect=0x00, power=0x28, type=0x00, acc=0xFF, pp=0x23, ec=0x00
+            uint32_t found_at = 0;
+            // Only search at 7-byte and 8-byte strides (known move record sizes)
+            for (uint32_t stride : {7u, 8u}) {
+                if (stride != fmt.move.move_data_size && found_at == 0) {
+                    // Only scan with the configured stride unless nothing found
+                }
+                if (fmt.move.move_data_size == stride || found_at == 0) {
+                    for (uint32_t i = 0; i + stride * 3 <= rom_size; ++i) {
+                        // Fast pre-check: power=0x28, type=0x00, acc=0xFF at their offsets
+                        if (read_byte(i + fmt.move.power_offset)    != 0x28) continue;
+                        if (read_byte(i + fmt.move.type_offset)     != 0x00) continue;
+                        if (read_byte(i + fmt.move.accuracy_offset) != 0xFF) continue;
+                        if (check_pound_at(i)) { found_at = i; break; }
+                    }
+                }
+                if (found_at != 0) break;
+            }
+            if (found_at != 0 && found_at != o.moves) {
+                mismatches.push_back({
+                    "moves_address",
+                    0, 0,
+                    std::format("profile.offsets.moves=0x{:05X} does not start with "
+                                "Pound (MoveId 1) signature.\n"
+                                "  Structural search found Pound at 0x{:05X}.\n"
+                                "  Update profile.offsets.moves=0x{:05X} for this ROM.",
+                                o.moves, found_at, found_at)
+                });
+            } else if (found_at == 0) {
+                mismatches.push_back({
+                    "moves_address",
+                    0, 0,
+                    std::format("profile.offsets.moves=0x{:05X} does not start with "
+                                "Pound signature, and no candidate found in ROM scan.\n"
+                                "  Moves table may be relocated or use different record format.",
+                                o.moves)
+                });
+            }
         }
     }
 

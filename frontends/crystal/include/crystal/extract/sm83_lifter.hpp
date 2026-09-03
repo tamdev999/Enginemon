@@ -177,4 +177,66 @@ LiftResult lift_residual_fraction(const RomSpan& span);
 // Extracts: high_crit_delta, scope_lens_delta, lucky_punch_delta, focus_energy_delta
 LiftResult lift_crit_stage_deltas(const RomSpan& span);
 
+// ============================================================================
+// SM83 ROUTINE CANDIDATE SEARCH
+//
+// When a profile does not have a vanilla address for an SM83 routine (field=0)
+// or the vanilla address is wrong for a relocated ROM, sm83_locate_candidates()
+// scans the entire ROM for structural byte patterns that match the routine's
+// known signature, then validates each candidate with the strict recognizer.
+//
+// Each recognizer has a distinct opcode pattern. The search looks for that
+// pattern, building a list of candidate flat addresses where the recognizer
+// would succeed. The final recognizer remains strict and fail-closed — no
+// fuzzy matching occurs. Only exact structural matches pass.
+//
+// Usage:
+//   auto candidates = sm83_locate_candidates<lift_ai_discourage_move>(rom);
+//   for (uint32_t addr : candidates) {
+//       auto span = rom_span_at(rom, addr, SM83_SPAN_AI_DISCOURAGE);
+//       auto result = lift_ai_discourage_move(span);
+//       // result.ok == true guaranteed by the scan filter
+//   }
+// ============================================================================
+
+struct Sm83Candidate {
+    uint32_t flat_address;
+    LiftResult lift_result;   // Always ok=true (failed candidates are excluded)
+};
+
+// Locate AIDiscourageMove candidates: 7E C6 NN 77 C9  (NN in [1,50])
+// Strict: exact 5-byte pattern, all bytes checked.
+std::vector<Sm83Candidate> sm83_find_ai_discourage_move(const RomData& rom);
+
+// Locate DamageVariation candidates: 0F FE NN 38 xx  (NN >= 0x80)
+// Strict: RRCA / CP N / JR C pattern.
+std::vector<Sm83Candidate> sm83_find_damage_variation(const RomData& rom);
+
+// Locate ExpDivisor candidates: 3E NN E0 B7 06 04 CD  (NN in [1,20])
+// Strict: LD A,N / LDH [hDivisor],a / LD B,4 / CALL pattern.
+std::vector<Sm83Candidate> sm83_find_exp_divisor(const RomData& rom);
+
+// Locate GetEighthMaxHP candidates: CD ?? ?? CB 39  (call + exactly 1 srl c)
+// Strict: CALL followed by exactly one SRL C; denominator must be 8.
+std::vector<Sm83Candidate> sm83_find_eighth_max_hp(const RomData& rom);
+
+// Locate GetSixteenthMaxHP candidates: CD ?? ?? CB 39 CB 39  (call + 2 srl c)
+// Strict: CALL followed by exactly two SRL C; denominator must be 16.
+std::vector<Sm83Candidate> sm83_find_sixteenth_max_hp(const RomData& rom);
+
+// Generic helper: given a profile sm83 address and a find function,
+// return the first candidate address that passes the strict recognizer.
+// If profile_address != 0, tries that address first (span-based).
+// Then runs the structural scan if needed.
+// Returns 0 if no valid candidate is found.
+using Sm83FindFn = std::vector<Sm83Candidate>(*)(const RomData&);
+
+uint32_t sm83_resolve_address(
+    const RomData& rom,
+    uint32_t profile_address,
+    uint32_t span_size,
+    Sm83FindFn find_fn,
+    const char* routine_name,
+    std::string* out_diagnostic = nullptr);
+
 }  // namespace crystal
