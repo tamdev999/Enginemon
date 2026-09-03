@@ -9,6 +9,7 @@
 #include "engine/core/game_state.hpp"
 #include "engine/core/game_loop.hpp"
 #include "engine/core/rtc.hpp"
+#include "engine/battle/battle_rules.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1195,7 +1196,13 @@ namespace party_api {
 
 // ctx.party:count() -> number
 int count(lua_State* L) {
-    lua_pushinteger(L, 1);  // Stub: 1 Pokemon
+    // Party not yet in GameState — party serialization is a prerequisite.
+    // Return 0 (empty party) rather than the misleading stub value of 1.
+    // Source: party.hpp defines Party::MAX_PARTY_SIZE=6 and Party class,
+    // but GameState does not yet persist party data.
+    LuaRuntime* runtime = get_runtime(L);
+    (void)runtime;  // no GameState path yet
+    lua_pushinteger(L, 0);  // correct: unknown party → 0, not 1
     return 1;
 }
 
@@ -1210,7 +1217,9 @@ int get(lua_State* L) {
 // ctx.party:has_species(species_id) -> bool
 int has_species(lua_State* L) {
     int species_id = luaL_checkinteger(L, 2);
-    lua_pushinteger(L, 0);  // stub: not found — 0 per VM result contract
+    (void)species_id;
+    // Party not in GameState yet — always false until party serialization lands.
+    lua_pushinteger(L, 0);  // 0 per VM result contract
     return 1;
 }
 
@@ -1359,10 +1368,12 @@ int give_money(lua_State* L) {
     const char* key = (account == 1) ? "money_mom"
                     : (account == 2) ? "coins"
                     :                  "money_player";
-    // Crystal BCD storage width caps:
-    //   wPlayerMoney / wMomsMoney: 3 packed-BCD bytes → max 999999
-    //   wCoins: 2 packed-BCD bytes → max 9999
-    const int32_t cap = (account == 2) ? GameState::COIN_MAX : GameState::MONEY_MAX;
+    // Crystal BCD storage width caps — read from BattleRules::frontend_limits
+    // when a package is loaded, otherwise fall back to the vanilla-correct defaults.
+    const BattleRules* rules = runtime->get_battle_rules();
+    const int32_t cap = (account == 2)
+        ? (rules ? rules->get_coin_max()  : int32_t{9999})
+        : (rules ? rules->get_money_max() : int32_t{999999});
     if (GameState* gs = runtime->get_game_state()) {
         auto it = gs->variables.find(key);
         int32_t current = (it != gs->variables.end()) ? it->second : 0;

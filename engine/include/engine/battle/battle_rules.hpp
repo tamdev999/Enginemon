@@ -267,6 +267,29 @@ struct BattleRules {
     } damage_variation{};
 
     // ========================================================================
+    // Frontend-derived economy limits.
+    // These are format constants derived from the source frontend's SRAM/BCD layout,
+    // not SM83 immediate parameters.  They belong here (not in generic GameState)
+    // so ROM hacks or alternate frontends can override them through the package.
+    //
+    // Crystal SRAM BCD widths:
+    //   wPlayerMoney / wMomsMoney: 3 packed-BCD bytes → max 999,999
+    //   wCoins: 2 packed-BCD bytes → max 9,999
+    //   wNumItems / wItems bag: 20 item slots × 99 per slot
+    //
+    // Source: pokecrystal/constants/wram_constants.asm + wram.asm
+    struct FrontendLimits {
+        int32_t money_max  = 999999;  // BCD 3-byte max for player/mom money
+        int32_t coin_max   =   9999;  // BCD 2-byte max for Game Corner coins
+        int32_t item_qty_max  =   99; // Crystal bag semantics: 99 per slot
+    } frontend_limits{};
+
+    // Convenience getters — fall back to struct defaults (vanilla-correct).
+    int32_t get_money_max()    const { return frontend_limits.money_max; }
+    int32_t get_coin_max()     const { return frontend_limits.coin_max; }
+    int32_t get_item_qty_max() const { return frontend_limits.item_qty_max; }
+
+    // ======================================================================
     // SM83 lift status — bitmask recording which sub-structs were actually
     // extracted from ROM bytes vs fell back to the in-struct vanilla defaults.
     //

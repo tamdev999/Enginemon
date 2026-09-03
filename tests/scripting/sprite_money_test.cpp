@@ -1412,8 +1412,8 @@ return script
     // Must be capped at 999999, not 1000090
     auto it = gs.variables.find("money_player");
     ASSERT_TRUE(it != gs.variables.end());
-    ASSERT_EQ(it->second, GameState::MONEY_MAX);
-    ASSERT_TRUE(it->second <= GameState::MONEY_MAX);
+    ASSERT_EQ(it->second, enginemon::BattleRules{}.get_money_max());
+    ASSERT_TRUE(it->second <= enginemon::BattleRules{}.get_money_max());
     std::cout << "  [give_money player cap: 999990+100 → " << it->second << " (not 1000090)]\n";
 }
 
@@ -1435,7 +1435,7 @@ return script
     runtime.start_script("script");
     auto it = gs.variables.find("money_mom");
     ASSERT_TRUE(it != gs.variables.end());
-    ASSERT_EQ(it->second, GameState::MONEY_MAX);
+    ASSERT_EQ(it->second, enginemon::BattleRules{}.get_money_max());
     std::cout << "  [give_money mom cap: 999999+1 → " << it->second << " (stays at 999999)]\n";
 }
 
@@ -1457,8 +1457,8 @@ return script
     runtime.start_script("script");
     auto it = gs.variables.find("coins");
     ASSERT_TRUE(it != gs.variables.end());
-    ASSERT_EQ(it->second, GameState::COIN_MAX);  // 9999, NOT 10090
-    ASSERT_TRUE(it->second <= GameState::COIN_MAX);
+    ASSERT_EQ(it->second, enginemon::BattleRules{}.get_coin_max());  // 9999, NOT 10090
+    ASSERT_TRUE(it->second <= enginemon::BattleRules{}.get_coin_max());
     // Prove it did NOT reach 10090 (which is > COIN_MAX and would be wrong)
     ASSERT_TRUE(it->second < 10090);
     std::cout << "  [give_money coins cap: 9990+100 → " << it->second << " (not 10090)]\n";
@@ -1483,7 +1483,7 @@ return script
     runtime.start_script("script");
     auto it = gs.variables.find("money_player");
     ASSERT_TRUE(it != gs.variables.end());
-    ASSERT_EQ(it->second, GameState::MONEY_MAX);  // clamped, not overflowed
+    ASSERT_EQ(it->second, enginemon::BattleRules{}.get_money_max());  // clamped, not overflowed
     std::cout << "  [give_money overflow guard: large add clamped to 999999]\n";
 }
 
@@ -1491,14 +1491,14 @@ TEST(give_money_cap_constants_match_bcd_widths) {
     // Structural correctness: MONEY_MAX must be 999999 (3-byte BCD max)
     // and COIN_MAX must be 9999 (2-byte BCD max).
     // These values are derived from Crystal's wPlayerMoney=3 bytes, wCoins=2 bytes.
-    ASSERT_EQ(GameState::MONEY_MAX, 999999);
-    ASSERT_EQ(GameState::COIN_MAX,    9999);
+    ASSERT_EQ(enginemon::BattleRules{}.get_money_max(), 999999);
+    ASSERT_EQ(enginemon::BattleRules{}.get_coin_max(),    9999);
     // MONEY_MAX must be > COIN_MAX (different storage widths)
-    ASSERT_TRUE(GameState::MONEY_MAX > GameState::COIN_MAX);
+    ASSERT_TRUE(enginemon::BattleRules{}.get_money_max() > enginemon::BattleRules{}.get_coin_max());
     // MONEY_MAX must fit in int32_t (999999 << 2,147,483,647)
-    ASSERT_TRUE(static_cast<int64_t>(GameState::MONEY_MAX) < int64_t{2147483647});
-    std::cout << "  [cap constants: MONEY_MAX=" << GameState::MONEY_MAX
-              << " COIN_MAX=" << GameState::COIN_MAX << " — match BCD widths]\n";
+    ASSERT_TRUE(static_cast<int64_t>(enginemon::BattleRules{}.get_money_max()) < int64_t{2147483647});
+    std::cout << "  [cap constants: MONEY_MAX=" << enginemon::BattleRules{}.get_money_max()
+              << " COIN_MAX=" << enginemon::BattleRules{}.get_coin_max() << " — match BCD widths]\n";
 }
 
 int main(int /*argc*/, char* /*argv*/[]) {

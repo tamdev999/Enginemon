@@ -23,6 +23,7 @@ namespace enginemon {
 // Forward declarations
 class GameContext;
 class GameState;
+struct BattleRules;
 class World;
 class BattleContext;
 class Party;
@@ -395,6 +396,12 @@ public:
     // The caller owns GameState; LuaRuntime does NOT take ownership.
     void set_game_state(GameState* gs) { game_state_ = gs; }
     GameState* get_game_state() const  { return game_state_; }
+
+    // Battle rules — optional. When set, script economy limits (money/coin/item
+    // caps) are read from BattleRules::frontend_limits rather than hardcoded defaults.
+    // The caller owns BattleRules; LuaRuntime does NOT take ownership.
+    void set_battle_rules(const BattleRules* rules) { battle_rules_ = rules; }
+    const BattleRules* get_battle_rules() const     { return battle_rules_; }
     
     // Error handler
     using ErrorHandler = std::function<void(const std::string& error, const std::string& traceback)>;
@@ -421,6 +428,7 @@ private:
     // nullptr means stub-only mode (isolated tests).
     // Caller maintains ownership; this pointer is never deleted here.
     GameState* game_state_ = nullptr;
+    const BattleRules* battle_rules_ = nullptr;
     
     uint32_t next_coroutine_id_ = 1;
     std::unordered_map<uint32_t, ScriptCoroutine> coroutines_;

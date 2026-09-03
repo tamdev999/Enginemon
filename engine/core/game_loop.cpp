@@ -1133,17 +1133,19 @@ void HeadlessGameLoop::complete_npc_movement(NpcState& npc) {
     npc.move_progress = 0;
     
     // Reset idle timer
-    // Reference: pokecrystal RandomStepDuration_Slow = random & 0x7F (0-127)
-    // Reference: Gen2Recomped: random(30, 180)
+    // Source: pokecrystal RandomStepDuration_Slow = random & 0x7F (0-127 frames)
+    //         pokecrystal RandomStepDuration_Fast = random & 0x1F (0-31 frames)
+    // Both spin and walk paths use the same random-mask approach.
     uint32_t r = next_random();
     switch (npc.behavior) {
         case NpcMovementBehavior::RandomSpinFast:
-            // Fast: 0-31 frames (pokecrystal RandomStepDuration_Fast = random & 0x1F)
+            // Fast: 0-31 frames — pokecrystal RandomStepDuration_Fast = random & 0x1F
             npc.idle_timer = static_cast<int32_t>(r & 0x1F);
             break;
         default:
-            // Slow: 30-127 frames (compromise between pokecrystal 0-127 and Gen2Recomped 30-180)
-            npc.idle_timer = 30 + static_cast<int32_t>(r % 98);
+            // Slow: 0-127 frames — pokecrystal RandomStepDuration_Slow = random & 0x7F
+            // Crystal does NOT enforce a minimum floor; the range is [0, 127].
+            npc.idle_timer = static_cast<int32_t>(r & 0x7F);
             break;
     }
 }
@@ -1180,7 +1182,7 @@ void HeadlessGameLoop::update_npc_behavior(NpcState& npc) {
     if (!dir_opt.has_value()) {
         // Set new idle timer
         uint32_t r = next_random();
-        npc.idle_timer = 30 + static_cast<int32_t>(r % 98);
+        npc.idle_timer = static_cast<int32_t>(r & 0x7F);
         return;
     }
     
@@ -1205,7 +1207,7 @@ void HeadlessGameLoop::update_npc_behavior(NpcState& npc) {
     if ((r & 1) == 0) {
         // Just turn, don't move
         npc.facing = dir;
-        npc.idle_timer = 30 + static_cast<int32_t>((next_random()) % 98);
+        npc.idle_timer = static_cast<int32_t>(next_random() & 0x7F);
         return;
     }
     
@@ -1215,7 +1217,7 @@ void HeadlessGameLoop::update_npc_behavior(NpcState& npc) {
     } else {
         // Blocked - just update facing and wait
         npc.facing = dir;
-        npc.idle_timer = 30 + static_cast<int32_t>((next_random()) % 98);
+        npc.idle_timer = static_cast<int32_t>(next_random() & 0x7F);
     }
 }
 

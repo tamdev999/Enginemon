@@ -957,6 +957,19 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     // Indicates which sub-structs were actually extracted vs defaulted.
     push_u16(rules.sm83_lifted_mask);
 
+    // Frontend economy limits — 3 × int32_t LE.
+    // Derived from source frontend's SRAM/BCD layout widths.
+    // Old readers (before this field) will load struct defaults (vanilla-correct).
+    auto push_i32 = [&](int32_t v) {
+        buf.push_back(static_cast<uint8_t>(v & 0xFF));
+        buf.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        buf.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+        buf.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+    };
+    push_i32(rules.frontend_limits.money_max);
+    push_i32(rules.frontend_limits.coin_max);
+    push_i32(rules.frontend_limits.item_qty_max);
+
     battle_rules_data_ = std::move(buf);
 }
 

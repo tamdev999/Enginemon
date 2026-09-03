@@ -1063,7 +1063,11 @@ int main(int argc, char* argv[]) {
     //=========================================================================
     
     // Reference: Gen2Recomped Player.lua - stepFlip, animClock, walkPhase
-    constexpr int STEP_FRAMES = 16;
+    // Use GameTiming::FRAMES_PER_STEP (16) as the single authoritative step duration.
+    // Source: pokecrystal OBJECT_STEP_DURATION=16 stored to wObjectStepDuration at flat 0x01F44.
+    // Both player and NPC interpolation must use the same constant so a ROM hack
+    // that changes the step duration produces consistent visual timing.
+    const int STEP_FRAMES = GameTiming::FRAMES_PER_STEP;  // NOT a separate constant — same value
     int step_frame = 0;
     bool step_flip = false;
     int anim_clock = 0;
@@ -1629,10 +1633,10 @@ int main(int argc, char* argv[]) {
         // Walk animation phase (frames 4-11 show walk frame)
         bool show_walk_frame = false;
         if (player_moving) {
-            int p = anim_clock % 16;
+            int p = anim_clock % STEP_FRAMES;
             show_walk_frame = (p >= 4 && p < 12);
         }
-        bool current_step_flip = (anim_clock / 16) % 2 == 1;
+        bool current_step_flip = (anim_clock / STEP_FRAMES) % 2 == 1;
         
         // Player sprite
         SpriteInstance player_inst;
@@ -1680,11 +1684,13 @@ int main(int argc, char* argv[]) {
             bool npc_walk_frame = false;
             bool npc_step_flip = false;
             if (npc.is_moving) {
-                // Walk animation: phase 4-11 of 16-frame step shows walk frame
-                int phase = npc.move_progress % 16;
+                // Walk animation: phase 4-11 of FRAMES_PER_STEP-frame step shows walk frame
+                // Use GameTiming::FRAMES_PER_STEP so a ROM hack that changes step duration
+                // automatically updates the animation phase window.
+                int phase = npc.move_progress % GameTiming::FRAMES_PER_STEP;
                 npc_walk_frame = (phase >= 4 && phase < 12);
-                // Alternate step flip every 16 frames
-                npc_step_flip = ((npc.move_progress / 16) % 2) == 1;
+                // Alternate step flip every FRAMES_PER_STEP frames
+                npc_step_flip = ((npc.move_progress / GameTiming::FRAMES_PER_STEP) % 2) == 1;
             }
             
             npc_inst.walking = npc_walk_frame;

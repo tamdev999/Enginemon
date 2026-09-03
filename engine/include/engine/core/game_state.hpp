@@ -224,16 +224,10 @@ struct GameState {
     // Crystal bag is capped at 20 items / 99 per slot.  We do not enforce the
     // 20-slot cap here — that is a presentation constraint, not a semantic one.
     // Quantity cap of 99 per slot matches Crystal Gen2 bag semantics.
-    static constexpr int32_t ITEM_QUANTITY_MAX = 99;
+    // NOTE: The per-slot cap is enforced in give_item() using BattleRules::frontend_limits
+    // when a package is loaded, or the hardcoded vanilla default of 99 otherwise.
+    static constexpr int32_t ITEM_QUANTITY_MAX = 99;  // vanilla default; see BattleRules::frontend_limits
     std::unordered_map<ItemId, int32_t> items;
-
-    // Money and coin caps — derived from Crystal's BCD storage widths.
-    // wPlayerMoney / wMomsMoney: 3 packed-BCD bytes → 6 decimal digits → max 999999.
-    // wCoins: 2 packed-BCD bytes → 4 decimal digits → max 9999.
-    // These are format constants (BCD width), not SM83 immediate operands.
-    // Source: Crystal WRAM layout — wPlayerMoney at 0xD84E (3 bytes), wCoins at 0xD852 (2 bytes).
-    static constexpr int32_t MONEY_MAX = 999999;  // BCD 3-byte max (player and mom accounts)
-    static constexpr int32_t COIN_MAX  =   9999;  // BCD 2-byte max (Game Corner coins)
 
     // NPC states per map (map_id -> NPC states)
     // This captures all gameplay-relevant NPC runtime state for deterministic resume

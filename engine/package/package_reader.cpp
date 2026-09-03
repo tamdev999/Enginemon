@@ -1155,6 +1155,18 @@ PackageReader::load_battle_rules() const {
         }
     }
 
+    // Frontend economy limits — 3 × int32_t LE, optional (old packages keep struct defaults).
+    auto read_i32 = [&](int32_t& out) -> bool {
+        if (!r.has_bytes(4)) return false;
+        uint32_t raw = 0;
+        if (!r.read_le(raw)) return false;
+        out = static_cast<int32_t>(raw);
+        return true;
+    };
+    read_i32(rules.frontend_limits.money_max);
+    read_i32(rules.frontend_limits.coin_max);
+    read_i32(rules.frontend_limits.item_qty_max);
+
     return rules;
 }
 
