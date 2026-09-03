@@ -602,15 +602,24 @@ void Battle::apply_residual(BattlePokemon& bp, bool is_player) {
     const char* side = is_player ? "Player" : "Opponent";
     int16_t dmg = 0;
 
+    // Denominators from SM83 lifting of GetEighthMaxHP / GetSixteenthMaxHP.
+    // Vanilla: burn/poison = /8, toxic = /16 (per turn, multiplied by status_turns).
+    const int32_t burn_denom  = rules_ ? static_cast<int32_t>(rules_->get_burn_poison_denom())  : 8;
+    const int32_t toxic_denom = rules_ ? static_cast<int32_t>(rules_->get_toxic_denom())         : 16;
+
     if (bp.status == Status::Burn) {
-        dmg = static_cast<int16_t>(std::max(1, bp.stats.max_hp / 8));
+        const int32_t d = (burn_denom > 0) ? (bp.stats.max_hp / burn_denom) : 1;
+        dmg = static_cast<int16_t>(std::max(1, d));
         message(std::string(side) + " is hurt by its burn!");
     } else if (bp.status == Status::Poison) {
-        dmg = static_cast<int16_t>(std::max(1, bp.stats.max_hp / 8));
+        const int32_t d = (burn_denom > 0) ? (bp.stats.max_hp / burn_denom) : 1;
+        dmg = static_cast<int16_t>(std::max(1, d));
         message(std::string(side) + " is hurt by poison!");
     } else if (bp.status == Status::BadPoison) {
         bp.status_turns++;
-        dmg = static_cast<int16_t>(std::max(1, bp.stats.max_hp * bp.status_turns / 16));
+        const int32_t d = (toxic_denom > 0)
+            ? (bp.stats.max_hp * bp.status_turns / toxic_denom) : 1;
+        dmg = static_cast<int16_t>(std::max(1, d));
         message(std::string(side) + " is badly poisoned!");
     }
 

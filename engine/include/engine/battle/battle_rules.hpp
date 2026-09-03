@@ -36,6 +36,19 @@
 //   SunnyDayMoves                 0e:5134  data/battle/ai/sunny_day_moves.asm
 //   TrainerClassAttributes        0e:559c  data/trainers/attributes.asm
 //   TrainerClassDVs               09:70d6  data/trainers/dvs.asm
+//
+// SM83-lifted routine parameters (extracted by frontends/crystal/extract/sm83_lifter.cpp):
+//   BattleCommand_DamageCalc      0d:5612  damage formula constants (/5,+2,/50,MIN_DAMAGE=2)
+//   BattleCommand_DamageVariation 0d:4cfd  variation lower bound byte (0xD9)
+//   AIDiscourageMove              0e:5503  AI discouragement delta (+10)
+//   AIChooseMove                  11:40ce  AI initial score (20)
+//   GiveExperiencePoints          0f:6e3b  experience base divisor (/7)
+//   PokeBallEffect                03:68a2  capture status bonuses (+10 SLP/FRZ)
+//   TryToRunAwayFromBattle        0f:58b3  escape constants (×32, +30/attempt)
+//   CalcMonStatC                  03:617b  stat formula offsets (/100, +5, +10)
+//   GetEighthMaxHP                0f:4c83  burn/poison residual (/8 from shift count)
+//   GetSixteenthMaxHP             0f:4c76  toxic residual (/16 from shift count)
+//   BattleCommand_Critical        0d:4631  crit stage deltas (+2 held, +1 focus/scope)
 
 #include "engine/core/types.hpp"
 #include <algorithm>
@@ -178,8 +191,81 @@ struct BattleRules {
     // Source: TrainerClassAttributes (0e:559c)
     std::vector<TrainerClassAIEntry> trainer_class_ai;
 
-    // ========================================================================
-    // Validity
+    // ============================================================================
+    // SM83-lifted formula parameters.
+    // Extracted at package-build time from known Crystal routine shapes.
+    // The generic runtime uses these instead of inline hardcoded constants.
+    // Source routines verified in frontends/crystal/extract/sm83_lifter.cpp.
+    // ============================================================================
+
+    // Damage formula constants — BattleCommand_DamageCalc (0d:5612)
+    // Core formula: ((level × 2 / level_divisor) + level_addend) × power × atk / def / damage_divisor
+    // Then: clamped to [floor, cap], +floor addend applied after cap.
+    struct DamageFormulaParams {
+        uint8_t level_divisor   = 5;    // ÷5 in level factor (vanilla)
+        uint8_t level_addend    = 2;    // +2 in level factor (count of inc [hl])
+        uint8_t damage_divisor  = 50;   // final /50 divisor (vanilla)
+        uint8_t min_damage      = 2;    // MIN_DAMAGE floor addend (vanilla: add a,2)
+    } damage_formula{};
+
+    // AI score constants — AIChooseMove (11:40ce) + AIDiscourageMove (0e:5503)
+    struct AIScoreParams {
+        uint8_t init_score         = 20;  // Initial score for all move slots (ld a,20)
+        uint8_t discourage_strong  = 10;  // AIDiscourageMove delta (add a,10)
+    } ai_scores{};
+
+    // Stat formula offsets — CalcMonStatC (03:617b)
+    // Formula: ((base+DV)×2 + sqrt(StatExp)/4) × level / level_divisor + offset
+    struct StatFormulaParams {
+        uint8_t level_divisor = 100;  // /100 divisor (ld a,100)
+        uint8_t non_hp_offset =   5;  // STAT_MIN_NORMAL: non-HP stat +5 (ld a,5)
+        uint8_t hp_offset     =  10;  // STAT_MIN_HP: HP stat +10 (ld a,10)
+    } stat_formula{};
+
+    // Escape formula constants — TryToRunAwayFromBattle (0f:58b3)
+    // odds = (player_speed × speed_multiplier) / (wild_speed / 4) + (attempts-1) × attempt_addend
+    struct EscapeParams {
+        uint8_t speed_multiplier = 32;  // player_speed × N (ld a,32)
+        uint8_t attempt_addend   = 30;  // per-attempt addition (ld b,30)
+    } escape{};
+
+    // Capture status bonus — PokeBallEffect (03:68a2)
+    // Catch rate += bonus depending on target status.
+    // Crystal bug: brn_psn_par_bonus is intended +5 but path is unreachable → effectively 0.
+    struct CaptureStatusBonus {
+        uint8_t slp_frz_bonus       = 10;  // Sleep/Freeze bonus (ld c,10)
+        uint8_t brn_psn_par_bonus   =  5;  // Burn/Poison/Paralysis (ld c,5; BUG: unreachable)
+    } capture_status{};
+
+    // Experience formula constants — GiveExperiencePoints (0f:6e3b)
+    struct ExpParams {
+        uint8_t base_divisor = 7;  // exp = base_exp × level / divisor (ld a,7)
+    } exp_formula{};
+
+    // Residual damage fractions — GetEighthMaxHP / GetSixteenthMaxHP (0f:4c83/0f:4c76)
+    // Derived from shift-count (GetQuarterMaxHP + K srl c → 1/(4×2^K)).
+    struct ResidualFractionParams {
+        uint8_t burn_poison_denom = 8;   // Burn/Poison: max_hp / 8 (1 srl c after /4)
+        uint8_t toxic_denom       = 16;  // Toxic: max_hp / 16 (2 srl c after /4)
+    } residual{};
+
+    // Critical hit stage deltas — BattleCommand_Critical (0d:4631)
+    struct CritStageDeltaParams {
+        uint8_t held_item_delta       = 2;  // Lucky Punch / Stick (ld c, 2)
+        uint8_t scope_lens_delta      = 1;  // Scope Lens (inc c)
+        uint8_t focus_energy_delta    = 1;  // Focus Energy (inc c)
+        // high_crit_move_delta = held_item_delta (same ld c, n instruction)
+    } crit_deltas{};
+
+    // Damage variation bounds — BattleCommand_DamageVariation (0d:4cfd)
+    // The random byte is rotated right once (RRCA), then must be >= lower_bound_byte.
+    // lower_bound_byte is the assembled immediate of `cp 85 percent + 1`:
+    //   85 * 255 / 100 + 1 = 217 (0xD9)
+    // Semantic: values [0xD9..0xFF] map to damage ×(value/0xFF) ≈ 85%..100%.
+    struct DamageVariationParams {
+        uint8_t lower_bound_byte = 0xD9;  // `cp 85 percent + 1` assembled → 0xD9
+    } damage_variation{};
+
     // ========================================================================
 
     // Returns true if this BattleRules was loaded from a package and all
@@ -283,6 +369,28 @@ struct BattleRules {
             if (entry[0] >= final_catch_rate) return entry[1];
         return 255;
     }
+
+    // Convenience helpers for SM83-lifted formula parameters.
+    // These return the SM83-extracted value if available, or the struct default.
+    uint8_t  get_level_divisor()          const { return damage_formula.level_divisor; }
+    uint8_t  get_level_addend()           const { return damage_formula.level_addend; }
+    uint8_t  get_damage_divisor()         const { return damage_formula.damage_divisor; }
+    uint8_t  get_min_damage()             const { return damage_formula.min_damage; }
+    uint8_t  get_ai_init_score()          const { return ai_scores.init_score; }
+    uint8_t  get_ai_discourage_strong()   const { return ai_scores.discourage_strong; }
+    uint8_t  get_stat_level_divisor()     const { return stat_formula.level_divisor; }
+    uint8_t  get_stat_non_hp_offset()     const { return stat_formula.non_hp_offset; }
+    uint8_t  get_stat_hp_offset()         const { return stat_formula.hp_offset; }
+    uint8_t  get_escape_speed_mult()      const { return escape.speed_multiplier; }
+    uint8_t  get_escape_attempt_add()     const { return escape.attempt_addend; }
+    uint8_t  get_capture_slp_frz_bonus()  const { return capture_status.slp_frz_bonus; }
+    uint8_t  get_exp_divisor()            const { return exp_formula.base_divisor; }
+    uint8_t  get_burn_poison_denom()      const { return residual.burn_poison_denom; }
+    uint8_t  get_toxic_denom()            const { return residual.toxic_denom; }
+    uint8_t  get_crit_held_item_delta()   const { return crit_deltas.held_item_delta; }
+    uint8_t  get_crit_scope_lens_delta()  const { return crit_deltas.scope_lens_delta; }
+    uint8_t  get_crit_focus_energy_delta()const { return crit_deltas.focus_energy_delta; }
+    uint8_t  get_damage_var_lower_bound() const { return damage_variation.lower_bound_byte; }
 };
 
 } // namespace enginemon

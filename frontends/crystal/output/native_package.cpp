@@ -795,6 +795,17 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     //  [trainer_class_ai]     count × {u8 item1, u8 item2, u8 reward, u8 ai_passes, u16 LE item_flags,
     //                                  u8 dv_atk_def, u8 dv_spd_spc}   = count×8 bytes
     //
+    //  SM83-lifted formula parameters (appended, 20 bytes, optional — old readers use defaults):
+    //  [sm83_damage_formula]  4 × u8  {level_div, level_add, damage_div, min_damage}
+    //  [sm83_ai_scores]       2 × u8  {init_score, discourage_strong}
+    //  [sm83_stat_formula]    3 × u8  {level_div, non_hp_offset, hp_offset}
+    //  [sm83_escape]          2 × u8  {speed_mult, attempt_add}
+    //  [sm83_capture_status]  2 × u8  {slp_frz_bonus, brn_psn_par_bonus}
+    //  [sm83_exp]             1 × u8  {base_divisor}
+    //  [sm83_residual]        2 × u8  {burn_poison_denom, toxic_denom}
+    //  [sm83_crit_deltas]     3 × u8  {held_item_delta, scope_lens_delta, focus_energy_delta}
+    //  [sm83_damage_var]      1 × u8  {lower_bound_byte}
+    //
     //  ai_passes is an EMON-owned flags byte:
     //    bit 0=run_basic  bit 1=run_setup  bit 2=run_types
     //    bit 3=run_offensive  bit 4=run_smart
@@ -899,6 +910,46 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
         push_u8(static_cast<uint8_t>((t.dv_atk & 0x0F) << 4 | (t.dv_def & 0x0F)));
         push_u8(static_cast<uint8_t>((t.dv_spd & 0x0F) << 4 | (t.dv_spc & 0x0F)));
     }
+
+    // =========================================================================
+    // SM83-lifted formula parameters — appended after existing fields.
+    // Each sub-struct serialised as a fixed-length block; the reader checks
+    // remaining bytes before reading so old packages without this section still
+    // load cleanly (struct defaults are retained).
+    //
+    // All values are u8 (single byte per parameter).
+    // =========================================================================
+    //  [sm83_damage_formula]    4 × u8  {level_divisor, level_addend, damage_divisor, min_damage}
+    //  [sm83_ai_scores]         2 × u8  {init_score, discourage_strong}
+    //  [sm83_stat_formula]      3 × u8  {level_divisor, non_hp_offset, hp_offset}
+    //  [sm83_escape]            2 × u8  {speed_multiplier, attempt_addend}
+    //  [sm83_capture_status]    2 × u8  {slp_frz_bonus, brn_psn_par_bonus}
+    //  [sm83_exp]               1 × u8  {base_divisor}
+    //  [sm83_residual]          2 × u8  {burn_poison_denom, toxic_denom}
+    //  [sm83_crit_deltas]       3 × u8  {held_item_delta, scope_lens_delta, focus_energy_delta}
+    //  [sm83_damage_variation]  1 × u8  {lower_bound_byte}
+    //
+    // Total appended: 20 bytes
+    push_u8(rules.damage_formula.level_divisor);
+    push_u8(rules.damage_formula.level_addend);
+    push_u8(rules.damage_formula.damage_divisor);
+    push_u8(rules.damage_formula.min_damage);
+    push_u8(rules.ai_scores.init_score);
+    push_u8(rules.ai_scores.discourage_strong);
+    push_u8(rules.stat_formula.level_divisor);
+    push_u8(rules.stat_formula.non_hp_offset);
+    push_u8(rules.stat_formula.hp_offset);
+    push_u8(rules.escape.speed_multiplier);
+    push_u8(rules.escape.attempt_addend);
+    push_u8(rules.capture_status.slp_frz_bonus);
+    push_u8(rules.capture_status.brn_psn_par_bonus);
+    push_u8(rules.exp_formula.base_divisor);
+    push_u8(rules.residual.burn_poison_denom);
+    push_u8(rules.residual.toxic_denom);
+    push_u8(rules.crit_deltas.held_item_delta);
+    push_u8(rules.crit_deltas.scope_lens_delta);
+    push_u8(rules.crit_deltas.focus_energy_delta);
+    push_u8(rules.damage_variation.lower_bound_byte);
 
     battle_rules_data_ = std::move(buf);
 }

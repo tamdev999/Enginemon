@@ -408,6 +408,20 @@ void ProfileRegistry::register_crystal_v11() {
     o.trainer_class_dvs          = flat_offset(0x09, 0x70d6); // 09:70d6 TrainerClassDVs
     o.num_wobble_entries         = 24; // 24 entries in Crystal v1.1 WobbleProbabilities
 
+    // SM83 routine addresses for static parameter lifting.
+    // Verified against Crystal v1.1 (SHA-1: f2f52230b536214ef7c9924f483392993e226cfb).
+    o.sm83_ai_discourage_move    = flat_offset(0x0e, 0x5503); // 0e:5503 AIDiscourageMove
+    o.sm83_ai_choose_move        = flat_offset(0x11, 0x40ce); // 11:40ce AIChooseMove
+    o.sm83_give_exp_points       = flat_offset(0x0f, 0x6e3b); // 0f:6e3b GiveExperiencePoints
+    o.sm83_damage_variation      = flat_offset(0x0d, 0x4cfd); // 0d:4cfd BattleCommand_DamageVariation
+    o.sm83_poke_ball_effect      = flat_offset(0x03, 0x68a2); // 03:68a2 PokeBallEffect
+    o.sm83_try_to_run_away       = flat_offset(0x0f, 0x58b3); // 0f:58b3 TryToRunAwayFromBattle
+    o.sm83_calc_mon_stat_c       = flat_offset(0x03, 0x617b); // 03:617b CalcMonStatC
+    o.sm83_damage_calc           = flat_offset(0x0d, 0x5612); // 0d:5612 BattleCommand_DamageCalc
+    o.sm83_get_eighth_max_hp     = flat_offset(0x0f, 0x4c83); // 0f:4c83 GetEighthMaxHP
+    o.sm83_get_sixteenth_max_hp  = flat_offset(0x0f, 0x4c76); // 0f:4c76 GetSixteenthMaxHP
+    o.sm83_critical              = flat_offset(0x0d, 0x4631); // 0d:4631 BattleCommand_Critical
+
     //-------------------------------------------------------------------------
     // Register
     //-------------------------------------------------------------------------

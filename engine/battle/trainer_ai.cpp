@@ -45,8 +45,8 @@ namespace enginemon {
 // AI scoring constants — Crystal source: scoring.asm
 //   Default score: 20  AIDiscourageMove: +10  pass deltas: ±1, ±2
 // ============================================================================
-static constexpr int kInitScore        = 20;   // Crystal: default = 20
-static constexpr int kDiscourageStrong = 10;   // AIDiscourageMove (+10)
+static constexpr int kInitScore        = 20;   // Crystal vanilla default (fallback)
+static constexpr int kDiscourageStrong = 10;   // AIDiscourageMove vanilla (+10, fallback)
 static constexpr int kStrongDiscourage =  2;   // individual pass strong discourage (+2)
 static constexpr int kDiscourage       =  1;   // individual pass discourage (+1)
 static constexpr int kEncourage        = -1;   // individual pass encourage (-1)
@@ -58,9 +58,18 @@ static constexpr int kStrongEncourage  = -2;   // individual pass strong encoura
 
 struct MoveScores {
     int scores[4];
+    int discourage_strong = kDiscourageStrong; // AIDiscourageMove delta, overridden by rules
+
     MoveScores() {
         // Crystal initializes all move scores to 20 (AIChooseMove, line "ld a, 20")
         scores[0] = scores[1] = scores[2] = scores[3] = kInitScore;
+    }
+    explicit MoveScores(const BattleRules& rules) {
+        // ROM-derived: init score from AIChooseMove recognizer,
+        // discourage_strong from AIDiscourageMove recognizer.
+        const int init = static_cast<int>(rules.get_ai_init_score());
+        scores[0] = scores[1] = scores[2] = scores[3] = init;
+        discourage_strong = static_cast<int>(rules.get_ai_discourage_strong());
     }
 };
 
@@ -109,7 +118,7 @@ static void ai_basic(MoveScores& scores, const AIContext& ctx, const BattleRules
         if (!md) continue;
         if (rules.is_ai_status_only(md->effect_id)) {
             if (ctx.opponent.status != Status::None) {
-                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove = +10
+                scores.scores[i] += scores.discourage_strong;  // AIDiscourageMove
             }
         }
     }
@@ -146,7 +155,7 @@ static void ai_types(MoveScores& scores, const AIContext& ctx) {
 
         if (eff == 0) {
             // Immune — AIDiscourageMove (+10) — Crystal: strongly discourages immune moves
-            scores.scores[i] += kDiscourageStrong;
+            scores.scores[i] += scores.discourage_strong;
             continue;
         }
 
@@ -286,7 +295,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx, const BattleRules
         // Dream Eater: only useful if target is asleep
         if (eff == SemEffect::DreamEater) {
             if (ctx.opponent.status != Status::Sleep) {
-                scores.scores[i] += kDiscourageStrong;
+                scores.scores[i] += scores.discourage_strong;
             }
             continue;
         }
@@ -294,7 +303,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx, const BattleRules
         // Nightmare: only useful if target is asleep
         if (eff == SemEffect::Nightmare) {
             if (ctx.opponent.status != Status::Sleep) {
-                scores.scores[i] += kDiscourageStrong;
+                scores.scores[i] += scores.discourage_strong;
             }
             continue;
         }
@@ -303,7 +312,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx, const BattleRules
         if (eff == SemEffect::Toxic || eff == SemEffect::Poison) {
             if (ctx.opponent.status == Status::Poison
              || ctx.opponent.status == Status::BadPoison) {
-                scores.scores[i] += kDiscourageStrong;
+                scores.scores[i] += scores.discourage_strong;
             }
             continue;
         }
@@ -311,7 +320,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx, const BattleRules
         // Paralyze: discourage if target already paralyzed
         if (eff == SemEffect::Paralyze) {
             if (ctx.opponent.status == Status::Paralysis) {
-                scores.scores[i] += kDiscourageStrong;
+                scores.scores[i] += scores.discourage_strong;
             }
             continue;
         }
@@ -460,7 +469,7 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rul
     // When constructed from AIPassSet, uses ai_passes_ directly — no
     // range-sniffing or numeric domain overloading.
     // When constructed from AIBehaviorId (tests), uses legacy tier path.
-    MoveScores scores{};
+    MoveScores scores{rules};
 
     if (use_pass_set_) {
         // Semantic named-boolean dispatch — no Crystal bit positions in this code.

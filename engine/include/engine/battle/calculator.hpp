@@ -45,7 +45,11 @@ int32_t apply_accuracy_stage(int32_t base_accuracy, int8_t acc_stage, int8_t eva
 // Calculate actual stat from base stat, IV, EV, level, nature
 // Gen 2 doesn't have natures, simplified formula
 int32_t calc_hp(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level);
+int32_t calc_hp(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level,
+                const BattleRules& rules);
 int32_t calc_stat(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level);
+int32_t calc_stat(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level,
+                  const BattleRules& rules);
 
 // Main damage formula
 // Returns base damage (before random 85-100% variation, which caller applies).
@@ -84,6 +88,7 @@ struct DamageParams {
     TypeId move_type;       // Informational; used by caller for weather lookup
 };
 int32_t calculate_damage(const DamageParams& params);
+int32_t calculate_damage(const DamageParams& params, const BattleRules& rules);
 
 // Apply Gen 2 weather modifier to a damage value.
 // Apply weather modifier to a damage value using ROM-derived tables.
@@ -164,6 +169,9 @@ uint16_t get_combined_effectiveness(TypeId attack_type,
 // the caller is responsible for the exp-share split.
 uint32_t calculate_exp_gain(uint8_t base_exp, uint8_t defeated_level,
                            bool is_trainer_battle, uint8_t participants);
+uint32_t calculate_exp_gain(uint8_t base_exp, uint8_t defeated_level,
+                            bool is_trainer_battle, uint8_t participants,
+                            const BattleRules& rules);
 
 // Capture formula
 // Source: suiCune engine/items/item_effects.c PokeBallEffect
@@ -183,6 +191,7 @@ struct CaptureParams {
     Status status;
 };
 uint16_t calculate_catch_value(const CaptureParams& params);
+uint16_t calculate_catch_value(const CaptureParams& params, const BattleRules& rules);
 bool roll_capture(const CaptureParams& params, uint32_t random1, uint32_t random2);
 
 // Wobble probability for capture animation (separate from catch success).
@@ -202,5 +211,8 @@ uint8_t capture_wobble_chance(uint16_t final_catch_rate, const BattleRules& rule
 //   attempts is 1-based (incremented before check in Crystal).
 bool roll_escape(int32_t player_speed, int32_t wild_speed,
                  uint8_t attempts, uint32_t random);
+bool roll_escape(int32_t player_speed, int32_t wild_speed,
+                 uint8_t attempts, uint32_t random,
+                 const BattleRules& rules);
 
 } // namespace enginemon

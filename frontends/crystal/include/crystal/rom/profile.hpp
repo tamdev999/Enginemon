@@ -377,6 +377,36 @@ struct ProfileOffsets {
     uint32_t ai_sunny_day_moves;        // 0e:5134  SunnyDayMoves               — 1 byte/entry, 0xFF sentinel
     uint32_t trainer_class_attributes;  // 0e:559c  TrainerClassAttributes      — num_trainer_classes×7 bytes
     uint32_t trainer_class_dvs;         // 09:70d6  TrainerClassDVs             — num_trainer_classes×2 bytes
+
+    // SM83 routine addresses for static-lifting parameter extraction.
+    // Used by frontends/crystal/extract/sm83_lifter.cpp.
+    // Set to 0 to skip extraction for a routine (struct defaults are used).
+    uint32_t sm83_ai_discourage_move     = 0;  // 0e:5503 AIDiscourageMove
+    uint32_t sm83_ai_choose_move         = 0;  // 11:40ce AIChooseMove
+    uint32_t sm83_give_exp_points        = 0;  // 0f:6e3b GiveExperiencePoints
+    uint32_t sm83_damage_variation       = 0;  // 0d:4cfd BattleCommand_DamageVariation
+    uint32_t sm83_poke_ball_effect       = 0;  // 03:68a2 PokeBallEffect
+    uint32_t sm83_try_to_run_away        = 0;  // 0f:58b3 TryToRunAwayFromBattle
+    uint32_t sm83_calc_mon_stat_c        = 0;  // 03:617b CalcMonStatC
+    uint32_t sm83_damage_calc            = 0;  // 0d:5612 BattleCommand_DamageCalc
+    uint32_t sm83_get_eighth_max_hp      = 0;  // 0f:4c83 GetEighthMaxHP
+    uint32_t sm83_get_sixteenth_max_hp   = 0;  // 0f:4c76 GetSixteenthMaxHP
+    uint32_t sm83_critical               = 0;  // 0d:4631 BattleCommand_Critical
+    // Span sizes (bytes to read from each routine address for pattern matching).
+    // Conservative defaults — must cover all expected patterns.
+    static constexpr uint32_t SM83_SPAN_AI_DISCOURAGE     = 8;
+    static constexpr uint32_t SM83_SPAN_AI_CHOOSE_MOVE    = 30;
+    static constexpr uint32_t SM83_SPAN_GIVE_EXP          = 170;
+    static constexpr uint32_t SM83_SPAN_DAMAGE_VARIATION  = 40;
+    static constexpr uint32_t SM83_SPAN_POKE_BALL         = 250;
+    static constexpr uint32_t SM83_SPAN_TRY_TO_RUN        = 200;
+    static constexpr uint32_t SM83_SPAN_CALC_MON_STAT_C   = 250;
+    static constexpr uint32_t SM83_SPAN_DAMAGE_CALC       = 250;
+    static constexpr uint32_t SM83_SPAN_GET_EIGHTH_HP     = 30;
+    static constexpr uint32_t SM83_SPAN_GET_SIXTEENTH_HP  = 25;
+    static constexpr uint32_t SM83_SPAN_CRITICAL          = 90;
+
+    // Fixed count for WobbleProbabilities (24 in vanilla; may differ in hacks that
     // rewrite the table but keep the same format).
     uint8_t  num_wobble_entries = 24;
 };

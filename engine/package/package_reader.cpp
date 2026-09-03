@@ -1104,6 +1104,48 @@ PackageReader::load_battle_rules() const {
     }
 
     if (!rules.is_valid()) return std::nullopt;
+
+    // =========================================================================
+    // SM83-lifted formula parameters — read if bytes remain in the chunk.
+    // These are appended after the existing fields and are optional:
+    // older packages without them retain the struct defaults (vanilla values).
+    // Each field is exactly 1 byte.
+    // =========================================================================
+    auto read_sm83_u8 = [&](uint8_t& out) -> bool {
+        if (!r.has_bytes(1)) return false;  // end of old package — keep default
+        return r.read_le(out);
+    };
+
+    // sm83_damage_formula: 4 bytes
+    read_sm83_u8(rules.damage_formula.level_divisor);
+    read_sm83_u8(rules.damage_formula.level_addend);
+    read_sm83_u8(rules.damage_formula.damage_divisor);
+    read_sm83_u8(rules.damage_formula.min_damage);
+    // sm83_ai_scores: 2 bytes
+    read_sm83_u8(rules.ai_scores.init_score);
+    read_sm83_u8(rules.ai_scores.discourage_strong);
+    // sm83_stat_formula: 3 bytes
+    read_sm83_u8(rules.stat_formula.level_divisor);
+    read_sm83_u8(rules.stat_formula.non_hp_offset);
+    read_sm83_u8(rules.stat_formula.hp_offset);
+    // sm83_escape: 2 bytes
+    read_sm83_u8(rules.escape.speed_multiplier);
+    read_sm83_u8(rules.escape.attempt_addend);
+    // sm83_capture_status: 2 bytes
+    read_sm83_u8(rules.capture_status.slp_frz_bonus);
+    read_sm83_u8(rules.capture_status.brn_psn_par_bonus);
+    // sm83_exp: 1 byte
+    read_sm83_u8(rules.exp_formula.base_divisor);
+    // sm83_residual: 2 bytes
+    read_sm83_u8(rules.residual.burn_poison_denom);
+    read_sm83_u8(rules.residual.toxic_denom);
+    // sm83_crit_deltas: 3 bytes
+    read_sm83_u8(rules.crit_deltas.held_item_delta);
+    read_sm83_u8(rules.crit_deltas.scope_lens_delta);
+    read_sm83_u8(rules.crit_deltas.focus_energy_delta);
+    // sm83_damage_variation: 1 byte
+    read_sm83_u8(rules.damage_variation.lower_bound_byte);
+
     return rules;
 }
 

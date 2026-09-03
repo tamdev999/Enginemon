@@ -18,6 +18,7 @@
 //   data/trainers/attributes.asm           — TrainerClassAttributes
 
 #include "crystal/extract/battle_rules_extractor.hpp"
+#include "crystal/extract/sm83_lifter.hpp"
 #include "crystal/battle/crystal_effects.hpp"
 #include <format>
 #include <algorithm>
@@ -484,6 +485,133 @@ BattleRulesExtractResult extract_battle_rules(
             // This is a valid state for profiles that don't supply the address.
             // make_battle_pokemon falls back to the default {9,8,8,8} via get_trainer_dvs().
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 18. SM83 static lifting — formula parameter extraction.
+    //
+    // Each recognizer is called with a ROM span covering the routine.
+    // Failure is non-fatal: we log a warning and the struct default
+    // (vanilla-correct) value remains in place.  A recognizer failure
+    // means the routine shape differed from the known Crystal layout,
+    // which is possible for ROM hacks that restructure engine code.
+    // The package still emits the defaults so gameplay remains correct.
+    // ------------------------------------------------------------------
+    {
+        auto lift = [&](uint32_t flat_addr, uint32_t span_len, const char* name,
+                        auto recognizer_fn, auto apply_fn) {
+            if (flat_addr == 0) return;  // address not configured
+            auto span = rom_span_at(rom, flat_addr, span_len);
+            if (!span.data) {
+                err = std::format("SM83 lift {}: address 0x{:05x} out of ROM bounds", name, flat_addr);
+                return;  // non-fatal — default values retained
+            }
+            auto r = recognizer_fn(span);
+            if (!r.ok) {
+                // Non-fatal: default values remain.  Log to stderr for developer visibility.
+                // Use std::format to build message but don't propagate as hard failure.
+                (void)std::format("SM83 lift {} warning: {}", name, r.error);
+                return;
+            }
+            apply_fn(r);
+        };
+
+        // AIDiscourageMove — p[0] = discouragement delta
+        lift(o.sm83_ai_discourage_move, ProfileOffsets::SM83_SPAN_AI_DISCOURAGE,
+             "AIDiscourageMove",
+             [](const RomSpan& s) { return lift_ai_discourage_move(s); },
+             [&](const LiftResult& r) {
+                 rules.ai_scores.discourage_strong = r.p[0];
+             });
+
+        // AIChooseMove — p[0] = init score
+        lift(o.sm83_ai_choose_move, ProfileOffsets::SM83_SPAN_AI_CHOOSE_MOVE,
+             "AIChooseMove",
+             [](const RomSpan& s) { return lift_ai_choose_move_scores(s); },
+             [&](const LiftResult& r) {
+                 rules.ai_scores.init_score = r.p[0];
+             });
+
+        // GiveExperiencePoints — p[0] = exp base divisor
+        lift(o.sm83_give_exp_points, ProfileOffsets::SM83_SPAN_GIVE_EXP,
+             "GiveExperiencePoints",
+             [](const RomSpan& s) { return lift_exp_divisor(s); },
+             [&](const LiftResult& r) {
+                 rules.exp_formula.base_divisor = r.p[0];
+             });
+
+        // BattleCommand_DamageVariation — p[0] = RRCA lower bound byte
+        lift(o.sm83_damage_variation, ProfileOffsets::SM83_SPAN_DAMAGE_VARIATION,
+             "BattleCommand_DamageVariation",
+             [](const RomSpan& s) { return lift_damage_variation(s); },
+             [&](const LiftResult& r) {
+                 rules.damage_variation.lower_bound_byte = r.p[0];
+             });
+
+        // PokeBallEffect — p[0]=SLP/FRZ bonus, p[1]=BRN/PSN/PAR (bug), p[2]=none
+        lift(o.sm83_poke_ball_effect, ProfileOffsets::SM83_SPAN_POKE_BALL,
+             "PokeBallEffect",
+             [](const RomSpan& s) { return lift_capture_status_bonus(s); },
+             [&](const LiftResult& r) {
+                 rules.capture_status.slp_frz_bonus     = r.p[0];
+                 rules.capture_status.brn_psn_par_bonus = r.p[1];
+             });
+
+        // TryToRunAwayFromBattle — p[0]=speed multiplier, p[1]=per-attempt addend
+        lift(o.sm83_try_to_run_away, ProfileOffsets::SM83_SPAN_TRY_TO_RUN,
+             "TryToRunAwayFromBattle",
+             [](const RomSpan& s) { return lift_escape_constants(s); },
+             [&](const LiftResult& r) {
+                 rules.escape.speed_multiplier = r.p[0];
+                 rules.escape.attempt_addend   = r.p[1];
+             });
+
+        // CalcMonStatC — p[0]=/100, p[1]=non_hp_offset, p[2]=hp_offset
+        lift(o.sm83_calc_mon_stat_c, ProfileOffsets::SM83_SPAN_CALC_MON_STAT_C,
+             "CalcMonStatC",
+             [](const RomSpan& s) { return lift_stat_formula_offsets(s); },
+             [&](const LiftResult& r) {
+                 rules.stat_formula.level_divisor  = r.p[0];
+                 rules.stat_formula.non_hp_offset  = r.p[1];
+                 rules.stat_formula.hp_offset      = r.p[2];
+             });
+
+        // BattleCommand_DamageCalc — p[0]=level_div, p[1]=level_add, p[2]=dmg_div, p[3]=min_dmg
+        lift(o.sm83_damage_calc, ProfileOffsets::SM83_SPAN_DAMAGE_CALC,
+             "BattleCommand_DamageCalc",
+             [](const RomSpan& s) { return lift_damage_calc_constants(s); },
+             [&](const LiftResult& r) {
+                 rules.damage_formula.level_divisor  = r.p[0];
+                 rules.damage_formula.level_addend   = r.p[1];
+                 rules.damage_formula.damage_divisor = r.p[2];
+                 rules.damage_formula.min_damage     = r.p[3];
+             });
+
+        // GetEighthMaxHP — p[0] = denominator (8)
+        lift(o.sm83_get_eighth_max_hp, ProfileOffsets::SM83_SPAN_GET_EIGHTH_HP,
+             "GetEighthMaxHP",
+             [](const RomSpan& s) { return lift_residual_fraction(s); },
+             [&](const LiftResult& r) {
+                 rules.residual.burn_poison_denom = r.p[0];
+             });
+
+        // GetSixteenthMaxHP — p[0] = denominator (16)
+        lift(o.sm83_get_sixteenth_max_hp, ProfileOffsets::SM83_SPAN_GET_SIXTEENTH_HP,
+             "GetSixteenthMaxHP",
+             [](const RomSpan& s) { return lift_residual_fraction(s); },
+             [&](const LiftResult& r) {
+                 rules.residual.toxic_denom = r.p[0];
+             });
+
+        // BattleCommand_Critical — p[0]=held_item, p[1]=scope_lens, p[2]=focus_energy
+        lift(o.sm83_critical, ProfileOffsets::SM83_SPAN_CRITICAL,
+             "BattleCommand_Critical",
+             [](const RomSpan& s) { return lift_crit_stage_deltas(s); },
+             [&](const LiftResult& r) {
+                 rules.crit_deltas.held_item_delta    = r.p[0];
+                 rules.crit_deltas.scope_lens_delta   = r.p[1];
+                 rules.crit_deltas.focus_energy_delta = r.p[2];
+             });
     }
 
     result.success = true;

@@ -182,6 +182,7 @@ static uint8_t ceil_sqrt_u8(uint16_t v) {
 }
 
 int32_t calc_hp(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level) {
+    // Fallback (no rules): uses hardcoded vanilla values.
     // suiCune/engine/pokemon/stats.c CalcMonStatC:
     // sqrt_term = floor(ceil_sqrt(ev) / 4)  [cap ceil_sqrt at 255]
     // HP: floor(((base + iv) * 2 + sqrt_term) * level / 100) + level + 10
@@ -190,12 +191,42 @@ int32_t calc_hp(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level) {
     return static_cast<int32_t>(((base + iv) * 2 + sqrt_term) * level / 100) + level + 10;
 }
 
+int32_t calc_hp(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level,
+                const BattleRules& rules) {
+    // ROM-derived overload: offsets come from CalcMonStatC recognizer.
+    // Crystal CalcMonStatC: floor(((base+iv)*2 + sqrt_term) * level / level_div)
+    //   + level + hp_offset
+    // Vanilla: level_div=100, hp_offset=10
+    const uint8_t sq = ceil_sqrt_u8(ev);
+    const uint32_t sqrt_term = sq / 4;
+    const uint32_t level_div = rules.get_stat_level_divisor();
+    const uint8_t  hp_off    = rules.get_stat_hp_offset();
+    if (level_div == 0) return calc_hp(base, iv, ev, level);  // guard divide-by-zero
+    return static_cast<int32_t>(((base + iv) * 2 + sqrt_term) * level / level_div)
+           + level + hp_off;
+}
+
 int32_t calc_stat(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level) {
+    // Fallback (no rules): uses hardcoded vanilla values.
     // suiCune/engine/pokemon/stats.c CalcMonStatC:
     // non-HP: floor(((base + iv) * 2 + sqrt_term) * level / 100) + 5
     const uint8_t sq = ceil_sqrt_u8(ev);
     const uint32_t sqrt_term = sq / 4;
     return static_cast<int32_t>(((base + iv) * 2 + sqrt_term) * level / 100) + 5;
+}
+
+int32_t calc_stat(uint8_t base, uint8_t iv, uint16_t ev, uint8_t level,
+                  const BattleRules& rules) {
+    // ROM-derived overload: offsets come from CalcMonStatC recognizer.
+    // Crystal CalcMonStatC: floor(((base+iv)*2 + sqrt_term) * level / level_div)
+    //   + non_hp_offset
+    // Vanilla: level_div=100, non_hp_offset=5
+    const uint8_t sq = ceil_sqrt_u8(ev);
+    const uint32_t sqrt_term = sq / 4;
+    const uint32_t level_div = rules.get_stat_level_divisor();
+    const uint8_t  off       = rules.get_stat_non_hp_offset();
+    if (level_div == 0) return calc_stat(base, iv, ev, level);  // guard divide-by-zero
+    return static_cast<int32_t>(((base + iv) * 2 + sqrt_term) * level / level_div) + off;
 }
 
 // ============================================================================
@@ -291,6 +322,59 @@ int32_t calculate_damage(const DamageParams& params) {
     n += 2;
     if (n > 999) n = 999;
     if (n < 2) n = 2;
+
+    return n;
+}
+
+int32_t calculate_damage(const DamageParams& params, const BattleRules& rules) {
+    // ROM-derived overload: formula constants from BattleCommand_DamageCalc recognizer.
+    // Crystal DamageCalc: n = level*2/level_div + level_add  (vanilla: /5, +2)
+    //                     n = n * power * atk / def / damage_div  (vanilla: /50)
+    //                     min_damage added after type/STAB/weather  (vanilla: +2)
+    // Defaults match vanilla so this is a safe drop-in replacement.
+
+    if (params.move_power == 0) return 0;
+
+    int32_t atk = params.attack_stat;
+    int32_t def = params.defense_stat;
+    truncate_stats(atk, def);
+    if (def <= 0) def = 1;
+
+    const uint32_t level_div  = rules.get_level_divisor();
+    const uint32_t level_add  = rules.get_level_addend();
+    const uint32_t damage_div = rules.get_damage_divisor();
+    const int32_t  min_dmg    = rules.get_min_damage();
+
+    // Guard divide-by-zero (should never happen with validated ROM extraction)
+    if (level_div == 0 || damage_div == 0) return calculate_damage(params);
+
+    int32_t n = static_cast<int32_t>(params.attacker_level) * 2
+                / static_cast<int32_t>(level_div)
+                + static_cast<int32_t>(level_add);
+    n = n * params.move_power;
+    n = n * atk;
+    n = n / def;
+    n = n / static_cast<int32_t>(damage_div);
+
+    if (params.critical) {
+        n *= 2;
+        if (n > 0xFFFF) n = 0xFFFF;
+    }
+    if (params.burned) {
+        n >>= 1;
+        if (n == 0) n = 1;
+    }
+
+    if (params.type_effectiveness == 0) return 0;
+    n = n * static_cast<int32_t>(params.type_effectiveness) / 100;
+
+    if (params.stab) {
+        n += n / 2;
+    }
+
+    n += min_dmg;
+    if (n > 999) n = 999;
+    if (n < min_dmg) n = min_dmg;
 
     return n;
 }
@@ -497,23 +581,26 @@ uint16_t get_combined_effectiveness(TypeId attack_type,
 
 uint32_t calculate_exp_gain(uint8_t base_exp, uint8_t defeated_level,
                            bool is_trainer_battle, uint8_t participants) {
+    // Fallback (no rules): uses hardcoded vanilla divisor=7.
     // suiCune: core.c GiveExperiencePoints
-    // Base formula: exp = base_exp * defeated_level / 7
-    // Then BoostExp (×1.5, floor) for trainer battle and/or traded mon.
-    // participants: Crystal divides among participants AFTER boosting in the
-    // loop, so each mon receives base/7 independently; callers must handle
-    // the per-participant split externally. Here we compute the per-mon share.
-    (void)participants;  // Each mon gets full base; caller divides if needed
-
+    (void)participants;
     uint32_t exp = (static_cast<uint32_t>(base_exp) * defeated_level) / 7u;
-    if (exp == 0) exp = 1;  // Minimum 1 exp
+    if (exp == 0) exp = 1;
+    if (is_trainer_battle) exp = exp + exp / 2u;
+    return exp;
+}
 
-    // Trainer battle boost: ×1.5 (floor)
-    // suiCune: BoostExp returns exp + exp/2
-    if (is_trainer_battle) {
-        exp = exp + exp / 2u;
-    }
-
+uint32_t calculate_exp_gain(uint8_t base_exp, uint8_t defeated_level,
+                            bool is_trainer_battle, uint8_t participants,
+                            const BattleRules& rules) {
+    // ROM-derived overload: divisor from GiveExperiencePoints recognizer.
+    // Crystal: exp = base_exp * level / exp_divisor  (vanilla: /7)
+    (void)participants;
+    const uint32_t div = rules.get_exp_divisor();
+    if (div == 0) return calculate_exp_gain(base_exp, defeated_level, is_trainer_battle, participants);
+    uint32_t exp = (static_cast<uint32_t>(base_exp) * defeated_level) / div;
+    if (exp == 0) exp = 1;
+    if (is_trainer_battle) exp = exp + exp / 2u;
     return exp;
 }
 
@@ -576,6 +663,49 @@ uint16_t calculate_catch_value(const CaptureParams& params) {
     return static_cast<uint16_t>(final_rate);
 }
 
+uint16_t calculate_catch_value(const CaptureParams& params, const BattleRules& rules) {
+    // ROM-derived overload: SLP/FRZ bonus from PokeBallEffect recognizer.
+    // Vanilla: slp_frz_bonus=10, brn_psn_par_bonus=0 (Crystal bug — not +5).
+    if (params.max_hp <= 0) return 0;
+
+    int32_t hp     = params.current_hp;
+    int32_t max_hp = params.max_hp;
+
+    int32_t base = static_cast<int32_t>(params.catch_rate)
+                 * static_cast<int32_t>(params.ball_modifier) / 10;
+    if (base > 255) base = 255;
+    if (base < 1) base = 1;
+
+    int32_t hp2  = hp * 2;
+    int32_t max3 = max_hp * 3;
+    if (max3 > 255) {
+        max3 >>= 2;
+        hp2  >>= 2;
+        if (hp2 == 0) hp2 = 1;
+    }
+
+    int32_t numerator = base * (max3 - hp2);
+    int32_t num = (max3 > 0) ? (numerator / max3) : 1;
+    if (num <= 0) num = 1;
+
+    int32_t status_add = 0;
+    if (params.status == Status::Sleep || params.status == Status::Freeze) {
+        status_add = static_cast<int32_t>(rules.get_capture_slp_frz_bonus());
+    } else if (params.status == Status::Burn ||
+               params.status == Status::Poison ||
+               params.status == Status::BadPoison ||
+               params.status == Status::Paralysis) {
+        // Crystal vanilla bug: BRN/PSN/PAR bonus = 0.
+        // rules.capture_status.brn_psn_par_bonus holds the extracted value (0 in vanilla).
+        status_add = static_cast<int32_t>(rules.capture_status.brn_psn_par_bonus);
+    }
+
+    int32_t final_rate = num + status_add;
+    if (final_rate > 255) final_rate = 255;
+
+    return static_cast<uint16_t>(final_rate);
+}
+
 bool roll_capture(const CaptureParams& params, uint32_t random1, uint32_t random2) {
     // suiCune: item_effects.c — catch succeeds if random > final_rate (i.e. > catch_value)
     // Wait: the check is "random > b" where b = final_rate, so:
@@ -593,24 +723,34 @@ bool roll_capture(const CaptureParams& params, uint32_t random1, uint32_t random
 
 bool roll_escape(int32_t player_speed, int32_t wild_speed,
                  uint8_t attempts, uint32_t random) {
+    // Fallback (no rules): uses hardcoded vanilla constants.
     // suiCune: core.c TryToRunAwayFromBattle
-    //
-    // If player_speed >= wild_speed: always escape.
     if (player_speed >= wild_speed) return true;
-
-    // odds = (player_speed * 32) / (wild_speed / 4)  [integer division]
-    // If wild_speed/4 == 0: always escape (avoid divide-by-zero).
     int32_t divisor = wild_speed / 4;
     if (divisor <= 0) return true;
-
-    // Each run attempt adds 30 to odds; Crystal increments wNumFleeAttempts
-    // BEFORE computing odds, so attempts here is the current attempt count (1-based).
     int32_t odds = (player_speed * 32) / divisor + (attempts - 1) * 30;
-
-    // If odds > 255: always escape
     if (odds > 255) return true;
+    return (random & 0xFF) < static_cast<uint32_t>(odds);
+}
 
-    // Succeed if random(0-255) < odds
+bool roll_escape(int32_t player_speed, int32_t wild_speed,
+                 uint8_t attempts, uint32_t random,
+                 const BattleRules& rules) {
+    // ROM-derived overload: constants from TryToRunAwayFromBattle recognizer.
+    // Crystal: odds = (player_spd * speed_mult) / (wild_spd / wild_div)
+    //                 + (attempts - 1) * attempt_add
+    // Vanilla: speed_mult=32, wild_div=4 (implied), attempt_add=30.
+    // The recognizer extracts speed_multiplier (=32) and attempt_addend (=30).
+    // wild_speed divisor of 4 is structural in the ASM (SRL C, SRL C) and not
+    // a configurable operand — it is the shift count, not a load-immediate.
+    // So only speed_mult and attempt_add vary.
+    if (player_speed >= wild_speed) return true;
+    int32_t divisor = wild_speed / 4;  // SRL×2 — structurally fixed in Crystal
+    if (divisor <= 0) return true;
+    const int32_t speed_mult  = static_cast<int32_t>(rules.get_escape_speed_mult());
+    const int32_t attempt_add = static_cast<int32_t>(rules.get_escape_attempt_add());
+    int32_t odds = (player_speed * speed_mult) / divisor + (attempts - 1) * attempt_add;
+    if (odds > 255) return true;
     return (random & 0xFF) < static_cast<uint32_t>(odds);
 }
 

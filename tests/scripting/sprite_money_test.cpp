@@ -1263,6 +1263,128 @@ TEST(no_raw_effect_ids_in_engine_ai) {
     std::cout << "  [semantic EffectId pipeline: Toxic=7≠33, StatUp=18≠10; engine uses semantic IDs only]\n";
 }
 
+// ============================================================================
+// SM83-LIFTED PARAMS WIRE ROUNDTRIP
+//
+// Proves the 20-byte SM83 parameter block appended at end of the BRLS chunk
+// survives PackageWriter → PackageReader exactly. Each SM83-derived field is
+// set to a non-vanilla value; after roundtrip every field must match.
+//
+// This test does NOT require a real ROM — it directly constructs BattleRules
+// with SM83-derived sub-structs and verifies the wire format handles them.
+// ============================================================================
+TEST(sm83_params_wire_roundtrip) {
+    enginemon::BattleRules rules = make_phase1_rules();
+
+    // Set all SM83-derived fields to non-vanilla values (distinct from defaults)
+    // so a stock-data fallback would cause an obvious mismatch.
+
+    // damage_formula: vanilla {5, 2, 50, 2} → use {6, 3, 40, 3}
+    rules.damage_formula.level_divisor  = 6;
+    rules.damage_formula.level_addend   = 3;
+    rules.damage_formula.damage_divisor = 40;
+    rules.damage_formula.min_damage     = 3;
+
+    // ai_scores: vanilla {20, 10} → use {25, 12}
+    rules.ai_scores.init_score        = 25;
+    rules.ai_scores.discourage_strong = 12;
+
+    // stat_formula: vanilla {100, 5, 10} → use {80, 6, 11}
+    rules.stat_formula.level_divisor = 80;
+    rules.stat_formula.non_hp_offset = 6;
+    rules.stat_formula.hp_offset     = 11;
+
+    // escape: vanilla {32, 30} → use {28, 20}
+    rules.escape.speed_multiplier = 28;
+    rules.escape.attempt_addend   = 20;
+
+    // capture_status: vanilla {10, 0} → use {8, 5}
+    rules.capture_status.slp_frz_bonus     = 8;
+    rules.capture_status.brn_psn_par_bonus = 5;
+
+    // exp_formula: vanilla {7} → use {6}
+    rules.exp_formula.base_divisor = 6;
+
+    // residual: vanilla {8, 16} → use {10, 12}
+    rules.residual.burn_poison_denom = 10;
+    rules.residual.toxic_denom       = 12;
+
+    // crit_deltas: vanilla {2, 1, 1} → use {3, 2, 2}
+    rules.crit_deltas.held_item_delta    = 3;
+    rules.crit_deltas.scope_lens_delta   = 2;
+    rules.crit_deltas.focus_energy_delta = 2;
+
+    // damage_variation: vanilla {0xD9} → use {0xC0}
+    rules.damage_variation.lower_bound_byte = 0xC0u;
+
+    // Roundtrip through BRLS package
+    auto loaded_opt = phase1_roundtrip(rules, "sm83_wire");
+    ASSERT_TRUE(loaded_opt.has_value());
+    if (!loaded_opt) return;
+    const enginemon::BattleRules& loaded = *loaded_opt;
+
+    // Verify all SM83 fields survive serialization exactly
+    ASSERT_EQ(loaded.damage_formula.level_divisor,   6u);
+    ASSERT_EQ(loaded.damage_formula.level_addend,    3u);
+    ASSERT_EQ(loaded.damage_formula.damage_divisor, 40u);
+    ASSERT_EQ(loaded.damage_formula.min_damage,      3u);
+    ASSERT_EQ(loaded.ai_scores.init_score,          25u);
+    ASSERT_EQ(loaded.ai_scores.discourage_strong,   12u);
+    ASSERT_EQ(loaded.stat_formula.level_divisor,    80u);
+    ASSERT_EQ(loaded.stat_formula.non_hp_offset,     6u);
+    ASSERT_EQ(loaded.stat_formula.hp_offset,        11u);
+    ASSERT_EQ(loaded.escape.speed_multiplier,       28u);
+    ASSERT_EQ(loaded.escape.attempt_addend,         20u);
+    ASSERT_EQ(loaded.capture_status.slp_frz_bonus,   8u);
+    ASSERT_EQ(loaded.capture_status.brn_psn_par_bonus, 5u);
+    ASSERT_EQ(loaded.exp_formula.base_divisor,       6u);
+    ASSERT_EQ(loaded.residual.burn_poison_denom,    10u);
+    ASSERT_EQ(loaded.residual.toxic_denom,          12u);
+    ASSERT_EQ(loaded.crit_deltas.held_item_delta,    3u);
+    ASSERT_EQ(loaded.crit_deltas.scope_lens_delta,   2u);
+    ASSERT_EQ(loaded.crit_deltas.focus_energy_delta, 2u);
+    ASSERT_EQ(loaded.damage_variation.lower_bound_byte, static_cast<uint8_t>(0xC0u));
+
+    // Confirm getter accessors agree with the raw fields
+    ASSERT_EQ(loaded.get_level_divisor(),          6u);
+    ASSERT_EQ(loaded.get_level_addend(),           3u);
+    ASSERT_EQ(loaded.get_damage_divisor(),        40u);
+    ASSERT_EQ(loaded.get_min_damage(),             3u);
+    ASSERT_EQ(loaded.get_ai_init_score(),         25u);
+    ASSERT_EQ(loaded.get_ai_discourage_strong(),  12u);
+    ASSERT_EQ(loaded.get_stat_level_divisor(),    80u);
+    ASSERT_EQ(loaded.get_stat_non_hp_offset(),     6u);
+    ASSERT_EQ(loaded.get_stat_hp_offset(),        11u);
+    ASSERT_EQ(loaded.get_escape_speed_mult(),     28u);
+    ASSERT_EQ(loaded.get_escape_attempt_add(),    20u);
+    ASSERT_EQ(loaded.get_capture_slp_frz_bonus(),  8u);
+    ASSERT_EQ(loaded.get_exp_divisor(),            6u);
+    ASSERT_EQ(loaded.get_burn_poison_denom(),     10u);
+    ASSERT_EQ(loaded.get_toxic_denom(),           12u);
+    ASSERT_EQ(loaded.get_crit_held_item_delta(),   3u);
+    ASSERT_EQ(loaded.get_crit_scope_lens_delta(),  2u);
+    ASSERT_EQ(loaded.get_crit_focus_energy_delta(), 2u);
+    ASSERT_EQ(loaded.get_damage_var_lower_bound(), static_cast<uint8_t>(0xC0u));
+
+    // Confirm calculator overloads use the loaded values, not hardcoded defaults.
+    // calc_stat with loaded rules: level_div=80 not 100 → different result
+    const int32_t stat_with_rules = enginemon::calc_stat(50, 9, 0, 50, loaded);
+    const int32_t stat_no_rules   = enginemon::calc_stat(50, 9, 0, 50);  // vanilla /100
+    // With level_div=80: (50+9)*2*50/80 + 6 = 73
+    // With level_div=100: (50+9)*2*50/100 + 5 = 64
+    ASSERT_TRUE(stat_with_rules != stat_no_rules);  // Proves loaded rules reach the calculator
+
+    // roll_escape with loaded speed_mult=28 vs vanilla 32:
+    //   player=50, wild=100, attempt=1
+    //   divisor = 100/4 = 25; odds=50*28/25=56 (loaded), 50*32/25=64 (vanilla)
+    //   random=60: loaded (odds=56) → fail (60 >= 56), vanilla (odds=64) → succeed
+    const bool escape_loaded  = enginemon::roll_escape(50, 100, 1, 60, loaded);
+    const bool escape_vanilla = enginemon::roll_escape(50, 100, 1, 60);  // vanilla 32
+    ASSERT_FALSE(escape_loaded);   // odds=56, random=60 → 60 >= 56 → no escape
+    ASSERT_TRUE(escape_vanilla);   // odds=64, random=60 → 60 < 64 → escape
+
+    std::cout << "  [SM83 wire roundtrip: all 20 bytes round-trip; calc_stat and roll_escape use loaded values]\n";
+}
 
 int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << "=== Sprite/Money State Tests ===\n";
@@ -1315,6 +1437,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN(brls_trainer_class_dvs_roundtrip);
     RUN(brls_base_reward_roundtrip);
     RUN(no_raw_effect_ids_in_engine_ai);
+    RUN(sm83_params_wire_roundtrip);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

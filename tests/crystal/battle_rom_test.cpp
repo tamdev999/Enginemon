@@ -22,6 +22,8 @@
 // Source addresses (Crystal v1.1):
 //   CriticalHitMoves         0x0D:0x46A3  flat 0x346A3  (8 bytes: 7 IDs + 0xFF sentinel)
 //   StatLevelMultipliers      0x0F:0x6D2B  flat 0x3ED2B  (13 × 2 bytes = 26 bytes)
+//   AIDiscourageMove          0x0E:0x5503  flat 0x39503  (5 bytes: 7E C6 0A 77 C9)
+//   AIChooseMove (init score) 0x11:0x40CE  flat 0x440CE  (30+ bytes)
 //
 // Run: battle_rom_test <rom_path>
 
@@ -291,6 +293,143 @@ TEST(stat_mult_mutation_propagates_through_full_pipeline) {
 }
 
 // ============================================================================
+// TEST 3: AIDiscourageMove mutation propagates to runtime AI scoring
+//
+// AIDiscourageMove at flat 0x39503 (0x0E:0x5503):
+//   Bytes: 7E C6 0A 77 C9
+//   The routine adds A += 0x0A (10) to discourage a strong move.
+//   Mutation: patch byte +2 from 0x0A (10) to 0x0F (15).
+//   After mutation: ai_scores.discourage_strong == 15 (not 10).
+//   Proves: recognizer extracts the actual operand, not a hardcoded constant.
+// ============================================================================
+TEST(ai_discourage_mutation_propagates_through_full_pipeline) {
+    // Verified ROM address (Crystal v1.1):
+    //   AIDiscourageMove: flat 0x39503, byte sequence: 7E C6 0A 77 C9
+    //   Byte +2 is the ADD A,n immediate operand (= 0x0A = 10 in vanilla).
+    constexpr uint32_t AI_DISC_FLAT      = 0x39503u;
+    constexpr uint32_t OPERAND_OFFSET    = 2u;           // byte +2 of the routine
+    constexpr uint8_t  VANILLA_DELTA     = 0x0Au;        // 10 in vanilla
+    constexpr uint8_t  MUTATED_DELTA     = 0x0Fu;        // 15 — test value
+
+    // Verify vanilla ROM has the expected byte
+    {
+        const auto& raw = g_rom->raw();
+        ASSERT_EQ(raw[AI_DISC_FLAT + OPERAND_OFFSET], VANILLA_DELTA);
+    }
+
+    // Mutate: 0x0A → 0x0F (change discourage delta from 10 to 15)
+    std::vector<uint8_t> mutated = g_rom->raw();
+    mutated[AI_DISC_FLAT + OPERAND_OFFSET] = MUTATED_DELTA;
+
+    auto mut_rom = rom_from_bytes(mutated, "ai_disc_mut");
+    ASSERT_TRUE(mut_rom != nullptr);
+
+    // Build profile using the mutated ROM's hash by passing the real profile's offsets.
+    // Profile hash check uses the real ROM's hash; for mutated ROM we use the known
+    // profile directly since the structure is identical (only data value changed).
+    auto mut_result = crystal::extract_battle_rules(*mut_rom, *g_profile);
+    ASSERT_TRUE(mut_result.success);
+    if (!mut_result.success) {
+        std::cerr << "  extract_battle_rules failed: " << mut_result.error << "\n";
+        return;
+    }
+    const enginemon::BattleRules& extracted = mut_result.rules;
+
+    // The recognizer must have extracted the mutated operand 0x0F = 15
+    ASSERT_EQ(extracted.ai_scores.discourage_strong, static_cast<uint8_t>(MUTATED_DELTA));
+    ASSERT_NE(extracted.ai_scores.discourage_strong, static_cast<uint8_t>(VANILLA_DELTA));
+
+    // Roundtrip through BRLS package
+    auto loaded_opt = brls_roundtrip(extracted, "ai_disc_mut");
+    ASSERT_TRUE(loaded_opt.has_value());
+    if (!loaded_opt) return;
+    const enginemon::BattleRules& loaded = *loaded_opt;
+
+    // discourage_strong must survive serialization
+    ASSERT_EQ(loaded.ai_scores.discourage_strong, static_cast<uint8_t>(MUTATED_DELTA));
+    ASSERT_NE(loaded.ai_scores.discourage_strong, static_cast<uint8_t>(VANILLA_DELTA));
+
+    // Verify the loaded value reaches the MoveScores constructor.
+    // decide() with rules builds MoveScores{rules} so discourage_strong=15.
+    // We verify via a direct getter rather than spinning up a full Battle:
+    ASSERT_EQ(loaded.get_ai_discourage_strong(), static_cast<uint8_t>(MUTATED_DELTA));
+
+    // Prove vanilla gives 10 — confirms the test would catch a stock-data fallback
+    {
+        auto baseline = crystal::extract_battle_rules(*g_rom, *g_profile);
+        ASSERT_TRUE(baseline.success);
+        ASSERT_EQ(baseline.rules.ai_scores.discourage_strong, static_cast<uint8_t>(VANILLA_DELTA));
+    }
+
+    std::cout << "\n    [ROM mut: AIDiscourageMove +2: 0x0A→0x0F; "
+                 "discourage_strong=15 (not 10) after full roundtrip]\n";
+}
+
+// ============================================================================
+// TEST 4: AIChooseMove init score mutation propagates to runtime
+//
+// AIChooseMove at flat 0x440CE (0x11:0x40CE):
+//   The LD A,n initializer at byte offset +17..+18 is: 3E 14
+//   Byte +18 = 0x14 = 20 (vanilla init score).
+//   Mutation: patch byte +18 from 0x14 (20) to 0x1E (30).
+//   After mutation: ai_scores.init_score == 30 (not 20).
+// ============================================================================
+TEST(ai_init_score_mutation_propagates_through_full_pipeline) {
+    // Verified ROM address (Crystal v1.1):
+    //   AIChooseMove: flat 0x440CE, byte +18 is the LD A,n immediate = 0x14 (20).
+    constexpr uint32_t AI_INIT_FLAT      = 0x440CEu;
+    constexpr uint32_t OPERAND_OFFSET    = 18u;           // byte +18 of the routine
+    constexpr uint8_t  VANILLA_SCORE     = 0x14u;         // 20 in vanilla
+    constexpr uint8_t  MUTATED_SCORE     = 0x1Eu;         // 30 — test value
+
+    // Verify vanilla ROM has the expected byte
+    {
+        const auto& raw = g_rom->raw();
+        ASSERT_EQ(raw[AI_INIT_FLAT + OPERAND_OFFSET], VANILLA_SCORE);
+    }
+
+    // Mutate: 0x14 → 0x1E (change init score from 20 to 30)
+    std::vector<uint8_t> mutated = g_rom->raw();
+    mutated[AI_INIT_FLAT + OPERAND_OFFSET] = MUTATED_SCORE;
+
+    auto mut_rom = rom_from_bytes(mutated, "ai_init_mut");
+    ASSERT_TRUE(mut_rom != nullptr);
+
+    auto mut_result = crystal::extract_battle_rules(*mut_rom, *g_profile);
+    ASSERT_TRUE(mut_result.success);
+    if (!mut_result.success) {
+        std::cerr << "  extract_battle_rules failed: " << mut_result.error << "\n";
+        return;
+    }
+    const enginemon::BattleRules& extracted = mut_result.rules;
+
+    // The recognizer must have extracted the mutated operand 0x1E = 30
+    ASSERT_EQ(extracted.ai_scores.init_score, static_cast<uint8_t>(MUTATED_SCORE));
+    ASSERT_NE(extracted.ai_scores.init_score, static_cast<uint8_t>(VANILLA_SCORE));
+
+    // Roundtrip through BRLS package
+    auto loaded_opt = brls_roundtrip(extracted, "ai_init_mut");
+    ASSERT_TRUE(loaded_opt.has_value());
+    if (!loaded_opt) return;
+    const enginemon::BattleRules& loaded = *loaded_opt;
+
+    // init_score must survive serialization
+    ASSERT_EQ(loaded.ai_scores.init_score, static_cast<uint8_t>(MUTATED_SCORE));
+    ASSERT_NE(loaded.ai_scores.init_score, static_cast<uint8_t>(VANILLA_SCORE));
+    ASSERT_EQ(loaded.get_ai_init_score(), static_cast<uint8_t>(MUTATED_SCORE));
+
+    // Prove vanilla gives 20
+    {
+        auto baseline = crystal::extract_battle_rules(*g_rom, *g_profile);
+        ASSERT_TRUE(baseline.success);
+        ASSERT_EQ(baseline.rules.ai_scores.init_score, static_cast<uint8_t>(VANILLA_SCORE));
+    }
+
+    std::cout << "\n    [ROM mut: AIChooseMove +18: 0x14→0x1E; "
+                 "ai_scores.init_score=30 (not 20) after full roundtrip]\n";
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -323,6 +462,8 @@ int main(int argc, char* argv[]) {
 
     RUN_TEST(high_crit_mutation_propagates_through_full_pipeline);
     RUN_TEST(stat_mult_mutation_propagates_through_full_pipeline);
+    RUN_TEST(ai_discourage_mutation_propagates_through_full_pipeline);
+    RUN_TEST(ai_init_score_mutation_propagates_through_full_pipeline);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

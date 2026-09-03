@@ -101,7 +101,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    RuntimeTileset tileset = RuntimeTileset::from_package_data(map.tileset_id, *tileset_data);
+    auto tileset_opt = RuntimeTileset::from_package_data(map.tileset_id, *tileset_data);
+    if (!tileset_opt) {
+        std::cerr << "Failed to load tileset for map " << map.tileset_id << "\n";
+        return 1;
+    }
+    RuntimeTileset& tileset = *tileset_opt;
     
     // 4. fixed_special_palette
     std::cout << "4. Tileset '" << map.tileset_id << "' fixed_special_palette = "

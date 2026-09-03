@@ -16,6 +16,7 @@ add_library(enginemon_crystal STATIC
     extract/fonts.cpp
     extract/species.cpp
     extract/battle_rules.cpp
+    extract/sm83_lifter.cpp
     
     # Output/packaging
     output/native_package.cpp
