@@ -948,6 +948,7 @@ PackageReader::load_battle_rules() const {
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
     in.seekg(chunk->offset);
+    if (!in) return std::nullopt;
 
     BoundsReader r(in, chunk->size);
     BattleRules rules;
@@ -975,17 +976,17 @@ PackageReader::load_battle_rules() const {
         return true;
     };
 
-    // Read a uint8_t list from wire and widen each entry to MoveId (uint16_t).
-    // Used for high_crit_moves: wire stores Crystal MOVE_ANIM bytes (≤ 255);
-    // runtime uses semantic MoveId, which for standard Crystal moves equals the byte value.
-    auto read_byte_list_as_move_ids = [&](std::vector<enginemon::MoveId>& out) -> bool {
-        uint8_t count = 0;
+    // Read a u16 list from wire and store each entry as MoveId.
+    // high_crit_moves wire format: u16 LE count + count × u16 LE entries.
+    // Supports the full MoveId range (0..65535) including semantic IDs > 255.
+    auto read_u16_list_as_move_ids = [&](std::vector<enginemon::MoveId>& out) -> bool {
+        uint16_t count = 0;
         if (!r.read_le(count)) return false;
         out.resize(count);
-        for (uint8_t i = 0; i < count; ++i) {
-            uint8_t b = 0;
-            if (!r.read_le(b)) return false;
-            out[i] = static_cast<enginemon::MoveId>(b);
+        for (uint16_t i = 0; i < count; ++i) {
+            uint16_t v = 0;
+            if (!r.read_le(v)) return false;
+            out[i] = static_cast<enginemon::MoveId>(v);
         }
         return true;
     };
@@ -1042,8 +1043,8 @@ PackageReader::load_battle_rules() const {
         }
     }
 
-    // high_crit_moves: u8 count + count × u8 (widened to MoveId at read time)
-    if (!read_byte_list_as_move_ids(rules.high_crit_moves)) return std::nullopt;
+    // high_crit_moves: u16 count + count × u16 LE (full MoveId range)
+    if (!read_u16_list_as_move_ids(rules.high_crit_moves)) return std::nullopt;
 
     // effect_priorities: u8 count + count × {eid, priority}
     {
@@ -1072,10 +1073,20 @@ PackageReader::load_battle_rules() const {
         rules.trainer_class_ai.resize(n);
         for (uint16_t i = 0; i < n; ++i) {
             auto& t = rules.trainer_class_ai[i];
-            if (!r.read_le(t.item1))         return std::nullopt;
-            if (!r.read_le(t.item2))         return std::nullopt;
-            if (!r.read_le(t.base_reward))   return std::nullopt;
-            if (!r.read_le(t.ai_move_flags)) return std::nullopt;
+            if (!r.read_le(t.item1))       return std::nullopt;
+            if (!r.read_le(t.item2))       return std::nullopt;
+            if (!r.read_le(t.base_reward)) return std::nullopt;
+            // Decode BRLS wire move-flags (Crystal TRNATTR_AI_MOVE_WEIGHTS encoding)
+            // into semantic AIPassSet.  Bit positions are part of the BRLS wire spec:
+            //   bit 0=BASIC  bit 1=SETUP  bit 2=TYPES  bit 3=OFFENSIVE  bit 4=SMART
+            uint16_t move_flags = 0;
+            if (!r.read_le(move_flags)) return std::nullopt;
+            const uint16_t f = (move_flags != 0) ? move_flags : 0x0001u;
+            t.ai_passes.run_basic     = true;               // always active
+            t.ai_passes.run_setup     = (f & (1u << 1)) != 0;
+            t.ai_passes.run_types     = (f & (1u << 2)) != 0;
+            t.ai_passes.run_offensive = (f & (1u << 3)) != 0;
+            t.ai_passes.run_smart     = (f & (1u << 4)) != 0;
             if (!r.read_le(t.ai_item_flags)) return std::nullopt;
         }
     }

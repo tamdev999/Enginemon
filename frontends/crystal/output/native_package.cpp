@@ -767,8 +767,8 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     //  [weather_type_mods]    count × {u8 wid, u8 tid, u8 mul}= N×3 bytes
     //  [weather_move_count]   u8                             =  1 byte
     //  [weather_move_mods]    count × {u8 wid, u8 eid, u8 mul}= N×3 bytes
-    //  [high_crit_count]      u8                             =  1 byte
-    //  [high_crit_moves]      count × u8                     = N bytes
+    //  [high_crit_count]      u16 LE                         =  2 bytes
+    //  [high_crit_moves]      count × u16 LE                 = N×2 bytes
     //  [eff_priority_count]   u8                             =  1 byte
     //  [eff_priorities]       count × {u8 eid, u8 pri}       = N×2 bytes
     //  [status_only_count]    u8                             =  1 byte
@@ -834,10 +834,10 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
         push_u8(w.multiplier);
     }
 
-    // high_crit_moves: u8 count + count × u8 (MoveId narrowed to u8 — all ≤ 251)
-    push_u8(static_cast<uint8_t>(rules.high_crit_moves.size()));
+    // high_crit_moves: u16 count + count × u16 LE (full MoveId range — supports >255)
+    push_u16(static_cast<uint16_t>(rules.high_crit_moves.size()));
     for (enginemon::MoveId m : rules.high_crit_moves)
-        push_u8(static_cast<uint8_t>(m & 0xFF));
+        push_u16(static_cast<uint16_t>(m));
 
     // effect_priorities: u8 count + count × {eid, priority}
     push_u8(static_cast<uint8_t>(rules.effect_priorities.size()));
@@ -864,7 +864,16 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
         push_u8(t.item1);
         push_u8(t.item2);
         push_u8(t.base_reward);
-        push_u16(t.ai_move_flags);
+        // Repack AIPassSet back to Crystal TRNATTR_AI_MOVE_WEIGHTS bitmask for wire.
+        // Crystal bit positions (trainer_data_constants.asm):
+        //   bit 0=BASIC  bit 1=SETUP  bit 2=TYPES  bit 3=OFFENSIVE  bit 4=SMART
+        uint16_t move_flags = 0u;
+        if (t.ai_passes.run_basic)     move_flags |= (1u << 0);
+        if (t.ai_passes.run_setup)     move_flags |= (1u << 1);
+        if (t.ai_passes.run_types)     move_flags |= (1u << 2);
+        if (t.ai_passes.run_offensive) move_flags |= (1u << 3);
+        if (t.ai_passes.run_smart)     move_flags |= (1u << 4);
+        push_u16(move_flags);
         push_u16(t.ai_item_flags);
     }
 

@@ -260,6 +260,18 @@ if(MSVC)
     target_compile_options(compiler_integrity_test PRIVATE /bigobj)
 endif()
 
+# Battle ROM propagation tests — true ROM→extractor→BRLS→runtime pipeline proof
+add_executable(battle_rom_test
+    crystal/battle_rom_test.cpp
+)
+target_link_libraries(battle_rom_test PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+if(MSVC)
+    target_compile_options(battle_rom_test PRIVATE /bigobj)
+endif()
+
 # Crystal Frontend Oracle ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Phase 1
 # Independent source-fidelity tests using RGBDS-derived (or hand-authored) binary fixtures.
 # Expected values come from pokecrystal semantics, NOT from Enginemon encoder output.
@@ -399,6 +411,11 @@ if(ENGINEMON_ENABLE_ENGINE)
             COMMAND $<TARGET_FILE:compiler_integrity_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(compiler_integrity_test
             PROPERTIES LABELS "rom-required;compiler-ir" TIMEOUT 120)
+
+        add_test(NAME battle_rom_test
+            COMMAND $<TARGET_FILE:battle_rom_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(battle_rom_test
+            PROPERTIES LABELS "rom-required;battle" TIMEOUT 30)
 
         add_test(NAME oracle_test
             COMMAND $<TARGET_FILE:oracle_test> "${ENGINEMON_ROM_PATH}")

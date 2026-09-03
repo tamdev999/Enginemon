@@ -77,15 +77,15 @@ struct MoveEffectPriorityEntry {
 
 // ============================================================================
 // Trainer class AI flags entry: one per trainer class (0-indexed).
-// ai_move_flags: TRNATTR_AI_MOVE_WEIGHTS bitmask (AI_BASIC|AI_SETUP|…)
-// ai_item_flags: TRNATTR_AI_ITEM_SWITCH bitmask (CONTEXT_USE|SWITCH_SOMETIMES|…)
+// ai_passes: semantic AI behavior set — decoded from ROM bitmask by the Crystal frontend.
+// ai_item_flags: TRNATTR_AI_ITEM_SWITCH bitmask (raw — item use AI not yet semantic).
 // ============================================================================
 struct TrainerClassAIEntry {
     uint8_t  item1;          // Default held item 1 (NO_ITEM=0)
     uint8_t  item2;          // Default held item 2 (NO_ITEM=0)
     uint8_t  base_reward;    // Base prize money (prize = base_reward * level * 4)
-    uint16_t ai_move_flags;  // TRNATTR_AI_MOVE_WEIGHTS bitmask (LE)
-    uint16_t ai_item_flags;  // TRNATTR_AI_ITEM_SWITCH bitmask (LE)
+    AIPassSet ai_passes;     // Semantic AI pass set (decoded from TRNATTR_AI_MOVE_WEIGHTS)
+    uint16_t ai_item_flags;  // TRNATTR_AI_ITEM_SWITCH bitmask (LE, raw — item AI pending)
 };
 
 // ============================================================================
@@ -205,10 +205,10 @@ struct BattleRules {
         return false;
     }
 
-    // AI move flags for a trainer class (0-indexed).  Returns 0 if out of range.
-    uint16_t get_trainer_ai_flags(size_t trainer_class_index) const {
-        if (trainer_class_index >= trainer_class_ai.size()) return 0;
-        return trainer_class_ai[trainer_class_index].ai_move_flags;
+    // AI pass set for a trainer class (0-indexed).  Returns basic-only if out of range.
+    AIPassSet get_trainer_ai_passes(size_t trainer_class_index) const {
+        if (trainer_class_index >= trainer_class_ai.size()) return AIPassSet::basic_only();
+        return trainer_class_ai[trainer_class_index].ai_passes;
     }
 
     // Priority for a given move effect_id.  Returns BASE_PRIORITY (1) if not found.

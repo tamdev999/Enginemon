@@ -201,7 +201,8 @@ enum class MoveExecutionResult {
     Immune,              // Target immune to move type
     NoTarget,            // No valid target
     NoPP,                // Out of PP (struggle not yet implemented)
-    UnsupportedSemantic  // Move effect not implemented; PP NOT deducted; turn halted
+    UnsupportedSemantic, // Move effect not implemented; PP NOT deducted; turn halted
+    InvalidData          // Malformed/missing move data (accuracy==0, etc.); turn halted
 };
 
 // Battle context

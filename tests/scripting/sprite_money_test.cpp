@@ -872,7 +872,7 @@ TEST(rom_brls_runtime_stat_mult_propagation) {
     }};
     rules.crit_chances = {17,32,64,85,128,128,128};
     rules.wobble_probabilities = {{{1,63},{255,255}}};
-    rules.trainer_class_ai.push_back({0,0,10,0x0001,0x0000});
+    rules.trainer_class_ai.push_back({0,0,10,AIPassSet::basic_only(),0x0000});
 
     // Write to package
     crystal::PackageWriter writer;
@@ -918,7 +918,7 @@ TEST(rom_brls_runtime_crit_threshold_propagation) {
     }};
     rules.crit_chances = {50,32,64,85,128,128,128};  // stage-0 threshold = 50
     rules.wobble_probabilities = {{{1,63},{255,255}}};
-    rules.trainer_class_ai.push_back({0,0,10,0x0001,0x0000});
+    rules.trainer_class_ai.push_back({0,0,10,AIPassSet::basic_only(),0x0000});
 
     crystal::PackageWriter writer;
     writer.set_source_rom("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "test_v1");
@@ -941,6 +941,129 @@ TEST(rom_brls_runtime_crit_threshold_propagation) {
     ASSERT_TRUE(!enginemon::roll_critical(0, 30, vanilla));
 
     std::cout << "  [BRLS roundtrip: crit threshold 50 crits at random=30, vanilla 17 does not]\n";
+}
+
+TEST(brls_ai_pass_set_roundtrip_named_booleans) {
+    // Prove AIPassSet survives BRLS write → read with all named fields intact.
+    // Writer repacks to Crystal TRNATTR_AI_MOVE_WEIGHTS bitmask; reader decodes back.
+    // This verifies: named-boolean semantic values are preserved through the wire format.
+    enginemon::BattleRules rules;
+    rules.stat_stage_mult = {{
+        {25,100},{28,100},{33,100},{40,100},{50,100},{66,100},
+        {1,1},{15,10},{2,1},{25,10},{3,1},{35,10},{4,1}
+    }};
+    rules.acc_stage_mult = {{
+        {33,100},{36,100},{43,100},{50,100},{60,100},{75,100},
+        {1,1},{133,100},{166,100},{2,1},{233,100},{133,50},{3,1}
+    }};
+    rules.crit_chances = {17,32,64,85,128,128,128};
+    rules.wobble_probabilities = {{{1,63},{255,255}}};
+
+    // Entry 0: BASIC+SMART only (run_smart=true, run_types=false)
+    enginemon::TrainerClassAIEntry e0{};
+    e0.ai_passes = {true, false, false, false, true};  // basic + smart
+    e0.ai_item_flags = 0x0000;
+    rules.trainer_class_ai.push_back(e0);
+
+    // Entry 1: all passes active
+    enginemon::TrainerClassAIEntry e1{};
+    e1.ai_passes = enginemon::AIPassSet::all();
+    e1.ai_item_flags = 0x0003;
+    rules.trainer_class_ai.push_back(e1);
+
+    // Entry 2: basic only (default)
+    enginemon::TrainerClassAIEntry e2{};
+    e2.ai_passes = enginemon::AIPassSet::basic_only();
+    e2.ai_item_flags = 0x0000;
+    rules.trainer_class_ai.push_back(e2);
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("dddddddddddddddddddddddddddddddddddddddd", "test_v1");
+    writer.add_battle_rules(rules);
+    auto pkg_path = std::filesystem::temp_directory_path() / "p4_ai_passes_test.emon";
+    ASSERT_TRUE(writer.write(pkg_path));
+
+    auto reader_ptr = enginemon::PackageReader::open(pkg_path);
+    ASSERT_TRUE(reader_ptr != nullptr);
+    auto loaded = reader_ptr->load_battle_rules();
+    std::filesystem::remove(pkg_path);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->trainer_class_ai.size(), 3u);
+
+    // Entry 0: basic + smart
+    ASSERT_TRUE( loaded->trainer_class_ai[0].ai_passes.run_basic);
+    ASSERT_FALSE(loaded->trainer_class_ai[0].ai_passes.run_setup);
+    ASSERT_FALSE(loaded->trainer_class_ai[0].ai_passes.run_types);
+    ASSERT_FALSE(loaded->trainer_class_ai[0].ai_passes.run_offensive);
+    ASSERT_TRUE( loaded->trainer_class_ai[0].ai_passes.run_smart);
+
+    // Entry 1: all passes
+    ASSERT_TRUE(loaded->trainer_class_ai[1].ai_passes.run_basic);
+    ASSERT_TRUE(loaded->trainer_class_ai[1].ai_passes.run_setup);
+    ASSERT_TRUE(loaded->trainer_class_ai[1].ai_passes.run_types);
+    ASSERT_TRUE(loaded->trainer_class_ai[1].ai_passes.run_offensive);
+    ASSERT_TRUE(loaded->trainer_class_ai[1].ai_passes.run_smart);
+
+    // Entry 2: basic only
+    ASSERT_TRUE( loaded->trainer_class_ai[2].ai_passes.run_basic);
+    ASSERT_FALSE(loaded->trainer_class_ai[2].ai_passes.run_setup);
+    ASSERT_FALSE(loaded->trainer_class_ai[2].ai_passes.run_types);
+    ASSERT_FALSE(loaded->trainer_class_ai[2].ai_passes.run_offensive);
+    ASSERT_FALSE(loaded->trainer_class_ai[2].ai_passes.run_smart);
+
+    std::cout << "  [AIPassSet BRLS roundtrip: basic+smart, all, basic-only — named booleans preserved]\n";
+}
+
+TEST(brls_high_crit_moveid_gt255_roundtrip) {
+    // Proves MoveId > 255 survives BRLS write → read unchanged.
+    // The wire format changed from u8 (cap 255) to u16 LE (full range).
+    // MoveId 300 (0x012C) must survive without truncation or corruption.
+    // MoveId 75 (RAZOR_LEAF) = 0x4B must still match.
+    // MoveId 300 & 0xFF = 44 — if truncation occurred, 44 would appear instead of 300.
+
+    enginemon::BattleRules rules;
+    rules.stat_stage_mult = {{
+        {25,100},{28,100},{33,100},{40,100},{50,100},{66,100},
+        {1,1},{15,10},{2,1},{25,10},{3,1},{35,10},{4,1}
+    }};
+    rules.acc_stage_mult = {{
+        {33,100},{36,100},{43,100},{50,100},{60,100},{75,100},
+        {1,1},{133,100},{166,100},{2,1},{233,100},{133,50},{3,1}
+    }};
+    rules.crit_chances = {17,32,64,85,128,128,128};
+    rules.wobble_probabilities = {{{1,63},{255,255}}};
+    rules.trainer_class_ai.push_back({0,0,10,AIPassSet::basic_only(),0x0000});
+
+    // Inject MoveIds: vanilla RAZOR_LEAF (75) + a semantic ID > 255 (300)
+    rules.high_crit_moves = {75, 300};
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("cccccccccccccccccccccccccccccccccccccccc", "test_v1");
+    writer.add_battle_rules(rules);
+    auto pkg_path = std::filesystem::temp_directory_path() / "p4_moveid_gt255_test.emon";
+    ASSERT_TRUE(writer.write(pkg_path));
+
+    auto reader_ptr = enginemon::PackageReader::open(pkg_path);
+    ASSERT_TRUE(reader_ptr != nullptr);
+    auto loaded = reader_ptr->load_battle_rules();
+    std::filesystem::remove(pkg_path);
+    ASSERT_TRUE(loaded.has_value());
+
+    ASSERT_EQ(loaded->high_crit_moves.size(), 2u);
+
+    // MoveId 75 survives unchanged
+    ASSERT_EQ(loaded->high_crit_moves[0], static_cast<enginemon::MoveId>(75));
+    // MoveId 300 survives without truncation (300 & 0xFF = 44 ≠ 300)
+    ASSERT_EQ(loaded->high_crit_moves[1], static_cast<enginemon::MoveId>(300));
+
+    // is_high_crit_move() must find both
+    ASSERT_TRUE(loaded->is_high_crit_move(75));
+    ASSERT_TRUE(loaded->is_high_crit_move(300));
+    // And must NOT find the truncated alias
+    ASSERT_FALSE(loaded->is_high_crit_move(44));   // 300 & 0xFF — proves no truncation
+    ASSERT_FALSE(loaded->is_high_crit_move(256));  // not in list
+
+    std::cout << "  [BRLS high_crit_moves u16 roundtrip: MoveId 75 and 300 survive; 44 (300&0xFF) absent]\n";
 }
 int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << "=== Sprite/Money State Tests ===\n";
@@ -984,6 +1107,8 @@ int main(int /*argc*/, char* /*argv*/[]) {
     // TRUE ROM→BRLS→runtime propagation tests
     RUN(rom_brls_runtime_stat_mult_propagation);
     RUN(rom_brls_runtime_crit_threshold_propagation);
+    RUN(brls_high_crit_moveid_gt255_roundtrip);
+    RUN(brls_ai_pass_set_roundtrip_named_booleans);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

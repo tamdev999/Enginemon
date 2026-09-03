@@ -83,6 +83,21 @@ struct FlagRef {
 // New code should use FlagRef directly
 using FlagId = uint16_t;
 
+// Semantic AI pass set — which behavior passes the AI will run.
+// The engine layer works only with these named boolean fields.
+// The Crystal frontend decodes ROM bitmasks (TRNATTR_AI_MOVE_WEIGHTS) into AIPassSet
+// at extraction/load time; no Crystal bit-position knowledge belongs in the engine.
+struct AIPassSet {
+    bool run_basic     = true;   // AI_BASIC — redundancy/status-block filter (always active)
+    bool run_setup     = false;  // AI_SETUP — stat-boosting move encouragement on turn 1
+    bool run_types     = false;  // AI_TYPES — type matchup awareness
+    bool run_offensive = false;  // AI_OFFENSIVE — discourages non-damaging moves
+    bool run_smart     = false;  // AI_SMART — context-specific per-effect adjustments
+
+    static AIPassSet all()        { return {true, true, true, true, true}; }
+    static AIPassSet basic_only() { return {true, false, false, false, false}; }
+};
+
 // Null/invalid markers
 inline constexpr SpeciesId SPECIES_NONE = 0;
 inline constexpr MoveId MOVE_NONE = 0;

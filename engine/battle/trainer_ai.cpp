@@ -152,13 +152,13 @@ struct MoveScores {
 
 VanillaCrystalAI::VanillaCrystalAI(AIBehaviorId behavior)
     : behavior_(behavior)
-    , use_crystal_flags_(false)
+    , use_pass_set_(false)
 {}
 
-VanillaCrystalAI::VanillaCrystalAI(CrystalAIFlags flags)
+VanillaCrystalAI::VanillaCrystalAI(AIPassSet passes)
     : behavior_(0)
-    , crystal_flags_(flags)
-    , use_crystal_flags_(true)
+    , ai_passes_(passes)
+    , use_pass_set_(true)
 {}
 
 std::string VanillaCrystalAI::name() const {
@@ -544,22 +544,22 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx) {
 }
 
 AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rules) {
-    // ROM-derived overload using typed CrystalAIFlags for exact bitmask dispatch.
-    // When constructed from CrystalAIFlags, uses crystal_flags_ directly — no
+    // ROM-derived overload using semantic AIPassSet for named-boolean pass dispatch.
+    // When constructed from AIPassSet, uses ai_passes_ directly — no
     // range-sniffing or numeric domain overloading.
     // When constructed from AIBehaviorId (tests), uses legacy tier path.
     MoveScores scores{};
 
-    if (use_crystal_flags_) {
-        // Exact bitmask-driven pass dispatch — matches Crystal AIChooseMove.
-        // ai_basic always runs (Crystal minimum).
+    if (use_pass_set_) {
+        // Semantic named-boolean dispatch — no Crystal bit positions in this code.
+        // ai_basic always runs (Crystal minimum, also the default when run_basic=true).
         ai_basic(scores, ctx, rules);
 
-        // Passes run in Crystal's AIScoringPointers order (bit index order).
-        if (crystal_flags_.has(CrystalAIFlags::SETUP))     ai_setup(scores, ctx, 0, 0);
-        if (crystal_flags_.has(CrystalAIFlags::TYPES))     ai_types(scores, ctx);
-        if (crystal_flags_.has(CrystalAIFlags::OFFENSIVE)) ai_offensive(scores, ctx);
-        if (crystal_flags_.has(CrystalAIFlags::SMART))     ai_smart(scores, ctx);
+        // Passes run in Crystal's AIScoringPointers order (SETUP, TYPES, OFFENSIVE, SMART).
+        if (ai_passes_.run_setup)     ai_setup(scores, ctx, 0, 0);
+        if (ai_passes_.run_types)     ai_types(scores, ctx);
+        if (ai_passes_.run_offensive) ai_offensive(scores, ctx);
+        if (ai_passes_.run_smart)     ai_smart(scores, ctx);
     } else {
         // Legacy tier-based dispatch (tests / direct AIBehaviorId construction).
         const AIBehaviorId beh = behavior_;

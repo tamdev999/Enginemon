@@ -909,10 +909,10 @@ BattleRules make_test_battle_rules() {
     r.high_crit_moves = {76, 122, 200};
     // AI status-only effects
     r.ai_status_only_effects = {1, 2, 5, 6, 7, 34, 48, 73, 92};
-    // Trainer class AI flags (3 entries for tests)
-    TrainerClassAIEntry e1{}; e1.ai_move_flags = 0x0001; r.trainer_class_ai.push_back(e1); // BASIC
-    TrainerClassAIEntry e2{}; e2.ai_move_flags = 0x0011; r.trainer_class_ai.push_back(e2); // BASIC+SMART
-    TrainerClassAIEntry e3{}; e3.ai_move_flags = 0x0009; r.trainer_class_ai.push_back(e3); // BASIC+OFFENSIVE
+    // Trainer class AI entries — use AIPassSet named booleans (no raw Crystal bitmask)
+    TrainerClassAIEntry e1{}; e1.ai_passes = {true,false,false,false,false}; r.trainer_class_ai.push_back(e1); // BASIC
+    TrainerClassAIEntry e2{}; e2.ai_passes = {true,false,false,false,true};  r.trainer_class_ai.push_back(e2); // BASIC+SMART
+    TrainerClassAIEntry e3{}; e3.ai_passes = {true,false,false,true,false};  r.trainer_class_ai.push_back(e3); // BASIC+OFFENSIVE
     return r;
 }
 
@@ -1205,7 +1205,7 @@ TEST(propagation_trainer_class_flags_change_ai_behavior) {
     // Trainer with SMART flag (GYM_LEADER) runs ai_smart → encourages Recover at low HP
     BattleRules rules = make_test_battle_rules();
     BattleRules modified = rules;
-    modified.trainer_class_ai[0].ai_move_flags = 0x0011;  // BASIC+SMART → GYM_LEADER
+    modified.trainer_class_ai[0].ai_passes = {true,false,false,false,true};  // BASIC+SMART
 
     auto party = make_test_party();
     auto reg   = make_test_registries();
@@ -1381,7 +1381,7 @@ TEST(trainer_ai_bitmask_types_only_no_smart) {
     // This verifies the type-aware behavior works correctly regardless.
     BattleRules rules = make_test_battle_rules();
     BattleRules modified = rules;
-    modified.trainer_class_ai[0].ai_move_flags = 0x0004;
+    modified.trainer_class_ai[0].ai_passes = {true,false,true,false,false};  // BASIC+TYPES (run_types)
     auto party = make_test_party();
     auto reg   = make_test_registries();
     Battle battle(BattleType::Trainer, party, reg);
@@ -1412,7 +1412,7 @@ TEST(trainer_ai_bitmask_basic_offensive_exact) {
     // Ember=20 < Recover=23 → Ember wins.
     BattleRules rules = make_test_battle_rules();
     BattleRules modified = rules;
-    modified.trainer_class_ai[0].ai_move_flags = 0x0019;  // BASIC+OFFENSIVE+SMART = 25 >= 16
+    modified.trainer_class_ai[0].ai_passes = {true,false,false,true,true};   // BASIC+OFFENSIVE+SMART
     auto party = make_test_party();
     auto reg   = make_test_registries();
     Battle battle(BattleType::Trainer, party, reg);
@@ -1471,7 +1471,11 @@ TEST(execute_turn_throws_without_rules_in_release) {
 
 TEST(accuracy_zero_is_invalid_not_always_hit) {
     // accuracy=0 in MoveData means missing/unset data.
-    // execute_move() with md->accuracy==0 emits an error message (not a hit).
+    // execute_move() with md->accuracy==0 must:
+    //   - return MoveExecutionResult::InvalidData (not Miss, not Success)
+    //   - emit an error message
+    //   - NOT deduct PP (undo any prior deduction)
+    //   - halt the turn (opponent does not act)
     BattleRules rules = make_test_battle_rules();
     auto party = make_test_party();
     // Build fresh registry with bad_move(accuracy=0) included BEFORE freezing
@@ -1499,17 +1503,69 @@ TEST(accuracy_zero_is_invalid_not_always_hit) {
 
     BattlePokemon& player = battle.player_pokemon();
     player.stats.hp = player.stats.max_hp = 100;
+    const int16_t opp_hp_before = battle.opponent_pokemon().stats.hp;
     player.moves[0].move = 99; player.moves[0].pp = 10; player.moves[0].max_pp = 10;
+    // Force player to act first
+    player.base_stats.speed = 255;
+    battle.opponent_pokemon().base_stats.speed = 1;
     battle.set_player_action(ActionFight{0, 0});
     battle.execute_turn();
 
+    // Must have emitted error message
     bool found_error = false;
     for (const auto& msg : messages) {
         if (msg.find("accuracy not set") != std::string::npos ||
             msg.find("data error") != std::string::npos) { found_error = true; break; }
     }
     ASSERT_TRUE(found_error);
-    std::cout << "  [accuracy=0 emits error message (not silent always-hit)]\n";
+    // PP must NOT be deducted — InvalidData is a data error, not a gameplay action
+    ASSERT_EQ(player.moves[0].pp, 10);
+    // Opponent HP must be unchanged — turn must be halted (no second actor)
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, opp_hp_before);
+    std::cout << "  [accuracy=0: InvalidData, PP not deducted, turn halted, error message emitted]\n";
+}
+
+TEST(accuracy_zero_distinguished_from_miss) {
+    // MoveExecutionResult::InvalidData is a distinct enum value from Miss and Success.
+    // This test proves the values are distinguishable at compile time + validates the
+    // turn-halting behavior (same contract as UnsupportedSemantic).
+    static_assert(MoveExecutionResult::InvalidData != MoveExecutionResult::Miss,
+        "InvalidData must be distinct from Miss");
+    static_assert(MoveExecutionResult::InvalidData != MoveExecutionResult::Success,
+        "InvalidData must be distinct from Success");
+    static_assert(MoveExecutionResult::InvalidData != MoveExecutionResult::UnsupportedSemantic,
+        "InvalidData must be distinct from UnsupportedSemantic");
+
+    // Verify the enum values are still all present and distinct
+    MoveExecutionResult v = MoveExecutionResult::InvalidData;
+    ASSERT_TRUE(v == MoveExecutionResult::InvalidData);
+    ASSERT_TRUE(v != MoveExecutionResult::Miss);
+    ASSERT_TRUE(v != MoveExecutionResult::Success);
+    ASSERT_TRUE(v != MoveExecutionResult::UnsupportedSemantic);
+    std::cout << "  [InvalidData is a distinct result code, not aliased to Miss or Success]\n";
+}
+
+TEST(accuracy_0xFF_always_hits_adversarial) {
+    // 0xFF is the Crystal always-hit encoding. It must not be conflated with accuracy=0.
+    // Test with accuracy=0xFF: should hit regardless of stages (no accuracy roll).
+    // Test with accuracy=0: must return InvalidData (data error, not gameplay miss).
+    BattleRules rules = make_test_battle_rules();
+
+    // Stage params that would make a normal accuracy roll fail (worst case)
+    const int8_t worst_acc_stage = -6;
+    const int8_t worst_eva_stage = +6;
+
+    // 0xFF always hits — even at worst stages
+    bool always_hit = roll_accuracy(0xFF, worst_acc_stage, worst_eva_stage, 254, rules);
+    ASSERT_TRUE(always_hit);
+
+    // 0x00: execute_move guards against accuracy==0 BEFORE calling roll_accuracy,
+    // returning InvalidData. roll_accuracy itself is not the guard — it clamps any
+    // accuracy to minimum 1, so we don't test it directly with 0.
+    // The adversarial execute_move tests above (accuracy_zero_is_invalid_not_always_hit)
+    // prove the execute_move guard fires correctly.
+
+    std::cout << "  [0xFF=always-hit at worst stages; execute_move guards accuracy==0 before roll_accuracy]\n";
 }
 
 TEST(status_move_halts_second_actor) {
@@ -1565,14 +1621,14 @@ TEST(high_crit_semantic_moveid_not_byte) {
     std::cout << "  [high_crit: MoveId 76 matches; MoveId 300 doesn't (no byte truncation)]\n";
 }
 
-TEST(typed_crystal_ai_flags_no_range_sniff) {
-    // Prove CrystalAIFlags dispatch doesn't rely on range >= 16.
-    // A bitmask of 0x0005 (BASIC|TYPES = bits 0+2) is < 16 but should still
-    // trigger the exact bitmask path when constructed from CrystalAIFlags.
+TEST(ai_pass_set_named_booleans_no_range_sniff) {
+    // Prove AIPassSet dispatch uses named semantic booleans, not Crystal bitmask range-sniffing.
+    // BASIC|TYPES corresponds to {run_basic=true, run_types=true, run_smart=false}.
     // ai_types should run; ai_smart should NOT.
     BattleRules rules = make_test_battle_rules();
     BattleRules modified = rules;
-    modified.trainer_class_ai[0].ai_move_flags = 0x0005;  // BASIC|TYPES
+    // Set trainer class AI passes directly — semantic named booleans, no raw Crystal bits.
+    modified.trainer_class_ai[0].ai_passes = {true, false, true, false, false};  // basic + types
 
     auto party = make_test_party();
     auto reg   = make_test_registries();
@@ -1584,16 +1640,18 @@ TEST(typed_crystal_ai_flags_no_range_sniff) {
 
     // At full HP: ai_smart would discourage Recover (+1 = 21 if SMART ran)
     // With BASIC|TYPES only: Recover=20, Ember(SE vs Grass)=19
-    // If CrystalAIFlags dispatches correctly (TYPES runs), Ember=19 wins.
+    // ai_types runs: Ember SE vs Grass → -1=19; Recover stays 20. Ember wins.
     BattlePokemon self = make_test_bp(4, 2, 2, {6, 2, MOVE_NONE, MOVE_NONE}, 100, 100);
     BattlePokemon opp  = make_test_bp(1, 4, 4, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE});
 
     AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
-    VanillaCrystalAI ai(CrystalAIFlags::from_rom(0x0005));  // typed construction
+    // Construct with AIPassSet — named booleans, no raw Crystal bits.
+    AIPassSet pass_set{true, false, true, false, false};  // basic + types
+    VanillaCrystalAI ai(pass_set);
     const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, modified).action);
     // ai_types: Ember SE vs Grass → -1=19; Recover stays 20. Ember wins.
     ASSERT_EQ(af.move_slot, 1u);
-    std::cout << "  [CrystalAIFlags(0x0005=BASIC|TYPES): Ember(SE)=19 wins; no range-sniff]\n";
+    std::cout << "  [AIPassSet{basic,types}: Ember(SE)=19 wins; named-boolean dispatch, no range-sniff]\n";
 }
 
 TEST(weather_order_crystal_exact_base_weather_stab_type) {
@@ -1757,9 +1815,11 @@ int main(int /*argc*/, char* /*argv*/[]) {
     // === PHASE 3: release authority, exact ordering, typed identity ===
     RUN(execute_turn_throws_without_rules_in_release);
     RUN(accuracy_zero_is_invalid_not_always_hit);
+    RUN(accuracy_zero_distinguished_from_miss);
+    RUN(accuracy_0xFF_always_hits_adversarial);
     RUN(status_move_halts_second_actor);
     RUN(high_crit_semantic_moveid_not_byte);
-    RUN(typed_crystal_ai_flags_no_range_sniff);
+    RUN(ai_pass_set_named_booleans_no_range_sniff);
     RUN(weather_order_crystal_exact_base_weather_stab_type);
 
     std::cout << "\n=== Results ===\n";

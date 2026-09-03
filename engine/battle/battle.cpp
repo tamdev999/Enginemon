@@ -164,10 +164,11 @@ void Battle::set_trainer(TrainerId trainer, const TrainerData& data) {
     }
 
     // Determine AI behavior from trainer class via BattleRules.
-    // Use CrystalAIFlags typed bitmask — no numeric range-sniffing.
+    // get_trainer_ai_passes() returns a semantic AIPassSet decoded by the Crystal frontend.
+    // No Crystal ROM bit positions in this code.
     if (rules_) {
-        const uint16_t raw = rules_->get_trainer_ai_flags(data.trainer_class);
-        trainer_ai_ = std::make_unique<VanillaCrystalAI>(CrystalAIFlags::from_rom(raw));
+        const AIPassSet passes = rules_->get_trainer_ai_passes(data.trainer_class);
+        trainer_ai_ = std::make_unique<VanillaCrystalAI>(passes);
     } else {
         trainer_ai_ = std::make_unique<VanillaCrystalAI>(VanillaAI::BASIC);
     }
@@ -362,9 +363,10 @@ void Battle::execute_action(BattlePokemon& user, BattlePokemon& target,
             return;
         }
         const auto res = execute_move(user, target, mid, af.move_slot, is_player);
-        // UnsupportedSemantic: the move had no effect; flag turn as halted so the
-        // opponent does not act on this turn.  Battle state remains coherent.
-        if (res == MoveExecutionResult::UnsupportedSemantic) {
+        // UnsupportedSemantic and InvalidData: no valid move execution; flag turn as
+        // halted so the opponent does not act on this turn.  Battle state remains coherent.
+        if (res == MoveExecutionResult::UnsupportedSemantic ||
+            res == MoveExecutionResult::InvalidData) {
             turn_halted_ = true;
         }
 
@@ -408,10 +410,13 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
 
     // Accuracy check
     // 0xFF = always hit (Crystal encoding for never-miss moves like Swift).
-    // 0 = missing/unset data — explicit failure, not a silent always-hit.
+    // 0    = missing/unset data — explicit invalid-data failure; undo PP deduct.
     if (md->accuracy == 0) {
+        // Undo PP deduction: this is a data error, not a gameplay action.
+        if (move_slot < 4 && user.moves[move_slot].pp < 63)
+            user.moves[move_slot].pp++;
         message("Move data error: accuracy not set for " + md->name);
-        return MoveExecutionResult::Miss;
+        return MoveExecutionResult::InvalidData;
     }
     if (md->accuracy != 0xFF) {
         const int8_t acc_stage = user.stages.accuracy;

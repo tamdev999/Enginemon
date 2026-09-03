@@ -353,7 +353,7 @@ BattleRulesExtractResult extract_battle_rules(
     //   byte 0:   TRNATTR_ITEM1           (item1)
     //   byte 1:   TRNATTR_ITEM2           (item2)
     //   byte 2:   TRNATTR_BASEMONEY       (base_reward)
-    //   bytes 3-4: TRNATTR_AI_MOVE_WEIGHTS (ai_move_flags, LE word)
+    //   bytes 3-4: TRNATTR_AI_MOVE_WEIGHTS (ai_passes, decoded to AIPassSet)
     //   bytes 5-6: TRNATTR_AI_ITEM_SWITCH  (ai_item_flags, LE word)
     // ------------------------------------------------------------------
     {
@@ -383,10 +383,20 @@ BattleRulesExtractResult extract_battle_rules(
                                   static_cast<uint32_t>(i) * ENTRY_SIZE;
             auto rec = rom.read_bytes(entry_addr, ENTRY_SIZE);
             enginemon::TrainerClassAIEntry e;
-            e.item1         = rec[0];
-            e.item2         = rec[1];
-            e.base_reward   = rec[2];
-            e.ai_move_flags = static_cast<uint16_t>(rec[3] | (rec[4] << 8));
+            e.item1       = rec[0];
+            e.item2       = rec[1];
+            e.base_reward = rec[2];
+            // Crystal TRNATTR_AI_MOVE_WEIGHTS bit positions (trainer_data_constants.asm):
+            //   bit 0 = AI_BASIC      bit 1 = AI_SETUP    bit 2 = AI_TYPES
+            //   bit 3 = AI_OFFENSIVE  bit 4 = AI_SMART
+            // These bit positions are Crystal-specific and belong only in this extractor.
+            const uint16_t raw_move = static_cast<uint16_t>(rec[3] | (rec[4] << 8));
+            const uint16_t flags = (raw_move != 0) ? raw_move : 0x0001u; // default: BASIC
+            e.ai_passes.run_basic     = true;                            // always active
+            e.ai_passes.run_setup     = (flags & (1u << 1)) != 0;
+            e.ai_passes.run_types     = (flags & (1u << 2)) != 0;
+            e.ai_passes.run_offensive = (flags & (1u << 3)) != 0;
+            e.ai_passes.run_smart     = (flags & (1u << 4)) != 0;
             e.ai_item_flags = static_cast<uint16_t>(rec[5] | (rec[6] << 8));
             rules.trainer_class_ai.push_back(e);
         }

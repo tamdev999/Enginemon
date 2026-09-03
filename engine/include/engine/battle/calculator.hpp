@@ -108,9 +108,8 @@ bool roll_critical(uint8_t crit_stage, uint32_t random, const BattleRules& rules
 // Build the effective crit stage from battle state.
 // Source: effect_commands.asm BattleCommand_Critical
 //   base stage = 0
-//   +2 if move ID is in BattleRules::high_crit_moves
-//     (rules stores Crystal MOVE_ANIM bytes = MoveId for standard Crystal moves;
-//      build_crit_stage compares (uint8_t)move.id against the list)
+//   +2 if move.id is in BattleRules::high_crit_moves
+//     (stored as semantic MoveId values; comparison is direct MoveId equality)
 //   +1 if user has Focus Energy volatile (VolatileStatus::FocusEnergy)
 //   +2 if user holds Lucky Punch (Chansey) or Stick (Farfetch'd) — not yet representable
 //   +1 if user holds Scope Lens (HELD_CRITICAL_UP) — not yet representable
