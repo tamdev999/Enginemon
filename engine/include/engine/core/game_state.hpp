@@ -227,6 +227,14 @@ struct GameState {
     static constexpr int32_t ITEM_QUANTITY_MAX = 99;
     std::unordered_map<ItemId, int32_t> items;
 
+    // Money and coin caps — derived from Crystal's BCD storage widths.
+    // wPlayerMoney / wMomsMoney: 3 packed-BCD bytes → 6 decimal digits → max 999999.
+    // wCoins: 2 packed-BCD bytes → 4 decimal digits → max 9999.
+    // These are format constants (BCD width), not SM83 immediate operands.
+    // Source: Crystal WRAM layout — wPlayerMoney at 0xD84E (3 bytes), wCoins at 0xD852 (2 bytes).
+    static constexpr int32_t MONEY_MAX = 999999;  // BCD 3-byte max (player and mom accounts)
+    static constexpr int32_t COIN_MAX  =   9999;  // BCD 2-byte max (Game Corner coins)
+
     // NPC states per map (map_id -> NPC states)
     // This captures all gameplay-relevant NPC runtime state for deterministic resume
     std::unordered_map<std::string, std::vector<NpcSaveState>> npc_states;

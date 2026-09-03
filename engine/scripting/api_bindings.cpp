@@ -7,6 +7,7 @@
 #include "engine/scripting/semantic_ir.hpp"
 #include "engine/world/movement_manager.hpp"
 #include "engine/core/game_state.hpp"
+#include "engine/core/game_loop.hpp"
 #include "engine/core/rtc.hpp"
 #include <unordered_map>
 #include <unordered_set>
@@ -503,7 +504,7 @@ static bool parse_movement_command_sequence(lua_State* L, int table_idx,
         } else if (type == "sleep") {
             cmd.type      = MovementCommandType::StepSleep;
             cmd.direction = MovementDirection::None;
-            cmd.param     = frames > 0 ? frames : 16;
+            cmd.param     = frames > 0 ? frames : GameTiming::FRAMES_PER_STEP;
             out_cmds.push_back(cmd);
         } else if (d) {
             // Direction-bearing commands: step, slow_step, big_step, turn
@@ -1358,10 +1359,16 @@ int give_money(lua_State* L) {
     const char* key = (account == 1) ? "money_mom"
                     : (account == 2) ? "coins"
                     :                  "money_player";
+    // Crystal BCD storage width caps:
+    //   wPlayerMoney / wMomsMoney: 3 packed-BCD bytes → max 999999
+    //   wCoins: 2 packed-BCD bytes → max 9999
+    const int32_t cap = (account == 2) ? GameState::COIN_MAX : GameState::MONEY_MAX;
     if (GameState* gs = runtime->get_game_state()) {
         auto it = gs->variables.find(key);
         int32_t current = (it != gs->variables.end()) ? it->second : 0;
-        gs->variables[key] = current + static_cast<int32_t>(amount);
+        // Use int64 arithmetic to avoid overflow before clamping.
+        int64_t next = static_cast<int64_t>(current) + static_cast<int64_t>(amount);
+        gs->variables[key] = static_cast<int32_t>(std::min<int64_t>(next, cap));
     } else {
         auto& stubs = runtime->get_stub_services();
         stubs.last_give_money_amount  = amount;
