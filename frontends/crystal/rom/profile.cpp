@@ -402,7 +402,10 @@ void ProfileRegistry::register_crystal_v11() {
     o.ai_useful_moves            = flat_offset(0x0e, 0x5301); // 0e:5301 UsefulMoves
     o.ai_residual_moves          = flat_offset(0x0e, 0x5446); // 0e:5446 ResidualMoves
     o.ai_encore_moves            = flat_offset(0x0e, 0x4c85); // 0e:4c85 EncoreMoves
+    o.ai_rain_dance_moves        = flat_offset(0x0e, 0x50e7); // 0e:50e7 RainDanceMoves
+    o.ai_sunny_day_moves         = flat_offset(0x0e, 0x5134); // 0e:5134 SunnyDayMoves
     o.trainer_class_attributes   = flat_offset(0x0e, 0x559c); // 0e:559c TrainerClassAttributes
+    o.trainer_class_dvs          = flat_offset(0x09, 0x70d6); // 09:70d6 TrainerClassDVs
     o.num_wobble_entries         = 24; // 24 entries in Crystal v1.1 WobbleProbabilities
 
     //-------------------------------------------------------------------------

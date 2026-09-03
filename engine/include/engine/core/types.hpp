@@ -263,12 +263,19 @@ struct TrainerData {
     TrainerId id;
     std::string name;
     uint8_t trainer_class;
-    
+
     struct Pokemon {
         SpeciesId species;
         uint8_t level;
         ItemId held_item;
         std::array<MoveId, 4> moves;  // MOVE_NONE if not specified
+        // DVs from Crystal's TrainerClassDVs table (09:70d6), per trainer class.
+        // Gen 2 DVs are 4-bit values (0–15).  Materialized by the frontend extractor;
+        // the engine uses them directly rather than defaulting to iv=9.
+        uint8_t dv_atk = 9;   // Attack DV  (vanilla default 9)
+        uint8_t dv_def = 8;   // Defense DV (vanilla default 8)
+        uint8_t dv_spd = 8;   // Speed DV   (vanilla default 8)
+        uint8_t dv_spc = 8;   // Special DV (vanilla default 8)
     };
     std::vector<Pokemon> party;
     

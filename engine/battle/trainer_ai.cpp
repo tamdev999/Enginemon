@@ -27,6 +27,7 @@
 
 #include "engine/battle/trainer_ai.hpp"
 #include "engine/battle/calculator.hpp"
+#include "engine/battle/battle_effects.hpp"
 #include <algorithm>
 #include <cassert>
 #include <numeric>
@@ -41,98 +42,15 @@
 namespace enginemon {
 
 // ============================================================================
-// Constants matching Crystal AI behavior
+// AI scoring constants — Crystal source: scoring.asm
+//   Default score: 20  AIDiscourageMove: +10  pass deltas: ±1, ±2
 // ============================================================================
-
-// Score adjustment magnitudes — Crystal source: scoring.asm
-//   Default score: 20 (all moves start at 20)
-//   AIDiscourageMove: +10 (strongly discourage)
-//   Individual pass discourage: +1 or +2
-//   Individual pass encourage: -1 or -2
-static constexpr int kInitScore       = 20;   // Crystal: default = 20, disabled = 80
-static constexpr int kDiscourageStrong = 10;  // AIDiscourageMove in Crystal (+10)
-static constexpr int kStrongDiscourage = 2;   // individual pass strong discourage (+2)
-static constexpr int kDiscourage       = 1;   // individual pass discourage (+1)
-static constexpr int kEncourage        = -1;  // individual pass encourage (-1)
-static constexpr int kStrongEncourage  = -2;  // individual pass strong encourage (-2)
-
-// Crystal move effect IDs (from constants/battle_constants.asm).
-// We use the effect_id field of MoveData for these comparisons.
-// These are the Gen 2 canonical values.
-namespace Effect {
-    static constexpr uint8_t None          = 0;
-    static constexpr uint8_t Sleep         = 1;
-    static constexpr uint8_t Poison        = 2;
-    static constexpr uint8_t Drain         = 3;  // LeechHit
-    static constexpr uint8_t Burn          = 5;
-    static constexpr uint8_t Freeze        = 6;
-    static constexpr uint8_t Paralyze      = 7;
-    static constexpr uint8_t Selfdestruct  = 8;
-    static constexpr uint8_t DreamEater    = 9;
-    static constexpr uint8_t MirrorMove    = 10;
-    static constexpr uint8_t AttackUp      = 11;
-    static constexpr uint8_t DefenseUp     = 12;
-    static constexpr uint8_t SpeedUp       = 13;
-    static constexpr uint8_t SpecialUp     = 14;
-    static constexpr uint8_t AccuracyUp    = 15;
-    static constexpr uint8_t EvasionUp     = 16;
-    static constexpr uint8_t AlwaysHit     = 17;
-    static constexpr uint8_t AttackDown    = 18;
-    static constexpr uint8_t DefenseDown   = 19;
-    static constexpr uint8_t SpeedDown     = 20;
-    static constexpr uint8_t SpecialDown   = 21;
-    static constexpr uint8_t AccuracyDown  = 22;
-    static constexpr uint8_t EvasionDown   = 23;
-    static constexpr uint8_t Bide          = 27;
-    static constexpr uint8_t ForceSwitch   = 29;
-    static constexpr uint8_t Heal          = 33;
-    static constexpr uint8_t Toxic         = 34;
-    static constexpr uint8_t LightScreen   = 36;
-    static constexpr uint8_t Ohko          = 38;
-    static constexpr uint8_t Confuse       = 48;
-    static constexpr uint8_t SpDefUp2      = 53;
-    static constexpr uint8_t Reflect       = 66;
-    static constexpr uint8_t Substitute    = 68;
-    static constexpr uint8_t HyperBeam     = 69;
-    static constexpr uint8_t LeechSeed     = 73;
-    static constexpr uint8_t AttackUp2     = 74;
-    static constexpr uint8_t DefenseUp2    = 75;
-    static constexpr uint8_t SpeedUp2      = 76;
-    static constexpr uint8_t SpecialUp2    = 77;
-    static constexpr uint8_t AccuracyUp2   = 78;
-    static constexpr uint8_t EvasionUp2    = 79;
-    static constexpr uint8_t AttackDown2   = 80;
-    static constexpr uint8_t DefenseDown2  = 81;
-    static constexpr uint8_t SpeedDown2    = 82;
-    static constexpr uint8_t SpecialDown2  = 83;
-    static constexpr uint8_t AccuracyDown2 = 84;
-    static constexpr uint8_t EvasionDown2  = 85;
-    static constexpr uint8_t Nightmare     = 92;
-    static constexpr uint8_t BellyDrum     = 97;
-    static constexpr uint8_t Safeguard     = 108;
-    static constexpr uint8_t MorningSun    = 112;
-    static constexpr uint8_t Synthesis     = 113;
-    static constexpr uint8_t Moonlight     = 114;
-    static constexpr uint8_t RainDance     = 120;
-    static constexpr uint8_t SunnyDay      = 121;
-    static constexpr uint8_t Protect       = 122;
-    static constexpr uint8_t BatonPass     = 133;
-    static constexpr uint8_t Endure        = 135;
-}
-
-// Status-only effects (source: suiCune data/battle/ai/status_only_effects.asm)
-// These are discarded by BASIC AI if target already has a status.
-static const uint8_t kStatusOnlyEffects[] = {
-    Effect::Sleep, Effect::Poison, Effect::Burn, Effect::Freeze,
-    Effect::Paralyze, Effect::Toxic, Effect::Confuse, Effect::LeechSeed,
-    Effect::Nightmare, 0xFF  // terminator
-};
-
-static bool is_status_only(uint8_t effect) {
-    for (const uint8_t* p = kStatusOnlyEffects; *p != 0xFF; ++p)
-        if (*p == effect) return true;
-    return false;
-}
+static constexpr int kInitScore        = 20;   // Crystal: default = 20
+static constexpr int kDiscourageStrong = 10;   // AIDiscourageMove (+10)
+static constexpr int kStrongDiscourage =  2;   // individual pass strong discourage (+2)
+static constexpr int kDiscourage       =  1;   // individual pass discourage (+1)
+static constexpr int kEncourage        = -1;   // individual pass encourage (-1)
+static constexpr int kStrongEncourage  = -2;   // individual pass strong encourage (-2)
 
 // ============================================================================
 // Score table for move selection
@@ -178,34 +96,11 @@ std::string VanillaCrystalAI::name() const {
 // ============================================================================
 // AI_Basic
 // Source: suiCune engine/battle/ai/scoring.c AI_Basic
-// Discourages status-only moves if target already has a status condition,
-// or if the target has Safeguard active.
-// Also discourages redundant moves (e.g., Protect used twice consecutively).
+// Discourages status-only moves if target already has a status condition.
+// Production path: uses rules.ai_status_only_effects (ROM-derived).
+// The no-rules path (hardcoded list) has been removed; callers must provide rules.
 // ============================================================================
 
-static void ai_basic(MoveScores& scores, const AIContext& ctx) {
-    for (size_t i = 0; i < 4; ++i) {
-        const MoveId mid = ctx.self.moves[i].move;
-        if (mid == MOVE_NONE) continue;
-
-        // We need the move's effect_id. Battle gives us the Battle registry
-        // via ctx.battle.registries().
-        // Access through the Battle const reference.
-        const MoveData* md = ctx.battle.registries().moves.get(mid);
-        if (!md) continue;
-
-        // Discourage status-only moves if target already has a status
-        if (is_status_only(md->effect_id)) {
-            const bool target_already_statused =
-                (ctx.opponent.status != Status::None);
-            if (target_already_statused) {
-                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove = +10
-            }
-        }
-    }
-}
-
-// ROM-derived variant: uses rules.ai_status_only_effects instead of kStatusOnlyEffects.
 static void ai_basic(MoveScores& scores, const AIContext& ctx, const BattleRules& rules) {
     for (size_t i = 0; i < 4; ++i) {
         const MoveId mid = ctx.self.moves[i].move;
@@ -292,35 +187,41 @@ static void ai_offensive(MoveScores& scores, const AIContext& ctx) {
 // Source: suiCune engine/battle/ai/scoring.c AI_Setup
 // Encourages stat-up moves on turn 1 (both sides' turn 1).
 // Discourages them otherwise.
+//
+// Stat-up/stat-down classification uses BattleRules::ai_stat_up_effects and
+// ai_stat_down_effects, which are populated from Crystal's TrainerClassAttributes
+// and the extractor's knowledge of Crystal's contiguous effect-ID ranges.
+// The engine does not directly encode Crystal's ID layout.
 // ============================================================================
 
-static bool is_stat_up(uint8_t effect) {
-    return (effect >= Effect::AttackUp  && effect <= Effect::EvasionUp)
-        || (effect >= Effect::AttackUp2 && effect <= Effect::EvasionUp2);
+static bool is_stat_up(uint8_t effect_id, const BattleRules& rules) {
+    for (uint8_t e : rules.ai_stat_up_effects)
+        if (e == effect_id) return true;
+    return false;
 }
 
-static bool is_stat_down(uint8_t effect) {
-    return (effect >= Effect::AttackDown  && effect <= Effect::EvasionDown)
-        || (effect >= Effect::AttackDown2 && effect <= Effect::EvasionDown2);
+static bool is_stat_down(uint8_t effect_id, const BattleRules& rules) {
+    for (uint8_t e : rules.ai_stat_down_effects)
+        if (e == effect_id) return true;
+    return false;
 }
 
 static void ai_setup(MoveScores& scores, const AIContext& ctx,
-                     uint16_t self_turn, uint16_t opp_turn) {
+                     uint16_t self_turn, uint16_t opp_turn,
+                     const BattleRules& rules) {
     for (size_t i = 0; i < 4; ++i) {
         if (ctx.self.moves[i].move == MOVE_NONE) continue;
         const MoveData* md = ctx.battle.registries().moves.get(ctx.self.moves[i].move);
         if (!md) continue;
 
-        if (is_stat_up(md->effect_id)) {
+        if (is_stat_up(md->effect_id, rules)) {
             if (self_turn == 0) {
-                // Turn 1 of self's pokemon: 50% chance to encourage
                 scores.scores[i] += kStrongEncourage;
             } else {
                 scores.scores[i] += kStrongDiscourage;
             }
-        } else if (is_stat_down(md->effect_id)) {
+        } else if (is_stat_down(md->effect_id, rules)) {
             if (opp_turn == 0) {
-                // Turn 1 of opponent's pokemon: 50% chance to encourage
                 scores.scores[i] += kStrongEncourage;
             } else {
                 scores.scores[i] += kStrongDiscourage;
@@ -334,9 +235,14 @@ static void ai_setup(MoveScores& scores, const AIContext& ctx,
 // Source: suiCune engine/battle/ai/scoring.c AI_Smart
 // Full implementation has ~70 per-effect handlers; we implement the most
 // impactful ones. Unimplemented effects get no adjustment (neutral).
+//
+// Uses SemEffect:: constants (engine/include/engine/battle/battle_effects.hpp)
+// rather than raw Crystal EFFECT_* IDs from trainer_ai.cpp (removed).
+// Weather synergy moves looked up via BattleRules::is_ai_rain_dance_move() /
+// is_ai_sunny_day_move() — ROM-extracted lists, no hardcoded Crystal constants.
 // ============================================================================
 
-static void ai_smart(MoveScores& scores, const AIContext& ctx) {
+static void ai_smart(MoveScores& scores, const AIContext& ctx, const BattleRules& rules) {
     for (size_t i = 0; i < 4; ++i) {
         if (ctx.self.moves[i].move == MOVE_NONE) continue;
         const MoveData* md = ctx.battle.registries().moves.get(ctx.self.moves[i].move);
@@ -346,34 +252,32 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
         const int16_t self_hp  = ctx.self.stats.hp;
         const int16_t self_max = ctx.self.stats.max_hp;
 
-        // Healing moves: encourage when HP is low (< half)
-        if (eff == Effect::Heal || eff == Effect::MorningSun
-         || eff == Effect::Synthesis || eff == Effect::Moonlight) {
+        // Healing moves: encourage when HP is low (< half); discourage when above 75%
+        if (eff == SemEffect::Heal || eff == SemEffect::MorningSun
+         || eff == SemEffect::Synthesis || eff == SemEffect::Moonlight) {
             if (self_max > 0 && self_hp * 2 < self_max) {
                 scores.scores[i] += kStrongEncourage;
             } else if (self_max > 0 && self_hp * 4 >= self_max * 3) {
-                // HP above 75%: discourage healing
                 scores.scores[i] += kDiscourage;
             }
             continue;
         }
 
-        // Selfdestruct / Explosion: discourage if opponent not faint-threshold
-        if (eff == Effect::Selfdestruct) {
+        // Selfdestruct / Explosion: discourage if opponent not near KO
+        if (eff == SemEffect::Selfdestruct) {
             if (ctx.opponent.stats.hp * 4 > ctx.opponent.stats.max_hp) {
-                // Opponent HP > 25% — discourage
                 scores.scores[i] += kDiscourage;
             }
             continue;
         }
 
         // Sleep-inducing: encourage if we also have Dream Eater or Nightmare
-        if (eff == Effect::Sleep) {
+        if (eff == SemEffect::Sleep) {
             for (size_t j = 0; j < 4; ++j) {
                 if (ctx.self.moves[j].move == MOVE_NONE) continue;
                 const MoveData* mdj = ctx.battle.registries().moves.get(ctx.self.moves[j].move);
                 if (!mdj) continue;
-                if (mdj->effect_id == Effect::DreamEater || mdj->effect_id == Effect::Nightmare) {
+                if (mdj->effect_id == SemEffect::DreamEater || mdj->effect_id == SemEffect::Nightmare) {
                     scores.scores[i] += kStrongEncourage;
                     break;
                 }
@@ -382,47 +286,45 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
         }
 
         // Dream Eater: only useful if target is asleep
-        if (eff == Effect::DreamEater) {
+        if (eff == SemEffect::DreamEater) {
             if (ctx.opponent.status != Status::Sleep) {
-                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove
+                scores.scores[i] += kDiscourageStrong;
             }
             continue;
         }
 
         // Nightmare: only useful if target is asleep
-        if (eff == Effect::Nightmare) {
+        if (eff == SemEffect::Nightmare) {
             if (ctx.opponent.status != Status::Sleep) {
-                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove
+                scores.scores[i] += kDiscourageStrong;
             }
             continue;
         }
 
         // Toxic / Poison: discourage if target already poisoned
-        if (eff == Effect::Toxic || eff == Effect::Poison) {
+        if (eff == SemEffect::Toxic || eff == SemEffect::Poison) {
             if (ctx.opponent.status == Status::Poison
              || ctx.opponent.status == Status::BadPoison) {
-                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove
+                scores.scores[i] += kDiscourageStrong;
             }
             continue;
         }
 
         // Paralyze: discourage if target already paralyzed
-        if (eff == Effect::Paralyze) {
+        if (eff == SemEffect::Paralyze) {
             if (ctx.opponent.status == Status::Paralysis) {
-                scores.scores[i] += kDiscourageStrong;  // AIDiscourageMove
+                scores.scores[i] += kDiscourageStrong;
             }
             continue;
         }
 
-        // Reflect / Light Screen: discourage if already active (simplified)
-        if (eff == Effect::Reflect || eff == Effect::LightScreen) {
-            // No convenient way to check screen state from AIContext currently;
-            // leave neutral.
+        // Reflect / Light Screen: leave neutral (no AIContext screen state yet)
+        if (eff == SemEffect::Reflect || eff == SemEffect::LightScreen) {
             continue;
         }
 
         // Baton Pass: encourage if we have positive stat stages
-        if (eff == Effect::BatonPass) {
+        if (eff == SemEffect::BatonPass) {
             const auto& st = ctx.self.stages;
             const bool has_positive = (st.attack > 0 || st.defense > 0 ||
                 st.speed > 0 || st.special_attack > 0 || st.special_defense > 0 ||
@@ -436,7 +338,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
         }
 
         // Belly Drum: encourage only if HP is at max
-        if (eff == Effect::BellyDrum) {
+        if (eff == SemEffect::BellyDrum) {
             if (self_max > 0 && self_hp < self_max) {
                 scores.scores[i] += kStrongDiscourage;
             }
@@ -444,17 +346,48 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
         }
 
         // Protect / Endure: discourage (Crystal AI generally avoids stalling)
-        if (eff == Effect::Protect || eff == Effect::Endure) {
+        if (eff == SemEffect::Protect || eff == SemEffect::Endure) {
             scores.scores[i] += kDiscourage;
             continue;
         }
 
         // Hyper Beam: encourage if opponent is at low HP (likely KO)
-        if (eff == Effect::HyperBeam) {
+        if (eff == SemEffect::HyperBeam) {
             if (ctx.opponent.stats.max_hp > 0 &&
                 ctx.opponent.stats.hp * 4 <= ctx.opponent.stats.max_hp) {
-                // Opponent <= 25% HP — encourage the KO attempt
                 scores.scores[i] += kEncourage;
+            }
+            continue;
+        }
+
+        // Rain Dance: encourage if AI knows a rain-synergy move (ROM-derived list)
+        if (eff == SemEffect::RainDance) {
+            bool has_synergy = false;
+            for (size_t j = 0; j < 4 && !has_synergy; ++j) {
+                const MoveData* mdj = ctx.battle.registries().moves.get(ctx.self.moves[j].move);
+                if (mdj && rules.is_ai_rain_dance_move(static_cast<uint8_t>(mdj->id & 0xFF)))
+                    has_synergy = true;
+            }
+            if (has_synergy) {
+                scores.scores[i] += kStrongEncourage;
+            } else {
+                scores.scores[i] += kStrongDiscourage;
+            }
+            continue;
+        }
+
+        // Sunny Day: encourage if AI knows a sunny-day synergy move (ROM-derived list)
+        if (eff == SemEffect::SunnyDay) {
+            bool has_synergy = false;
+            for (size_t j = 0; j < 4 && !has_synergy; ++j) {
+                const MoveData* mdj = ctx.battle.registries().moves.get(ctx.self.moves[j].move);
+                if (mdj && rules.is_ai_sunny_day_move(static_cast<uint8_t>(mdj->id & 0xFF)))
+                    has_synergy = true;
+            }
+            if (has_synergy) {
+                scores.scores[i] += kStrongEncourage;
+            } else {
+                scores.scores[i] += kStrongDiscourage;
             }
             continue;
         }
@@ -466,52 +399,36 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx) {
 // ============================================================================
 
 AIDecision VanillaCrystalAI::decide(const AIContext& ctx) {
-    // Build score table (all 0 = equal initially)
+    // No-rules overload: test/legacy path only.
+    // Without BattleRules, ai_basic (status-only list), ai_setup (stat-up/down lists),
+    // and ai_smart (weather synergy lists) cannot run faithfully.
+    // Only ai_types and ai_offensive run; ai_basic is skipped.
+    // For production use, always call decide(ctx, rules).
     MoveScores scores{};
 
-    // Determine which AI passes to run based on behavior flags
-    // Crystal: the behavior ID encodes a bitmask of AI passes.
-    // BASIC is always run.
-    // Higher behaviors add more passes.
     const AIBehaviorId beh = behavior_;
 
-    ai_basic(scores, ctx);
+    // ai_basic skipped: requires BattleRules::ai_status_only_effects
+    ai_types(scores, ctx);
 
-    if (beh >= VanillaAI::SMART || beh == VanillaAI::GYM_LEADER
-     || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
-        ai_types(scores, ctx);
-        ai_smart(scores, ctx);
-    } else if (beh >= VanillaAI::AGGRESSIVE) {
-        ai_types(scores, ctx);
+    if (beh >= VanillaAI::AGGRESSIVE) {
         ai_offensive(scores, ctx);
-    } else {
-        // BASIC only adds type awareness
-        ai_types(scores, ctx);
     }
+    // ai_setup and ai_smart skipped: require BattleRules lists
 
-    if (beh == VanillaAI::DEFENSIVE || beh == VanillaAI::GYM_LEADER
-     || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
-        // Setup AI: turn counts aren't in AIContext yet; pass 0 as approximation
-        ai_setup(scores, ctx, 0, 0);
-    }
-
-    // Should switch? Basic check: if self has very low HP and has usable switches.
     if (should_switch(ctx)) {
-        // Pick a switch target and issue a switch action
         size_t switch_to = choose_switch_target(ctx);
         if (switch_to < SIZE_MAX) {
             AIDecision d;
             d.action    = ActionSwitch{switch_to};
-            d.reasoning = "Low HP — switching";
+            d.reasoning = "Low HP — switching (no-rules)";
             d.confidence = 0.7f;
             return d;
         }
     }
 
-    // Select the move with the lowest score (ties broken randomly via first-found)
     int best_score = INT_MAX;
     std::vector<size_t> candidates;
-
     for (size_t i = 0; i < 4; ++i) {
         if (!ctx.self.can_use_move(i)) continue;
         if (scores.scores[i] < best_score) {
@@ -525,15 +442,12 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx) {
 
     AIDecision d;
     if (candidates.empty()) {
-        // No usable moves — struggle
         d.action = ActionFight{0, 0};
         d.reasoning = "Struggle";
         d.confidence = 1.0f;
         return d;
     }
 
-    // Crystal tie-breaking: Random() % num_tied_moves (uniform among tied slots).
-    // Source: AIChooseMove .ChooseMove — maskbits NUM_MOVES, retry until non-zero.
     const size_t chosen = candidates.size() == 1
         ? candidates[0]
         : candidates[const_cast<Battle&>(ctx.battle).rng_byte() % candidates.size()];
@@ -556,10 +470,10 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rul
         ai_basic(scores, ctx, rules);
 
         // Passes run in Crystal's AIScoringPointers order (SETUP, TYPES, OFFENSIVE, SMART).
-        if (ai_passes_.run_setup)     ai_setup(scores, ctx, 0, 0);
+        if (ai_passes_.run_setup)     ai_setup(scores, ctx, 0, 0, rules);
         if (ai_passes_.run_types)     ai_types(scores, ctx);
         if (ai_passes_.run_offensive) ai_offensive(scores, ctx);
-        if (ai_passes_.run_smart)     ai_smart(scores, ctx);
+        if (ai_passes_.run_smart)     ai_smart(scores, ctx, rules);
     } else {
         // Legacy tier-based dispatch (tests / direct AIBehaviorId construction).
         const AIBehaviorId beh = behavior_;
@@ -569,7 +483,7 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rul
         if (beh >= VanillaAI::SMART || beh == VanillaAI::GYM_LEADER
          || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
             ai_types(scores, ctx);
-            ai_smart(scores, ctx);
+            ai_smart(scores, ctx, rules);
         } else if (beh >= VanillaAI::AGGRESSIVE) {
             ai_types(scores, ctx);
             ai_offensive(scores, ctx);
@@ -579,7 +493,7 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rul
 
         if (beh == VanillaAI::DEFENSIVE || beh == VanillaAI::GYM_LEADER
          || beh == VanillaAI::ELITE_FOUR || beh == VanillaAI::CHAMPION) {
-            ai_setup(scores, ctx, 0, 0);
+            ai_setup(scores, ctx, 0, 0, rules);
         }
     }
 
@@ -631,9 +545,9 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rul
 // ============================================================================
 
 int VanillaCrystalAI::score_move(const AIContext& ctx, size_t move_slot) {
-    // Placeholder: expose the score for a single slot if needed externally
+    // Placeholder: expose the score for a single slot if needed externally.
+    // Only ai_types runs here (ai_basic requires BattleRules).
     MoveScores scores{};
-    ai_basic(scores, ctx);
     ai_types(scores, ctx);
     return scores.scores[move_slot];
 }

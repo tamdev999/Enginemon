@@ -373,9 +373,10 @@ struct ProfileOffsets {
     uint32_t ai_useful_moves;           // 0e:5301  UsefulMoves                 — 1 byte/entry, 0xFF sentinel
     uint32_t ai_residual_moves;         // 0e:5446  ResidualMoves               — 1 byte/entry, 0xFF sentinel
     uint32_t ai_encore_moves;           // 0e:4c85  EncoreMoves                 — 1 byte/entry, 0xFF sentinel
+    uint32_t ai_rain_dance_moves;       // 0e:50e7  RainDanceMoves              — 1 byte/entry, 0xFF sentinel
+    uint32_t ai_sunny_day_moves;        // 0e:5134  SunnyDayMoves               — 1 byte/entry, 0xFF sentinel
     uint32_t trainer_class_attributes;  // 0e:559c  TrainerClassAttributes      — num_trainer_classes×7 bytes
-
-    // Fixed count for WobbleProbabilities (24 in vanilla; may differ in hacks that
+    uint32_t trainer_class_dvs;         // 09:70d6  TrainerClassDVs             — num_trainer_classes×2 bytes
     // rewrite the table but keep the same format).
     uint8_t  num_wobble_entries = 24;
 };

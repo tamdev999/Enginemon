@@ -347,7 +347,43 @@ BattleRulesExtractResult extract_battle_rules(
         return result;
 
     // ------------------------------------------------------------------
-    // 15. TrainerClassAttributes — num_trainer_classes × 7 bytes
+    // 15. AI weather synergy move lists — 1 byte/entry, 0xFF sentinel
+    // ------------------------------------------------------------------
+    if (!extract_byte_list(rom, o.ai_rain_dance_moves,
+                           "RainDanceMoves",
+                           rules.ai_rain_dance_move_ids, err))
+        return result;
+
+    if (!extract_byte_list(rom, o.ai_sunny_day_moves,
+                           "SunnyDayMoves",
+                           rules.ai_sunny_day_move_ids, err))
+        return result;
+
+    // ------------------------------------------------------------------
+    // 15b. AI stat-effect lists — synthesized from Crystal's effect-ID ranges.
+    // These encode Crystal's known contiguous EFFECT_* layout as explicit lists
+    // so the engine AI does not need to know Crystal's source ID layout.
+    // Stat-up:   ATTACK_UP(11)..EVASION_UP(16)    and ATTACK_UP_2(74)..EVASION_UP_2(79)
+    // Stat-down: ATTACK_DOWN(18)..EVASION_DOWN(23) and ATTACK_DOWN_2(80)..EVASION_DOWN_2(85)
+    // Source: constants/battle_constants.asm — EFFECT_ATTACK_UP through EFFECT_EVASION_DOWN_2
+    // ------------------------------------------------------------------
+    {
+        rules.ai_stat_up_effects.clear();
+        for (uint8_t e = 11; e <= 16; ++e)  // ATTACK_UP .. EVASION_UP
+            rules.ai_stat_up_effects.push_back(e);
+        for (uint8_t e = 74; e <= 79; ++e)  // ATTACK_UP_2 .. EVASION_UP_2
+            rules.ai_stat_up_effects.push_back(e);
+    }
+    {
+        rules.ai_stat_down_effects.clear();
+        for (uint8_t e = 18; e <= 23; ++e)  // ATTACK_DOWN .. EVASION_DOWN
+            rules.ai_stat_down_effects.push_back(e);
+        for (uint8_t e = 80; e <= 85; ++e)  // ATTACK_DOWN_2 .. EVASION_DOWN_2
+            rules.ai_stat_down_effects.push_back(e);
+    }
+
+    // ------------------------------------------------------------------
+    // 16. TrainerClassAttributes — num_trainer_classes × 7 bytes
     //
     // Each entry (from trainer_data_constants.asm):
     //   byte 0:   TRNATTR_ITEM1           (item1)
@@ -399,6 +435,43 @@ BattleRulesExtractResult extract_battle_rules(
             e.ai_passes.run_smart     = (flags & (1u << 4)) != 0;
             e.ai_item_flags = static_cast<uint16_t>(rec[5] | (rec[6] << 8));
             rules.trainer_class_ai.push_back(e);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 17. TrainerClassDVs — num_trainer_classes × 2 bytes
+    //
+    // Each entry is two bytes encoding 4×4-bit DV values:
+    //   byte 0: {atk<<4 | def}   byte 1: {spd<<4 | spc}
+    // Source: data/trainers/dvs.asm (09:70d6)
+    // Note: table has exactly num_trainer_classes entries; parallel with trainer_class_ai.
+    // ------------------------------------------------------------------
+    {
+        const char* tname = "TrainerClassDVs";
+        const uint16_t n_classes = c.num_trainer_classes;
+        if (o.trainer_class_dvs != 0) {
+            // Table must cover exactly num_trainer_classes × 2 bytes
+            const uint32_t table_bytes = static_cast<uint32_t>(n_classes) * 2u;
+            if (static_cast<uint64_t>(o.trainer_class_dvs) + table_bytes > rom.size()) {
+                err = std::format(
+                    "{}: table at 0x{:05x} ({} bytes) extends past ROM size 0x{:05x}",
+                    tname, o.trainer_class_dvs, table_bytes, rom.size());
+                return result;
+            }
+            auto bytes = rom.read_bytes(o.trainer_class_dvs, table_bytes);
+            for (uint16_t i = 0; i < n_classes && i < static_cast<uint16_t>(rules.trainer_class_ai.size()); ++i) {
+                uint8_t b0 = bytes[static_cast<size_t>(i * 2)];      // atk<<4 | def
+                uint8_t b1 = bytes[static_cast<size_t>(i * 2 + 1)];  // spd<<4 | spc
+                auto& e = rules.trainer_class_ai[i];
+                e.dv_atk = (b0 >> 4) & 0x0F;
+                e.dv_def = (b0)      & 0x0F;
+                e.dv_spd = (b1 >> 4) & 0x0F;
+                e.dv_spc = (b1)      & 0x0F;
+            }
+        } else {
+            // Profile does not provide TrainerClassDVs address — use vanilla default 9/8/8/8
+            // This is a valid state for profiles that don't supply the address.
+            // make_battle_pokemon falls back to the default {9,8,8,8} via get_trainer_dvs().
         }
     }
 

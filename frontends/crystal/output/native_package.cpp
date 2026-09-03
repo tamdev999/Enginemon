@@ -783,14 +783,24 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     //  [residual_move_ids]    count × u8                     = N bytes
     //  [encore_count]         u8                             =  1 byte
     //  [encore_move_ids]      count × u8                     = N bytes
+    //  [rain_dance_count]     u8                             =  1 byte
+    //  [rain_dance_move_ids]  count × u8                     = N bytes
+    //  [sunny_day_count]      u8                             =  1 byte
+    //  [sunny_day_move_ids]   count × u8                     = N bytes
+    //  [stat_up_count]        u8                             =  1 byte
+    //  [stat_up_effects]      count × u8                     = N bytes
+    //  [stat_down_count]      u8                             =  1 byte
+    //  [stat_down_effects]    count × u8                     = N bytes
     //  [trainer_class_count]  u16 LE                         =  2 bytes
-    //  [trainer_class_ai]     count × {u8 item1, u8 item2, u8 reward, u8 ai_passes, u16 LE item_flags}
-    //                                                        = count×6 bytes
+    //  [trainer_class_ai]     count × {u8 item1, u8 item2, u8 reward, u8 ai_passes, u16 LE item_flags,
+    //                                  u8 dv_atk_def, u8 dv_spd_spc}   = count×8 bytes
     //
     //  ai_passes is an EMON-owned flags byte:
     //    bit 0=run_basic  bit 1=run_setup  bit 2=run_types
     //    bit 3=run_offensive  bit 4=run_smart
     //  These bit positions are part of the EMON BRLS wire spec — not Crystal ROM ABI.
+    //
+    //  DV bytes encode 4-bit nibbles: dv_atk_def = {atk<<4|def}, dv_spd_spc = {spd<<4|spc}
 
     std::vector<uint8_t> buf;
     buf.reserve(512);
@@ -862,8 +872,12 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     push_byte_list(rules.ai_useful_move_ids);
     push_byte_list(rules.ai_residual_move_ids);
     push_byte_list(rules.ai_encore_move_ids);
+    push_byte_list(rules.ai_rain_dance_move_ids);
+    push_byte_list(rules.ai_sunny_day_move_ids);
+    push_byte_list(rules.ai_stat_up_effects);
+    push_byte_list(rules.ai_stat_down_effects);
 
-    // trainer_class_ai: u16 LE count + count × 6 bytes
+    // trainer_class_ai: u16 LE count + count × 8 bytes
     push_u16(static_cast<uint16_t>(rules.trainer_class_ai.size()));
     for (const auto& t : rules.trainer_class_ai) {
         push_u8(t.item1);
@@ -881,6 +895,9 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
         if (t.ai_passes.run_smart)     ai_passes_byte |= (1u << 4);
         push_u8(ai_passes_byte);
         push_u16(t.ai_item_flags);
+        // DV nibble pairs: {atk<<4|def, spd<<4|spc}
+        push_u8(static_cast<uint8_t>((t.dv_atk & 0x0F) << 4 | (t.dv_def & 0x0F)));
+        push_u8(static_cast<uint8_t>((t.dv_spd & 0x0F) << 4 | (t.dv_spc & 0x0F)));
     }
 
     battle_rules_data_ = std::move(buf);

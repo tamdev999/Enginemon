@@ -32,7 +32,10 @@
 //   UsefulMoves                   0e:5301  data/battle/ai/useful_moves.asm
 //   ResidualMoves                 0e:5446  data/battle/ai/residual_moves.asm
 //   EncoreMoves                   0e:4c85  data/battle/ai/encore_moves.asm
+//   RainDanceMoves                0e:50e7  data/battle/ai/rain_dance_moves.asm
+//   SunnyDayMoves                 0e:5134  data/battle/ai/sunny_day_moves.asm
 //   TrainerClassAttributes        0e:559c  data/trainers/attributes.asm
+//   TrainerClassDVs               09:70d6  data/trainers/dvs.asm
 
 #include "engine/core/types.hpp"
 #include <algorithm>
@@ -83,9 +86,17 @@ struct MoveEffectPriorityEntry {
 struct TrainerClassAIEntry {
     uint8_t  item1;          // Default held item 1 (NO_ITEM=0)
     uint8_t  item2;          // Default held item 2 (NO_ITEM=0)
-    uint8_t  base_reward;    // Base prize money (prize = base_reward * level * 4)
+    uint8_t  base_reward;    // Base prize money (prize = base_reward * level)
     AIPassSet ai_passes;     // Semantic AI pass set (decoded from TRNATTR_AI_MOVE_WEIGHTS)
     uint16_t ai_item_flags;  // TRNATTR_AI_ITEM_SWITCH bitmask (LE, raw — item AI pending)
+    // DVs for all Pokémon of this trainer class.
+    // Crystal's TrainerClassDVs table (09:70d6) stores one 2-byte entry per class.
+    // Format: {atk<<4 | def, spd<<4 | spc} — each nibble is a 0–15 DV value.
+    // Decoded into 4-bit fields for direct use by make_battle_pokemon().
+    uint8_t dv_atk = 9;      // Attack DV  (0–15; vanilla default 9)
+    uint8_t dv_def = 8;      // Defense DV (0–15; vanilla default 8)
+    uint8_t dv_spd = 8;      // Speed DV   (0–15; vanilla default 8)
+    uint8_t dv_spc = 8;      // Special DV (0–15; vanilla default 8)
 };
 
 // ============================================================================
@@ -146,6 +157,22 @@ struct BattleRules {
     std::vector<uint8_t> ai_residual_move_ids;     // ResidualMoves     (0e:5446) — move IDs
     std::vector<uint8_t> ai_encore_move_ids;       // EncoreMoves       (0e:4c85) — move IDs
 
+    // AI weather synergy move lists: move IDs that benefit from weather.
+    // AI_Smart encourages weather-setting moves when the AI knows one of these.
+    // Source: data/battle/ai/rain_dance_moves.asm (0e:50e7)
+    //         data/battle/ai/sunny_day_moves.asm  (0e:5134)
+    std::vector<uint8_t> ai_rain_dance_move_ids;   // RainDanceMoves — move IDs that benefit from Rain
+    std::vector<uint8_t> ai_sunny_day_move_ids;    // SunnyDayMoves  — move IDs that benefit from Sun
+
+    // AI stat-effect lists for ai_setup().
+    // These encode Crystal's contiguous effect-ID ranges as explicit lists,
+    // extracted by the Crystal frontend.  The engine AI uses these lists
+    // rather than range-checking Crystal's source layout directly.
+    // Stat-up: ATTACK_UP(11)..EVASION_UP(16) + ATTACK_UP_2(74)..EVASION_UP_2(79)
+    // Stat-down: ATTACK_DOWN(18)..EVASION_DOWN(23) + ATTACK_DOWN_2(80)..EVASION_DOWN_2(85)
+    std::vector<uint8_t> ai_stat_up_effects;       // effect IDs that are +stat moves
+    std::vector<uint8_t> ai_stat_down_effects;     // effect IDs that are -stat moves (to opponent)
+
     // Per-trainer-class AI flags.
     // Index = trainer class index (0-based, corresponding to Crystal trainer class order).
     // Source: TrainerClassAttributes (0e:559c)
@@ -205,10 +232,41 @@ struct BattleRules {
         return false;
     }
 
+    // True if move_id is in the AI rain-dance synergy list.
+    bool is_ai_rain_dance_move(uint8_t move_id) const {
+        for (uint8_t m : ai_rain_dance_move_ids)
+            if (m == move_id) return true;
+        return false;
+    }
+
+    // True if move_id is in the AI sunny-day synergy list.
+    bool is_ai_sunny_day_move(uint8_t move_id) const {
+        for (uint8_t m : ai_sunny_day_move_ids)
+            if (m == move_id) return true;
+        return false;
+    }
+
     // AI pass set for a trainer class (0-indexed).  Returns basic-only if out of range.
     AIPassSet get_trainer_ai_passes(size_t trainer_class_index) const {
         if (trainer_class_index >= trainer_class_ai.size()) return AIPassSet::basic_only();
         return trainer_class_ai[trainer_class_index].ai_passes;
+    }
+
+    // Trainer class DV values (0-indexed).  Returns vanilla default {9,8,8,8} if out of range.
+    // dvs[0]=atk, dvs[1]=def, dvs[2]=spd, dvs[3]=spc
+    std::array<uint8_t, 4> get_trainer_dvs(size_t trainer_class_index) const {
+        if (trainer_class_index < trainer_class_ai.size()) {
+            const auto& e = trainer_class_ai[trainer_class_index];
+            return {e.dv_atk, e.dv_def, e.dv_spd, e.dv_spc};
+        }
+        return {9, 8, 8, 8};  // Vanilla default for trainers not in the table
+    }
+
+    // Base reward for a trainer class (0-indexed).  Returns 0 if out of range.
+    // Used by ComputeTrainerReward: prize = base_reward × highest_party_level.
+    uint8_t get_trainer_class_base_reward(size_t trainer_class_index) const {
+        if (trainer_class_index >= trainer_class_ai.size()) return 0;
+        return trainer_class_ai[trainer_class_index].base_reward;
     }
 
     // Priority for a given move effect_id.  Returns BASE_PRIORITY (1) if not found.

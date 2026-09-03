@@ -777,37 +777,58 @@ TEST(ai_types_avoids_immune) {
 TEST(ai_basic_discourages_toxic_when_already_poisoned) {
     auto party = make_test_party();
     auto reg   = make_test_registries();
-    Battle battle(BattleType::Wild, party, reg);
+    // Build minimal BattleRules with status-only list (ai_basic requires it)
+    BattleRules rules;
+    rules.stat_stage_mult = {{{25,100},{28,100},{33,100},{40,100},{50,100},{66,100},{1,1},{15,10},{2,1},{25,10},{3,1},{35,10},{4,1}}};
+    rules.acc_stage_mult  = {{{33,100},{36,100},{43,100},{50,100},{60,100},{75,100},{1,1},{133,100},{166,100},{2,1},{233,100},{133,50},{3,1}}};
+    rules.crit_chances    = {17,32,64,85,128,128,128};
+    rules.wobble_probabilities = {{{1,63},{255,255}}};
+    rules.ai_status_only_effects = {1,2,5,6,7,34,48,73,92};  // Toxic=34 is in list
+    TrainerClassAIEntry tc{}; tc.ai_passes = AIPassSet::basic_only(); rules.trainer_class_ai.push_back(tc);
+    Battle battle(BattleType::Wild, party, reg, rules);
     BattlePokemon self = make_test_bp(4, 2, 2, {5, 1, MOVE_NONE, MOVE_NONE});
     BattlePokemon opp  = make_test_bp(1, 4, 4, {MOVE_NONE, MOVE_NONE, MOVE_NONE, MOVE_NONE});
     opp.status = Status::Poison;
     AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
     VanillaCrystalAI ai(VanillaAI::BASIC);
-    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx).action);
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, rules).action);
     ASSERT_EQ(af.move_slot, 1u);
 }
 
 TEST(ai_smart_encourages_recover_at_low_hp) {
     auto party = make_test_party();
     auto reg   = make_test_registries();
-    Battle battle(BattleType::Wild, party, reg);
+    // Minimal rules for ai_smart (needs wobble + trainer_class_ai for is_valid)
+    BattleRules rules;
+    rules.stat_stage_mult = {{{25,100},{28,100},{33,100},{40,100},{50,100},{66,100},{1,1},{15,10},{2,1},{25,10},{3,1},{35,10},{4,1}}};
+    rules.acc_stage_mult  = {{{33,100},{36,100},{43,100},{50,100},{60,100},{75,100},{1,1},{133,100},{166,100},{2,1},{233,100},{133,50},{3,1}}};
+    rules.crit_chances    = {17,32,64,85,128,128,128};
+    rules.wobble_probabilities = {{{1,63},{255,255}}};
+    TrainerClassAIEntry tc{}; tc.ai_passes = AIPassSet::all(); rules.trainer_class_ai.push_back(tc);
+    Battle battle(BattleType::Wild, party, reg, rules);
     BattlePokemon self = make_test_bp(4, 2, 2, {6, 1, MOVE_NONE, MOVE_NONE}, 20, 100);
     BattlePokemon opp  = make_test_bp(1, 4, 4, {MOVE_NONE, MOVE_NONE, MOVE_NONE, MOVE_NONE});
     AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
     VanillaCrystalAI ai(VanillaAI::SMART);
-    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx).action);
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, rules).action);
     ASSERT_EQ(af.move_slot, 0u);
 }
 
 TEST(ai_smart_discourages_recover_at_full_hp) {
     auto party = make_test_party();
     auto reg   = make_test_registries();
-    Battle battle(BattleType::Wild, party, reg);
+    BattleRules rules;
+    rules.stat_stage_mult = {{{25,100},{28,100},{33,100},{40,100},{50,100},{66,100},{1,1},{15,10},{2,1},{25,10},{3,1},{35,10},{4,1}}};
+    rules.acc_stage_mult  = {{{33,100},{36,100},{43,100},{50,100},{60,100},{75,100},{1,1},{133,100},{166,100},{2,1},{233,100},{133,50},{3,1}}};
+    rules.crit_chances    = {17,32,64,85,128,128,128};
+    rules.wobble_probabilities = {{{1,63},{255,255}}};
+    TrainerClassAIEntry tc{}; tc.ai_passes = AIPassSet::all(); rules.trainer_class_ai.push_back(tc);
+    Battle battle(BattleType::Wild, party, reg, rules);
     BattlePokemon self = make_test_bp(4, 2, 2, {6, 1, MOVE_NONE, MOVE_NONE}, 100, 100);
     BattlePokemon opp  = make_test_bp(1, 4, 4, {MOVE_NONE, MOVE_NONE, MOVE_NONE, MOVE_NONE});
     AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
     VanillaCrystalAI ai(VanillaAI::SMART);
-    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx).action);
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, rules).action);
     ASSERT_EQ(af.move_slot, 1u);
 }
 
@@ -909,10 +930,19 @@ BattleRules make_test_battle_rules() {
     r.high_crit_moves = {76, 122, 200};
     // AI status-only effects
     r.ai_status_only_effects = {1, 2, 5, 6, 7, 34, 48, 73, 92};
+    // AI stat-up effects (Crystal ranges: 11-16 and 74-79)
+    for (uint8_t e = 11; e <= 16; ++e) r.ai_stat_up_effects.push_back(e);
+    for (uint8_t e = 74; e <= 79; ++e) r.ai_stat_up_effects.push_back(e);
+    // AI stat-down effects (Crystal ranges: 18-23 and 80-85)
+    for (uint8_t e = 18; e <= 23; ++e) r.ai_stat_down_effects.push_back(e);
+    for (uint8_t e = 80; e <= 85; ++e) r.ai_stat_down_effects.push_back(e);
+    // AI weather synergy moves (minimal)
+    r.ai_rain_dance_move_ids = {55, 57, 58};  // Some water moves
+    r.ai_sunny_day_move_ids  = {6, 7, 8};     // Some fire moves
     // Trainer class AI entries — use AIPassSet named booleans (no raw Crystal bitmask)
-    TrainerClassAIEntry e1{}; e1.ai_passes = {true,false,false,false,false}; r.trainer_class_ai.push_back(e1); // BASIC
-    TrainerClassAIEntry e2{}; e2.ai_passes = {true,false,false,false,true};  r.trainer_class_ai.push_back(e2); // BASIC+SMART
-    TrainerClassAIEntry e3{}; e3.ai_passes = {true,false,false,true,false};  r.trainer_class_ai.push_back(e3); // BASIC+OFFENSIVE
+    TrainerClassAIEntry e1{}; e1.ai_passes = {true,false,false,false,false}; e1.base_reward = 10; r.trainer_class_ai.push_back(e1); // BASIC
+    TrainerClassAIEntry e2{}; e2.ai_passes = {true,false,false,false,true};  e2.base_reward = 15; r.trainer_class_ai.push_back(e2); // BASIC+SMART
+    TrainerClassAIEntry e3{}; e3.ai_passes = {true,false,false,true,false};  e3.base_reward = 12; r.trainer_class_ai.push_back(e3); // BASIC+OFFENSIVE
     return r;
 }
 

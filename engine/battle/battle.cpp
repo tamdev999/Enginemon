@@ -65,7 +65,9 @@ static BattlePokemon make_battle_pokemon(
     SpeciesId species, uint8_t level,
     ItemId held, const std::array<MoveId, 4>& move_ids,
     size_t party_index,
-    const Registries& reg)
+    const Registries& reg,
+    uint8_t dv_atk = 9, uint8_t dv_def = 8,
+    uint8_t dv_spd = 8, uint8_t dv_spc = 8)
 {
     BattlePokemon bp{};
     bp.party_index = party_index;
@@ -78,16 +80,17 @@ static BattlePokemon make_battle_pokemon(
         bp.type1 = sd->type1;
         bp.type2 = sd->type2;
 
-        // Stats: use trainer default IV=9 for trainer mons
+        // Stats: use per-pokemon DVs from TrainerData (materialized by frontend extractor).
+        // Gen 2 HP uses the special DV; non-HP stats use their own DV.
+        // Source: Crystal CalcMonStatC / GetHPIV
         const auto& bs = sd->base_stats;
-        const uint8_t iv = 9;
-        bp.stats.max_hp          = static_cast<int16_t>(calc_hp(bs.hp, iv, 0, level));
+        bp.stats.max_hp          = static_cast<int16_t>(calc_hp(bs.hp, dv_spc, 0, level));
         bp.stats.hp              = bp.stats.max_hp;
-        bp.stats.attack          = static_cast<int16_t>(calc_stat(bs.attack, iv, 0, level));
-        bp.stats.defense         = static_cast<int16_t>(calc_stat(bs.defense, iv, 0, level));
-        bp.stats.speed           = static_cast<int16_t>(calc_stat(bs.speed, iv, 0, level));
-        bp.stats.special_attack  = static_cast<int16_t>(calc_stat(bs.special_attack, iv, 0, level));
-        bp.stats.special_defense = static_cast<int16_t>(calc_stat(bs.special_defense, iv, 0, level));
+        bp.stats.attack          = static_cast<int16_t>(calc_stat(bs.attack,          dv_atk, 0, level));
+        bp.stats.defense         = static_cast<int16_t>(calc_stat(bs.defense,         dv_def, 0, level));
+        bp.stats.speed           = static_cast<int16_t>(calc_stat(bs.speed,           dv_spd, 0, level));
+        bp.stats.special_attack  = static_cast<int16_t>(calc_stat(bs.special_attack,  dv_spc, 0, level));
+        bp.stats.special_defense = static_cast<int16_t>(calc_stat(bs.special_defense, dv_spc, 0, level));
         bp.base_stats            = bp.stats;
     }
 
@@ -149,13 +152,15 @@ void Battle::set_wild_pokemon(SpeciesId species, uint8_t level) {
 
 void Battle::set_trainer(TrainerId trainer, const TrainerData& data) {
     assert(type_ == BattleType::Trainer);
-    trainer_id_ = trainer;
+    trainer_id_          = trainer;
+    trainer_class_index_ = data.trainer_class;
 
     opponent_party_.clear();
     for (size_t i = 0; i < data.party.size(); ++i) {
         const auto& tp = data.party[i];
         opponent_party_.push_back(
-            make_battle_pokemon(tp.species, tp.level, tp.held_item, tp.moves, i, registries_));
+            make_battle_pokemon(tp.species, tp.level, tp.held_item, tp.moves, i, registries_,
+                                tp.dv_atk, tp.dv_def, tp.dv_spd, tp.dv_spc));
     }
 
     if (!opponent_party_.empty()) {
@@ -654,7 +659,21 @@ void Battle::finalize_outcome() {
     outcome_.result      = result_;
     outcome_.turns_taken = turn_number_;
     if (result_ == BattleResult::PlayerWin && type_ == BattleType::Trainer) {
-        outcome_.money_gained = 100;  // Placeholder
+        // Crystal formula: ComputeTrainerReward = base_reward × highest_party_level
+        // Source: engine/battle/read_trainer_party.asm ComputeTrainerReward
+        // base_reward comes from TrainerClassAttributes (already in BattleRules).
+        // The highest level in the opponent party is used (wCurPartyLevel at fight end).
+        uint8_t base_reward = 0;
+        uint8_t highest_level = 0;
+        if (rules_) {
+            base_reward = rules_->get_trainer_class_base_reward(trainer_class_index_);
+        }
+        for (const auto& bp : opponent_party_) {
+            if (bp.level > highest_level) highest_level = bp.level;
+        }
+        // Fallback: if no rules or reward=0, use 0 (explicit, not a magic placeholder).
+        outcome_.money_gained = static_cast<uint32_t>(base_reward)
+                              * static_cast<uint32_t>(highest_level);
     }
 }
 

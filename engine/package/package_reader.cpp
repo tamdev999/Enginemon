@@ -1061,11 +1061,15 @@ PackageReader::load_battle_rules() const {
     if (!read_byte_list(rules.ai_status_only_effects)) return std::nullopt;
     if (!read_byte_list(rules.ai_risky_effects))       return std::nullopt;
     if (!read_byte_list(rules.ai_stall_move_ids))      return std::nullopt;
-    if (!read_byte_list(rules.ai_useful_move_ids))     return std::nullopt;
-    if (!read_byte_list(rules.ai_residual_move_ids))   return std::nullopt;
-    if (!read_byte_list(rules.ai_encore_move_ids))     return std::nullopt;
+    if (!read_byte_list(rules.ai_useful_move_ids))        return std::nullopt;
+    if (!read_byte_list(rules.ai_residual_move_ids))      return std::nullopt;
+    if (!read_byte_list(rules.ai_encore_move_ids))        return std::nullopt;
+    if (!read_byte_list(rules.ai_rain_dance_move_ids))    return std::nullopt;
+    if (!read_byte_list(rules.ai_sunny_day_move_ids))     return std::nullopt;
+    if (!read_byte_list(rules.ai_stat_up_effects))        return std::nullopt;
+    if (!read_byte_list(rules.ai_stat_down_effects))      return std::nullopt;
 
-    // trainer_class_ai: u16 LE count + count × 6 bytes
+    // trainer_class_ai: u16 LE count + count × 8 bytes
     {
         uint16_t n = 0;
         if (!r.read_le(n)) return std::nullopt;
@@ -1088,6 +1092,14 @@ PackageReader::load_battle_rules() const {
             t.ai_passes.run_offensive = (ai_passes_byte & (1u << 3)) != 0;
             t.ai_passes.run_smart     = (ai_passes_byte & (1u << 4)) != 0;
             if (!r.read_le(t.ai_item_flags)) return std::nullopt;
+            // DV nibble pairs: {atk<<4|def, spd<<4|spc}
+            uint8_t dv0 = 0, dv1 = 0;
+            if (!r.read_le(dv0)) return std::nullopt;
+            if (!r.read_le(dv1)) return std::nullopt;
+            t.dv_atk = (dv0 >> 4) & 0x0F;
+            t.dv_def = (dv0)      & 0x0F;
+            t.dv_spd = (dv1 >> 4) & 0x0F;
+            t.dv_spc = (dv1)      & 0x0F;
         }
     }
 
