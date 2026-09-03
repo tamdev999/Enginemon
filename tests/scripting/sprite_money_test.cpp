@@ -945,8 +945,12 @@ TEST(rom_brls_runtime_crit_threshold_propagation) {
 
 TEST(brls_ai_pass_set_roundtrip_named_booleans) {
     // Prove AIPassSet survives BRLS write → read with all named fields intact.
-    // Writer repacks to Crystal TRNATTR_AI_MOVE_WEIGHTS bitmask; reader decodes back.
-    // This verifies: named-boolean semantic values are preserved through the wire format.
+    // The BRLS wire format uses an EMON-owned u8 flags byte (not Crystal bitmask).
+    // Bit positions are EMON BRLS wire spec: bit0=basic, bit1=setup, bit2=types,
+    // bit3=offensive, bit4=smart — independent of Crystal TRNATTR_AI_MOVE_WEIGHTS ABI.
+    //
+    // Adversarial entry (basic=false) proves the reader does NOT force run_basic=true,
+    // confirming Crystal ABI knowledge is absent from the generic engine reader.
     enginemon::BattleRules rules;
     rules.stat_stage_mult = {{
         {25,100},{28,100},{33,100},{40,100},{50,100},{66,100},
@@ -959,7 +963,7 @@ TEST(brls_ai_pass_set_roundtrip_named_booleans) {
     rules.crit_chances = {17,32,64,85,128,128,128};
     rules.wobble_probabilities = {{{1,63},{255,255}}};
 
-    // Entry 0: BASIC+SMART only (run_smart=true, run_types=false)
+    // Entry 0: BASIC+SMART only
     enginemon::TrainerClassAIEntry e0{};
     e0.ai_passes = {true, false, false, false, true};  // basic + smart
     e0.ai_item_flags = 0x0000;
@@ -977,6 +981,13 @@ TEST(brls_ai_pass_set_roundtrip_named_booleans) {
     e2.ai_item_flags = 0x0000;
     rules.trainer_class_ai.push_back(e2);
 
+    // Entry 3: ADVERSARIAL — run_basic=false (impossible in Crystal but legal in EMON)
+    // Proves the EMON reader does NOT force run_basic=true (no Crystal ABI assumption).
+    enginemon::TrainerClassAIEntry e3{};
+    e3.ai_passes = {false, false, true, false, false};  // only types — no basic
+    e3.ai_item_flags = 0x0000;
+    rules.trainer_class_ai.push_back(e3);
+
     crystal::PackageWriter writer;
     writer.set_source_rom("dddddddddddddddddddddddddddddddddddddddd", "test_v1");
     writer.add_battle_rules(rules);
@@ -988,7 +999,7 @@ TEST(brls_ai_pass_set_roundtrip_named_booleans) {
     auto loaded = reader_ptr->load_battle_rules();
     std::filesystem::remove(pkg_path);
     ASSERT_TRUE(loaded.has_value());
-    ASSERT_EQ(loaded->trainer_class_ai.size(), 3u);
+    ASSERT_EQ(loaded->trainer_class_ai.size(), 4u);
 
     // Entry 0: basic + smart
     ASSERT_TRUE( loaded->trainer_class_ai[0].ai_passes.run_basic);
@@ -1011,7 +1022,14 @@ TEST(brls_ai_pass_set_roundtrip_named_booleans) {
     ASSERT_FALSE(loaded->trainer_class_ai[2].ai_passes.run_offensive);
     ASSERT_FALSE(loaded->trainer_class_ai[2].ai_passes.run_smart);
 
-    std::cout << "  [AIPassSet BRLS roundtrip: basic+smart, all, basic-only — named booleans preserved]\n";
+    // Entry 3: ADVERSARIAL — run_basic=false must survive (no Crystal force-true in reader)
+    ASSERT_FALSE(loaded->trainer_class_ai[3].ai_passes.run_basic);
+    ASSERT_FALSE(loaded->trainer_class_ai[3].ai_passes.run_setup);
+    ASSERT_TRUE( loaded->trainer_class_ai[3].ai_passes.run_types);
+    ASSERT_FALSE(loaded->trainer_class_ai[3].ai_passes.run_offensive);
+    ASSERT_FALSE(loaded->trainer_class_ai[3].ai_passes.run_smart);
+
+    std::cout << "  [AIPassSet EMON wire roundtrip: 4 entries including basic=false adversarial]\n";
 }
 
 TEST(brls_high_crit_moveid_gt255_roundtrip) {

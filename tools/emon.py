@@ -139,7 +139,8 @@ def cmd_build(preset: str = "all", clean: bool = False, configure: bool = False)
         rc = run(cfg_cmd, LOG_DIR / "configure.log")
         if rc != 0:
             fail(f"Configure failed (exit {rc})  log: {LOG_DIR / 'configure.log'}")
-            return 1    if clean:
+            return 1
+    if clean:
         print("  Cleaning...")
         run([str(CMAKE), "--build", "--preset", preset, "--target", "clean"],
             LOG_DIR / "clean.log")

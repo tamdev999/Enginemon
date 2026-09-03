@@ -124,15 +124,15 @@
   "testPresets": [
     {
       "name": "all",
-      "displayName": "All 15 canonical tests (clang-cl build) [DEFAULT]",
-      "description": "Runs all 15 gates in parallel against build_clang. Requires ENGINEMON_ROM.",
+      "displayName": "All 17 canonical tests (clang-cl build) [DEFAULT]",
+      "description": "Runs all 17 gates in parallel against build_clang. Requires ENGINEMON_ROM for ROM-dependent gates.",
       "configurePreset": "default",
       "output": { "outputOnFailure": true, "shortProgress": false },
       "execution": { "jobs": 8, "timeout": 120, "stopOnFailure": false }
     },
     {
       "name": "clang-all",
-      "displayName": "All 15 canonical tests (clang-cl build)",
+      "displayName": "All 17 canonical tests (clang-cl build)",
       "description": "Alias for all. Requires ENGINEMON_ROM.",
       "configurePreset": "clang",
       "output": { "outputOnFailure": true, "shortProgress": false },
@@ -140,8 +140,8 @@
     },
     {
       "name": "msvc-all",
-      "displayName": "All 15 canonical tests (MSVC build) [SECONDARY]",
-      "description": "Runs all 15 gates against build/. Requires ENGINEMON_ROM.",
+      "displayName": "All 17 canonical tests (MSVC build) [SECONDARY]",
+      "description": "Runs all 17 gates against build/. Requires ENGINEMON_ROM for ROM-dependent gates.",
       "configurePreset": "msvc",
       "configuration": "Release",
       "output": { "outputOnFailure": true, "shortProgress": false },

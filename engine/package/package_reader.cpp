@@ -1065,7 +1065,7 @@ PackageReader::load_battle_rules() const {
     if (!read_byte_list(rules.ai_residual_move_ids))   return std::nullopt;
     if (!read_byte_list(rules.ai_encore_move_ids))     return std::nullopt;
 
-    // trainer_class_ai: u16 LE count + count × 7 bytes
+    // trainer_class_ai: u16 LE count + count × 6 bytes
     {
         uint16_t n = 0;
         if (!r.read_le(n)) return std::nullopt;
@@ -1076,17 +1076,17 @@ PackageReader::load_battle_rules() const {
             if (!r.read_le(t.item1))       return std::nullopt;
             if (!r.read_le(t.item2))       return std::nullopt;
             if (!r.read_le(t.base_reward)) return std::nullopt;
-            // Decode BRLS wire move-flags (Crystal TRNATTR_AI_MOVE_WEIGHTS encoding)
-            // into semantic AIPassSet.  Bit positions are part of the BRLS wire spec:
-            //   bit 0=BASIC  bit 1=SETUP  bit 2=TYPES  bit 3=OFFENSIVE  bit 4=SMART
-            uint16_t move_flags = 0;
-            if (!r.read_le(move_flags)) return std::nullopt;
-            const uint16_t f = (move_flags != 0) ? move_flags : 0x0001u;
-            t.ai_passes.run_basic     = true;               // always active
-            t.ai_passes.run_setup     = (f & (1u << 1)) != 0;
-            t.ai_passes.run_types     = (f & (1u << 2)) != 0;
-            t.ai_passes.run_offensive = (f & (1u << 3)) != 0;
-            t.ai_passes.run_smart     = (f & (1u << 4)) != 0;
+            // Deserialize EMON-owned ai_passes flags byte.
+            // Bit positions are EMON BRLS wire spec — no Crystal ROM ABI knowledge:
+            //   bit 0=run_basic  bit 1=run_setup  bit 2=run_types
+            //   bit 3=run_offensive  bit 4=run_smart
+            uint8_t ai_passes_byte = 0;
+            if (!r.read_le(ai_passes_byte)) return std::nullopt;
+            t.ai_passes.run_basic     = (ai_passes_byte & (1u << 0)) != 0;
+            t.ai_passes.run_setup     = (ai_passes_byte & (1u << 1)) != 0;
+            t.ai_passes.run_types     = (ai_passes_byte & (1u << 2)) != 0;
+            t.ai_passes.run_offensive = (ai_passes_byte & (1u << 3)) != 0;
+            t.ai_passes.run_smart     = (ai_passes_byte & (1u << 4)) != 0;
             if (!r.read_le(t.ai_item_flags)) return std::nullopt;
         }
     }

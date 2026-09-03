@@ -103,6 +103,7 @@ if(ENGINEMON_ENABLE_ENGINE AND ENGINEMON_BUILD_TESTS AND ENGINEMON_BUILD_TOOLS A
         corpus_test
         linker_test
         compiler_integrity_test
+        battle_rom_test
         oracle_test
     )
 endif()

@@ -375,6 +375,13 @@ if(ENGINEMON_ENABLE_ENGINE)
     add_test(NAME crystal_save_test COMMAND $<TARGET_FILE:crystal_save_test>)
     set_tests_properties(crystal_save_test PROPERTIES LABELS "standalone" TIMEOUT 30)
 
+    # ROM-absent gate: proves battle_rom_test exits nonzero when no ROM is provided.
+    # This test always runs (no ENGINEMON_ROM_PATH required) and proves the binary
+    # refuses to silently pass when the ROM argument is missing.
+    add_test(NAME battle_rom_test_no_args COMMAND $<TARGET_FILE:battle_rom_test>)
+    set_tests_properties(battle_rom_test_no_args
+        PROPERTIES LABELS "standalone;battle" TIMEOUT 10 WILL_FAIL TRUE)
+
     # --- ROM-dependent --------------------------------------------------------
     if(ENGINEMON_ROM_PATH)
         add_test(NAME runtime_test_engine

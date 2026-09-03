@@ -784,8 +784,13 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     //  [encore_count]         u8                             =  1 byte
     //  [encore_move_ids]      count × u8                     = N bytes
     //  [trainer_class_count]  u16 LE                         =  2 bytes
-    //  [trainer_class_ai]     count × {u8 item1, u8 item2, u8 reward, u16 LE move_flags, u16 LE item_flags}
-    //                                                        = count×7 bytes
+    //  [trainer_class_ai]     count × {u8 item1, u8 item2, u8 reward, u8 ai_passes, u16 LE item_flags}
+    //                                                        = count×6 bytes
+    //
+    //  ai_passes is an EMON-owned flags byte:
+    //    bit 0=run_basic  bit 1=run_setup  bit 2=run_types
+    //    bit 3=run_offensive  bit 4=run_smart
+    //  These bit positions are part of the EMON BRLS wire spec — not Crystal ROM ABI.
 
     std::vector<uint8_t> buf;
     buf.reserve(512);
@@ -858,22 +863,23 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     push_byte_list(rules.ai_residual_move_ids);
     push_byte_list(rules.ai_encore_move_ids);
 
-    // trainer_class_ai: u16 LE count + count × 7 bytes
+    // trainer_class_ai: u16 LE count + count × 6 bytes
     push_u16(static_cast<uint16_t>(rules.trainer_class_ai.size()));
     for (const auto& t : rules.trainer_class_ai) {
         push_u8(t.item1);
         push_u8(t.item2);
         push_u8(t.base_reward);
-        // Repack AIPassSet back to Crystal TRNATTR_AI_MOVE_WEIGHTS bitmask for wire.
-        // Crystal bit positions (trainer_data_constants.asm):
-        //   bit 0=BASIC  bit 1=SETUP  bit 2=TYPES  bit 3=OFFENSIVE  bit 4=SMART
-        uint16_t move_flags = 0u;
-        if (t.ai_passes.run_basic)     move_flags |= (1u << 0);
-        if (t.ai_passes.run_setup)     move_flags |= (1u << 1);
-        if (t.ai_passes.run_types)     move_flags |= (1u << 2);
-        if (t.ai_passes.run_offensive) move_flags |= (1u << 3);
-        if (t.ai_passes.run_smart)     move_flags |= (1u << 4);
-        push_u16(move_flags);
+        // Serialize AIPassSet as EMON-owned flags byte.
+        // Bit positions are EMON BRLS wire spec — independent of Crystal ROM ABI:
+        //   bit 0=run_basic  bit 1=run_setup  bit 2=run_types
+        //   bit 3=run_offensive  bit 4=run_smart
+        uint8_t ai_passes_byte = 0u;
+        if (t.ai_passes.run_basic)     ai_passes_byte |= (1u << 0);
+        if (t.ai_passes.run_setup)     ai_passes_byte |= (1u << 1);
+        if (t.ai_passes.run_types)     ai_passes_byte |= (1u << 2);
+        if (t.ai_passes.run_offensive) ai_passes_byte |= (1u << 3);
+        if (t.ai_passes.run_smart)     ai_passes_byte |= (1u << 4);
+        push_u8(ai_passes_byte);
         push_u16(t.ai_item_flags);
     }
 
