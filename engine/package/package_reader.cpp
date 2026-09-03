@@ -1043,6 +1043,18 @@ PackageReader::load_battle_rules() const {
         }
     }
 
+    // type_matchups: u16 count + count × {atk_type, def_type, multiplier}
+    {
+        uint16_t n = 0;
+        if (!r.read_le(n)) return std::nullopt;
+        rules.type_matchups.resize(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            if (!r.read_le(rules.type_matchups[i].attacking))  return std::nullopt;
+            if (!r.read_le(rules.type_matchups[i].defending))  return std::nullopt;
+            if (!r.read_le(rules.type_matchups[i].multiplier)) return std::nullopt;
+        }
+    }
+
     // high_crit_moves: u16 count + count × u16 LE (full MoveId range)
     if (!read_u16_list_as_move_ids(rules.high_crit_moves)) return std::nullopt;
 

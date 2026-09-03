@@ -294,6 +294,56 @@ BattleRulesExtractResult extract_battle_rules(
         return result;
 
     // ------------------------------------------------------------------
+    // 6b. TypeMatchups — 3 bytes/entry {atk_type, def_type, multiplier}, 0xFF sentinel
+    // Source: TypeMatchups (0d:4bb1) — only non-neutral entries are stored.
+    // Multiplier: 0=immune, 5=NVE, 20=SE (neutral=10 is the TypeChart default, absent).
+    // This populates BattleRules::type_matchups which the runtime uses to build
+    // registries_.type_chart via rules.apply_to(chart).
+    // ------------------------------------------------------------------
+    {
+        const char* tname = "TypeMatchups";
+        if (o.type_matchups == 0) {
+            err = std::format("{}: address is zero — not configured in profile", tname);
+            return result;
+        }
+        rules.type_matchups.clear();
+        uint32_t ptr = o.type_matchups;
+        constexpr uint32_t ENTRY_SIZE = 3;
+        constexpr uint32_t MAX_ENTRIES = 512;  // safety cap
+        for (uint32_t i = 0; i < MAX_ENTRIES; ++i) {
+            if (ptr + ENTRY_SIZE > rom.size()) {
+                err = std::format("{}: sentinel not found before ROM end (offset 0x{:05x})",
+                                  tname, ptr);
+                return result;
+            }
+            uint8_t atk = rom.read_byte(ptr);
+            if (atk == 0xFF) break;  // sentinel
+            // 0xFE = separator between "always was this" and "added in Gen 2" sections.
+            // Skip this byte and continue parsing.
+            if (atk == 0xFE) { ptr += 1; continue; }
+            uint8_t def  = rom.read_byte(ptr + 1);
+            uint8_t mult = rom.read_byte(ptr + 2);
+            // Validate multiplier: Crystal uses 0=immune, 5=NVE, 20=SE (10 never stored)
+            if (mult != 0 && mult != 5 && mult != 20) {
+                err = std::format("{}: unexpected multiplier byte {} at offset 0x{:05x}",
+                                  tname, mult, ptr);
+                return result;
+            }
+            enginemon::BattleRules::TypeMatchupEntry entry;
+            entry.attacking = atk;
+            entry.defending = def;
+            entry.multiplier = mult;
+            rules.type_matchups.push_back(entry);
+            ptr += ENTRY_SIZE;
+        }
+        if (rules.type_matchups.empty()) {
+            err = std::format("{}: extracted 0 entries — ROM data wrong or address incorrect",
+                              tname);
+            return result;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 7. CriticalHitMoves — 1 byte/entry (move constants = MoveId ≤ 255), 0xFF sentinel
     // ------------------------------------------------------------------
     {

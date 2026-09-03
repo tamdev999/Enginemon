@@ -1834,6 +1834,10 @@ std::vector<MapIdRef> discover_reachable_maps(
     std::set<MapIdRef> visited;
     std::queue<MapIdRef> frontier;
     std::vector<MapIdRef> result;
+
+    // Use profile count for group-boundary validation throughout this function.
+    // Do NOT hardcode 26 — ROM hacks may add groups beyond Crystal's vanilla 26.
+    const uint16_t max_map_groups = profile.counts.num_map_groups;
     
     auto enqueue = [&](uint8_t group, uint8_t map) {
         if (group == 0 || map == 0) return;
@@ -1864,14 +1868,17 @@ std::vector<MapIdRef> discover_reachable_maps(
     // Spawn points table - covers fly destinations, respawn points
     if (profile.offsets.spawn_points != 0) {
         const uint32_t spawn_table = profile.offsets.spawn_points;
-        for (uint8_t i = 0; i < 30; ++i) {
+        const uint16_t max_groups = profile.counts.num_map_groups;
+        // Iterate until N_A sentinel — no hardcoded entry count.
+        // Safety cap: 255 entries (uint8_t loop + ROM bounds will stop first).
+        for (uint16_t i = 0; i < 255; ++i) {
             uint32_t addr = spawn_table + (i * 4);
             if (addr + 2 > rom.size()) break;
             uint8_t grp = rom.read_byte(addr);
             uint8_t idx = rom.read_byte(addr + 1);
             if (grp == 0xFF) break;  // N_A terminator
-            // Validate: Crystal has 26 groups
-            if (grp > 0 && grp <= 26 && idx > 0 && idx < 100) {
+            // Validate against actual profile map-group count, not hardcoded 26.
+            if (grp > 0 && grp <= max_groups && idx > 0 && idx < 100) {
                 enqueue(grp, idx);
             }
         }
@@ -2052,8 +2059,8 @@ std::vector<MapIdRef> discover_reachable_maps(
             auto data = rom.read_bytes(conn_ptr, fmt.connection_size);
             uint8_t tgt_group = data[0];
             uint8_t tgt_map = data[1];
-            // Validate: Crystal has 26 groups
-            if (tgt_group > 0 && tgt_group <= 26 && tgt_map > 0 && tgt_map < 100) {
+            // Validate against profile map-group count, not hardcoded 26.
+            if (tgt_group > 0 && tgt_group <= max_map_groups && tgt_map > 0 && tgt_map < 100) {
                 enqueue(tgt_group, tgt_map);
             }
             conn_ptr += fmt.connection_size;
@@ -2105,8 +2112,8 @@ std::vector<MapIdRef> discover_reachable_maps(
             // Warp: y, x, warp_index, target_group, target_map
             uint8_t tgt_group = warp[3];
             uint8_t tgt_map = warp[4];
-            // Validate target (Crystal has 26 groups max)
-            if (tgt_group > 0 && tgt_group <= 26 && tgt_map > 0 && tgt_map < 100) {
+            // Validate against profile map-group count, not hardcoded 26.
+            if (tgt_group > 0 && tgt_group <= max_map_groups && tgt_map > 0 && tgt_map < 100) {
                 enqueue(tgt_group, tgt_map);
             }
             ptr += fmt.warp_size;

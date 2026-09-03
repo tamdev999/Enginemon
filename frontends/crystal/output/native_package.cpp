@@ -767,6 +767,7 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     //  [weather_type_mods]    count × {u8 wid, u8 tid, u8 mul}= N×3 bytes
     //  [weather_move_count]   u8                             =  1 byte
     //  [weather_move_mods]    count × {u8 wid, u8 eid, u8 mul}= N×3 bytes
+    //  [type_matchups]        u16 LE count + count × {u8 atk, u8 def, u8 mul} = N×3 bytes
     //  [high_crit_count]      u16 LE                         =  2 bytes
     //  [high_crit_moves]      count × u16 LE                 = N×2 bytes
     //  [eff_priority_count]   u8                             =  1 byte
@@ -860,6 +861,15 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
         push_u8(w.weather_id);
         push_u8(w.type_id);
         push_u8(w.multiplier);
+    }
+
+    // type_matchups: u16 count + count × {atk_type, def_type, multiplier}
+    // Non-neutral entries only (neutral = 10 is the TypeChart default fill).
+    push_u16(static_cast<uint16_t>(rules.type_matchups.size()));
+    for (const auto& e : rules.type_matchups) {
+        push_u8(e.attacking);
+        push_u8(e.defending);
+        push_u8(e.multiplier);
     }
 
     // high_crit_moves: u16 count + count × u16 LE (full MoveId range — supports >255)

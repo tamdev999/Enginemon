@@ -144,6 +144,12 @@ bool setup_headless_runtime(
             return false;
         }
         rt.battle_rules = std::move(*br);
+
+        // Populate TypeChart from extracted type_matchups.
+        // This converts the stored non-neutral entries into the runtime lookup table.
+        // TypeChart is pre-filled with neutral (10); only non-neutral entries need applying.
+        rt.battle_rules.apply_to(rt.registries.type_chart);
+        rt.registries.type_chart.freeze();
     }
 
     // -------------------------------------------------------------------------

@@ -51,6 +51,7 @@
 //   BattleCommand_Critical        0d:4631  crit stage deltas (+2 held, +1 focus/scope)
 
 #include "engine/core/types.hpp"
+#include "engine/core/registry.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -141,10 +142,30 @@ struct BattleRules {
     // Source: WobbleProbabilities (03:79ba)
     std::vector<std::array<uint8_t, 2>> wobble_probabilities;
 
+    // Type effectiveness chart — extracted from ROM TypeMatchups table.
+    // Source: TypeMatchups (0d:4bb1) — profile.offsets.type_matchups.
+    // Format: 3 bytes per entry {atk_type_id, def_type_id, multiplier}, 0xFF sentinel.
+    // Multiplier encoding matches Crystal: 0=immune, 5=NVE, 20=SE (10=neutral = absent).
+    // Only non-neutral entries are stored; neutral (×1) is the default TypeChart fill.
+    // This vector is used to populate registries_.type_chart at runtime via apply_to().
+    struct TypeMatchupEntry {
+        uint8_t attacking;    // TypeId of attacking move
+        uint8_t defending;    // TypeId of defending Pokémon
+        uint8_t multiplier;   // Crystal encoding: 0=immune, 5=NVE, 20=SE
+    };
+    std::vector<TypeMatchupEntry> type_matchups;
+
+    // Helper: populate a TypeChart from the extracted type_matchups vector.
+    // Call this after loading BattleRules from the package, before gameplay.
+    void apply_to(TypeChart& chart) const {
+        for (const auto& e : type_matchups) {
+            chart.set_effectiveness(e.attacking, e.defending, e.multiplier);
+        }
+    }
+
     // Weather × type modifiers (sentinel-terminated).
     // Source: WeatherTypeModifiers (3e:7e13)
     std::vector<WeatherModifierEntry> weather_type_modifiers;
-
     // Weather × move-effect modifiers (sentinel-terminated).
     // Source: WeatherMoveModifiers (3e:7e20)
     std::vector<WeatherModifierEntry> weather_move_modifiers;
