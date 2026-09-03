@@ -806,6 +806,8 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     //  [sm83_crit_deltas]     3 × u8  {held_item_delta, scope_lens_delta, focus_energy_delta}
     //  [sm83_damage_var]      1 × u8  {lower_bound_byte}
     //
+    //  [sm83_lifted_mask]     u16 LE  bitmask: which sub-structs were extracted
+    //
     //  ai_passes is an EMON-owned flags byte:
     //    bit 0=run_basic  bit 1=run_setup  bit 2=run_types
     //    bit 3=run_offensive  bit 4=run_smart
@@ -950,6 +952,10 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     push_u8(rules.crit_deltas.scope_lens_delta);
     push_u8(rules.crit_deltas.focus_energy_delta);
     push_u8(rules.damage_variation.lower_bound_byte);
+
+    // SM83 lift-status mask — 2 bytes LE.
+    // Indicates which sub-structs were actually extracted vs defaulted.
+    push_u16(rules.sm83_lifted_mask);
 
     battle_rules_data_ = std::move(buf);
 }

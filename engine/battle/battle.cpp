@@ -518,7 +518,8 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     dp.weather            = field_.weather;
     dp.move_type          = md->type;
 
-    int32_t damage = enginemon::calculate_damage(dp);
+    int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_)
+                            : enginemon::calculate_damage(dp);
     if (damage == 0) return MoveExecutionResult::Immune;
 
     // Step 2: apply weather modifier
@@ -548,12 +549,19 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         if (damage > 999) damage = 999;
     }
 
-    // Random variation 85-100% (suiCune BattleCommand_DamageVariation: RRCA loop)
+    // Random variation — BattleCommand_DamageVariation (suiCune).
+    // Crystal: RRCA the random byte, loop while rotated value < cp_threshold.
+    // cp_threshold is lifted from the `cp N` immediate after RRCA in the ROM.
+    // lower_bound_byte = 0xD9 (217) in vanilla = "85% floor" after RRCA scaling.
+    // Runtime uses the ROM-extracted threshold directly in the same RRCA loop.
+    const uint8_t var_threshold = rules_
+        ? rules_->get_damage_var_lower_bound()
+        : uint8_t{0xD9};  // vanilla fallback
     uint8_t variation;
     do {
         uint8_t r = rng_.next_byte();
         variation = (r >> 1) | (r << 7);  // RRCA
-    } while (variation < 85);
+    } while (variation < var_threshold);
     damage = damage * variation / 100;
     if (damage < 2) damage = 2;
 

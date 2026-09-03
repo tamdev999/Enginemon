@@ -315,19 +315,24 @@ LiftResult lift_stat_formula_offsets(const RomSpan& span) {
     uint8_t div100 = 0;
     bool found_div100 = false;
 
-    // Find: ld a, 100 / ldh [hDivisor], a / ld a, 3 / ld b, a / call Divide
+    // Find: ld a, N / ldh [hDivisor], a / ld a, 3 / ld b, a / call Divide
+    // The value N is the level-divisor (vanilla: 100). We anchor on the
+    // surrounding instruction shape, not the value itself, so hacks that
+    // change /100 to /80 still extract correctly.
     for (uint32_t i = 0; i + 8 < span.size; ++i) {
         if (!found_div100
             && span.at(i)   == SM83::LD_A_N
-            && span.at(i+1) == 100
-            && span.at(i+2) == 0xE0   // ldh
+            // span.at(i+1) = N (the divisor — extracted, not anchored)
+            && span.at(i+2) == 0xE0   // ldh prefix
             && span.at(i+3) == 0xB7   // hDivisor
             && span.at(i+4) == SM83::LD_A_N
-            && span.at(i+5) == 3
+            && span.at(i+5) == 3      // precision: ld a,3 / ld b,a
             && span.at(i+6) == 0x47   // ld b, a
             && span.at(i+7) == SM83::CALL)
         {
-            div100 = span.at(i+1);  // always 100, but we read it to be uniform
+            div100 = span.at(i+1);  // extract whatever value the hack uses
+            if (div100 == 0)
+                return LiftResult::fail("CalcMonStatC: level divisor is 0");
             found_div100 = true;
             continue;
         }
@@ -337,23 +342,40 @@ LiftResult lift_stat_formula_offsets(const RomSpan& span) {
         return LiftResult::fail("CalcMonStatC: did not find ld a,100 / ldh [hDivisor] / ld a,3 / ld b,a / call Divide");
 
     // Find the non-HP and HP stat offsets.
-    // They appear as: ld a, N / ld b, a / ldh a, [hQuotient+3] / add b
+    // In the Crystal ROM the non-HP path has an intervening conditional branch before
+    // ld b,a / ldh a,[hQuotient+3] / add a,b — so we search for the wider pattern:
+    //   ld a, N  (i+0=3E, i+1=N)
+    //   ... (optional jr nz + ld a,[...] between ld a,N and ld b,a)
+    //   ld b, a  (0x47)
+    //   ldh a, [hQuotient+3]  (F0 B6)
+    //   add a, b              (80)
+    // We scan for 0x47 / F0 B6 / 80 and then look back for the nearest ld a,N.
     uint8_t offsets[2]{};
     uint8_t found = 0;
 
-    for (uint32_t i = 0; i + 5 < span.size && found < 2; ++i) {
-        if (span.at(i)   == SM83::LD_A_N
-            && span.at(i+2) == 0x47  // ld b, a
-            && span.at(i+3) == 0xF0  // ldh a, [n]
-            && span.at(i+4) == 0xB6  // hQuotient+3
-            && span.at(i+5) == 0x80) // add a, b  (= add b in register notation)
-        {
-            uint8_t v = span.at(i+1);
-            if (v == 0 || v > 20)
-                return LiftResult::fail(std::format(
-                    "CalcMonStatC: stat offset {} out of range [1,20]", v));
-            offsets[found++] = v;
+    for (uint32_t i = 3; i + 3 < span.size && found < 2; ++i) {
+        // Anchor on ld b,a (47) / ldh a,[B6] (F0 B6) / add a,b (80)
+        if (span.at(i)   != 0x47)  continue;  // ld b, a
+        if (span.at(i+1) != 0xF0)  continue;  // ldh prefix
+        if (span.at(i+2) != 0xB6)  continue;  // hQuotient+3
+        if (span.at(i+3) != 0x80)  continue;  // add a, b
+
+        // Look backward up to 10 bytes for a ld a, N that loaded the offset
+        uint8_t v = 0;
+        bool found_lda = false;
+        for (uint32_t j = (i > 10 ? i - 10 : 0); j < i; ++j) {
+            if (span.at(j) == SM83::LD_A_N) {
+                uint8_t candidate = span.at(j + 1);
+                if (candidate > 0 && candidate <= 20) {
+                    v = candidate;
+                    found_lda = true;
+                    // keep the LAST ld a,N before the anchor
+                }
+            }
         }
+        if (!found_lda) continue;
+
+        offsets[found++] = v;
     }
 
     if (found < 2)
@@ -446,11 +468,13 @@ LiftResult lift_damage_calc_constants(const RomSpan& span) {
             }
         }
 
-        // P4: add a, F — the MIN_DAMAGE floor add at the end
-        // Anchor: C6 F near a 23 (inc hl) / 30 xx (jr nc) pair
+        // P4: add a, F — the MIN_DAMAGE floor add.
+        // Anchor: C6 F (add a,n) followed by ld [de],a (32) — the MIN_DAMAGE
+        // store to [de]. In Crystal DamageCalc this is the only add a,n that
+        // writes to [de] after the main formula. F in [1,10].
         if (!found_min
             && span.at(i)   == SM83::ADD_A_N
-            && span.at(i+2) == SM83::LD_HL_IND_N  // ld [hld], a  (77 or 22)
+            && span.at(i+2) == 0x32   // ld [de], a — confirms this is the floor store
             && span.at(i+1) >= 1 && span.at(i+1) <= 10)
         {
             min_damage = span.at(i+1);

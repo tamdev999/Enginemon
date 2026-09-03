@@ -20,6 +20,7 @@
 #include "crystal/extract/battle_rules_extractor.hpp"
 #include "crystal/extract/sm83_lifter.hpp"
 #include "crystal/battle/crystal_effects.hpp"
+#include <cstdio>
 #include <format>
 #include <algorithm>
 
@@ -491,34 +492,37 @@ BattleRulesExtractResult extract_battle_rules(
     // 18. SM83 static lifting — formula parameter extraction.
     //
     // Each recognizer is called with a ROM span covering the routine.
-    // Failure is non-fatal: we log a warning and the struct default
-    // (vanilla-correct) value remains in place.  A recognizer failure
-    // means the routine shape differed from the known Crystal layout,
-    // which is possible for ROM hacks that restructure engine code.
-    // The package still emits the defaults so gameplay remains correct.
+    // Failure is non-fatal: the struct default (vanilla-correct) value
+    // remains in place.  A failure is logged to stderr.
+    //
+    // Recognizer success is recorded in rules.sm83_lifted_mask so callers
+    // can distinguish ROM-extracted values from struct defaults.
     // ------------------------------------------------------------------
     {
         auto lift = [&](uint32_t flat_addr, uint32_t span_len, const char* name,
+                        uint16_t mask_bit,
                         auto recognizer_fn, auto apply_fn) {
-            if (flat_addr == 0) return;  // address not configured
+            if (flat_addr == 0) return;  // address not configured in profile
             auto span = rom_span_at(rom, flat_addr, span_len);
             if (!span.data) {
-                err = std::format("SM83 lift {}: address 0x{:05x} out of ROM bounds", name, flat_addr);
-                return;  // non-fatal — default values retained
+                // OOB address — emit warning but do not hard-fail.
+                std::fprintf(stderr, "SM83 lift %s: address 0x%05X out of ROM bounds\n",
+                             name, flat_addr);
+                return;
             }
             auto r = recognizer_fn(span);
             if (!r.ok) {
-                // Non-fatal: default values remain.  Log to stderr for developer visibility.
-                // Use std::format to build message but don't propagate as hard failure.
-                (void)std::format("SM83 lift {} warning: {}", name, r.error);
+                // Recognizer rejected the routine shape.  Default values remain.
+                std::fprintf(stderr, "SM83 lift %s warning: %s\n", name, r.error.c_str());
                 return;
             }
             apply_fn(r);
+            rules.sm83_lifted_mask |= mask_bit;  // record successful extraction
         };
 
         // AIDiscourageMove — p[0] = discouragement delta
         lift(o.sm83_ai_discourage_move, ProfileOffsets::SM83_SPAN_AI_DISCOURAGE,
-             "AIDiscourageMove",
+             "AIDiscourageMove", enginemon::BattleRules::SM83_LIFTED_AI_SCORES,
              [](const RomSpan& s) { return lift_ai_discourage_move(s); },
              [&](const LiftResult& r) {
                  rules.ai_scores.discourage_strong = r.p[0];
@@ -526,7 +530,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // AIChooseMove — p[0] = init score
         lift(o.sm83_ai_choose_move, ProfileOffsets::SM83_SPAN_AI_CHOOSE_MOVE,
-             "AIChooseMove",
+             "AIChooseMove", enginemon::BattleRules::SM83_LIFTED_AI_SCORES,
              [](const RomSpan& s) { return lift_ai_choose_move_scores(s); },
              [&](const LiftResult& r) {
                  rules.ai_scores.init_score = r.p[0];
@@ -534,7 +538,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // GiveExperiencePoints — p[0] = exp base divisor
         lift(o.sm83_give_exp_points, ProfileOffsets::SM83_SPAN_GIVE_EXP,
-             "GiveExperiencePoints",
+             "GiveExperiencePoints", enginemon::BattleRules::SM83_LIFTED_EXP,
              [](const RomSpan& s) { return lift_exp_divisor(s); },
              [&](const LiftResult& r) {
                  rules.exp_formula.base_divisor = r.p[0];
@@ -542,7 +546,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // BattleCommand_DamageVariation — p[0] = RRCA lower bound byte
         lift(o.sm83_damage_variation, ProfileOffsets::SM83_SPAN_DAMAGE_VARIATION,
-             "BattleCommand_DamageVariation",
+             "BattleCommand_DamageVariation", enginemon::BattleRules::SM83_LIFTED_DAMAGE_VAR,
              [](const RomSpan& s) { return lift_damage_variation(s); },
              [&](const LiftResult& r) {
                  rules.damage_variation.lower_bound_byte = r.p[0];
@@ -550,7 +554,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // PokeBallEffect — p[0]=SLP/FRZ bonus, p[1]=BRN/PSN/PAR (bug), p[2]=none
         lift(o.sm83_poke_ball_effect, ProfileOffsets::SM83_SPAN_POKE_BALL,
-             "PokeBallEffect",
+             "PokeBallEffect", enginemon::BattleRules::SM83_LIFTED_CAPTURE_STATUS,
              [](const RomSpan& s) { return lift_capture_status_bonus(s); },
              [&](const LiftResult& r) {
                  rules.capture_status.slp_frz_bonus     = r.p[0];
@@ -559,7 +563,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // TryToRunAwayFromBattle — p[0]=speed multiplier, p[1]=per-attempt addend
         lift(o.sm83_try_to_run_away, ProfileOffsets::SM83_SPAN_TRY_TO_RUN,
-             "TryToRunAwayFromBattle",
+             "TryToRunAwayFromBattle", enginemon::BattleRules::SM83_LIFTED_ESCAPE,
              [](const RomSpan& s) { return lift_escape_constants(s); },
              [&](const LiftResult& r) {
                  rules.escape.speed_multiplier = r.p[0];
@@ -568,7 +572,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // CalcMonStatC — p[0]=/100, p[1]=non_hp_offset, p[2]=hp_offset
         lift(o.sm83_calc_mon_stat_c, ProfileOffsets::SM83_SPAN_CALC_MON_STAT_C,
-             "CalcMonStatC",
+             "CalcMonStatC", enginemon::BattleRules::SM83_LIFTED_STAT_FORMULA,
              [](const RomSpan& s) { return lift_stat_formula_offsets(s); },
              [&](const LiftResult& r) {
                  rules.stat_formula.level_divisor  = r.p[0];
@@ -578,7 +582,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // BattleCommand_DamageCalc — p[0]=level_div, p[1]=level_add, p[2]=dmg_div, p[3]=min_dmg
         lift(o.sm83_damage_calc, ProfileOffsets::SM83_SPAN_DAMAGE_CALC,
-             "BattleCommand_DamageCalc",
+             "BattleCommand_DamageCalc", enginemon::BattleRules::SM83_LIFTED_DAMAGE_FORMULA,
              [](const RomSpan& s) { return lift_damage_calc_constants(s); },
              [&](const LiftResult& r) {
                  rules.damage_formula.level_divisor  = r.p[0];
@@ -589,7 +593,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // GetEighthMaxHP — p[0] = denominator (8)
         lift(o.sm83_get_eighth_max_hp, ProfileOffsets::SM83_SPAN_GET_EIGHTH_HP,
-             "GetEighthMaxHP",
+             "GetEighthMaxHP", enginemon::BattleRules::SM83_LIFTED_RESIDUAL,
              [](const RomSpan& s) { return lift_residual_fraction(s); },
              [&](const LiftResult& r) {
                  rules.residual.burn_poison_denom = r.p[0];
@@ -597,7 +601,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // GetSixteenthMaxHP — p[0] = denominator (16)
         lift(o.sm83_get_sixteenth_max_hp, ProfileOffsets::SM83_SPAN_GET_SIXTEENTH_HP,
-             "GetSixteenthMaxHP",
+             "GetSixteenthMaxHP", enginemon::BattleRules::SM83_LIFTED_RESIDUAL,
              [](const RomSpan& s) { return lift_residual_fraction(s); },
              [&](const LiftResult& r) {
                  rules.residual.toxic_denom = r.p[0];
@@ -605,7 +609,7 @@ BattleRulesExtractResult extract_battle_rules(
 
         // BattleCommand_Critical — p[0]=held_item, p[1]=scope_lens, p[2]=focus_energy
         lift(o.sm83_critical, ProfileOffsets::SM83_SPAN_CRITICAL,
-             "BattleCommand_Critical",
+             "BattleCommand_Critical", enginemon::BattleRules::SM83_LIFTED_CRIT_DELTAS,
              [](const RomSpan& s) { return lift_crit_stage_deltas(s); },
              [&](const LiftResult& r) {
                  rules.crit_deltas.held_item_delta    = r.p[0];

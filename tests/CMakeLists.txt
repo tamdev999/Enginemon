@@ -272,6 +272,18 @@ if(MSVC)
     target_compile_options(battle_rom_test PRIVATE /bigobj)
 endif()
 
+# SM83 recognizer matrix — 11 recognizers × (positive + modified + malformed) + mask roundtrip
+add_executable(sm83_lifter_test
+    crystal/sm83_lifter_test.cpp
+)
+target_link_libraries(sm83_lifter_test PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+if(MSVC)
+    target_compile_options(sm83_lifter_test PRIVATE /bigobj)
+endif()
+
 # Crystal Frontend Oracle ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Phase 1
 # Independent source-fidelity tests using RGBDS-derived (or hand-authored) binary fixtures.
 # Expected values come from pokecrystal semantics, NOT from Enginemon encoder output.
@@ -382,6 +394,11 @@ if(ENGINEMON_ENABLE_ENGINE)
     set_tests_properties(battle_rom_test_no_args
         PROPERTIES LABELS "standalone;battle" TIMEOUT 10 WILL_FAIL TRUE)
 
+    # sm83_lifter_test can run synthetic tests without ROM (ROM-backed tests auto-skip)
+    add_test(NAME sm83_lifter_test_no_rom COMMAND $<TARGET_FILE:sm83_lifter_test>)
+    set_tests_properties(sm83_lifter_test_no_rom
+        PROPERTIES LABELS "standalone;battle" TIMEOUT 30)
+
     # --- ROM-dependent --------------------------------------------------------
     if(ENGINEMON_ROM_PATH)
         add_test(NAME runtime_test_engine
@@ -422,6 +439,11 @@ if(ENGINEMON_ENABLE_ENGINE)
         add_test(NAME battle_rom_test
             COMMAND $<TARGET_FILE:battle_rom_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(battle_rom_test
+            PROPERTIES LABELS "rom-required;battle" TIMEOUT 30)
+
+        add_test(NAME sm83_lifter_test
+            COMMAND $<TARGET_FILE:sm83_lifter_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(sm83_lifter_test
             PROPERTIES LABELS "rom-required;battle" TIMEOUT 30)
 
         add_test(NAME oracle_test

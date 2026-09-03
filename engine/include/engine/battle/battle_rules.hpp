@@ -267,6 +267,34 @@ struct BattleRules {
     } damage_variation{};
 
     // ========================================================================
+    // SM83 lift status — bitmask recording which sub-structs were actually
+    // extracted from ROM bytes vs fell back to the in-struct vanilla defaults.
+    //
+    // A set bit means the recognizer RAN and succeeded for that routine.
+    // A clear bit means the address was zero, the span was OOB, or the
+    // recognizer returned LiftResult::fail() — the sub-struct default is used.
+    //
+    // This is the ONLY authoritative indicator of lift success.  Code that
+    // needs to distinguish "ROM-derived" from "assumed vanilla" must check
+    // this mask rather than comparing field values to known vanilla constants.
+    //
+    // Bit assignments (stable — part of the BRLS wire format v2):
+    enum : uint16_t {
+        SM83_LIFTED_DAMAGE_FORMULA = 1u << 0,   // DamageFormulaParams
+        SM83_LIFTED_AI_SCORES      = 1u << 1,   // AIScoreParams
+        SM83_LIFTED_STAT_FORMULA   = 1u << 2,   // StatFormulaParams
+        SM83_LIFTED_ESCAPE         = 1u << 3,   // EscapeParams
+        SM83_LIFTED_CAPTURE_STATUS = 1u << 4,   // CaptureStatusBonus
+        SM83_LIFTED_EXP            = 1u << 5,   // ExpParams
+        SM83_LIFTED_RESIDUAL       = 1u << 6,   // ResidualFractionParams (both routines)
+        SM83_LIFTED_CRIT_DELTAS    = 1u << 7,   // CritStageDeltaParams
+        SM83_LIFTED_DAMAGE_VAR     = 1u << 8,   // DamageVariationParams
+    };
+    uint16_t sm83_lifted_mask = 0;  // initially: nothing lifted (all defaults)
+
+    bool sm83_is_lifted(uint16_t bit) const { return (sm83_lifted_mask & bit) != 0; }
+
+    // ========================================================================
 
     // Returns true if this BattleRules was loaded from a package and all
     // required tables are populated.

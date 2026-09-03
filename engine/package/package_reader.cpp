@@ -1146,6 +1146,15 @@ PackageReader::load_battle_rules() const {
     // sm83_damage_variation: 1 byte
     read_sm83_u8(rules.damage_variation.lower_bound_byte);
 
+    // sm83_lifted_mask: 2 bytes LE — present only in packages written after this field was added.
+    // Old packages leave it at 0 (nothing lifted), which correctly signals "use struct defaults".
+    if (r.has_bytes(2)) {
+        uint16_t mask = 0;
+        if (r.read_le(mask)) {
+            rules.sm83_lifted_mask = mask;
+        }
+    }
+
     return rules;
 }
 
