@@ -201,6 +201,44 @@ enum class MoveTarget : uint8_t {
     Field           // Field effect
 };
 
+// ============================================================================
+// Semantic move effect identifier.
+// Stable EMON-assigned values — independent of any source-game's numeric ABI.
+// The Crystal frontend maps raw EFFECT_* ROM bytes to these stable IDs when
+// writing MoveData into the package.
+// Engine code (AI, mechanics) works only against these semantic IDs.
+// ============================================================================
+using EffectId = uint8_t;
+
+// Stable semantic effect ID assignments (EMON-owned, not Crystal-sourced).
+// Values start at 1; 0 is reserved for Unknown/None.
+// Future frontends must map their own effect IDs to these at extraction time.
+namespace SemEffect {
+    static constexpr EffectId Unknown      =   0;  // Unrecognised / unmapped effect
+    static constexpr EffectId Sleep        =   1;  // Puts target to sleep
+    static constexpr EffectId Heal         =   2;  // Restores user HP (Recover/Morning Sun/…)
+    static constexpr EffectId Selfdestruct =   3;  // User faints
+    static constexpr EffectId DreamEater   =   4;  // Drains sleeping target
+    static constexpr EffectId HyperBeam    =   5;  // Recharge move
+    static constexpr EffectId Nightmare    =   6;  // Damages sleeping target each turn
+    static constexpr EffectId Toxic        =   7;  // Poisons (badly)
+    static constexpr EffectId Poison       =   8;  // Poisons target (regular)
+    static constexpr EffectId Paralyze     =   9;  // Paralyses target
+    static constexpr EffectId BatonPass    =  10;  // Switches out passing stat stages
+    static constexpr EffectId BellyDrum    =  11;  // Max attack, half HP
+    static constexpr EffectId Protect      =  12;  // Blocks moves this turn
+    static constexpr EffectId Endure       =  13;  // Survives with 1 HP
+    static constexpr EffectId Reflect      =  14;  // Physical damage screen
+    static constexpr EffectId LightScreen  =  15;  // Special damage screen
+    static constexpr EffectId RainDance    =  16;  // Rain weather
+    static constexpr EffectId SunnyDay     =  17;  // Sun weather
+    // Stat stage modifiers — broad semantic categories used by ai_setup
+    static constexpr EffectId StatUp       =  18;  // Any stat-raising move
+    static constexpr EffectId StatDown     =  19;  // Any stat-lowering move (on opponent)
+    // Used for sleep-synergy detection in AI_Smart
+    // (ai_basic/ai_setup use BattleRules lists; only ai_smart uses these direct checks)
+}
+
 // Move definition
 struct MoveData {
     MoveId id;
@@ -215,7 +253,7 @@ struct MoveData {
     uint8_t pp;
     int8_t priority;        // Usually 0, positive = faster
     
-    uint8_t effect_id;      // Index into move effect handlers
+    EffectId effect_id  = SemEffect::Unknown;  // Semantic effect identifier (EMON-stable)
     uint8_t effect_chance;  // Percent chance of secondary effect
     
     bool makes_contact;

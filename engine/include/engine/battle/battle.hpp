@@ -314,6 +314,7 @@ private:
     // Trainer info
     std::optional<TrainerId> trainer_id_;
     size_t trainer_class_index_ = 0;   // Index into rules_->trainer_class_ai for this trainer
+    uint8_t last_trainer_party_level_ = 0;  // Level of last-parsed party mon (Crystal ComputeTrainerReward)
     std::unique_ptr<ITrainerAI> trainer_ai_;
     
     // Field state

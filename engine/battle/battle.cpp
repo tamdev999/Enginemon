@@ -81,10 +81,14 @@ static BattlePokemon make_battle_pokemon(
         bp.type2 = sd->type2;
 
         // Stats: use per-pokemon DVs from TrainerData (materialized by frontend extractor).
-        // Gen 2 HP uses the special DV; non-HP stats use their own DV.
-        // Source: Crystal CalcMonStatC / GetHPIV
+        // Gen 2 HP DV is derived from the low bits of all four DVs.
+        // Source: Crystal CalcMonStatC / GetHPIV (move_mon.asm):
+        //   DV_HP = (DV_ATK & 1) << 3 | (DV_DEF & 1) << 2 | (DV_SPD & 1) << 1 | (DV_SPC & 1)
         const auto& bs = sd->base_stats;
-        bp.stats.max_hp          = static_cast<int16_t>(calc_hp(bs.hp, dv_spc, 0, level));
+        const uint8_t dv_hp = static_cast<uint8_t>(
+            ((dv_atk & 1u) << 3) | ((dv_def & 1u) << 2) |
+            ((dv_spd & 1u) << 1) |  (dv_spc & 1u));
+        bp.stats.max_hp          = static_cast<int16_t>(calc_hp(bs.hp, dv_hp, 0, level));
         bp.stats.hp              = bp.stats.max_hp;
         bp.stats.attack          = static_cast<int16_t>(calc_stat(bs.attack,          dv_atk, 0, level));
         bp.stats.defense         = static_cast<int16_t>(calc_stat(bs.defense,         dv_def, 0, level));
@@ -154,6 +158,12 @@ void Battle::set_trainer(TrainerId trainer, const TrainerData& data) {
     assert(type_ == BattleType::Trainer);
     trainer_id_          = trainer;
     trainer_class_index_ = data.trainer_class;
+    // Crystal's ComputeTrainerReward uses wCurPartyLevel, which holds the level of the
+    // LAST pokemon parsed from the trainer party stream (not the highest level).
+    // Source: read_trainer_party.asm — wCurPartyLevel set in the parsing loop;
+    // after the loop ends, it holds the last value set, which is the last party member.
+    last_trainer_party_level_ = data.party.empty() ? 0
+                              : data.party.back().level;
 
     opponent_party_.clear();
     for (size_t i = 0; i < data.party.size(); ++i) {
@@ -659,21 +669,17 @@ void Battle::finalize_outcome() {
     outcome_.result      = result_;
     outcome_.turns_taken = turn_number_;
     if (result_ == BattleResult::PlayerWin && type_ == BattleType::Trainer) {
-        // Crystal formula: ComputeTrainerReward = base_reward × highest_party_level
+        // Crystal formula: ComputeTrainerReward = base_reward × wCurPartyLevel
         // Source: engine/battle/read_trainer_party.asm ComputeTrainerReward
-        // base_reward comes from TrainerClassAttributes (already in BattleRules).
-        // The highest level in the opponent party is used (wCurPartyLevel at fight end).
+        // wCurPartyLevel holds the level of the LAST-PARSED pokemon in the party
+        // (set sequentially in the parsing loop; last iteration wins).
+        // base_reward comes from TrainerClassAttributes::TRNATTR_BASEMONEY.
         uint8_t base_reward = 0;
-        uint8_t highest_level = 0;
         if (rules_) {
             base_reward = rules_->get_trainer_class_base_reward(trainer_class_index_);
         }
-        for (const auto& bp : opponent_party_) {
-            if (bp.level > highest_level) highest_level = bp.level;
-        }
-        // Fallback: if no rules or reward=0, use 0 (explicit, not a magic placeholder).
         outcome_.money_gained = static_cast<uint32_t>(base_reward)
-                              * static_cast<uint32_t>(highest_level);
+                              * static_cast<uint32_t>(last_trainer_party_level_);
     }
 }
 

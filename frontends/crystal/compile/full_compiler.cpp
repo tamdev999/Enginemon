@@ -19,6 +19,7 @@
 #include "crystal/extract/sprite_ids.hpp"
 #include "crystal/extract/species_extractor.hpp"
 #include "crystal/extract/battle_rules_extractor.hpp"
+#include "crystal/battle/crystal_effects.hpp"
 #include "engine/scripting/semantic_ir.hpp"
 #include <iostream>
 #include <iomanip>
@@ -1558,7 +1559,7 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
             e.power         = rec[fmt.power_offset];
             e.accuracy      = rec[fmt.accuracy_offset];
             e.pp            = rec[fmt.pp_offset];
-            e.effect_id     = rec[fmt.effect_offset];
+            e.effect_id     = crystal::to_semantic_effect(rec[fmt.effect_offset]);
             e.effect_chance = rec[fmt.effect_chance_offset];
             move_entries.push_back(e);
         }

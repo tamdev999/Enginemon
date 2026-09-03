@@ -194,16 +194,14 @@ static void ai_offensive(MoveScores& scores, const AIContext& ctx) {
 // The engine does not directly encode Crystal's ID layout.
 // ============================================================================
 
-static bool is_stat_up(uint8_t effect_id, const BattleRules& rules) {
-    for (uint8_t e : rules.ai_stat_up_effects)
-        if (e == effect_id) return true;
-    return false;
+static bool is_stat_up(uint8_t effect_id, const BattleRules&) {
+    // All Crystal stat-up effects map to SemEffect::StatUp at extraction time.
+    return effect_id == SemEffect::StatUp;
 }
 
-static bool is_stat_down(uint8_t effect_id, const BattleRules& rules) {
-    for (uint8_t e : rules.ai_stat_down_effects)
-        if (e == effect_id) return true;
-    return false;
+static bool is_stat_down(uint8_t effect_id, const BattleRules&) {
+    // All Crystal stat-down effects map to SemEffect::StatDown at extraction time.
+    return effect_id == SemEffect::StatDown;
 }
 
 static void ai_setup(MoveScores& scores, const AIContext& ctx,
@@ -253,8 +251,8 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx, const BattleRules
         const int16_t self_max = ctx.self.stats.max_hp;
 
         // Healing moves: encourage when HP is low (< half); discourage when above 75%
-        if (eff == SemEffect::Heal || eff == SemEffect::MorningSun
-         || eff == SemEffect::Synthesis || eff == SemEffect::Moonlight) {
+        // All heal effects (Recover, Morning Sun, Synthesis, Moonlight) map to SemEffect::Heal
+        if (eff == SemEffect::Heal) {
             if (self_max > 0 && self_hp * 2 < self_max) {
                 scores.scores[i] += kStrongEncourage;
             } else if (self_max > 0 && self_hp * 4 >= self_max * 3) {
@@ -365,7 +363,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx, const BattleRules
             bool has_synergy = false;
             for (size_t j = 0; j < 4 && !has_synergy; ++j) {
                 const MoveData* mdj = ctx.battle.registries().moves.get(ctx.self.moves[j].move);
-                if (mdj && rules.is_ai_rain_dance_move(static_cast<uint8_t>(mdj->id & 0xFF)))
+                if (mdj && rules.is_ai_rain_dance_move(static_cast<uint8_t>(mdj->id)))
                     has_synergy = true;
             }
             if (has_synergy) {
@@ -381,7 +379,7 @@ static void ai_smart(MoveScores& scores, const AIContext& ctx, const BattleRules
             bool has_synergy = false;
             for (size_t j = 0; j < 4 && !has_synergy; ++j) {
                 const MoveData* mdj = ctx.battle.registries().moves.get(ctx.self.moves[j].move);
-                if (mdj && rules.is_ai_sunny_day_move(static_cast<uint8_t>(mdj->id & 0xFF)))
+                if (mdj && rules.is_ai_sunny_day_move(static_cast<uint8_t>(mdj->id)))
                     has_synergy = true;
             }
             if (has_synergy) {

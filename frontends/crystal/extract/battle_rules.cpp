@@ -18,6 +18,7 @@
 //   data/trainers/attributes.asm           — TrainerClassAttributes
 
 #include "crystal/extract/battle_rules_extractor.hpp"
+#include "crystal/battle/crystal_effects.hpp"
 #include <format>
 #include <algorithm>
 
@@ -316,15 +317,23 @@ BattleRulesExtractResult extract_battle_rules(
     // ------------------------------------------------------------------
     // 9–14. AI move/effect lists — 1 byte/entry, 0xFF sentinel
     // ------------------------------------------------------------------
+    // Effect-ID lists (status_only, risky): raw Crystal EFFECT_* bytes → semantic EffectId
+    // Move-ID lists (stall, useful, residual, encore): raw move IDs stay as-is
     if (!extract_byte_list(rom, o.ai_status_only_effects,
                            "StatusOnlyEffects",
                            rules.ai_status_only_effects, err))
         return result;
+    // Convert status_only effect IDs: Crystal raw bytes → semantic EffectId
+    for (auto& b : rules.ai_status_only_effects)
+        b = crystal::to_semantic_effect(b);
 
     if (!extract_byte_list(rom, o.ai_risky_effects,
                            "RiskyEffects",
                            rules.ai_risky_effects, err))
         return result;
+    // Convert risky effect IDs: Crystal raw bytes → semantic EffectId
+    for (auto& b : rules.ai_risky_effects)
+        b = crystal::to_semantic_effect(b);
 
     if (!extract_byte_list(rom, o.ai_stall_moves,
                            "StallMoves",
@@ -361,24 +370,26 @@ BattleRulesExtractResult extract_battle_rules(
 
     // ------------------------------------------------------------------
     // 15b. AI stat-effect lists — synthesized from Crystal's effect-ID ranges.
-    // These encode Crystal's known contiguous EFFECT_* layout as explicit lists
-    // so the engine AI does not need to know Crystal's source ID layout.
-    // Stat-up:   ATTACK_UP(11)..EVASION_UP(16)    and ATTACK_UP_2(74)..EVASION_UP_2(79)
-    // Stat-down: ATTACK_DOWN(18)..EVASION_DOWN(23) and ATTACK_DOWN_2(80)..EVASION_DOWN_2(85)
-    // Source: constants/battle_constants.asm — EFFECT_ATTACK_UP through EFFECT_EVASION_DOWN_2
+    // These use correct Crystal EFFECT_* values (from move_effect_constants.asm):
+    //   Stat-up 1:  ATTACK_UP(10) .. EVASION_UP(16)    — 7 entries
+    //   Stat-up 2:  ATTACK_UP_2(50) .. EVASION_UP_2(56) — 7 entries
+    //   Stat-down 1: ATTACK_DOWN(18) .. EVASION_DOWN(24)   — 7 entries
+    //   Stat-down 2: ATTACK_DOWN_2(58) .. EVASION_DOWN_2(64) — 7 entries
+    // The engine AI uses these lists (not hardcoded Crystal ranges) so it stays
+    // frontend-neutral: a future frontend can populate different values.
     // ------------------------------------------------------------------
     {
         rules.ai_stat_up_effects.clear();
-        for (uint8_t e = 11; e <= 16; ++e)  // ATTACK_UP .. EVASION_UP
+        for (uint8_t e = crystal::EffectId::STAT_UP_MIN;  e <= crystal::EffectId::STAT_UP_MAX;  ++e)
             rules.ai_stat_up_effects.push_back(e);
-        for (uint8_t e = 74; e <= 79; ++e)  // ATTACK_UP_2 .. EVASION_UP_2
+        for (uint8_t e = crystal::EffectId::STAT_UP2_MIN; e <= crystal::EffectId::STAT_UP2_MAX; ++e)
             rules.ai_stat_up_effects.push_back(e);
     }
     {
         rules.ai_stat_down_effects.clear();
-        for (uint8_t e = 18; e <= 23; ++e)  // ATTACK_DOWN .. EVASION_DOWN
+        for (uint8_t e = crystal::EffectId::STAT_DOWN_MIN;  e <= crystal::EffectId::STAT_DOWN_MAX;  ++e)
             rules.ai_stat_down_effects.push_back(e);
-        for (uint8_t e = 80; e <= 85; ++e)  // ATTACK_DOWN_2 .. EVASION_DOWN_2
+        for (uint8_t e = crystal::EffectId::STAT_DOWN2_MIN; e <= crystal::EffectId::STAT_DOWN2_MAX; ++e)
             rules.ai_stat_down_effects.push_back(e);
     }
 
