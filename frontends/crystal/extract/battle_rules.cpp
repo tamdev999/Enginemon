@@ -329,6 +329,19 @@ BattleRulesExtractResult extract_battle_rules(
                                   tname, mult, ptr);
                 return result;
             }
+            // Sanity check on type IDs: Crystal type IDs are in 0x00–0x1F range in vanilla,
+            // with Polished and other hacks adding types up to ~0x25 or so.
+            // Reject any type ID >= 0x40 (64) as almost certainly wrong-address data.
+            // This catches the Polished Crystal case where the wrong address produces
+            // type IDs in the range 0x40–0xFF (plainly not type matchup data).
+            constexpr uint8_t MAX_REASONABLE_TYPE_ID = 0x3F;  // generous for all known hacks
+            if (atk > MAX_REASONABLE_TYPE_ID || def > MAX_REASONABLE_TYPE_ID) {
+                err = std::format("{}: implausible type ID: atk=0x{:02x} def=0x{:02x} — "
+                                  "likely wrong address for TypeMatchups table in this ROM; "
+                                  "update profile.offsets.type_matchups",
+                                  tname, atk, def);
+                return result;
+            }
             enginemon::BattleRules::TypeMatchupEntry entry;
             entry.attacking = atk;
             entry.defending = def;

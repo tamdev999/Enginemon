@@ -527,6 +527,31 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
         }
     }
 
+    // ── Probe 3b: Map group count from ptr-table sentinel ────────────────────
+    // Count consecutive valid bank-local 2-byte ptrs at map_group_pointers.
+    // A ptr in [0x4000, 0x7FFF] is valid; anything else terminates the table.
+    if (o.map_group_pointers != 0) {
+        uint16_t structural_count = 0;
+        for (uint32_t i = 0; i < 256u; ++i) {
+            uint32_t entry_addr = o.map_group_pointers + i * 2u;
+            if (entry_addr + 2u > rom_size) break;
+            uint16_t ptr = static_cast<uint16_t>(read_byte(entry_addr))
+                         | (static_cast<uint16_t>(read_byte(entry_addr + 1)) << 8);
+            if (ptr < 0x4000u || ptr > 0x7FFFu) break;
+            ++structural_count;
+        }
+        if (structural_count != c.num_map_groups) {
+            mismatches.push_back({
+                "num_map_groups",
+                c.num_map_groups,
+                structural_count,
+                std::format("MapGroupPointers sentinel at entry {} (profile says {}); "
+                            "update profile.counts.num_map_groups",
+                            structural_count, c.num_map_groups)
+            });
+        }
+    }
+
     // ── Probe 3: StdScripts count from entry-validity sentinel ───────────────
     // A valid StdScript 3-byte entry has: bank in [0x00, 0x7F], ptr in [0x4000, 0x7FFF].
     // The first invalid entry is the end of the table.
