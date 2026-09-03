@@ -133,6 +133,13 @@ struct MoveFormatRules {
     uint8_t accuracy_offset = 4;
     uint8_t pp_offset = 5;
     uint8_t effect_chance_offset = 6;
+
+    // Per-move Physical/Special/Status category offset.
+    // 0xFF = not present: derive category from type byte using Gen 2 type-based split.
+    // Non-0xFF: index into the move record where category is stored (Polished Crystal
+    //   and Gen 4+ style ROMs that add a per-move P/S field beyond the vanilla 7 bytes).
+    // Values at that offset: 0=Physical, 1=Special, 2=Status.
+    uint8_t category_offset = 0xFF;
 };
 
 // Item data format rules
@@ -522,6 +529,33 @@ public:
         const uint8_t* rom_bytes,
         size_t rom_size,
         std::string* out_reason = nullptr);
+
+    // ROM-structural count validation.
+    // Probes actual ROM data to verify that profile.counts.num_pokemon,
+    // num_moves, and std_scripts_count match what the ROM structure indicates.
+    // This is NOT merely a bounds check — it reads actual table entries and
+    // validates them structurally to detect silent truncation.
+    //
+    // Returns true if all probed counts agree with the profile.
+    // Returns false with out_reason set if any count is wrong.
+    // On mismatch, out_actual (if non-null) is set to the ROM-derived count.
+    //
+    // Species: scans BaseData records forward until a type byte is out of the
+    //   valid Crystal type range [0x00-0x1B], then confirms the profile count
+    //   matches that boundary (±0).
+    // Moves: same approach — scans Moves records until an invalid type byte.
+    // StdScripts: scans 3-byte entries until a ptr < 0x4000 (invalid bank-local
+    //   pointer sentinel) is found, then confirms profile count matches.
+    struct CountMismatch {
+        std::string field;    // "num_pokemon", "num_moves", "std_scripts_count"
+        uint16_t profile_count;
+        uint16_t rom_derived_count;
+        std::string detail;
+    };
+    static std::vector<CountMismatch> probe_profile_counts(
+        const ExtractionProfile& profile,
+        const uint8_t* rom_bytes,
+        size_t rom_size);
     
     // Get all supported ROMs (for error messages)
     const std::vector<std::pair<std::string, std::string>>& supported_roms() const;

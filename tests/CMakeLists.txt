@@ -284,6 +284,18 @@ if(MSVC)
     target_compile_options(sm83_lifter_test PRIVATE /bigobj)
 endif()
 
+# Expansion compatibility adversarial tests — count probes, P/S split, unknown effects
+add_executable(expansion_compat_test
+    crystal/expansion_compat_test.cpp
+)
+target_link_libraries(expansion_compat_test PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+if(MSVC)
+    target_compile_options(expansion_compat_test PRIVATE /bigobj)
+endif()
+
 # Crystal Frontend Oracle ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Phase 1
 # Independent source-fidelity tests using RGBDS-derived (or hand-authored) binary fixtures.
 # Expected values come from pokecrystal semantics, NOT from Enginemon encoder output.
@@ -399,6 +411,11 @@ if(ENGINEMON_ENABLE_ENGINE)
     set_tests_properties(sm83_lifter_test_no_rom
         PROPERTIES LABELS "standalone;battle" TIMEOUT 30)
 
+    # expansion_compat_test: synthetic count/P-S/effect tests run without ROM
+    add_test(NAME expansion_compat_test_no_rom COMMAND $<TARGET_FILE:expansion_compat_test>)
+    set_tests_properties(expansion_compat_test_no_rom
+        PROPERTIES LABELS "standalone;battle" TIMEOUT 30)
+
     # --- ROM-dependent --------------------------------------------------------
     if(ENGINEMON_ROM_PATH)
         add_test(NAME runtime_test_engine
@@ -444,6 +461,11 @@ if(ENGINEMON_ENABLE_ENGINE)
         add_test(NAME sm83_lifter_test
             COMMAND $<TARGET_FILE:sm83_lifter_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(sm83_lifter_test
+            PROPERTIES LABELS "rom-required;battle" TIMEOUT 30)
+
+        add_test(NAME expansion_compat_test
+            COMMAND $<TARGET_FILE:expansion_compat_test> "${ENGINEMON_ROM_PATH}")
+        set_tests_properties(expansion_compat_test
             PROPERTIES LABELS "rom-required;battle" TIMEOUT 30)
 
         add_test(NAME oracle_test

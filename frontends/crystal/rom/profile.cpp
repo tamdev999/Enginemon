@@ -459,6 +459,105 @@ const std::vector<std::pair<std::string, std::string>>& ProfileRegistry::support
 }
 
 // =============================================================================
+// COUNT VALIDATION
+// ROM-structural probing to detect profile count mismatches.
+// =============================================================================
+
+std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_counts(
+    const ExtractionProfile& profile,
+    const uint8_t* rom,
+    size_t rom_size)
+{
+    std::vector<CountMismatch> mismatches;
+    const auto& o   = profile.offsets;
+    const auto& c   = profile.counts;
+    const auto& fmt = profile.format;
+
+    auto read_byte = [&](uint32_t flat) -> uint8_t {
+        return (flat < rom_size) ? rom[flat] : 0xFF;
+    };
+
+    // ── Probe 1: species count from BaseData type-byte boundary ──────────────
+    // Crystal type IDs occupy only 0x00-0x1B (18 types + ???=0x13 + gap).
+    // Values >= 0x1C at either type1 or type2 indicate non-species data (text, etc.)
+    // Scan records until a type byte is invalid; that gives the structural count.
+    if (o.base_data != 0 && fmt.pokemon.base_data_size > 0) {
+        constexpr uint8_t MAX_VALID_TYPE = 0x1B;
+        uint32_t structural_count = 0;
+        for (uint32_t i = 0; i < 512u; ++i) {
+            uint32_t entry_addr = o.base_data + i * fmt.pokemon.base_data_size;
+            if (entry_addr + fmt.pokemon.base_data_size > rom_size) break;
+            uint8_t t1 = read_byte(entry_addr + fmt.pokemon.type1_offset);
+            uint8_t t2 = read_byte(entry_addr + fmt.pokemon.type2_offset);
+            if (t1 > MAX_VALID_TYPE || t2 > MAX_VALID_TYPE) break;
+            ++structural_count;
+        }
+        if (structural_count != c.num_pokemon) {
+            mismatches.push_back({
+                "num_pokemon",
+                c.num_pokemon,
+                static_cast<uint16_t>(structural_count),
+                std::format("BaseData type-byte boundary at record {} (profile says {}); "
+                            "hack may have {} species — update profile.counts.num_pokemon",
+                            structural_count + 1, c.num_pokemon, structural_count)
+            });
+        }
+    }
+
+    // ── Probe 2: move count from Moves table type-byte boundary ──────────────
+    if (o.moves != 0 && fmt.move.move_data_size > 0) {
+        constexpr uint8_t MAX_VALID_TYPE = 0x1B;
+        uint32_t structural_count = 0;
+        for (uint32_t i = 0; i < 512u; ++i) {
+            uint32_t entry_addr = o.moves + i * fmt.move.move_data_size;
+            if (entry_addr + fmt.move.move_data_size > rom_size) break;
+            uint8_t type_byte = read_byte(entry_addr + fmt.move.type_offset);
+            if (type_byte > MAX_VALID_TYPE) break;
+            ++structural_count;
+        }
+        if (structural_count != c.num_moves) {
+            mismatches.push_back({
+                "num_moves",
+                c.num_moves,
+                static_cast<uint16_t>(structural_count),
+                std::format("Moves table type-byte boundary at record {} (profile says {}); "
+                            "update profile.counts.num_moves",
+                            structural_count + 1, c.num_moves, structural_count)
+            });
+        }
+    }
+
+    // ── Probe 3: StdScripts count from entry-validity sentinel ───────────────
+    // A valid StdScript 3-byte entry has: bank in [0x00, 0x7F], ptr in [0x4000, 0x7FFF].
+    // The first invalid entry is the end of the table.
+    if (o.std_scripts != 0) {
+        uint16_t structural_count = 0;
+        for (uint32_t i = 0; i < 256u; ++i) {
+            uint32_t entry_addr = o.std_scripts + i * 3u;
+            if (entry_addr + 3u > rom_size) break;
+            uint8_t  bank = read_byte(entry_addr);
+            uint16_t ptr  = static_cast<uint16_t>(read_byte(entry_addr + 1))
+                          | (static_cast<uint16_t>(read_byte(entry_addr + 2)) << 8);
+            // Valid: bank < 0x80 (ROM bank) and ptr in switchable-bank window [0x4000, 0x7FFF]
+            if (bank >= 0x80 || ptr < 0x4000u || ptr > 0x7FFFu) break;
+            ++structural_count;
+        }
+        if (structural_count != o.std_scripts_count) {
+            mismatches.push_back({
+                "std_scripts_count",
+                o.std_scripts_count,
+                structural_count,
+                std::format("StdScripts sentinel at entry {} (profile says {}); "
+                            "update profile.offsets.std_scripts_count",
+                            structural_count, o.std_scripts_count)
+            });
+        }
+    }
+
+    return mismatches;
+}
+
+// =============================================================================
 // LAYOUT VALIDATION
 // Checks that a profile's key structural assumptions hold for a ROM.
 // This is a lightweight set of spot-checks — not a full extraction attempt.

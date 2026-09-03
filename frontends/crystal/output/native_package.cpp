@@ -742,7 +742,7 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
         buf.push_back(e.pp);
         buf.push_back(e.effect_id);
         buf.push_back(e.effect_chance);
-        buf.push_back(0);  // reserved
+        buf.push_back(e.category);  // was reserved; now holds MoveCategory (0=Physical,1=Special,2=Status)
     }
     move_data_data_ = std::move(buf);
 }

@@ -906,7 +906,7 @@ PackageReader::load_move_registry() const {
         uint8_t pp            = static_cast<uint8_t>(in.get());
         uint8_t effect_id     = static_cast<uint8_t>(in.get());
         uint8_t effect_chance = static_cast<uint8_t>(in.get());
-        in.get();  // reserved
+        uint8_t category_raw  = static_cast<uint8_t>(in.get());  // was reserved; now category
         if (!in.good() && !in.eof()) return std::nullopt;
 
         MoveId mid = static_cast<MoveId>(move_id_raw);
@@ -923,8 +923,13 @@ PackageReader::load_move_registry() const {
         md.pp             = pp;
         md.effect_id      = effect_id;
         md.effect_chance  = effect_chance;
-        // Fields not in the package chunk are left at their zero-initialised defaults:
-        // category, target, priority, makes_contact, is_sound_based, animation_id, name.
+        // Restore MoveCategory from the serialized byte.
+        // 0=Physical, 1=Special, 2=Status — must match MoveCategory enum order.
+        md.category = (category_raw <= 2u)
+                    ? static_cast<enginemon::MoveCategory>(category_raw)
+                    : enginemon::MoveCategory::Physical;
+        // Other fields default to zero: target, priority, makes_contact, is_sound_based,
+        // animation_id, name. These are not yet in the package wire format.
 
         reg.register_entry(mid, std::move(md));
     }

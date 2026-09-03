@@ -168,14 +168,38 @@ bool FullGameCompiler::compile(const std::filesystem::path& output_path,
         std::cerr << "Content discovery failed\n";
         return false;
     }
-    
+
     stats_.discovery_time.stop();
     std::cout << "  Maps: " << content_.maps.size() << "\n";
     std::cout << "  Tilesets: " << content_.tilesets.size() << "\n";
     std::cout << "  Sprites: " << content_.sprites.size() << "\n";
     std::cout << "  Discovery time: " << std::fixed << std::setprecision(1)
-              << stats_.discovery_time.elapsed_ms() << " ms\n\n";
-    
+              << stats_.discovery_time.elapsed_ms() << " ms\n";
+
+    // ── ROM-structural count validation ──────────────────────────────────────
+    // Probe BaseData/Moves type-byte boundaries and StdScript entry sentinel to
+    // detect profile.counts mismatches before any extraction begins.
+    // A mismatch means the profile is wrong for this ROM — emit an explicit error
+    // rather than silently truncating or over-reading.
+    {
+        const auto& raw = rom_.raw();
+        auto mismatches = crystal::ProfileRegistry::probe_profile_counts(
+            profile_, raw.data(), raw.size());
+        for (const auto& m : mismatches) {
+            std::cerr << "ERROR: ROM-structural count mismatch for " << m.field
+                      << ": profile=" << m.profile_count
+                      << " rom-derived=" << m.rom_derived_count
+                      << " — " << m.detail << "\n";
+        }
+        if (!mismatches.empty()) {
+            std::cerr << "FATAL: profile.counts do not match ROM structure "
+                         "(see above). Update the profile for this ROM hack or "
+                         "the compiled package will be incomplete/incorrect.\n";
+            return false;
+        }
+    }
+    std::cout << "\n";
+
     //=========================================================================
     // PHASE 2: Typed Script Pipeline (serial)
     //=========================================================================
@@ -1546,6 +1570,11 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
         std::vector<PackageWriter::MoveDataEntry> move_entries;
         move_entries.reserve(c.num_moves);
 
+        // Track unmapped effects for developer visibility.
+        // A move with an unmapped effect still compiles (effect_id = SemEffect::Unknown)
+        // but the AI won't apply special-case handling for it.
+        uint32_t unmapped_effect_count = 0;
+
         // Moves are 1-indexed in Crystal (move 0 = no-move/Pound placeholder).
         // ROM stores moves[0..num_moves-1] contiguously at o.moves.
         // MoveId 1 = Pound at index 0, MoveId N at index N-1.
@@ -1559,13 +1588,48 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
             e.power         = rec[fmt.power_offset];
             e.accuracy      = rec[fmt.accuracy_offset];
             e.pp            = rec[fmt.pp_offset];
-            e.effect_id     = crystal::to_semantic_effect(rec[fmt.effect_offset]);
             e.effect_chance = rec[fmt.effect_chance_offset];
+
+            // Effect mapping: Crystal raw byte → EMON semantic EffectId.
+            // Unknown effects log a diagnostic but still compile as SemEffect::Unknown.
+            uint8_t raw_effect = rec[fmt.effect_offset];
+            e.effect_id = crystal::to_semantic_effect(raw_effect);
+            if (e.effect_id == enginemon::SemEffect::Unknown && raw_effect != 0) {
+                // raw_effect 0 = NORMAL_HIT — legitimately maps to Unknown (no AI special case)
+                // Any other unmapped byte is a Polished/hack-specific effect the AI won't handle.
+                ++unmapped_effect_count;
+                std::fprintf(stderr,
+                    "Stage 9 [move %u]: Crystal effect 0x%02X has no SemEffect mapping "
+                    "(MoveId=%u type=0x%02X power=%u) — stored as Unknown, AI ignores it\n",
+                    i, raw_effect, i, e.type_id, e.power);
+            }
+
+            // Physical/Special/Status derivation.
+            // Source: Crystal BattleCommand_CheckType — types < 0x13 = Physical,
+            //   types >= 0x13 = Special; power = 0 = Status.
+            // If the profile provides a per-move category offset (for Polished Crystal-style
+            // P/S splits), that field takes priority over the type-based derivation.
+            if (fmt.category_offset != 0xFF && fmt.category_offset < fmt.move_data_size) {
+                // Profile-specified per-move category field (Polished Crystal / Gen 4+ style).
+                // Values: 0=Physical, 1=Special, 2=Status — must match MoveCategory enum.
+                uint8_t rom_cat = rec[fmt.category_offset];
+                e.category = (rom_cat <= 2u) ? rom_cat
+                            : static_cast<uint8_t>(enginemon::MoveCategory::Physical);
+            } else {
+                // Vanilla Gen 2: type-based Physical/Special split.
+                e.category = static_cast<uint8_t>(
+                    crystal::crystal_move_category_from_type(e.type_id, e.power));
+            }
+
             move_entries.push_back(e);
         }
 
         writer.add_move_data(move_entries);
-        std::cout << "  MoveData chunk: " << move_entries.size() << " moves\n";
+        std::cout << "  MoveData chunk: " << move_entries.size() << " moves";
+        if (unmapped_effect_count > 0) {
+            std::cout << " (" << unmapped_effect_count << " unmapped effects — see stderr)";
+        }
+        std::cout << "\n";
     }
 
     // =========================================================================

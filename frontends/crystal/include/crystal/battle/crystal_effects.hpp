@@ -259,4 +259,44 @@ inline bool crystal_is_stat_down(uint8_t raw_effect) {
         || (raw_effect >= EffectId::STAT_DOWN2_MIN && raw_effect <= EffectId::STAT_DOWN2_MAX);
 }
 
+// ============================================================================
+// Gen 2 type-based Physical/Special split
+//
+// In vanilla Crystal (and Gold/Silver), every move's category is determined
+// entirely by its type.  There is no per-move category field in the ROM.
+//
+// Physical types: Normal, Fighting, Flying, Poison, Ground, Rock, Ghost, Bug, Steel
+// Special types:  Fire, Water, Grass, Electric, Ice, Psychic, Dragon, Dark
+// ??? type is treated as Status (used internally for moves with no real type)
+//
+// Source authority:
+//   pokecrystal/constants/type_constants.asm  — type IDs
+//   pokecrystal/engine/battle/effect_commands.asm — Battle command dispatch
+//     (physical = type < SPECIAL_TYPES_START = 0x13)
+//   Crystal's actual split threshold: types < 0x13 are Physical.
+//
+// Note: Polished Crystal and similar hacks may store a per-move P/S field
+// at a different offset in the move record (e.g. using a previously reserved
+// byte).  When such a field is available in the profile, it takes precedence
+// over this type-based derivation.
+// ============================================================================
+inline enginemon::MoveCategory crystal_move_category_from_type(uint8_t type_id, uint8_t power) {
+    // Status moves: power = 0
+    if (power == 0) return enginemon::MoveCategory::Status;
+    // Crystal type-based split:
+    //   Types 0x00-0x12 = Physical: NORMAL(00) FIGHTING(01) FLYING(02) POISON(03)
+    //     GROUND(04) ROCK(05) BIRD/unused(06) BUG(07) GHOST(08) STEEL(09)
+    //     (0x0A-0x12 gaps/unused — treated Physical by the engine)
+    //   Types 0x13-0x1B = Special: FIRE(14) WATER(15) GRASS(16) ELECTRIC(17)
+    //     PSYCHIC(18) ICE(19) DRAGON(1A) DARK(1B)
+    //   Type 0x13 = ??? (appears on moves like Curse — zero-power; handled above)
+    //
+    // Crystal's in-ROM threshold: BattleCommand_CheckType uses
+    //   cp SPECIAL_TYPES_START (= 0x13 = 19 decimal)
+    //   jr c → physical; jr nc → special
+    static constexpr uint8_t SPECIAL_TYPES_START = 0x13;  // pokecrystal type_constants.asm
+    if (type_id < SPECIAL_TYPES_START) return enginemon::MoveCategory::Physical;
+    return enginemon::MoveCategory::Special;
+}
+
 } // namespace crystal

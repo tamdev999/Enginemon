@@ -137,6 +137,11 @@ public:
         uint8_t pp;
         uint8_t effect_id;
         uint8_t effect_chance;
+        // Physical/Special/Status category — derived by the Crystal frontend from
+        // the move's type (Gen 2 type-based split) or from a per-move ROM field
+        // if the source game implements a custom Physical/Special split.
+        // Stored in the previously-reserved byte (wire format compatibility preserved).
+        uint8_t category;  // 0=Physical, 1=Special, 2=Status (matches MoveCategory enum)
     };
     void add_move_data(const std::vector<MoveDataEntry>& entries);
 
