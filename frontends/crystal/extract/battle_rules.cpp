@@ -291,12 +291,19 @@ BattleRulesExtractResult extract_battle_rules(
         return result;
 
     // ------------------------------------------------------------------
-    // 7. CriticalHitMoves — 1 byte/entry (move IDs), 0xFF sentinel
+    // 7. CriticalHitMoves — 1 byte/entry (move constants = MoveId ≤ 255), 0xFF sentinel
     // ------------------------------------------------------------------
-    if (!extract_byte_list(rom, o.critical_hit_moves,
-                           "CriticalHitMoves",
-                           rules.high_crit_moves, err))
-        return result;
+    {
+        std::vector<uint8_t> raw_ids;
+        if (!extract_byte_list(rom, o.critical_hit_moves,
+                               "CriticalHitMoves", raw_ids, err))
+            return result;
+        // Widen each byte to semantic MoveId: Crystal MOVE_ANIM = MoveId for standard moves.
+        rules.high_crit_moves.clear();
+        rules.high_crit_moves.reserve(raw_ids.size());
+        for (uint8_t b : raw_ids)
+            rules.high_crit_moves.push_back(static_cast<enginemon::MoveId>(b));
+    }
 
     // ------------------------------------------------------------------
     // 8. MoveEffectPriorities — 2 bytes/entry {effect_id, priority}, 0xFF sentinel

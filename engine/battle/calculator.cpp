@@ -366,9 +366,11 @@ uint8_t build_crit_stage(const BattlePokemon& user, const MoveData& move,
     uint8_t stage = 0;
 
     // High-crit move: +2 (source: data/moves/critical_hit_moves.asm)
-    // Compare move.id (truncated to uint8_t) against the extracted list.
-    // All Crystal standard moves have MoveId ≤ 251, so truncation is safe.
-    if (rules.is_high_crit_move(static_cast<uint8_t>(move.id & 0xFF))) {
+    // BattleRules::high_crit_moves stores semantic MoveId values.
+    // The frontend maps Crystal's MOVE_ANIM byte (= move constant = MoveId for
+    // standard Crystal moves) to MoveId at extraction time.
+    // Runtime compares move.id directly — no byte truncation.
+    if (rules.is_high_crit_move(move.id)) {
         stage += 2;
     }
 

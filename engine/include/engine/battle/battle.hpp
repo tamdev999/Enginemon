@@ -18,6 +18,7 @@
 #include <functional>
 #include <variant>
 #include <random>
+#include <stdexcept>
 
 namespace enginemon {
 
@@ -193,16 +194,32 @@ struct FieldState {
     uint8_t safeguard_opponent = 0;
 };
 
+// Result of executing a single move — allows callers to distinguish outcomes.
+enum class MoveExecutionResult {
+    Success,             // Move executed normally (damage dealt or effect applied)
+    Miss,                // Move failed accuracy check
+    Immune,              // Target immune to move type
+    NoTarget,            // No valid target
+    NoPP,                // Out of PP (struggle not yet implemented)
+    UnsupportedSemantic  // Move effect not implemented; PP NOT deducted; turn halted
+};
+
 // Battle context
 class Battle {
-public:
+public:    // Production constructor: BattleRules are mandatory and non-nullable.
+    // This is the only constructor that permits execute_turn() to run.
+    Battle(BattleType type, Party& player_party, const Registries& reg,
+           const BattleRules& rules);
+
+    // Test constructor: no BattleRules provided.
+    // execute_turn() will still assert rules_ != nullptr in debug builds;
+    // in release builds execute_turn() throws if rules_ is null.
+    // Tests that don't need full execution (calculator unit tests) can use this.
+    [[deprecated("use Battle(type, party, reg, rules) in production")]]
     Battle(BattleType type, Party& player_party, const Registries& reg);
 
-    // Attach ROM-derived battle rules.  Must be called before execute_turn() in
-    // production.  Passing null explicitly to test without a package is allowed;
-    // execute_turn() will assert non-null in production, but tests may use
-    // set_battle_rules(nullptr) explicitly to enter test-only fallback mode.
-    // Enforcement: execute_turn() asserts rules_ != nullptr when called.
+    // Kept for test compatibility: override rules after construction.
+    // In production the constructor-supplied rules are authoritative.
     void set_battle_rules(const BattleRules* rules) { rules_ = rules; }
 
     ~Battle();
@@ -305,6 +322,7 @@ private:
     BattleAction player_action_;
     BattleAction opponent_action_;
     uint8_t run_attempts_ = 0;
+    bool turn_halted_ = false;  // Set on UnsupportedSemantic to skip second actor
     
     // NOTE: When battle system is implemented, RNG must be consumed from
     // GameState::rng to maintain deterministic save/restore.
@@ -322,7 +340,7 @@ private:
     void determine_turn_order();
     void execute_action(BattlePokemon& user, BattlePokemon& target, 
                        const BattleAction& action, bool is_player);
-    void execute_move(BattlePokemon& user, BattlePokemon& target, MoveId move,
+    MoveExecutionResult execute_move(BattlePokemon& user, BattlePokemon& target, MoveId move,
                       size_t move_slot, bool user_is_player);
     void apply_end_of_turn_effects();
     void apply_residual(BattlePokemon& bp, bool is_player);
@@ -338,7 +356,7 @@ private:
     
     // Experience calculation
     uint32_t calculate_exp(const BattlePokemon& defeated, bool is_trainer) const;
-    
+
     // Internal event notification helpers
     void message(const std::string& msg);
     void animate(uint8_t anim_id, size_t user, size_t target);

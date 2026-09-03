@@ -834,9 +834,10 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
         push_u8(w.multiplier);
     }
 
-    // high_crit_moves: u8 count + count × u8
+    // high_crit_moves: u8 count + count × u8 (MoveId narrowed to u8 — all ≤ 251)
     push_u8(static_cast<uint8_t>(rules.high_crit_moves.size()));
-    for (uint8_t m : rules.high_crit_moves) push_u8(m);
+    for (enginemon::MoveId m : rules.high_crit_moves)
+        push_u8(static_cast<uint8_t>(m & 0xFF));
 
     // effect_priorities: u8 count + count × {eid, priority}
     push_u8(static_cast<uint8_t>(rules.effect_priorities.size()));

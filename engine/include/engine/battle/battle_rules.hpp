@@ -125,9 +125,12 @@ struct BattleRules {
     // Source: WeatherMoveModifiers (3e:7e20)
     std::vector<WeatherModifierEntry> weather_move_modifiers;
 
-    // Move IDs that grant +2 crit stage (sentinel-terminated).
+    // Move IDs that grant +2 crit stage.
     // Source: CriticalHitMoves (0d:46a3)
-    std::vector<uint8_t> high_crit_moves;
+    // Crystal stores these as MOVE_ANIM byte values (= MoveId for standard Crystal moves).
+    // The frontend extractor maps each ROM byte to semantic MoveId at extraction time.
+    // Runtime compares move.id directly.
+    std::vector<MoveId> high_crit_moves;
 
     // Move effect → priority value (sentinel-terminated).
     // Source: MoveEffectPriorities (0f:45df)
@@ -182,8 +185,8 @@ struct BattleRules {
     }
 
     // True if move_id is in the high-crit move list.
-    bool is_high_crit_move(uint8_t move_id) const {
-        for (uint8_t m : high_crit_moves)
+    bool is_high_crit_move(MoveId move_id) const {
+        for (MoveId m : high_crit_moves)
             if (m == move_id) return true;
         return false;
     }

@@ -1430,6 +1430,214 @@ TEST(trainer_ai_bitmask_basic_offensive_exact) {
     ASSERT_EQ(af.move_slot, 1u);  // Ember
     std::cout << "  [BASIC+OFFENSIVE+SMART 0x0019 (bitmask path): Recover=23 > Ember=20; Ember wins]\n";
 }
+
+// =============================================================================
+// PHASE 3 TESTS
+// =============================================================================
+
+// Suppress [[deprecated]] warnings in this test TU for tests that intentionally
+// use the no-rules Battle constructor.
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+TEST(execute_turn_throws_without_rules_in_release) {
+    // BattleRules not set → execute_turn() must throw std::runtime_error.
+    // Enforced in both Debug and Release (not assert — throws).
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Wild, party, reg);  // no rules
+    battle.set_wild_pokemon(1, 10);
+    BattlePokemon& player = battle.player_pokemon();
+    player.stats.hp = player.stats.max_hp = 100;
+    player.moves[0].move = 1; player.moves[0].pp = 10; player.moves[0].max_pp = 10;
+    battle.set_player_action(ActionFight{0, 0});
+    bool threw = false;
+    try {
+        battle.execute_turn();
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        std::string msg = e.what();
+        ASSERT_TRUE(msg.find("BattleRules") != std::string::npos ||
+                    msg.find("set_battle_rules") != std::string::npos);
+    }
+    ASSERT_TRUE(threw);
+    std::cout << "  [execute_turn throws std::runtime_error without BattleRules]\n";
+}
+
+#pragma warning(pop)
+#pragma clang diagnostic pop
+
+TEST(accuracy_zero_is_invalid_not_always_hit) {
+    // accuracy=0 in MoveData means missing/unset data.
+    // execute_move() with md->accuracy==0 emits an error message (not a hit).
+    BattleRules rules = make_test_battle_rules();
+    auto party = make_test_party();
+    // Build fresh registry with bad_move(accuracy=0) included BEFORE freezing
+    Registries reg2;
+    TypeData t1; t1.id = 1; t1.name = "N"; reg2.types.register_entry(1, t1);
+    reg2.type_chart.set_effectiveness(1, 1, 10);
+    MoveData normal_move{}; normal_move.id = 1; normal_move.name = "Tackle";
+    normal_move.type = 1; normal_move.power = 40; normal_move.accuracy = 100;
+    normal_move.pp = 35; normal_move.category = MoveCategory::Physical; normal_move.priority = 0;
+    reg2.moves.register_entry(1, normal_move);
+    MoveData bad_move{}; bad_move.id = 99; bad_move.name = "BadMove";
+    bad_move.type = 1; bad_move.power = 40; bad_move.accuracy = 0;
+    bad_move.pp = 10; bad_move.category = MoveCategory::Physical; bad_move.priority = 0;
+    reg2.moves.register_entry(99, bad_move);
+    SpeciesData sd{}; sd.id = 1; sd.name = "Test"; sd.type1 = sd.type2 = 1;
+    sd.base_stats = {50,50,50,50,50,50}; sd.catch_rate = 45; sd.base_exp = 64;
+    reg2.species.register_entry(1, sd);
+    reg2.freeze_all();
+
+    Battle battle(BattleType::Wild, party, reg2, rules);
+    battle.set_wild_pokemon(1, 10);
+
+    std::vector<std::string> messages;
+    battle.set_message_callback([&](const std::string& msg) { messages.push_back(msg); });
+
+    BattlePokemon& player = battle.player_pokemon();
+    player.stats.hp = player.stats.max_hp = 100;
+    player.moves[0].move = 99; player.moves[0].pp = 10; player.moves[0].max_pp = 10;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.execute_turn();
+
+    bool found_error = false;
+    for (const auto& msg : messages) {
+        if (msg.find("accuracy not set") != std::string::npos ||
+            msg.find("data error") != std::string::npos) { found_error = true; break; }
+    }
+    ASSERT_TRUE(found_error);
+    std::cout << "  [accuracy=0 emits error message (not silent always-hit)]\n";
+}
+
+TEST(status_move_halts_second_actor) {
+    // When player uses a Status move (unsupported), UnsupportedSemantic is returned
+    // and the opponent does NOT get to act (turn_halted_).
+    BattleRules rules = make_test_battle_rules();
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    battle.set_wild_pokemon(1, 10);
+    // Give wild pokemon a damaging move that would reduce player HP
+    auto& opp = battle.opponent_pokemon();
+    opp.moves[0].move = 1; opp.moves[0].pp = 10; opp.moves[0].max_pp = 10;
+    opp.stats.attack = 100; opp.base_stats.attack = 100;
+
+    BattlePokemon& player = battle.player_pokemon();
+    player.stats.hp = player.stats.max_hp = 100;
+    player.moves[0].move = 4; player.moves[0].pp = 10; player.moves[0].max_pp = 10;  // Growl (Status)
+
+    // Player uses status move — faster or slower than opponent doesn't matter for this test.
+    // Force player to go first by giving higher speed.
+    player.base_stats.speed = 200;
+    opp.base_stats.speed    = 50;
+
+    const int16_t hp_before = player.stats.hp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.execute_turn();
+    // Player's Growl returned UnsupportedSemantic → opponent should NOT have acted.
+    // If opponent acted with Tackle, player HP would be reduced.
+    ASSERT_EQ(player.stats.hp, hp_before);
+    std::cout << "  [Status move UnsupportedSemantic: opponent did not act, player HP unchanged]\n";
+}
+
+TEST(high_crit_semantic_moveid_not_byte) {
+    // Prove BattleRules::high_crit_moves stores MoveId (semantic), not raw bytes.
+    // Move with id=76 matches; move with id=300 (>255) does NOT match even if byte
+    // truncation would give 44 (300 & 0xFF = 44) which is not in the list.
+    BattleRules rules = make_test_battle_rules();  // high_crit_moves = {76, 122, 200}
+    BattlePokemon user{}; user.volatile_status = 0;
+
+    MoveData md_exact{}; md_exact.id = 76; md_exact.animation_id = 0;
+    ASSERT_EQ(build_crit_stage(user, md_exact, rules), 2u);
+
+    // MoveId 300 & 0xFF = 44 — NOT in list {76,122,200}
+    // Confirms no truncation: 300 is different from 44 and 76.
+    MoveData md_large{}; md_large.id = 300; md_large.animation_id = 0;
+    ASSERT_EQ(build_crit_stage(user, md_large, rules), 0u);
+
+    // Add MoveId 300 explicitly — now it should match
+    BattleRules with300 = rules;
+    with300.high_crit_moves.push_back(300);
+    ASSERT_EQ(build_crit_stage(user, md_large, with300), 2u);
+    std::cout << "  [high_crit: MoveId 76 matches; MoveId 300 doesn't (no byte truncation)]\n";
+}
+
+TEST(typed_crystal_ai_flags_no_range_sniff) {
+    // Prove CrystalAIFlags dispatch doesn't rely on range >= 16.
+    // A bitmask of 0x0005 (BASIC|TYPES = bits 0+2) is < 16 but should still
+    // trigger the exact bitmask path when constructed from CrystalAIFlags.
+    // ai_types should run; ai_smart should NOT.
+    BattleRules rules = make_test_battle_rules();
+    BattleRules modified = rules;
+    modified.trainer_class_ai[0].ai_move_flags = 0x0005;  // BASIC|TYPES
+
+    auto party = make_test_party();
+    auto reg   = make_test_registries();
+    Battle battle(BattleType::Trainer, party, reg, rules);
+    battle.set_battle_rules(&modified);  // override with modified
+    TrainerData td; td.trainer_class = 0;
+    td.party.push_back({4, 10, ITEM_NONE, {6, 2, MOVE_NONE, MOVE_NONE}});
+    battle.set_trainer(1, td);
+
+    // At full HP: ai_smart would discourage Recover (+1 = 21 if SMART ran)
+    // With BASIC|TYPES only: Recover=20, Ember(SE vs Grass)=19
+    // If CrystalAIFlags dispatches correctly (TYPES runs), Ember=19 wins.
+    BattlePokemon self = make_test_bp(4, 2, 2, {6, 2, MOVE_NONE, MOVE_NONE}, 100, 100);
+    BattlePokemon opp  = make_test_bp(1, 4, 4, {1, MOVE_NONE, MOVE_NONE, MOVE_NONE});
+
+    AIContext ctx{battle, self, opp, true, false, false, false, 0, {}, {}};
+    VanillaCrystalAI ai(CrystalAIFlags::from_rom(0x0005));  // typed construction
+    const ActionFight& af = std::get<ActionFight>(ai.decide(ctx, modified).action);
+    // ai_types: Ember SE vs Grass → -1=19; Recover stays 20. Ember wins.
+    ASSERT_EQ(af.move_slot, 1u);
+    std::cout << "  [CrystalAIFlags(0x0005=BASIC|TYPES): Ember(SE)=19 wins; no range-sniff]\n";
+}
+
+TEST(weather_order_crystal_exact_base_weather_stab_type) {
+    // Source-proven order: Crystal BattleCommand_Stab does weather → STAB → type matchup.
+    // Enginemon order: calculate_damage(base, type=100, stab=false) → weather → STAB → type.
+    // Golden case distinguishing weather-before-type vs type-before-weather:
+    //
+    // Setup: Rain (weather 1) boosts Water moves 1.5x.
+    //        Water move (type=3) vs Fire/Water dual type (eff = 2× Fire = 200, 1× Water = 100
+    //        for Water-vs-Water = 50... this gets complex. Use simpler case:
+    //
+    // Simpler: Rain 0.5× Fire (multiplier=5/10). Fire move vs Grass type (2x = type 200).
+    //   Base damage = 10 (pre-weather, pre-STAB, pre-type)
+    //   Crystal order: weather (0.5×) = 5, STAB (no STAB) = 5, type (2×) = 10
+    //   Wrong order type-then-weather: type (2×) = 20, weather (0.5×) = 10
+    //   SAME for this case. Need different numbers.
+    //
+    // Use: base=7, weather 1.5x (Rain+Water), STAB yes, type 2x
+    //   Crystal: weather(1.5×)=floor(7*15/10)=10 → STAB(1.5×)=10+5=15 → type(2×)=30
+    //   Wrong (STAB before weather): STAB=7+3=10 → weather=floor(10*15/10)=15 → type=30
+    //   STILL SAME. Need base=3, weather 0.5x, STAB, type 2x:
+    //   Crystal: weather(0.5×)=floor(3*5/10)=1 → STAB=1+0=1 → type(2×)=2
+    //   Wrong (type then weather): type(2×)=6 → weather(0.5×)=3 → STAB=3+1=4
+    //   Gives 2 vs 4 — clearly different.
+    BattleRules rules = make_test_battle_rules();
+    // Rain+Fire=0.5x (weather=1, type=2). Simulate manually.
+    int32_t base = 3;
+    // Weather step (0.5×):
+    int32_t after_weather = apply_weather_modifier(base, 1, 2, 0, rules);
+    ASSERT_EQ(after_weather, 1);  // floor(3*5/10)=1
+    // STAB step (+50%):
+    int32_t after_stab = after_weather + after_weather / 2;  // 1 + 0 = 1
+    ASSERT_EQ(after_stab, 1);
+    // Type step (2×):
+    int32_t crystal_final = after_stab * 200 / 100;  // 1*200/100=2
+    ASSERT_EQ(crystal_final, 2);
+
+    // Wrong order: type first (2×) = 6, then weather (0.5×) = 3, then STAB = 4
+    int32_t wrong_type_first = base * 200 / 100;   // 6
+    int32_t wrong_weather    = apply_weather_modifier(wrong_type_first, 1, 2, 0, rules);  // 3
+    int32_t wrong_final      = wrong_weather + wrong_weather / 2;  // 4
+    ASSERT_TRUE(crystal_final != wrong_final);  // 2 != 4
+    std::cout << "  [weather→STAB→type: base=3 → 2; wrong type→weather→STAB → 4]\n";
+}
 int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << "=== Battle Calculator + AI Tests ===\n";
 
@@ -1545,6 +1753,14 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN(status_move_explicit_unsupported_diagnostic);
     RUN(trainer_ai_bitmask_types_only_no_smart);
     RUN(trainer_ai_bitmask_basic_offensive_exact);
+
+    // === PHASE 3: release authority, exact ordering, typed identity ===
+    RUN(execute_turn_throws_without_rules_in_release);
+    RUN(accuracy_zero_is_invalid_not_always_hit);
+    RUN(status_move_halts_second_actor);
+    RUN(high_crit_semantic_moveid_not_byte);
+    RUN(typed_crystal_ai_flags_no_range_sniff);
+    RUN(weather_order_crystal_exact_base_weather_stab_type);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

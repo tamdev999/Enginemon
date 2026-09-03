@@ -975,6 +975,21 @@ PackageReader::load_battle_rules() const {
         return true;
     };
 
+    // Read a uint8_t list from wire and widen each entry to MoveId (uint16_t).
+    // Used for high_crit_moves: wire stores Crystal MOVE_ANIM bytes (≤ 255);
+    // runtime uses semantic MoveId, which for standard Crystal moves equals the byte value.
+    auto read_byte_list_as_move_ids = [&](std::vector<enginemon::MoveId>& out) -> bool {
+        uint8_t count = 0;
+        if (!r.read_le(count)) return false;
+        out.resize(count);
+        for (uint8_t i = 0; i < count; ++i) {
+            uint8_t b = 0;
+            if (!r.read_le(b)) return false;
+            out[i] = static_cast<enginemon::MoveId>(b);
+        }
+        return true;
+    };
+
     // -----------------------------------------------------------------------
     // Deserialise (must match wire format in PackageWriter::add_battle_rules)
     // -----------------------------------------------------------------------
@@ -1027,8 +1042,8 @@ PackageReader::load_battle_rules() const {
         }
     }
 
-    // high_crit_moves: u8 count + count × u8
-    if (!read_byte_list(rules.high_crit_moves)) return std::nullopt;
+    // high_crit_moves: u8 count + count × u8 (widened to MoveId at read time)
+    if (!read_byte_list_as_move_ids(rules.high_crit_moves)) return std::nullopt;
 
     // effect_priorities: u8 count + count × {eid, priority}
     {

@@ -27,21 +27,44 @@ namespace enginemon {
 // Forward declarations (battle.hpp already included above for BattleAction/Battle)
 class LuaRuntime;
 
-// AI behavior identifier
+// AI behavior identifier — used for legacy/test tier-based construction.
 using AIBehaviorId = uint16_t;
 
-// Well-known vanilla AI behaviors (Crystal)
+// Well-known vanilla AI behaviors (Crystal tier constants, test use only)
 namespace VanillaAI {
-    constexpr AIBehaviorId NONE = 0;           // No AI (player-controlled)
-    constexpr AIBehaviorId BASIC = 1;          // Random moves
-    constexpr AIBehaviorId SMART = 2;          // Type matchups, healing
-    constexpr AIBehaviorId AGGRESSIVE = 3;     // Prioritize damage
-    constexpr AIBehaviorId DEFENSIVE = 4;      // Prioritize survival
-    constexpr AIBehaviorId STATUS_FOCUS = 5;   // Prioritize status moves
-    constexpr AIBehaviorId GYM_LEADER = 6;     // Full type/item awareness
-    constexpr AIBehaviorId ELITE_FOUR = 7;     // Optimal play
-    constexpr AIBehaviorId CHAMPION = 8;       // Near-perfect
+    constexpr AIBehaviorId NONE = 0;
+    constexpr AIBehaviorId BASIC = 1;
+    constexpr AIBehaviorId SMART = 2;
+    constexpr AIBehaviorId AGGRESSIVE = 3;
+    constexpr AIBehaviorId DEFENSIVE = 4;
+    constexpr AIBehaviorId STATUS_FOCUS = 5;
+    constexpr AIBehaviorId GYM_LEADER = 6;
+    constexpr AIBehaviorId ELITE_FOUR = 7;
+    constexpr AIBehaviorId CHAMPION = 8;
 }
+
+// Typed Crystal AI bitmask — unambiguously represents TRNATTR_AI_MOVE_WEIGHTS.
+// Production path uses this type; tests may use AIBehaviorId (legacy tiers) directly.
+// Crystal bit definitions (trainer_data_constants.asm):
+//   bit 0 = AI_BASIC   bit 1 = AI_SETUP    bit 2 = AI_TYPES
+//   bit 3 = AI_OFFENSIVE   bit 4 = AI_SMART
+struct CrystalAIFlags {
+    uint16_t flags = CrystalAIFlags::BASIC;
+
+    static constexpr uint16_t BASIC      = 1 << 0;
+    static constexpr uint16_t SETUP      = 1 << 1;
+    static constexpr uint16_t TYPES      = 1 << 2;
+    static constexpr uint16_t OFFENSIVE  = 1 << 3;
+    static constexpr uint16_t SMART      = 1 << 4;
+
+    bool has(uint16_t bit) const { return (flags & bit) != 0; }
+
+    static CrystalAIFlags from_rom(uint16_t raw) {
+        CrystalAIFlags f;
+        f.flags = (raw != 0) ? raw : CrystalAIFlags::BASIC;
+        return f;
+    }
+};
 
 // AI decision context - what the AI knows when deciding
 struct AIContext {
@@ -97,7 +120,12 @@ public:
 // Vanilla Crystal AI implementation
 class VanillaCrystalAI : public ITrainerAI {
 public:
+    // Legacy constructor: takes a tier constant (for tests that construct directly).
     explicit VanillaCrystalAI(AIBehaviorId behavior);
+
+    // Production constructor: takes a typed CrystalAIFlags bitmask from the ROM.
+    // Uses exact bitmask-driven pass dispatch — no tier inference, no range-sniffing.
+    explicit VanillaCrystalAI(CrystalAIFlags flags);
 
     // Base overload (uses internal static fallback tables — for tests without a package).
     AIDecision decide(const AIContext& ctx) override;
@@ -110,7 +138,9 @@ public:
     std::string name() const override;
 
 private:
-    AIBehaviorId behavior_;
+    AIBehaviorId behavior_;     // Legacy tier constant (0 when crystal_flags_ is authoritative)
+    CrystalAIFlags crystal_flags_; // Exact ROM bitmask (populated by CrystalAIFlags constructor)
+    bool use_crystal_flags_ = false; // true when constructed from CrystalAIFlags
     
     // Crystal AI subroutines (ported from pokecrystal)
     int score_move(const AIContext& ctx, size_t move_slot);

@@ -106,10 +106,21 @@ static BattlePokemon make_battle_pokemon(
 // Battle construction / destruction
 // ============================================================================
 
+// Production constructor — BattleRules required at construction.
+Battle::Battle(BattleType type, Party& player_party, const Registries& reg,
+               const BattleRules& rules)
+    : type_(type)
+    , player_party_(player_party)
+    , registries_(reg)
+    , rules_(&rules)
+{}
+
+// Test constructor — no BattleRules; execute_turn() will throw in release.
 Battle::Battle(BattleType type, Party& player_party, const Registries& reg)
     : type_(type)
     , player_party_(player_party)
     , registries_(reg)
+    , rules_(nullptr)
 {}
 
 Battle::~Battle() = default;
@@ -153,20 +164,13 @@ void Battle::set_trainer(TrainerId trainer, const TrainerData& data) {
     }
 
     // Determine AI behavior from trainer class via BattleRules.
-    // Source: AIChooseMove — TrainerClassAttributes TRNATTR_AI_MOVE_WEIGHTS bitmask.
-    // Crystal bit definitions (trainer_data_constants.asm, shift_const order):
-    //   bit 0 = AI_BASIC       bit 1 = AI_SETUP      bit 2 = AI_TYPES
-    //   bit 3 = AI_OFFENSIVE   bit 4 = AI_SMART       bit 5 = AI_OPPORTUNIST
-    //   bit 6 = AI_AGGRESSIVE  bit 7 = AI_CAUTIOUS    bit 8 = AI_STATUS
-    //   bit 9 = AI_RISKY
-    // We map the bitmask directly: store it in the AI object; decide(ctx, rules)
-    // reads the flags and runs exactly the set of passes that are enabled.
-    uint16_t ai_flags = 0x0001;  // Default: BASIC only (bit 0)
+    // Use CrystalAIFlags typed bitmask — no numeric range-sniffing.
     if (rules_) {
-        ai_flags = rules_->get_trainer_ai_flags(data.trainer_class);
-        if (ai_flags == 0) ai_flags = 0x0001;  // Trainer class with no flags → BASIC
+        const uint16_t raw = rules_->get_trainer_ai_flags(data.trainer_class);
+        trainer_ai_ = std::make_unique<VanillaCrystalAI>(CrystalAIFlags::from_rom(raw));
+    } else {
+        trainer_ai_ = std::make_unique<VanillaCrystalAI>(VanillaAI::BASIC);
     }
-    trainer_ai_ = std::make_unique<VanillaCrystalAI>(static_cast<AIBehaviorId>(ai_flags));
 }
 
 // ============================================================================
@@ -267,10 +271,13 @@ void Battle::execute_turn() {
     if (result_ != BattleResult::InProgress) return;
 
     // BattleRules must be set before execute_turn() in any production path.
-    // Tests that intentionally omit set_battle_rules() must call
-    // set_battle_rules(nullptr) explicitly; the fallback overloads are for
-    // unit test isolation only and produce [[deprecated]] warnings.
-    assert(rules_ != nullptr && "set_battle_rules() must be called before execute_turn()");
+    // Enforced in both debug and release builds: throws if rules_ is null.
+    // Use the production constructor Battle(type, party, reg, rules) to guarantee this.
+    if (rules_ == nullptr) {
+        throw std::runtime_error(
+            "Battle::execute_turn(): BattleRules not set. "
+            "Use Battle(type, party, reg, rules) constructor or call set_battle_rules() first.");
+    }
 
     ++turn_number_;
 
@@ -318,11 +325,12 @@ void Battle::execute_turn() {
     BattleAction& sa      = player_goes_first_ ? opponent_action_  : player_action_;
     const bool first_is_player = player_goes_first_;
 
+    turn_halted_ = false;  // Reset at turn start
     execute_action(first, second, fa, first_is_player);
     check_fainted();
     if (result_ != BattleResult::InProgress) { finalize_outcome(); return; }
 
-    if (!second.is_fainted()) {
+    if (!turn_halted_ && !second.is_fainted()) {
         execute_action(second, first, sa, !first_is_player);
         check_fainted();
         if (result_ != BattleResult::InProgress) { finalize_outcome(); return; }
@@ -335,6 +343,7 @@ void Battle::execute_turn() {
     // Clear per-turn actions
     player_action_   = ActionFight{};
     opponent_action_ = ActionFight{};
+    turn_halted_ = false;
 }
 
 // ============================================================================
@@ -352,7 +361,12 @@ void Battle::execute_action(BattlePokemon& user, BattlePokemon& target,
             message(is_player ? "Player has no usable move!" : "Opponent has no usable move!");
             return;
         }
-        execute_move(user, target, mid, af.move_slot, is_player);
+        const auto res = execute_move(user, target, mid, af.move_slot, is_player);
+        // UnsupportedSemantic: the move had no effect; flag turn as halted so the
+        // opponent does not act on this turn.  Battle state remains coherent.
+        if (res == MoveExecutionResult::UnsupportedSemantic) {
+            turn_halted_ = true;
+        }
 
     } else if (std::holds_alternative<ActionSwitch>(action)) {
         const ActionSwitch& as = std::get<ActionSwitch>(action);
@@ -373,22 +387,19 @@ void Battle::execute_action(BattlePokemon& user, BattlePokemon& target,
 // Source: suiCune effect_commands.c DamageCalc + BattleCommand_Stab + etc.
 // ============================================================================
 
-void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
+MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
                           MoveId move_id, size_t move_slot, bool user_is_player) {
     const MoveData* md = registries_.moves.get(move_id);
-    if (!md) { message("Unknown move!"); return; }
+    if (!md) { message("Unknown move!"); return MoveExecutionResult::NoTarget; }
 
     message((user_is_player ? "Player used " : "Opponent used ") + md->name + "!");
 
     if (md->category == MoveCategory::Status) {
         // Status move effects are not implemented in this pass.
-        // Do NOT deduct PP or consume turn resources for unimplemented effects.
-        // Emit an explicit diagnostic so the caller can identify unsupported execution.
-        // Source: Crystal executes status move effects via BattleCommand dispatch;
-        //         each effect has its own handler. Deferred per Phase 1 scope.
+        // PP NOT deducted. Return UnsupportedSemantic to halt turn continuation.
+        // Source: Crystal dispatches each status effect via BattleCommand handlers.
         message(md->name + " — status effect not yet supported (deferred).");
-        // PP is intentionally NOT deducted — no canonical effect executed.
-        return;
+        return MoveExecutionResult::UnsupportedSemantic;
     }
 
     // Deduct PP (only for damaging moves where execution proceeds)
@@ -397,9 +408,12 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
 
     // Accuracy check
     // 0xFF = always hit (Crystal encoding for never-miss moves like Swift).
-    // Moves stored with accuracy=0 in MoveData indicate unset package data —
-    // treat as no accuracy check (conservative — avoids spurious misses).
-    if (md->accuracy != 0xFF && md->accuracy != 0) {
+    // 0 = missing/unset data — explicit failure, not a silent always-hit.
+    if (md->accuracy == 0) {
+        message("Move data error: accuracy not set for " + md->name);
+        return MoveExecutionResult::Miss;
+    }
+    if (md->accuracy != 0xFF) {
         const int8_t acc_stage = user.stages.accuracy;
         const int8_t eva_stage = target.stages.evasion;
         bool hit;
@@ -410,7 +424,7 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
         }
         if (!hit) {
             message("The attack missed!");
-            return;
+            return MoveExecutionResult::Miss;
         }
     }
 
@@ -428,7 +442,7 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
         md->type, target.type1, target.type2, registries_.type_chart);
     if (type_eff == 0) {
         message("It doesn't affect the opposing Pokémon…");
-        return;
+        return MoveExecutionResult::Immune;
     }
 
     // STAB
@@ -467,40 +481,28 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
     // Burn penalty on physical moves
     const bool burned = physical && (user.status == Status::Burn);
 
-    // Weather modifier applied BEFORE calculate_damage(), matching Crystal ordering.
-    // Source: BattleCommand_Stab calls DoWeatherModifiers BEFORE the type-matchup
-    // loop and STAB application (effect_commands.asm, .go section).
-    // The modifier is applied to atk_stat effectively — we implement it by
-    // pre-multiplying the base damage divisor, which is equivalent for integer math.
-    // Practical implementation: apply multiplier to the pre-STAB damage, i.e.,
-    // compute damage without STAB first, apply weather, then apply STAB — but
-    // Crystal actually applies weather modifier to wCurDamage before the STAB
-    // shift in BattleCommand_Stab.  We replicate: compute base damage (no STAB),
-    // apply weather, then add STAB.
+    // Crystal damage formula matching BattleCommand_DamageCalc + BattleCommand_Stab ordering:
+    //   DamageCalc: base = (level×2/5+2) × power × atk/def/50  → crit×2 → burn>>1 → +2 floor
+    //   BattleCommand_Stab: weather → STAB → type matchup loop
     //
-    // To implement correctly without restructuring calculate_damage():
-    //   1. Get base damage (stab=false in DamageParams)
-    //   2. Apply weather modifier to base damage
-    //   3. Apply STAB manually (+damage/2)
-
+    // Step 1: compute base damage (no type_eff, no STAB — those come after weather)
     DamageParams dp{};
     dp.attacker_level     = user.level;
     dp.attack_stat        = atk_stat;
     dp.defense_stat       = def_stat;
     dp.move_power         = md->power;
-    dp.type_effectiveness = type_eff;
-    dp.stab               = false;   // Applied manually after weather below
+    dp.type_effectiveness = 100;  // Neutral — type applied manually after weather (see Step 4)
+    dp.stab               = false; // Applied manually after weather (see Step 3)
     dp.critical           = is_crit;
     dp.burned             = burned;
     dp.weather            = field_.weather;
     dp.move_type          = md->type;
 
     int32_t damage = enginemon::calculate_damage(dp);
-    if (damage == 0) return;
+    if (damage == 0) return MoveExecutionResult::Immune;
 
-    // Weather modifier — applied after base damage, before STAB.
-    // Crystal: DoWeatherModifiers runs inside BattleCommand_Stab before type loop.
-    // Source: misc.asm DoWeatherModifiers — multiplier × damage / 10, min 1.
+    // Step 2: apply weather modifier
+    // Source: DoWeatherModifiers runs FIRST in BattleCommand_Stab, before STAB and type loop.
     if (rules_ && field_.weather != Weather::None) {
         const uint8_t weather_id = static_cast<uint8_t>(field_.weather);
         const uint8_t type_id    = static_cast<uint8_t>(md->type);
@@ -508,12 +510,22 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
         damage = apply_weather_modifier(damage, weather_id, type_id, effect_id, *rules_);
     }
 
-    // STAB — applied after weather, matching Crystal BattleCommand_Stab ordering.
-    // Source: BattleCommand_Stab: DoWeatherModifiers → type matchup → STAB shift.
+    // Step 3: STAB — applied after weather, before type loop.
+    // Source: BattleCommand_Stab checks STAB before .TypesLoop.
     if (stab) {
-        damage += damage / 2;  // +50% integer: n + n/2
+        damage += damage / 2;   // +50% integer: floor(n × 3/2) via shift+add
         if (damage > 999) damage = 999;
         if (damage < 2)   damage = 2;
+    }
+
+    // Step 4: type effectiveness multiplier.
+    // Source: BattleCommand_Stab .TypesLoop applies after STAB.
+    // type_eff is in per-100 notation (100=neutral, 200=2×, 50=0.5×, 0=immune).
+    // Immunity was already checked above and returned early.
+    if (type_eff != 100) {
+        damage = damage * static_cast<int32_t>(type_eff) / 100;
+        if (damage < 1) damage = 1;
+        if (damage > 999) damage = 999;
     }
 
     // Random variation 85-100% (suiCune BattleCommand_DamageVariation: RRCA loop)
@@ -540,6 +552,7 @@ void Battle::execute_move(BattlePokemon& user, BattlePokemon& target,
     hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
 
     outcome_.damage_dealt += static_cast<uint16_t>(damage);
+    return MoveExecutionResult::Success;
 }
 
 // ============================================================================

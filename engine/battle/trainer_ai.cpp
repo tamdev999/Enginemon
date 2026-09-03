@@ -152,6 +152,13 @@ struct MoveScores {
 
 VanillaCrystalAI::VanillaCrystalAI(AIBehaviorId behavior)
     : behavior_(behavior)
+    , use_crystal_flags_(false)
+{}
+
+VanillaCrystalAI::VanillaCrystalAI(CrystalAIFlags flags)
+    : behavior_(0)
+    , crystal_flags_(flags)
+    , use_crystal_flags_(true)
 {}
 
 std::string VanillaCrystalAI::name() const {
@@ -537,47 +544,24 @@ AIDecision VanillaCrystalAI::decide(const AIContext& ctx) {
 }
 
 AIDecision VanillaCrystalAI::decide(const AIContext& ctx, const BattleRules& rules) {
-    // ROM-derived overload using exact bitmask-driven pass dispatch.
-    //
-    // When set_trainer() calls set_battle_rules(), it stores the raw
-    // TRNATTR_AI_MOVE_WEIGHTS bitmask as the behavior_ ID.
-    // Crystal bit definitions (trainer_data_constants.asm):
-    //   bit 0 = AI_BASIC       bit 1 = AI_SETUP      bit 2 = AI_TYPES
-    //   bit 3 = AI_OFFENSIVE   bit 4 = AI_SMART
-    //
-    // Crystal's AIChooseMove iterates flag bits 0-15 in order, running the
-    // corresponding AI pass for each set bit (AIScoringPointers index = bit number).
-    // We replicate the exact pass set and order.
-    //
-    // NOTE: When behavior_ is a legacy VanillaAI:: enum constant (< 9, from direct
-    // construction in tests), fall through to the tier-based logic below.
+    // ROM-derived overload using typed CrystalAIFlags for exact bitmask dispatch.
+    // When constructed from CrystalAIFlags, uses crystal_flags_ directly — no
+    // range-sniffing or numeric domain overloading.
+    // When constructed from AIBehaviorId (tests), uses legacy tier path.
     MoveScores scores{};
 
-    // Check whether behavior_ is a raw bitmask (>= 16 and not a legacy enum)
-    // or a legacy tier constant (0-8).  Raw bitmask values from set_trainer() will
-    // be 0x0001–0xFFFF; legacy enum values are 0–8.  Discriminate by value range.
-    const bool is_bitmask = (behavior_ >= 16);
-
-    if (is_bitmask) {
+    if (use_crystal_flags_) {
         // Exact bitmask-driven pass dispatch — matches Crystal AIChooseMove.
-        const uint16_t flags = static_cast<uint16_t>(behavior_);
-        constexpr uint16_t BIT_BASIC     = 1 << 0;
-        constexpr uint16_t BIT_SETUP     = 1 << 1;
-        constexpr uint16_t BIT_TYPES     = 1 << 2;
-        constexpr uint16_t BIT_OFFENSIVE = 1 << 3;
-        constexpr uint16_t BIT_SMART     = 1 << 4;
-
-        // AI_BASIC: always run first regardless of flags.
-        // Source: Crystal's AI always scores via AI_Basic at minimum.
+        // ai_basic always runs (Crystal minimum).
         ai_basic(scores, ctx, rules);
 
-        // Passes run in Crystal's AIScoringPointers order (bit 0 first).
-        if (flags & BIT_SETUP)     ai_setup(scores, ctx, 0, 0);
-        if (flags & BIT_TYPES)     ai_types(scores, ctx);
-        if (flags & BIT_OFFENSIVE) ai_offensive(scores, ctx);
-        if (flags & BIT_SMART)     ai_smart(scores, ctx);
+        // Passes run in Crystal's AIScoringPointers order (bit index order).
+        if (crystal_flags_.has(CrystalAIFlags::SETUP))     ai_setup(scores, ctx, 0, 0);
+        if (crystal_flags_.has(CrystalAIFlags::TYPES))     ai_types(scores, ctx);
+        if (crystal_flags_.has(CrystalAIFlags::OFFENSIVE)) ai_offensive(scores, ctx);
+        if (crystal_flags_.has(CrystalAIFlags::SMART))     ai_smart(scores, ctx);
     } else {
-        // Legacy tier-based dispatch (tests / direct VanillaAI:: construction).
+        // Legacy tier-based dispatch (tests / direct AIBehaviorId construction).
         const AIBehaviorId beh = behavior_;
 
         ai_basic(scores, ctx, rules);
