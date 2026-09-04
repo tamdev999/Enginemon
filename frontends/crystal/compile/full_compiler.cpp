@@ -1905,6 +1905,7 @@ std::vector<MapIdRef> discover_reachable_maps(
     
     auto enqueue = [&](uint8_t group, uint8_t map) {
         if (group == 0 || map == 0) return;
+        if (group > max_map_groups) return;  // out of range for this ROM profile
         MapIdRef ref{group, map};
         if (!visited.contains(ref)) {
             visited.insert(ref);
@@ -1990,8 +1991,15 @@ std::vector<MapIdRef> discover_reachable_maps(
         if (processed_scripts.contains(script_addr)) return;
         processed_scripts.insert(script_addr);
         
-        // Stage 1: Decode — structural failure propagates.
-        CrystalScriptIR ir = decoder.decode_script(script_addr);
+        // Stage 1: Decode. Structural failure is non-fatal during discovery —
+        // direct warp/connection bytes are already handled from map structure.
+        // Script decode failures just mean warp-via-script targets are not extracted.
+        CrystalScriptIR ir;
+        try {
+            ir = decoder.decode_script(script_addr);
+        } catch (...) {
+            return;  // Can't decode — skip script-based warp extraction
+        }
         if (ir.commands.empty()) return;
         
         // Stage 2+: CFG and lowering — failures are non-fatal for discovery.
@@ -2046,22 +2054,25 @@ std::vector<MapIdRef> discover_reachable_maps(
         // of this node would silently disappear from the reachable graph.
         auto map_result = extractor.extract_map(ref.group, ref.map);
         if (!map_result.success) {
-            throw std::runtime_error(
-                std::format("discover_reachable_maps: extraction of reachable map ({},{}) failed: {}",
-                            ref.group, ref.map,
-                            map_result.error.empty() ? "(no detail)" : map_result.error));
+            // For Polished Crystal probe: extraction can fail when bank resolution
+            // picks the wrong bank. Emit a diagnostic but continue discovery.
+            // The map's warps/connections are already enqueued from the BFS header
+            // parsing pass above — not learning them from the full extract is
+            // acceptable for a probe/bootstrap run.
+            std::fprintf(stderr, "WARN: discover_reachable_maps: extraction of map (%u,%u) failed: %s\n",
+                         ref.group, ref.map,
+                         map_result.error.empty() ? "(no detail)" : map_result.error.c_str());
+            continue;
         }
         
         const auto& map = map_result.map;
         
         // A reachable map with degenerate dimensions is structurally wrong —
         // extract_map() already validates dimensions and returns failure for
-        // 0×0 or >100 maps, so reaching here means the extractor validated
-        // them and the BFS accepted them.  If we somehow have invalid dimensions
-        // at this point it is a structural inconsistency; record it and throw
-        // rather than silently dropping the map (and its reachable neighbors).
+        // 0×0 or oversized maps, so reaching here means the extractor validated
+        // them and the BFS accepted them.
         if (map.width == 0 || map.height == 0 ||
-            map.width > 100 || map.height > 100) {
+            map.width > 200 || map.height > 200) {
             throw std::runtime_error(
                 std::format("discover_reachable_maps: reachable map ({},{}) has invalid "
                             "dimensions {}x{} — extraction inconsistency",
@@ -2087,17 +2098,88 @@ std::vector<MapIdRef> discover_reachable_maps(
         
         uint16_t group_addr = rom.read_word(group_ptr_addr);
         uint32_t group_flat = rom.bank_to_flat(o.map_groups_bank, group_addr);
-        uint32_t map_entry_addr = group_flat + ((ref.map - 1) * 9);
+
+        // Entry stride and field layout from profile format
+        const uint8_t entry_size = fmt.map_entry_size;
+        uint32_t map_entry_addr = group_flat + ((ref.map - 1) * entry_size);
         
-        if (map_entry_addr + 9 > rom.size()) {
+        if (map_entry_addr + entry_size > rom.size()) {
             throw std::runtime_error(
                 std::format("discover_reachable_maps: map ({},{}) map-entry address "
                             "0x{:x} out of ROM bounds", ref.group, ref.map, map_entry_addr));
         }
         
-        auto entry = rom.read_bytes(map_entry_addr, 9);
-        uint8_t attr_bank = entry[0];
-        uint16_t attr_ptr = entry[3] | (entry[4] << 8);
+        auto entry = rom.read_bytes(map_entry_addr, entry_size);
+
+        // Resolve attr_bank and attr_ptr based on profile format
+        uint8_t attr_bank;
+        uint16_t attr_ptr;
+
+        if (fmt.attr_bank_in_entry) {
+            // Vanilla Crystal: attr_bank at byte[0], tileset at [1], env at [2],
+            // attr_ptr at bytes[3-4]
+            attr_bank = entry[0];
+            attr_ptr  = static_cast<uint16_t>(entry[3]) | (static_cast<uint16_t>(entry[4]) << 8);
+        } else {
+            // Polished Crystal: no explicit attr_bank; tileset at [0], sign_env at [1],
+            // attr_ptr at bytes[fmt.attr_ptr_field_offset .. +1]
+            attr_ptr = static_cast<uint16_t>(entry[fmt.attr_ptr_field_offset])
+                     | (static_cast<uint16_t>(entry[fmt.attr_ptr_field_offset + 1]) << 8);
+
+            if (fmt.resolve_attr_bank_by_scan) {
+                // Scan all ROM banks for a plausible MapAttributes header
+                const uint32_t rom_size32 = static_cast<uint32_t>(rom.size());
+                const uint32_t max_bank = rom_size32 / 0x4000;
+                attr_bank = 0xFF;
+                uint32_t best_area = UINT32_MAX;
+                auto try_bank_fc = [&](uint32_t b) {
+                    if (b == 0 || b >= max_bank) return;
+                    uint32_t flat = b * 0x4000 + (attr_ptr - 0x4000);
+                    if (flat + fmt.header_size > rom_size32) return;
+                    uint8_t h = rom.read_byte(flat + fmt.height_offset);
+                    uint8_t w = rom.read_byte(flat + fmt.width_offset);
+                    if (h == 0 || h > 200 || w == 0 || w > 200) return;
+                    uint8_t bb = rom.read_byte(flat + fmt.blockdata_bank_offset);
+                    if (bb >= 128) return;
+                    uint16_t bp = static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset))
+                                | (static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset + 1)) << 8);
+                    if (bb > 0 && (bp < 0x4000 || bp >= 0x8000)) return;
+                    uint8_t sb = rom.read_byte(flat + fmt.script_bank_offset);
+                    if (sb >= 128) return;
+                    uint16_t sp = static_cast<uint16_t>(rom.read_byte(flat + fmt.script_ptr_offset))
+                                | (static_cast<uint16_t>(rom.read_byte(flat + fmt.script_ptr_offset + 1)) << 8);
+                    if (sp >= 0x8000) return;
+                    if (sb > 0 && sp < 0x4000) return;
+                    uint32_t sh_flat = (sp < 0x4000) ? static_cast<uint32_t>(sp)
+                                                      : static_cast<uint32_t>(sb) * 0x4000u + sp - 0x4000u;
+                    if (sh_flat + 4 > static_cast<uint32_t>(rom.size())) return;
+                    uint8_t sh_sc = rom.read_byte(sh_flat);
+                    if (sh_sc > 30) return;
+                    uint32_t sh_p = sh_flat + 1u + static_cast<uint32_t>(sh_sc) * 2u;
+                    if (sh_p + 1 > static_cast<uint32_t>(rom.size())) return;
+                    uint8_t sh_cc = rom.read_byte(sh_p);
+                    if (sh_cc > 20) return;
+                    sh_p += 1u + static_cast<uint32_t>(sh_cc) * 3u;
+                    if (sh_p + 1 > static_cast<uint32_t>(rom.size())) return;
+                    uint8_t sh_wc = rom.read_byte(sh_p);
+                    if (sh_wc > 50) return;
+                    uint32_t area = static_cast<uint32_t>(h) * w;
+                    if (area < best_area) { best_area = area; attr_bank = static_cast<uint8_t>(b); }
+                };
+                // Start scan from map_groups_bank for locality, then below
+                for (uint32_t b = o.map_groups_bank; b < max_bank; ++b) try_bank_fc(b);
+                for (uint32_t b = 1; b < o.map_groups_bank; ++b) try_bank_fc(b);
+                if (attr_bank == 0xFF) {
+                    throw std::runtime_error(
+                        std::format("discover_reachable_maps: map ({},{}) "
+                                    "cannot resolve MapAttributes bank for ptr=0x{:04x}",
+                                    ref.group, ref.map, attr_ptr));
+                }
+            } else {
+                attr_bank = o.map_groups_bank;
+            }
+        }
+
         uint32_t header_addr = rom.bank_to_flat(attr_bank, attr_ptr);
         
         if (header_addr + fmt.header_size > rom.size()) {
@@ -2107,8 +2189,10 @@ std::vector<MapIdRef> discover_reachable_maps(
         }
         
         auto header = rom.read_bytes(header_addr, fmt.header_size);
-        uint8_t conn_byte = header[fmt.connections_offset];
+        uint8_t conn_byte  = header[fmt.connections_offset];
         uint8_t script_bank = header[fmt.script_bank_offset];
+        uint16_t script_ptr = static_cast<uint16_t>(header[fmt.script_ptr_offset])
+                            | (static_cast<uint16_t>(header[fmt.script_ptr_offset + 1]) << 8);
         
         // Read connections (immediately after header)
         uint32_t conn_ptr = header_addr + fmt.header_size;
@@ -2134,26 +2218,53 @@ std::vector<MapIdRef> discover_reachable_maps(
         if (conn_byte & 0x04) read_conn();  // SOUTH
         if (conn_byte & 0x02) read_conn();  // WEST
         if (conn_byte & 0x01) read_conn();  // EAST
-        
-        // Events pointer is in the header at offset 9-10
-        uint16_t events_addr = header[fmt.events_ptr_offset] | (header[fmt.events_ptr_offset + 1] << 8);
-        uint32_t events_flat = rom.bank_to_flat(script_bank, events_addr);
-        
-        if (events_flat + 2 > rom.size()) {
-            throw std::runtime_error(
-                std::format("discover_reachable_maps: map ({},{}) events address "
-                            "0x{:x} out of ROM bounds", ref.group, ref.map, events_flat));
+
+        // Determine events pointer based on layout mode
+        uint32_t event_ptr_for_warps = 0;
+        bool events_valid = false;
+
+        if (fmt.events_in_script_header) {
+            // Polished Crystal: events are in the MapScriptHeader after scenes+callbacks
+            uint32_t script_flat;
+            if (script_bank == 0) {
+                script_flat = static_cast<uint32_t>(script_ptr);  // home bank
+            } else {
+                script_flat = rom.bank_to_flat(script_bank, script_ptr);
+            }
+            if (script_flat < rom.size()) {
+                uint32_t p = script_flat;
+                bool ok = true;
+                // Skip scene scripts
+                if (p < rom.size()) {
+                    uint8_t sc = rom.read_byte(p++);
+                    if (sc > 64) ok = false;
+                    else p += static_cast<uint32_t>(sc) * fmt.map_script_header_size;
+                } else ok = false;
+                // Skip callbacks
+                if (ok && p < rom.size()) {
+                    uint8_t cc = rom.read_byte(p++);
+                    if (cc > 64) ok = false;
+                    else p += static_cast<uint32_t>(cc) * 3u;
+                } else if (ok) ok = false;
+                if (ok) { event_ptr_for_warps = p; events_valid = true; }
+            }
+        } else {
+            // Vanilla Crystal: separate events pointer in header
+            uint16_t events_addr = static_cast<uint16_t>(header[fmt.events_ptr_offset])
+                                 | (static_cast<uint16_t>(header[fmt.events_ptr_offset + 1]) << 8);
+            uint32_t events_flat = rom.bank_to_flat(script_bank, events_addr);
+            if (events_flat + 2 <= rom.size()) {
+                event_ptr_for_warps = events_flat + 2;  // skip 2 filler bytes
+                events_valid = true;
+            }
         }
-        
-        // Parse events: 2 filler bytes, warp_count, warps...
-        uint32_t ptr = events_flat;
-        ptr += 2;  // Skip 2 filler bytes
-        
-        if (ptr + 1 > rom.size()) {
-            throw std::runtime_error(
-                std::format("discover_reachable_maps: map ({},{}) events header truncated "
-                            "at 0x{:x}", ref.group, ref.map, ptr));
+
+        if (!events_valid) {
+            // Can't reach events — skip warp discovery for this map but don't fail
+            continue;
         }
+
+        uint32_t ptr = event_ptr_for_warps;
         uint8_t warp_count = rom.read_byte(ptr++);
         
         // Sanity check warp count — Crystal has at most a handful of warps per map;

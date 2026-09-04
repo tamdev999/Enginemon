@@ -163,7 +163,15 @@ std::string MapExtractor::make_sprite_id(uint8_t sprite_index) const {
     //   0x80-0xA2: Pokémon icon sprites    → "pokemon_icon:<index>"
     //   0xE0-0xE1: Day Care Pokémon        → "daycare:<1|2>"
     //   0xF0-0xFC: Variable sprite slots   → "variable:<slot_name>"
-    // Invalid bytes throw std::runtime_error — the caller propagates extraction failure.
+    // When allow_unknown_sprites=true (Polished Crystal), bytes outside these ranges
+    // produce "unknown:<hex>" rather than throwing. When false, unknown bytes throw.
+    if (profile_.format.map.allow_unknown_sprites) {
+        try {
+            return crystal_sprite_byte_to_id(sprite_index);
+        } catch (...) {
+            return std::format("unknown:{:02x}", sprite_index);
+        }
+    }
     return crystal_sprite_byte_to_id(sprite_index);
 }
 
@@ -312,16 +320,25 @@ std::string MapExtractor::make_script_id(uint8_t group, uint8_t index, const cha
 
 // MapGroup entry layout (MAP_LENGTH = 9 bytes from map_data_constants.asm)
 // Format from maps.asm macro:
+//   Vanilla Crystal (9 bytes):
 //   db BANK(MapAttributes), tileset, environment
 //   dw MapAttributes
 //   db location, music
 //   dn phone_flag, palette   (high nibble = phone, low nibble = palette)
 //   db fishgroup
 //
+//   Polished Crystal (7 bytes, MAP_LENGTH=7 per map_data_constants.asm):
+//   db tileset
+//   dn sign, environment     (high nibble = SIGN_*, low nibble = ENV_*)
+//   dw MapAttributes         (bank-local ptr; bank determined by ROM scan)
+//   db location, music
+//   dn phone_flag, palette
+//
 // We read bytes directly to avoid alignment/packing issues
 
 bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEntry& out) const {
-    const auto& o = profile_.offsets;
+    const auto& o   = profile_.offsets;
+    const auto& fmt = profile_.format.map;
     
     // Bounds check group (groups are 1-indexed, 1..num_map_groups)
     if (group == 0 || group > profile_.counts.num_map_groups) {
@@ -337,13 +354,11 @@ bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEn
     
     uint16_t group_addr = rom_.read_word(group_ptr_addr);
     
-    // Use profile-driven bank for map data
+    // Use profile-driven bank for map group data
     uint8_t map_bank = o.map_groups_bank;
     uint32_t group_flat = rom_.bank_to_flat(map_bank, group_addr);
     
-    // MapGroup entry size from profile.format.map.map_entry_size (was inline constexpr 9).
-    // Crystal MAP_LENGTH = 9 bytes per entry; Gold/Silver uses the same layout.
-    const uint8_t map_entry_size = profile_.format.map.map_entry_size;
+    const uint8_t map_entry_size = fmt.map_entry_size;
     
     // index is 1-based in pokecrystal
     uint32_t map_entry_addr = group_flat + ((index - 1) * map_entry_size);
@@ -355,56 +370,131 @@ bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEn
     
     // Read the map entry
     auto data = rom_.read_bytes(map_entry_addr, map_entry_size);
-    
-    out.attr_bank = data[0];
-    out.tileset = data[1];
-    out.environment = data[2];
-    out.attr_ptr = data[3] | (data[4] << 8);
-    out.location = data[5];
-    out.music = data[6];
-    out.phone_palette = data[7];
-    out.fishgroup = data[8];
-    
-    // Validate entry fields to detect garbage data (end of group)
-    // Crystal has 36 tilesets (1-36) - value 0 or >36 indicates garbage
+
+    // ── Parse according to format flags ─────────────────────────────────────
+    if (fmt.attr_bank_in_entry) {
+        // Vanilla Crystal layout (9 bytes):
+        //   [0]=attr_bank [1]=tileset [2]=environment [3-4]=attr_ptr
+        //   [5]=location [6]=music [7]=phone_palette [8]=fishgroup
+        out.attr_bank    = data[0];
+        out.tileset      = data[1];
+        out.environment  = data[2];
+        out.attr_ptr     = static_cast<uint16_t>(data[3]) | (static_cast<uint16_t>(data[4]) << 8);
+        out.location     = data[fmt.location_field_offset];
+        out.music        = data[fmt.music_field_offset];
+        out.phone_palette = data[fmt.phone_palette_field_offset];
+        out.fishgroup    = (map_entry_size > 8) ? data[8] : 0;
+    } else {
+        // Polished Crystal layout (7 bytes, no attr_bank, no fishgroup):
+        //   [0]=tileset [1]=dn(sign,env) [2-3]=attr_ptr [4]=location [5]=music [6]=dn(phone,palette)
+        out.tileset   = data[0];
+        uint8_t sign_env = data[1];
+        // sign_env_nibble: high nibble = SIGN_*, low nibble = ENV_*
+        out.environment  = fmt.sign_env_nibble ? (sign_env & 0x0F) : sign_env;
+        // attr_ptr at the configured offset
+        out.attr_ptr = static_cast<uint16_t>(data[fmt.attr_ptr_field_offset])
+                     | (static_cast<uint16_t>(data[fmt.attr_ptr_field_offset + 1]) << 8);
+        out.location      = data[fmt.location_field_offset];
+        out.music         = data[fmt.music_field_offset];
+        out.phone_palette = data[fmt.phone_palette_field_offset];
+        out.fishgroup     = 0;  // not present in Polished Crystal
+        // attr_bank resolved below by ROM scan
+        out.attr_bank     = 0;
+    }
+
+    // ── Validate tileset ─────────────────────────────────────────────────────
     if (out.tileset == 0 || out.tileset > profile_.counts.num_tilesets) {
         return false;
     }
-    
-    // Environment must be 1-7 (TOWN through DUNGEON)
-    if (out.environment == 0 || out.environment > 7) {
+
+    // ── Validate environment ─────────────────────────────────────────────────
+    // Vanilla: 1-7 (TOWN through DUNGEON)
+    // Polished: 1-8 (adds ISOLATED=3, shifting INDOOR/GATE/CAVE/DUNGEON up by 1)
+    if (out.environment == 0 || out.environment > 8) {
         return false;
     }
-    
-    // attr_bank must be a valid ROM bank (0-127 for 2MB ROM)
-    if (out.attr_bank >= 128) {
-        return false;
-    }
-    
-    // attr_ptr must be in banked ROM range (0x4000-0x7FFF) or home bank (0x0000-0x3FFF for bank 0)
-    if (out.attr_bank == 0) {
-        if (out.attr_ptr >= 0x4000) {
-            return false;
+
+    // ── Resolve MapAttributes bank ───────────────────────────────────────────
+    if (fmt.attr_bank_in_entry) {
+        // Vanilla: explicit bank byte in entry
+        if (out.attr_bank >= 128) return false;
+        if (out.attr_bank == 0) {
+            if (out.attr_ptr >= 0x4000) return false;
+        } else {
+            if (out.attr_ptr < 0x4000 || out.attr_ptr >= 0x8000) return false;
         }
+    } else if (fmt.resolve_attr_bank_by_scan) {
+        // Polished: attr_ptr is bank-local but no bank stored in entry.
+        // Scan all valid ROM banks to find the one where attr_ptr resolves to a
+        // plausible MapAttributes header (h/w in [1,200], blk_bank < 0x80).
+        if (out.attr_ptr < 0x4000 || out.attr_ptr >= 0x8000) return false;
+        const uint32_t rom_size = static_cast<uint32_t>(rom_.size());
+        const uint32_t max_bank = rom_size / 0x4000;
+        uint8_t found_bank = 0xFF;
+        uint32_t found_area = UINT32_MAX;
+        // Scan banks starting near map_groups_bank for MapAttributes placement locality.
+        // Polished places MapAttributes in or near the same banks as the group data.
+        // Scanning from bank 1 risks picking false positives in early ROM banks.
+        // Try: [map_groups_bank .. max_bank) first, then [1 .. map_groups_bank).
+        // Keep minimum-area winner across both passes.
+        auto try_bank = [&](uint32_t b) {
+            if (b == 0 || b >= max_bank) return;
+            uint32_t flat = b * 0x4000 + (out.attr_ptr - 0x4000);
+            if (flat + fmt.header_size > rom_size) return;
+            uint8_t h = rom_.read_byte(flat + fmt.height_offset);
+            uint8_t w = rom_.read_byte(flat + fmt.width_offset);
+            if (h == 0 || h > 200 || w == 0 || w > 200) return;
+            uint8_t bb = rom_.read_byte(flat + fmt.blockdata_bank_offset);
+            if (bb >= 128) return;
+            uint16_t bp = static_cast<uint16_t>(rom_.read_byte(flat + fmt.blockdata_ptr_offset))
+                        | (static_cast<uint16_t>(rom_.read_byte(flat + fmt.blockdata_ptr_offset + 1)) << 8);
+            if (bb > 0 && (bp < 0x4000 || bp >= 0x8000)) return;
+            uint8_t sb = rom_.read_byte(flat + fmt.script_bank_offset);
+            if (sb >= 128) return;
+            uint16_t sp = static_cast<uint16_t>(rom_.read_byte(flat + fmt.script_ptr_offset))
+                        | (static_cast<uint16_t>(rom_.read_byte(flat + fmt.script_ptr_offset + 1)) << 8);
+            if (sp >= 0x8000) return;
+            if (sb > 0 && sp < 0x4000) return;
+            uint32_t sh_flat = (sp < 0x4000) ? static_cast<uint32_t>(sp)
+                                              : (static_cast<uint32_t>(sb) * 0x4000u + sp - 0x4000u);
+            if (sh_flat + 4 > rom_size) return;
+            uint8_t sh_sc = rom_.read_byte(sh_flat);
+            if (sh_sc > 30) return;
+            uint32_t sh_p = sh_flat + 1u + static_cast<uint32_t>(sh_sc) * 2u;
+            if (sh_p + 1 > rom_size) return;
+            uint8_t sh_cc = rom_.read_byte(sh_p);
+            if (sh_cc > 20) return;
+            sh_p += 1u + static_cast<uint32_t>(sh_cc) * 3u;
+            if (sh_p + 1 > rom_size) return;
+            uint8_t sh_wc = rom_.read_byte(sh_p);
+            if (sh_wc > 50) return;
+            // Valid candidate: prefer smallest area (most specific/compact map)
+            uint32_t area = static_cast<uint32_t>(h) * w;
+            if (area < found_area) { found_area = area; found_bank = static_cast<uint8_t>(b); }
+        };
+        // First pass: banks near/above map_groups_bank (where Polished places attrs)
+        for (uint32_t b = o.map_groups_bank; b < max_bank; ++b) try_bank(b);
+        // Second pass: banks below (rarely needed)
+        for (uint32_t b = 1; b < o.map_groups_bank; ++b) try_bank(b);
+        if (found_bank == 0xFF) {
+            stats_.bounds_check_failures++;
+            return false;  // No valid bank found for this attr_ptr
+        }
+        out.attr_bank = found_bank;
     } else {
-        if (out.attr_ptr < 0x4000 || out.attr_ptr >= 0x8000) {
-            return false;
-        }
+        // No bank in entry, no scan: use map_groups_bank as default
+        out.attr_bank = o.map_groups_bank;
+        if (out.attr_ptr < 0x4000 || out.attr_ptr >= 0x8000) return false;
     }
-    
-    // Additional validation: probe the map header to verify it looks valid
-    // Read the first few bytes of the map attributes
+
+    // Final validation: probe the resolved MapAttributes header
     uint32_t header_addr = rom_.bank_to_flat(out.attr_bank, out.attr_ptr);
-    if (header_addr + 12 > rom_.size()) {
+    if (header_addr + fmt.header_size > rom_.size()) {
         return false;
     }
-    
-    auto header = rom_.read_bytes(header_addr, 12);
-    // header[1] = height, header[2] = width
-    // Valid maps have dimensions 1-100
-    uint8_t height = header[1];
-    uint8_t width = header[2];
-    if (height == 0 || height > 100 || width == 0 || width > 100) {
+    uint8_t height = rom_.read_byte(header_addr + fmt.height_offset);
+    uint8_t width  = rom_.read_byte(header_addr + fmt.width_offset);
+    if (height == 0 || height > 200 || width == 0 || width > 200) {
         return false;
     }
     
@@ -487,10 +577,11 @@ bool MapExtractor::extract_coord_events(uint32_t ptr, uint8_t count,
         evt.scene_id = data[0];     // Scene script index (-1 = always active)
         evt.y = data[1];
         evt.x = data[2];
-        // byte 3: filler
-        // bytes 4-5: script pointer (local to script_bank)
-        uint16_t script_ptr = data[4] | (data[5] << 8);
-        // bytes 6-7: filler
+        // Vanilla Crystal (8 bytes): byte 3 = filler, bytes 4-5 = script_ptr, bytes 6-7 = filler
+        // Polished Crystal (5 bytes): bytes 3-4 = script_ptr (no filler)
+        uint8_t script_ptr_offset = (fmt.coord_event_size <= 5) ? 3 : 4;
+        uint16_t script_ptr = static_cast<uint16_t>(data[script_ptr_offset])
+                            | (static_cast<uint16_t>(data[script_ptr_offset + 1]) << 8);
         
         // Resolve to flat ROM address using script_bank
         evt.script_rom_address = rom_.bank_to_flat(script_bank, script_ptr);
@@ -925,9 +1016,9 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
     map.height = header[fmt.height_offset];
     map.width = header[fmt.width_offset];
     
-    // Validate dimensions
+    // Validate dimensions — Polished Crystal has larger maps (up to ~200 blocks)
     if (map.width == 0 || map.height == 0 || 
-        map.width > 100 || map.height > 100) {
+        map.width > 200 || map.height > 200) {
         result.error = std::format("Invalid dimensions: {}x{}", map.width, map.height);
         stats_.maps_failed++;
         return result;
@@ -935,17 +1026,27 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
     
     // Block data pointer
     uint8_t block_bank = header[fmt.blockdata_bank_offset];
-    uint16_t block_ptr = header[fmt.blockdata_ptr_offset] |
-                         (header[fmt.blockdata_ptr_offset + 1] << 8);
+    uint16_t block_ptr = static_cast<uint16_t>(header[fmt.blockdata_ptr_offset])
+                       | (static_cast<uint16_t>(header[fmt.blockdata_ptr_offset + 1]) << 8);
     
-    // Script pointer (also determines bank for events)
+    // Script/MapScriptHeader pointer (also determines bank for events in vanilla)
     uint8_t script_bank = header[fmt.script_bank_offset];
-    uint16_t script_ptr = header[fmt.script_ptr_offset] |
-                          (header[fmt.script_ptr_offset + 1] << 8);
+    uint16_t script_ptr = static_cast<uint16_t>(header[fmt.script_ptr_offset])
+                        | (static_cast<uint16_t>(header[fmt.script_ptr_offset + 1]) << 8);
     
-    // Events pointer (in same bank as script)
-    uint16_t events_ptr = header[fmt.events_ptr_offset] |
-                          (header[fmt.events_ptr_offset + 1] << 8);
+    // Events pointer: vanilla Crystal stores it separately; Polished Crystal does not
+    // (events are reached via the MapScriptHeader). 0xFF means absent.
+    uint16_t events_ptr = 0;
+    if (fmt.events_ptr_offset != 0xFF) {
+        events_ptr = static_cast<uint16_t>(header[fmt.events_ptr_offset])
+                   | (static_cast<uint16_t>(header[fmt.events_ptr_offset + 1]) << 8);
+    } else {
+        // Polished Crystal: events and scripts share the same bank-local pointer
+        // (MapScriptHeader points to both map scripts and events).
+        // Use script_ptr as the events_ptr too; the MapScriptHeader will
+        // dereference to the actual events section.
+        events_ptr = script_ptr;
+    }
     
     // Connection byte (bitfield: bit 3=north, 2=south, 1=west, 0=east)
     uint8_t conn_byte = header[fmt.connections_offset];
@@ -978,98 +1079,148 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
     map.fish_group_id = make_fishgroup_id(map_entry.fishgroup);
     
     // Determine if outdoor based on environment type
-    // TOWN=1, ROUTE=2 are outdoor; INDOOR=3, CAVE=4, ENVIRONMENT_5=5, GATE=6, DUNGEON=7 are not
+    // Vanilla: TOWN=1, ROUTE=2 are outdoor
+    // Polished: same; ISOLATED=3 is neither outdoor nor indoor
     map.is_outdoor = (map_entry.environment == 1 || map_entry.environment == 2);
     
-    // Extract events from events pointer
-    uint32_t events_flat = rom_.bank_to_flat(script_bank, events_ptr);
-    if (events_flat + 2 <= rom_.size()) {
-        // Events header: 2 filler bytes, then counts for each event type
-        auto events_header = rom_.read_bytes(events_flat, 2);
-        // Skip filler
-        uint32_t event_ptr = events_flat + 2;
-        
-        // Read warp count and extract warps.
-        // A declared non-zero count that cannot be fully read is a hard error —
-        // a partial warp table misaligns every subsequent event category.
-        if (event_ptr < rom_.size()) {
-            uint8_t warp_count = rom_.read_byte(event_ptr++);
-            if (warp_count >= 100) {
-                result.error = std::format("extract_map ({},{}): implausible warp count {}",
-                                           group, index, warp_count);
-                stats_.maps_failed++;
-                return result;
+    // ── Extract events ────────────────────────────────────────────────────────
+    //
+    // Two layouts depending on profile:
+    //
+    // Vanilla Crystal: events_ptr in MapAttributes header (separate section)
+    //   events_flat → [2 filler bytes] [warp_count] [warps] [coord_count] [coords]
+    //                 [bg_count] [bgs] [obj_count] [objects]
+    //
+    // Polished Crystal: events inline in MapScriptHeader (events_in_script_header=true)
+    //   script_flat → [scene_count] [scenes] [callback_count] [callbacks]
+    //                 [warp_count] [warps] [coord_count] [coords]
+    //                 [bg_count] [bgs] [obj_count] [objects]
+    //
+    {
+        // Determine starting event_ptr based on layout mode
+        uint32_t event_ptr = 0;
+        bool events_valid = false;
+
+        if (fmt.events_in_script_header) {
+            // Polished Crystal: start from MapScriptHeader, skip scenes+callbacks
+            // MapScriptHeader may be in the switchable bank (ptr [0x4000,0x7FFF])
+            // or in the home bank (ptr [0x0000,0x3FFF] when script_bank==0).
+            uint32_t script_flat;
+            if (script_bank == 0) {
+                script_flat = static_cast<uint32_t>(script_ptr);  // home bank: direct address
+            } else {
+                script_flat = rom_.bank_to_flat(script_bank, script_ptr);
             }
-            if (warp_count > 0) {
-                if (!extract_warps(event_ptr, warp_count, map.warps)) {
-                    result.error = std::format("extract_map ({},{}): warp extraction failed "
-                                               "(truncated ROM at declared count {})",
+            if (script_flat < rom_.size()) {
+                uint32_t p = script_flat;
+                bool ok = true;
+
+                // Skip scene scripts
+                if (p < rom_.size()) {
+                    uint8_t scene_count = rom_.read_byte(p++);
+                    if (scene_count > 64) { ok = false; }
+                    else { p += static_cast<uint32_t>(scene_count) * fmt.map_script_header_size; }
+                } else { ok = false; }
+
+                // Skip callbacks
+                if (ok && p < rom_.size()) {
+                    uint8_t cb_count = rom_.read_byte(p++);
+                    if (cb_count > 64) { ok = false; }
+                    else { p += static_cast<uint32_t>(cb_count) * 3u; }
+                } else if (ok) { ok = false; }
+
+                if (ok) { event_ptr = p; events_valid = true; }
+            }
+        } else {
+            // Vanilla: events at events_ptr (same bank as script)
+            uint32_t events_flat = rom_.bank_to_flat(script_bank, events_ptr);
+            if (events_flat + 2 <= rom_.size()) {
+                event_ptr = events_flat + 2;  // skip 2 filler bytes
+                events_valid = true;
+            }
+        }
+
+        if (events_valid) {
+            // Read warp count and extract warps
+            if (event_ptr < rom_.size()) {
+                uint8_t warp_count = rom_.read_byte(event_ptr++);
+                if (warp_count >= 100) {
+                    result.error = std::format("extract_map ({},{}): implausible warp count {}",
                                                group, index, warp_count);
                     stats_.maps_failed++;
                     return result;
                 }
-                event_ptr += warp_count * fmt.warp_size;
+                if (warp_count > 0) {
+                    if (!extract_warps(event_ptr, warp_count, map.warps)) {
+                        result.error = std::format("extract_map ({},{}): warp extraction failed "
+                                                   "(truncated ROM at declared count {})",
+                                                   group, index, warp_count);
+                        stats_.maps_failed++;
+                        return result;
+                    }
+                    event_ptr += warp_count * fmt.warp_size;
+                }
             }
-        }
-        
-        // Read coord event count and extract
-        if (event_ptr < rom_.size()) {
-            uint8_t coord_count = rom_.read_byte(event_ptr++);
-            if (coord_count >= 100) {
-                result.error = std::format("extract_map ({},{}): implausible coord event count {}",
-                                           group, index, coord_count);
-                stats_.maps_failed++;
-                return result;
-            }
-            if (coord_count > 0) {
-                if (!extract_coord_events(event_ptr, coord_count, map.coord_events, script_bank)) {
-                    result.error = std::format("extract_map ({},{}): coord event extraction failed "
-                                               "(truncated ROM at declared count {})",
+
+            // Read coord event count and extract
+            if (event_ptr < rom_.size()) {
+                uint8_t coord_count = rom_.read_byte(event_ptr++);
+                if (coord_count >= 100) {
+                    result.error = std::format("extract_map ({},{}): implausible coord event count {}",
                                                group, index, coord_count);
                     stats_.maps_failed++;
                     return result;
                 }
-                event_ptr += coord_count * fmt.coord_event_size;
+                if (coord_count > 0) {
+                    if (!extract_coord_events(event_ptr, coord_count, map.coord_events, script_bank)) {
+                        result.error = std::format("extract_map ({},{}): coord event extraction failed "
+                                                   "(truncated ROM at declared count {})",
+                                                   group, index, coord_count);
+                        stats_.maps_failed++;
+                        return result;
+                    }
+                    event_ptr += coord_count * fmt.coord_event_size;
+                }
             }
-        }
-        
-        // Read bg event count and extract
-        if (event_ptr < rom_.size()) {
-            uint8_t bg_count = rom_.read_byte(event_ptr++);
-            if (bg_count >= 100) {
-                result.error = std::format("extract_map ({},{}): implausible bg event count {}",
-                                           group, index, bg_count);
-                stats_.maps_failed++;
-                return result;
-            }
-            if (bg_count > 0) {
-                if (!extract_bg_events(event_ptr, bg_count, map.bg_events, script_bank)) {
-                    result.error = std::format("extract_map ({},{}): bg event extraction failed "
-                                               "(truncated ROM at declared count {})",
+
+            // Read bg event count and extract
+            if (event_ptr < rom_.size()) {
+                uint8_t bg_count = rom_.read_byte(event_ptr++);
+                if (bg_count >= 100) {
+                    result.error = std::format("extract_map ({},{}): implausible bg event count {}",
                                                group, index, bg_count);
                     stats_.maps_failed++;
                     return result;
                 }
-                event_ptr += bg_count * fmt.bg_event_size;
+                if (bg_count > 0) {
+                    if (!extract_bg_events(event_ptr, bg_count, map.bg_events, script_bank)) {
+                        result.error = std::format("extract_map ({},{}): bg event extraction failed "
+                                                   "(truncated ROM at declared count {})",
+                                                   group, index, bg_count);
+                        stats_.maps_failed++;
+                        return result;
+                    }
+                    event_ptr += bg_count * fmt.bg_event_size;
+                }
             }
-        }
-        
-        // Read object event count and extract
-        if (event_ptr < rom_.size()) {
-            uint8_t obj_count = rom_.read_byte(event_ptr++);
-            if (obj_count >= 100) {
-                result.error = std::format("extract_map ({},{}): implausible object count {}",
-                                           group, index, obj_count);
-                stats_.maps_failed++;
-                return result;
-            }
-            if (obj_count > 0) {
-                if (!extract_objects(event_ptr, obj_count, map.objects, script_bank, group, index)) {
-                    result.error = std::format("extract_map ({},{}): object extraction failed "
-                                               "(truncated ROM at declared count {})",
+
+            // Read object event count and extract
+            if (event_ptr < rom_.size()) {
+                uint8_t obj_count = rom_.read_byte(event_ptr++);
+                if (obj_count >= 100) {
+                    result.error = std::format("extract_map ({},{}): implausible object count {}",
                                                group, index, obj_count);
                     stats_.maps_failed++;
                     return result;
+                }
+                if (obj_count > 0) {
+                    if (!extract_objects(event_ptr, obj_count, map.objects, script_bank, group, index)) {
+                        result.error = std::format("extract_map ({},{}): object extraction failed "
+                                                   "(truncated ROM at declared count {})",
+                                                   group, index, obj_count);
+                        stats_.maps_failed++;
+                        return result;
+                    }
                 }
             }
         }

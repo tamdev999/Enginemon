@@ -25,6 +25,7 @@ enum class RomVersion {
     Unknown,
     Crystal_USA_v1_0,    // USA Rev 0
     Crystal_USA_v1_1,    // USA Rev 1 (most common)
+    Polished_Crystal_3_2_3, // Polished Crystal 3.2.3 by Rangi42
     Crystal_EUR,         // Europe
     Crystal_JPN,         // Japan
     Crystal_AUS          // Australia
@@ -72,7 +73,7 @@ struct MapFormatRules {
     uint8_t blockdata_ptr_offset = 4;   // 2 bytes little-endian
     uint8_t script_bank_offset = 6;     // also events bank
     uint8_t script_ptr_offset = 7;      // 2 bytes little-endian
-    uint8_t events_ptr_offset = 9;      // 2 bytes little-endian
+    uint8_t events_ptr_offset = 9;      // 2 bytes little-endian; 0xFF = not present in header
     uint8_t connections_offset = 11;    // connections byte (bitfield)
     
     // Map scripts header
@@ -91,8 +92,66 @@ struct MapFormatRules {
     // MapGroup entry size (MAP_LENGTH from map_data_constants.asm)
     // Crystal: 9 bytes per entry (attr_bank, tileset, environment, attr_ptr(2),
     //          location, music, phone_palette, fishgroup)
+    // Polished Crystal: 7 bytes per entry (tileset, dn(sign,env), attr_ptr(2),
+    //          location, music, dn(phone_flag,palette)) — attr_bank removed, fishgroup removed
     // GEN2-STABLE: same layout in Gold/Silver — field meanings identical.
     uint8_t map_entry_size = 9;
+
+    // Map entry field layout selectors:
+    //
+    // attr_bank_in_entry: vanilla Crystal stores the MapAttributes bank as byte[0]
+    //   of the 9-byte entry. Polished Crystal removes this field entirely.
+    //   When false, the bank must be resolved by ROM scan (see resolve_attr_bank_by_scan).
+    bool attr_bank_in_entry = true;
+
+    // sign_env_nibble: when true, byte[1] of the map entry packs
+    //   high-nibble=SIGN_* and low-nibble=ENV_* (Polished Crystal).
+    //   When false, byte[2] is environment directly (vanilla layout).
+    bool sign_env_nibble = false;
+
+    // resolve_attr_bank_by_scan: when attr_bank_in_entry is false, the extractor
+    //   must discover the correct ROM bank for each MapAttributes pointer by scanning
+    //   all ROM banks and applying a structural validity test.
+    //   This is required for Polished Crystal where MapAttributes are spread across
+    //   many banks with no explicit bank byte in the map entry.
+    bool resolve_attr_bank_by_scan = false;
+
+    // events_ptr_in_header: vanilla Crystal has events_ptr(2) at bytes 9-10 of the
+    //   12-byte MapAttributes header. Polished removes the separate events pointer;
+    //   events are reached via the MapScriptHeader. Set false for Polished.
+    bool events_ptr_in_header = true;
+
+    // events_in_script_header: when true (Polished Crystal), map events (warps, coord,
+    //   bg, objects) are packed inline after scene/callback data inside the MapScriptHeader
+    //   blob pointed to by script_bank/script_ptr. The layout (from home/map.asm) is:
+    //     [db scene_count] [scene_count × SCENE_SCRIPT_SIZE bytes] 
+    //     [db callback_count] [callback_count × CALLBACK_SIZE bytes]
+    //     [db warp_count] [warps]
+    //     [db coord_count] [coord_events]
+    //     [db bg_count] [bg_events]
+    //     [db object_count] [objects]
+    //   When false (vanilla), events are in a separate structure pointed to by events_ptr.
+    bool events_in_script_header = false;
+
+    // attr_ptr_field_offset: byte offset within the map entry where the 2-byte
+    //   MapAttributes pointer starts.
+    //   Vanilla Crystal: byte 3 (after attr_bank, tileset, environment = 3 bytes)
+    //   Polished Crystal: byte 2 (after tileset, sign_env = 2 bytes)
+    uint8_t attr_ptr_field_offset = 3;
+
+    // location_field_offset, music_field_offset, phone_palette_field_offset:
+    //   byte offsets within the map entry.
+    //   Vanilla Crystal: location=5, music=6, phone_palette=7
+    //   Polished Crystal: location=4, music=5, phone_palette=6
+    uint8_t location_field_offset     = 5;
+    uint8_t music_field_offset        = 6;
+    uint8_t phone_palette_field_offset = 7;
+
+    // allow_unknown_sprites: when true, sprite bytes outside the known vanilla
+    //   Crystal namespaces (0x67-0x7F, 0xA3-0xDF, 0xFD-0xFF) are tolerated and
+    //   mapped to "unknown:<hex>" rather than throwing. Required for Polished Crystal
+    //   which extends the fixed sprite range beyond 0x66.
+    bool allow_unknown_sprites = false;
 };
 
 // Pokemon data format rules
@@ -577,6 +636,7 @@ private:
     std::vector<std::pair<std::string, std::string>> supported_list_; // sha1 -> name
     
     void register_crystal_v11();
+    void register_polished_crystal_3_2_3();
 };
 
 //=============================================================================
