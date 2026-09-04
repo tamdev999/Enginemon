@@ -156,9 +156,13 @@ struct StdScriptEntry {
 // StdScripts table reader
 class StdScriptsTable {
 public:
-    // Load StdScripts table from ROM
-    // Returns false if table cannot be loaded
-    bool load(const RomData& rom, uint32_t table_address, size_t count);
+    // Load StdScripts table from ROM.
+    // entry_size=3: vanilla Crystal dba format (bank + 2-byte addr per entry).
+    // entry_size=2: Polished Crystal dw format (2-byte addr only; all scripts in
+    //               same bank as the table).
+    // Returns false if table cannot be loaded.
+    bool load(const RomData& rom, uint32_t table_address, size_t count,
+              uint8_t entry_size = 3);
     
     // Resolve std_id to flat ROM address
     // Returns 0 if invalid std_id

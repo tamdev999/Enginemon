@@ -3,6 +3,7 @@
 
 #include "crystal/compile/full_compiler.hpp"
 #include "crystal/compile/corpus_discovery.hpp"
+#include "crystal/rom/crystal_layout_resolver.hpp"
 #include "crystal/rom/symbol_map.hpp"
 #include "crystal/script/typed_decoder.hpp"
 #include "crystal/script/decoder.hpp"  // For text decoding
@@ -157,6 +158,24 @@ bool FullGameCompiler::compile(const std::filesystem::path& output_path,
         }
     }
     
+    //=========================================================================
+    // LAYOUT RESOLUTION
+    // Runs before Phase 1.  Fills zero addresses in profile_ from SM83 xrefs.
+    //=========================================================================
+    {
+        ExtractionProfile mutable_profile = profile_;
+        int n_resolved = crystal::resolve_crystal_layout(rom_, mutable_profile, /*verbose=*/true);
+        if (n_resolved > 0) {
+            auto& mp = const_cast<ExtractionProfile&>(profile_);
+            mp.offsets = mutable_profile.offsets;
+            mp.format  = mutable_profile.format;
+            mp.counts  = mutable_profile.counts;
+            std::cout << "  Layout resolver: " << n_resolved
+                      << " address(es) discovered generically\n";
+        }
+    }
+    std::cout << "\n";
+
     //=========================================================================
     // PHASE 1: Discovery (serial)
     //=========================================================================
@@ -654,7 +673,8 @@ bool FullGameCompiler::init_typed_pipeline() {
     // Load StdScripts table
     std_scripts_ = std::make_unique<StdScriptsTable>();
     if (!std_scripts_->load(rom_, profile_.offsets.std_scripts, 
-                            profile_.offsets.std_scripts_count)) {
+                            profile_.offsets.std_scripts_count,
+                            profile_.format.script.std_scripts_entry_size)) {
         std::cerr << "Failed to load StdScripts table\n";
         return false;
     }
@@ -1961,7 +1981,8 @@ std::vector<MapIdRef> discover_reachable_maps(
     ram_registry.initialize();
     
     StdScriptsTable std_scripts;
-    std_scripts.load(rom, profile.offsets.std_scripts, profile.offsets.std_scripts_count);
+    std_scripts.load(rom, profile.offsets.std_scripts, profile.offsets.std_scripts_count,
+                     profile.format.script.std_scripts_entry_size);
     
     CFGBuilder cfg_builder;
     cfg_builder.set_std_scripts(&std_scripts);
@@ -2046,8 +2067,7 @@ std::vector<MapIdRef> discover_reachable_maps(
     
     while (!frontier.empty()) {
         MapIdRef ref = frontier.front();
-        frontier.pop();
-        
+        frontier.pop();        
         // Extract and validate map.
         // A reachable map that cannot be extracted is a hard discovery failure:
         // its warps, connections, and scripts cannot be scanned, so descendants
@@ -2163,6 +2183,21 @@ std::vector<MapIdRef> discover_reachable_maps(
                     if (sh_p + 1 > static_cast<uint32_t>(rom.size())) return;
                     uint8_t sh_wc = rom.read_byte(sh_p);
                     if (sh_wc > 50) return;
+                    // CROSS-validation: warp targets must be plausible group:map pairs.
+                    if (sh_wc > 0) {
+                        uint32_t warp_ptr = sh_p + 1u;
+                        bool cross_ok = true;
+                        const uint8_t max_grp = static_cast<uint8_t>(profile.counts.num_map_groups);
+                        for (uint8_t wi = 0; wi < std::min<uint8_t>(sh_wc, 3u); ++wi) {
+                            if (warp_ptr + fmt.warp_size > static_cast<uint32_t>(rom.size())) { cross_ok = false; break; }
+                            uint8_t tgt_grp = rom.read_byte(warp_ptr + 3u);
+                            uint8_t tgt_map = rom.read_byte(warp_ptr + 4u);
+                            if (tgt_grp > 0 && tgt_grp > max_grp) { cross_ok = false; break; }
+                            if (tgt_map == 0 || tgt_map > 99u) { cross_ok = false; break; }
+                            warp_ptr += fmt.warp_size;
+                        }
+                        if (!cross_ok) return;
+                    }
                     uint32_t area = static_cast<uint32_t>(h) * w;
                     if (area < best_area) { best_area = area; attr_bank = static_cast<uint8_t>(b); }
                 };
@@ -2267,12 +2302,23 @@ std::vector<MapIdRef> discover_reachable_maps(
         uint32_t ptr = event_ptr_for_warps;
         uint8_t warp_count = rom.read_byte(ptr++);
         
-        // Sanity check warp count — Crystal has at most a handful of warps per map;
-        // more than 50 indicates structural corruption rather than a legitimate map.
+        // Sanity check warp count.  More than 50 strongly suggests the bank scan
+        // picked the wrong MapAttributes bank (MapScriptHeader is garbage data).
+        // For vanilla Crystal (attr_bank_in_entry=true), this is structural corruption
+        // and we throw.  For hacks with resolve_attr_bank_by_scan=true, the bank scan
+        // may pick false positives; we emit a warning and skip this map's warp extraction
+        // rather than crashing the whole discovery.
         if (warp_count > 50) {
+            if (fmt.resolve_attr_bank_by_scan) {
+                std::fprintf(stderr, "WARN: discover_reachable_maps: map (%u,%u) warp count %u "
+                                     "(>50) — bank scan may have picked wrong bank, skipping warp extraction\n",
+                             ref.group, ref.map, warp_count);
+                continue;
+            }
             throw std::runtime_error(
                 std::format("discover_reachable_maps: map ({},{}) has implausible warp count {} "
-                            "— likely ROM structure corruption", ref.group, ref.map, warp_count));
+                            "— likely wrong MapAttributes bank was resolved",
+                            ref.group, ref.map, warp_count));
         }
         
         // Read warps
@@ -2302,53 +2348,58 @@ std::vector<MapIdRef> discover_reachable_maps(
         
         // --- Object event scripts ---
         for (const auto& obj : map_result.map.objects) {
-            if (obj.script_rom_address != 0) {
+            // Only extract from script addresses in valid ROM bank range (not home bank)
+            if (obj.script_rom_address >= 0x4000u && obj.script_rom_address < rom.size()) {
                 extract_script_map_refs(obj.script_rom_address);
             }
         }
         
         // --- BG event scripts ---
         for (const auto& bg : map_result.map.bg_events) {
-            if (bg.script_rom_address != 0) {
+            if (bg.script_rom_address >= 0x4000u && bg.script_rom_address < rom.size()) {
                 extract_script_map_refs(bg.script_rom_address);
             }
         }
         
         // --- Scene scripts and callbacks from MapScripts header ---
-        // Crystal MapScripts structure sizes (from pokecrystal/constants/script_constants.asm)
-        constexpr uint8_t SCENE_SCRIPT_SIZE = 4;  // dw script_ptr, dw 0 (filler)
-        constexpr uint8_t CALLBACK_SIZE = 3;      // db type, dw script_ptr
+        // Use profile-driven sizes:
+        //   map_script_header_size = SCENE_SCRIPT_SIZE (2 for Polished, 4 for vanilla)
+        //   CALLBACK_SIZE = 3 (same for all Crystal-family ROMs)
+        const uint8_t SCENE_SCRIPT_SIZE_V = fmt.map_script_header_size;  // profile-driven
+        const uint8_t CALLBACK_SIZE_V = 3;
         
         // MapScripts header is at script_ptr in script_bank
-        uint16_t scripts_ptr = header[fmt.script_ptr_offset] | (header[fmt.script_ptr_offset + 1] << 8);
-        uint32_t map_scripts_addr = rom.bank_to_flat(script_bank, scripts_ptr);
-        if (map_scripts_addr + 1 <= rom.size()) {
-            uint32_t ms_ptr = map_scripts_addr;
+        uint16_t scripts_ptr = static_cast<uint16_t>(header[fmt.script_ptr_offset])
+                             | (static_cast<uint16_t>(header[fmt.script_ptr_offset + 1]) << 8);
+        uint32_t map_scripts_flat = (scripts_ptr < 0x4000u)
+            ? static_cast<uint32_t>(scripts_ptr)
+            : rom.bank_to_flat(script_bank, scripts_ptr);
+        if (map_scripts_flat + 1 <= rom.size()) {
+            uint32_t ms_ptr = map_scripts_flat;
             
-            // Scene scripts: db count, then count * (dw script_ptr, dw 0)
+            // Scene scripts: db count, then count * SCENE_SCRIPT_SIZE bytes
             uint8_t scene_count = rom.read_byte(ms_ptr++);
             if (scene_count <= 20) {  // Sanity check
                 for (uint8_t i = 0; i < scene_count; ++i) {
-                    if (ms_ptr + SCENE_SCRIPT_SIZE > rom.size()) break;
+                    if (ms_ptr + SCENE_SCRIPT_SIZE_V > rom.size()) break;
                     
                     uint16_t scene_script_ptr = rom.read_word(ms_ptr);
-                    ms_ptr += 2;  // script_ptr
-                    ms_ptr += 2;  // filler (always 0)
+                    ms_ptr += SCENE_SCRIPT_SIZE_V;  // advance by full scene entry size
                     
                     if (scene_script_ptr != 0) {
                         uint32_t scene_script_addr = rom.bank_to_flat(script_bank, scene_script_ptr);
-                        if (scene_script_addr > 0 && scene_script_addr < rom.size()) {
+                        if (scene_script_addr >= 0x4000u && scene_script_addr < rom.size()) {
                             extract_script_map_refs(scene_script_addr);
                         }
                     }
                 }
                 
-                // Callbacks: db count, then count * (db type, dw script_ptr)
+                // Callbacks: db count, then count * CALLBACK_SIZE bytes
                 if (ms_ptr + 1 <= rom.size()) {
                     uint8_t callback_count = rom.read_byte(ms_ptr++);
-                    if (callback_count <= 20) {  // Sanity check
+                    if (callback_count <= 20) {
                         for (uint8_t i = 0; i < callback_count; ++i) {
-                            if (ms_ptr + CALLBACK_SIZE > rom.size()) break;
+                            if (ms_ptr + CALLBACK_SIZE_V > rom.size()) break;
                             
                             ms_ptr++;  // Skip callback type
                             uint16_t callback_ptr = rom.read_word(ms_ptr);
@@ -2356,7 +2407,7 @@ std::vector<MapIdRef> discover_reachable_maps(
                             
                             if (callback_ptr != 0) {
                                 uint32_t callback_addr = rom.bank_to_flat(script_bank, callback_ptr);
-                                if (callback_addr > 0 && callback_addr < rom.size()) {
+                                if (callback_addr >= 0x4000u && callback_addr < rom.size()) {
                                     extract_script_map_refs(callback_addr);
                                 }
                             }

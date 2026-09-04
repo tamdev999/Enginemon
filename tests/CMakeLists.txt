@@ -296,6 +296,18 @@ if(MSVC)
     target_compile_options(expansion_compat_test PRIVATE /bigobj)
 endif()
 
+# Layout resolver adversarial tests — xref discovery, relocation, ambiguity, no silent fallback
+add_executable(layout_resolver_test
+    crystal/layout_resolver_test.cpp
+)
+target_link_libraries(layout_resolver_test PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+if(MSVC)
+    target_compile_options(layout_resolver_test PRIVATE /bigobj)
+endif()
+
 # Crystal Frontend Oracle ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Phase 1
 # Independent source-fidelity tests using RGBDS-derived (or hand-authored) binary fixtures.
 # Expected values come from pokecrystal semantics, NOT from Enginemon encoder output.
@@ -416,6 +428,11 @@ if(ENGINEMON_ENABLE_ENGINE)
     set_tests_properties(expansion_compat_test_no_rom
         PROPERTIES LABELS "standalone;battle" TIMEOUT 30)
 
+    # layout_resolver_test: adversarial relocation/xref tests, all synthetic
+    add_test(NAME layout_resolver_test_no_rom COMMAND $<TARGET_FILE:layout_resolver_test>)
+    set_tests_properties(layout_resolver_test_no_rom
+        PROPERTIES LABELS "standalone;crystal" TIMEOUT 60)
+
     # --- ROM-dependent --------------------------------------------------------
     if(ENGINEMON_ROM_PATH)
         add_test(NAME runtime_test_engine
@@ -472,6 +489,14 @@ if(ENGINEMON_ENABLE_ENGINE)
             COMMAND $<TARGET_FILE:oracle_test> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(oracle_test
             PROPERTIES LABELS "rom-required;oracle" TIMEOUT 60)
+
+        # layout_resolver_test: ROM-backed variant (vanilla ROM zero-churn check)
+        add_test(NAME layout_resolver_test
+            COMMAND ${CMAKE_COMMAND} -E env
+                "ENGINEMON_TEST_ROM=${ENGINEMON_ROM_PATH}"
+                $<TARGET_FILE:layout_resolver_test>)
+        set_tests_properties(layout_resolver_test
+            PROPERTIES LABELS "rom-required;crystal" TIMEOUT 60)
 
         add_test(NAME corpus_lowering_audit
             COMMAND $<TARGET_FILE:corpus_lowering_audit> "${ENGINEMON_ROM_PATH}")

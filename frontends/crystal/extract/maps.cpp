@@ -468,6 +468,25 @@ bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEn
             if (sh_p + 1 > rom_size) return;
             uint8_t sh_wc = rom_.read_byte(sh_p);
             if (sh_wc > 50) return;
+            // CROSS-validation: warp targets must be plausible group:map pairs.
+            // This eliminates false positives that pass all structural checks but
+            // whose "warps" point to garbage map IDs.  We check up to 3 warps.
+            if (sh_wc > 0) {
+                uint32_t warp_ptr = sh_p + 1u;
+                bool cross_ok = true;
+                const uint8_t max_grp = profile_.counts.num_map_groups;
+                const uint8_t WARP_SZ = fmt.warp_size;
+                for (uint8_t wi = 0; wi < std::min<uint8_t>(sh_wc, 3u); ++wi) {
+                    if (warp_ptr + WARP_SZ > rom_size) { cross_ok = false; break; }
+                    uint8_t tgt_grp = rom_.read_byte(warp_ptr + 3u);
+                    uint8_t tgt_map = rom_.read_byte(warp_ptr + 4u);
+                    // tgt_grp==0 is the LAST_MAP sentinel — also valid
+                    if (tgt_grp > 0 && tgt_grp > max_grp) { cross_ok = false; break; }
+                    if (tgt_map == 0 || tgt_map > 99u) { cross_ok = false; break; }
+                    warp_ptr += WARP_SZ;
+                }
+                if (!cross_ok) return;
+            }
             // Valid candidate: prefer smallest area (most specific/compact map)
             uint32_t area = static_cast<uint32_t>(h) * w;
             if (area < found_area) { found_area = area; found_bank = static_cast<uint8_t>(b); }

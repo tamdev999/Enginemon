@@ -247,6 +247,13 @@ struct ScriptFormatRules {
     uint8_t text_terminator = 0x50;     // '@' in Crystal encoding
     uint8_t line_terminator = 0x4F;     // '<NEXT>' 
     uint8_t paragraph_terminator = 0x51; // '<PARA>'
+
+    // StdScripts table entry size.
+    // Vanilla Crystal: 3 bytes per entry — dba macro = bank(1) + addr(2).
+    // Polished Crystal: 2 bytes per entry — dw macro = addr(2) only; all scripts
+    //   in same bank as the table, so no explicit bank stored.
+    // The bank for 2-byte entries is derived from the table address itself.
+    uint8_t std_scripts_entry_size = 3;
 };
 
 // Text/character encoding

@@ -575,6 +575,8 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     fmt.script.command_table_entry_size  = 3;
     fmt.script.script_pointer_format     = PointerFormat::BankAddrLE;
     fmt.script.text_terminator           = 0x50;
+    // Polished Crystal StdScripts uses dw (2-byte) entries — all scripts in same bank.
+    fmt.script.std_scripts_entry_size    = 2;
 
     // ── Text format ───────────────────────────────────────────────────────────
     fmt.text.uses_custom_charmap   = true;
@@ -772,6 +774,14 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     // add new types (e.g. Fairy = 0x1C) are still counted correctly.
     // Values >= 0x40 reliably indicate non-species data (text, code, etc.)
     // At the end of the table in all known Crystal-family ROMs.
+    //
+    // TERMINATION CRITERION — STRUCTURAL (with HINT-ONLY content component):
+    //   The type-byte ceiling (0x3F) is a HINT, not a hard rule.  It cannot
+    //   alone prove that the table ends at a specific record.  It terminates
+    //   scanning conservatively when bytes outside the known type-ID space are
+    //   encountered, reducing false extension.  The hp==0 check excludes
+    //   zero-filled padding rows (structural, not content-dependent).
+    //   This probe VALIDATES the profile count; it does NOT define it.
     if (o.base_data != 0 && fmt.pokemon.base_data_size > 0) {
         // MAX_VALID_TYPE must be generous enough for expansion hacks (Fairy, etc.)
         // 0x3F = 63 allows up to 64 types, well beyond any current hack.
@@ -802,6 +812,14 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     // ── Probe 2: move count from Moves table type-byte boundary ──────────────
     // Uses the same generous type bound (0x3F) as Probe 1 so hacks adding
     // new types (Fairy=0x1C, etc.) are counted correctly rather than truncated.
+    //
+    // TERMINATION CRITERION — HINT-ONLY:
+    //   The type-byte ceiling (0x3F) is a HINT.  Polished Crystal may have
+    //   type IDs beyond this for future types.  This probe validates the
+    //   configured count; it does NOT independently define a table bound.
+    //   If the profile.offsets.moves is wrong (table relocated), this probe
+    //   will silently scan unrelated ROM data — use resolve_crystal_layout()
+    //   to locate the Moves table first.
     if (o.moves != 0 && fmt.move.move_data_size > 0) {
         constexpr uint8_t MAX_VALID_TYPE = 0x3F;  // generous; same as TypeMatchups guard
         uint32_t structural_count = 0;
@@ -850,18 +868,30 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     }
 
     // ── Probe 3: StdScripts count from entry-validity sentinel ───────────────
-    // A valid StdScript 3-byte entry has: bank in [0x00, 0x7F], ptr in [0x4000, 0x7FFF].
-    // The first invalid entry is the end of the table.
+    // A valid StdScript entry uses either 3-byte dba (bank+ptr) or 2-byte dw (ptr only).
+    // The entry size is determined by fmt.script.std_scripts_entry_size.
+    // For 3-byte: bank in [0x00, 0x7F], ptr in [0x4000, 0x7FFF].
+    // For 2-byte: ptr in [0x4000, 0x7FFF] (bank is implicit = table bank).
+    // The first invalid entry terminates the table.
     if (o.std_scripts != 0) {
+        const uint8_t esz = fmt.script.std_scripts_entry_size;
         uint16_t structural_count = 0;
         for (uint32_t i = 0; i < 256u; ++i) {
-            uint32_t entry_addr = o.std_scripts + i * 3u;
-            if (entry_addr + 3u > rom_size) break;
-            uint8_t  bank = read_byte(entry_addr);
-            uint16_t ptr  = static_cast<uint16_t>(read_byte(entry_addr + 1))
-                          | (static_cast<uint16_t>(read_byte(entry_addr + 2)) << 8);
-            // Valid: bank < 0x80 (ROM bank) and ptr in switchable-bank window [0x4000, 0x7FFF]
-            if (bank >= 0x80 || ptr < 0x4000u || ptr > 0x7FFFu) break;
+            uint32_t entry_addr = o.std_scripts + i * esz;
+            if (entry_addr + esz > rom_size) break;
+            uint16_t ptr;
+            if (esz == 2) {
+                // 2-byte dw entry: ptr only
+                ptr = static_cast<uint16_t>(read_byte(entry_addr))
+                    | (static_cast<uint16_t>(read_byte(entry_addr + 1)) << 8);
+            } else {
+                // 3-byte dba entry: bank + ptr
+                uint8_t bank = read_byte(entry_addr);
+                if (bank >= 0x80) break;
+                ptr = static_cast<uint16_t>(read_byte(entry_addr + 1))
+                    | (static_cast<uint16_t>(read_byte(entry_addr + 2)) << 8);
+            }
+            if (ptr < 0x4000u || ptr > 0x7FFFu) break;
             ++structural_count;
         }
         if (structural_count != o.std_scripts_count) {
@@ -883,19 +913,34 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     //    that requires a new per-hack profile registration.
     // ─────────────────────────────────────────────────────────────────────────
 
-    // ── Probe 4a: TypeMatchups table — pure sentinel + {0,5,20} multiplier ──
+    // ── Probe 4a: TypeMatchups table — structural sentinel + multiplier set ──
     // The TypeMatchups table is identified by:
     //   • 3-byte entries: {atk_type, def_type, multiplier}
-    //   • multiplier ∈ {0, 5, 20} exactly
+    //   • multiplier in the Crystal-family multiplier set (see below)
     //   • separated by optional 0xFE bytes (Gen2 boundary marker)
     //   • terminated by 0xFF
     // We require at least 30 valid entries before the 0xFF sentinel to
     // distinguish it from random data that happens to have valid multipliers.
+    //
+    // MULTIPLIER SET — STRUCTURAL, generic across Crystal-family ROMs:
+    //   Vanilla Crystal: {0, 5, 20}    (immune, not-very, super-effective)
+    //   Polished Crystal: {0, 8, 16, 32} (immune, NVE, neutral, SE — q4 format)
+    //   Union (used here): {0, 5, 8, 10, 16, 20, 32}
+    //   This is a structural format property, NOT a content anchor.
     if (o.type_matchups != 0) {
         // Scan forward from configured address, counting valid entries.
-        // The existing extractor already validates this; here we check whether
-        // the configured address actually reaches enough entries.
         constexpr uint32_t MIN_EXPECTED_ENTRIES = 30u;
+        // Generic multiplier set — union of vanilla and Polished Crystal
+        static const uint8_t VALID_MULTS[] = {0, 5, 8, 10, 16, 20, 32};
+        auto is_valid_mult = [](uint8_t m) -> bool {
+            // Generic Crystal-family multiplier set:
+            // Vanilla Crystal: {0,5,20} | Polished Crystal: {0,8,16,32}
+            // STRUCTURAL: these are format-defined values, not game content.
+            switch (m) {
+                case 0: case 5: case 8: case 10: case 16: case 20: case 32: return true;
+                default: return false;
+            }
+        };
         uint32_t valid_entries = 0;
         uint32_t ptr = o.type_matchups;
         bool found_sentinel = false;
@@ -905,7 +950,7 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
             if (b == 0xFE) { ptr += 1; continue; }  // Gen2 separator
             if (ptr + 3u > rom_size) break;
             uint8_t mult = read_byte(ptr + 2);
-            if (mult == 0 || mult == 5 || mult == 20) {
+            if (is_valid_mult(mult)) {
                 ++valid_entries;
                 ptr += 3;
             } else {
@@ -923,7 +968,9 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
                  search += 3)
             {
                 if (read_byte(search) == 0xFE || read_byte(search) == 0xFF) {
-                    search -= 2; continue;  // align on entry boundary
+                    // Skip to next 3-byte boundary; avoid underflow
+                    if (search < 2) break;
+                    search -= 2; continue;
                 }
                 uint32_t p2 = search;
                 uint32_t cnt = 0;
@@ -936,7 +983,7 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
                     uint8_t d2 = read_byte(p2 + 1);
                     uint8_t m2 = read_byte(p2 + 2);
                     if (a2 > MAX_TYPE_ID_SEARCH || d2 > MAX_TYPE_ID_SEARCH) break;
-                    if (m2 != 0 && m2 != 5 && m2 != 20) break;
+                    if (!is_valid_mult(m2)) break;
                     ++cnt; p2 += 3;
                 }
                 if (ok && cnt > best_count) { best_count = cnt; best_candidate = search; }
@@ -971,7 +1018,16 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     // ── Probe 4b: Moves table — Pound (MoveId 1) signature ───────────────────
     // Move record 0 (MoveId 1 = Pound) has a known signature independent of
     // animation byte: effect=0, power=40(0x28), type=0(Normal), acc=255(0xFF),
-    // pp=35(0x23), effect_chance=0.  This is unique enough to locate the table.
+    // pp=35(0x23), effect_chance=0.
+    //
+    // EVIDENCE TYPE — CONTENT (HINT-ONLY for address discovery):
+    //   This is a content anchor: it relies on Pound's specific game stats.
+    //   ROM hacks that change Pound's base stats (power, PP, etc.) will cause
+    //   this probe to fail even when the table address is correct.
+    //   The Pound signature CANNOT independently prove the table start unless
+    //   corroborated by structural record-count validation.
+    //   Use resolve_crystal_layout() (SM83 xref) as the primary locator.
+    //   This probe is retained as a cross-check diagnostic only.
     if (o.moves != 0 && fmt.move.move_data_size > 0) {
         // Quick sanity check: does the profile address look like it starts with Pound?
         // Pound bytes at: [effect_off]=0, [power_off]=0x28, [type_off]=0x00,

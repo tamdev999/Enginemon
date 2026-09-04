@@ -8,6 +8,7 @@ add_library(enginemon_crystal STATIC
     rom/validator.cpp
     rom/symbol_map.cpp
     rom/profile.cpp
+    rom/crystal_layout_resolver.cpp
     
     # Data extractors
     extract/maps.cpp

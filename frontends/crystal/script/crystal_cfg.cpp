@@ -20,7 +20,8 @@ namespace crystal {
 // STD SCRIPTS TABLE
 // =============================================================================
 
-bool StdScriptsTable::load(const RomData& rom, uint32_t table_address, size_t count) {
+bool StdScriptsTable::load(const RomData& rom, uint32_t table_address, size_t count,
+                           uint8_t entry_size) {
     entries_.clear();
     loaded_ = false;
     
@@ -28,21 +29,36 @@ bool StdScriptsTable::load(const RomData& rom, uint32_t table_address, size_t co
         return false;
     }
     
-    // Each entry is 3 bytes: dba macro = bank (1 byte) + address (2 bytes LE)
+    // Entry format:
+    //   entry_size=3 (default): dba = bank(1) + address(2 LE)
+    //     Vanilla Crystal: each script may live in any bank.
+    //   entry_size=2: dw = address(2 LE) only
+    //     Polished Crystal: all scripts in the same bank as the table.
+    const uint8_t esz = (entry_size == 2) ? 2 : 3;
+    const uint8_t table_bank = rom.flat_to_bank(table_address);
+
     for (size_t i = 0; i < count; ++i) {
-        uint32_t entry_addr = table_address + (i * 3);
-        if (entry_addr + 3 > rom.size()) {
+        uint32_t entry_addr = table_address + (i * esz);
+        if (entry_addr + esz > rom.size()) {
             return false;
         }
         
-        uint8_t bank = rom.read_byte(entry_addr);
-        uint16_t addr = rom.read_word(entry_addr + 1);
-        
         StdScriptEntry entry;
         entry.std_id = static_cast<uint16_t>(i);
-        entry.bank = bank;
-        entry.address = addr;
-        entry.flat_address = rom.bank_to_flat(bank, addr);
+
+        if (esz == 3) {
+            uint8_t bank = rom.read_byte(entry_addr);
+            uint16_t addr = rom.read_word(entry_addr + 1);
+            entry.bank = bank;
+            entry.address = addr;
+            entry.flat_address = rom.bank_to_flat(bank, addr);
+        } else {
+            // 2-byte dw: address only; bank is the same as the table itself.
+            uint16_t addr = rom.read_word(entry_addr);
+            entry.bank = table_bank;
+            entry.address = addr;
+            entry.flat_address = rom.bank_to_flat(table_bank, addr);
+        }
         
         entries_.push_back(entry);
     }
