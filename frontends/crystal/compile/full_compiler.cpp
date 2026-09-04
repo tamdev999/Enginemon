@@ -2074,15 +2074,10 @@ std::vector<MapIdRef> discover_reachable_maps(
         // of this node would silently disappear from the reachable graph.
         auto map_result = extractor.extract_map(ref.group, ref.map);
         if (!map_result.success) {
-            // For Polished Crystal probe: extraction can fail when bank resolution
-            // picks the wrong bank. Emit a diagnostic but continue discovery.
-            // The map's warps/connections are already enqueued from the BFS header
-            // parsing pass above — not learning them from the full extract is
-            // acceptable for a probe/bootstrap run.
-            std::fprintf(stderr, "WARN: discover_reachable_maps: extraction of map (%u,%u) failed: %s\n",
-                         ref.group, ref.map,
-                         map_result.error.empty() ? "(no detail)" : map_result.error.c_str());
-            continue;
+            throw std::runtime_error(
+                std::format("discover_reachable_maps: extraction of map ({},{}) failed: {}",
+                            ref.group, ref.map,
+                            map_result.error.empty() ? "(no detail)" : map_result.error));
         }
         
         const auto& map = map_result.map;
@@ -2092,7 +2087,7 @@ std::vector<MapIdRef> discover_reachable_maps(
         // 0×0 or oversized maps, so reaching here means the extractor validated
         // them and the BFS accepted them.
         if (map.width == 0 || map.height == 0 ||
-            map.width > 200 || map.height > 200) {
+            map.width > fmt.max_map_dimension || map.height > fmt.max_map_dimension) {
             throw std::runtime_error(
                 std::format("discover_reachable_maps: reachable map ({},{}) has invalid "
                             "dimensions {}x{} — extraction inconsistency",
@@ -2147,69 +2142,26 @@ std::vector<MapIdRef> discover_reachable_maps(
                      | (static_cast<uint16_t>(entry[fmt.attr_ptr_field_offset + 1]) << 8);
 
             if (fmt.resolve_attr_bank_by_scan) {
-                // Scan all ROM banks for a plausible MapAttributes header
-                const uint32_t rom_size32 = static_cast<uint32_t>(rom.size());
-                const uint32_t max_bank = rom_size32 / 0x4000;
-                attr_bank = 0xFF;
-                uint32_t best_area = UINT32_MAX;
-                auto try_bank_fc = [&](uint32_t b) {
-                    if (b == 0 || b >= max_bank) return;
-                    uint32_t flat = b * 0x4000 + (attr_ptr - 0x4000);
-                    if (flat + fmt.header_size > rom_size32) return;
-                    uint8_t h = rom.read_byte(flat + fmt.height_offset);
-                    uint8_t w = rom.read_byte(flat + fmt.width_offset);
-                    if (h == 0 || h > 200 || w == 0 || w > 200) return;
-                    uint8_t bb = rom.read_byte(flat + fmt.blockdata_bank_offset);
-                    if (bb >= 128) return;
-                    uint16_t bp = static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset))
-                                | (static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset + 1)) << 8);
-                    if (bb > 0 && (bp < 0x4000 || bp >= 0x8000)) return;
-                    uint8_t sb = rom.read_byte(flat + fmt.script_bank_offset);
-                    if (sb >= 128) return;
-                    uint16_t sp = static_cast<uint16_t>(rom.read_byte(flat + fmt.script_ptr_offset))
-                                | (static_cast<uint16_t>(rom.read_byte(flat + fmt.script_ptr_offset + 1)) << 8);
-                    if (sp >= 0x8000) return;
-                    if (sb > 0 && sp < 0x4000) return;
-                    uint32_t sh_flat = (sp < 0x4000) ? static_cast<uint32_t>(sp)
-                                                      : static_cast<uint32_t>(sb) * 0x4000u + sp - 0x4000u;
-                    if (sh_flat + 4 > static_cast<uint32_t>(rom.size())) return;
-                    uint8_t sh_sc = rom.read_byte(sh_flat);
-                    if (sh_sc > 30) return;
-                    uint32_t sh_p = sh_flat + 1u + static_cast<uint32_t>(sh_sc) * 2u;
-                    if (sh_p + 1 > static_cast<uint32_t>(rom.size())) return;
-                    uint8_t sh_cc = rom.read_byte(sh_p);
-                    if (sh_cc > 20) return;
-                    sh_p += 1u + static_cast<uint32_t>(sh_cc) * 3u;
-                    if (sh_p + 1 > static_cast<uint32_t>(rom.size())) return;
-                    uint8_t sh_wc = rom.read_byte(sh_p);
-                    if (sh_wc > 50) return;
-                    // CROSS-validation: warp targets must be plausible group:map pairs.
-                    if (sh_wc > 0) {
-                        uint32_t warp_ptr = sh_p + 1u;
-                        bool cross_ok = true;
-                        const uint8_t max_grp = static_cast<uint8_t>(profile.counts.num_map_groups);
-                        for (uint8_t wi = 0; wi < std::min<uint8_t>(sh_wc, 3u); ++wi) {
-                            if (warp_ptr + fmt.warp_size > static_cast<uint32_t>(rom.size())) { cross_ok = false; break; }
-                            uint8_t tgt_grp = rom.read_byte(warp_ptr + 3u);
-                            uint8_t tgt_map = rom.read_byte(warp_ptr + 4u);
-                            if (tgt_grp > 0 && tgt_grp > max_grp) { cross_ok = false; break; }
-                            if (tgt_map == 0 || tgt_map > 99u) { cross_ok = false; break; }
-                            warp_ptr += fmt.warp_size;
-                        }
-                        if (!cross_ok) return;
-                    }
-                    uint32_t area = static_cast<uint32_t>(h) * w;
-                    if (area < best_area) { best_area = area; attr_bank = static_cast<uint8_t>(b); }
-                };
-                // Start scan from map_groups_bank for locality, then below
-                for (uint32_t b = o.map_groups_bank; b < max_bank; ++b) try_bank_fc(b);
-                for (uint32_t b = 1; b < o.map_groups_bank; ++b) try_bank_fc(b);
-                if (attr_bank == 0xFF) {
+                // Polished Crystal: the correct bank was pre-resolved by
+                // resolve_group_attr_banks() during init_typed_pipeline() and
+                // stored in profile.offsets.group_attr_banks[group].
+                // Use it directly — no per-map scanning or heuristic selection.
+                if (attr_ptr < 0x4000 || attr_ptr >= 0x8000) {
                     throw std::runtime_error(
                         std::format("discover_reachable_maps: map ({},{}) "
-                                    "cannot resolve MapAttributes bank for ptr=0x{:04x}",
+                                    "attr_ptr=0x{:04x} is not a valid banked pointer",
                                     ref.group, ref.map, attr_ptr));
                 }
+                const uint8_t grp_idx = ref.group;
+                if (grp_idx >= ProfileOffsets::MAX_MAP_GROUPS ||
+                    o.group_attr_banks[grp_idx] == ProfileOffsets::ATTR_BANK_UNRESOLVED) {
+                    throw std::runtime_error(
+                        std::format("discover_reachable_maps: map ({},{}) "
+                                    "group attr bank not resolved — "
+                                    "resolve_group_attr_banks() must run before discovery",
+                                    ref.group, ref.map));
+                }
+                attr_bank = o.group_attr_banks[grp_idx];
             } else {
                 attr_bank = o.map_groups_bank;
             }
@@ -2302,19 +2254,11 @@ std::vector<MapIdRef> discover_reachable_maps(
         uint32_t ptr = event_ptr_for_warps;
         uint8_t warp_count = rom.read_byte(ptr++);
         
-        // Sanity check warp count.  More than 50 strongly suggests the bank scan
-        // picked the wrong MapAttributes bank (MapScriptHeader is garbage data).
-        // For vanilla Crystal (attr_bank_in_entry=true), this is structural corruption
-        // and we throw.  For hacks with resolve_attr_bank_by_scan=true, the bank scan
-        // may pick false positives; we emit a warning and skip this map's warp extraction
-        // rather than crashing the whole discovery.
+        // Sanity check warp count.  More than 50 strongly suggests a wrong
+        // MapAttributes bank was resolved (MapScriptHeader is garbage data).
+        // This is always a hard failure — if bank resolution produced a false
+        // positive the resolver must be fixed, not silently skipped here.
         if (warp_count > 50) {
-            if (fmt.resolve_attr_bank_by_scan) {
-                std::fprintf(stderr, "WARN: discover_reachable_maps: map (%u,%u) warp count %u "
-                                     "(>50) — bank scan may have picked wrong bank, skipping warp extraction\n",
-                             ref.group, ref.map, warp_count);
-                continue;
-            }
             throw std::runtime_error(
                 std::format("discover_reachable_maps: map ({},{}) has implausible warp count {} "
                             "— likely wrong MapAttributes bank was resolved",

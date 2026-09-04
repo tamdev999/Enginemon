@@ -125,6 +125,70 @@ ResolvedAddress resolve_script_command_table(
     std::string* out_diagnostic = nullptr);
 
 // ============================================================================
+// Layout constant resolvers (ROM-xref based, no profile fallback needed)
+//
+// These extract numeric constants directly from compiled SM83 code in the
+// ROM's home bank.  The constants are structural (not content), so they work
+// on relocated code without any profile hint.
+// ============================================================================
+
+// Derive SCENE_SCRIPT_SIZE (bytes per scene-script entry in MapScriptHeader).
+// XREF: map-loading routine in home bank.
+//   Vanilla pattern (home bank, 2A 01 NN 00 CD): scene_size=4
+//   Polished pattern (home bank, 2A 01 NN 00 DF): scene_size=2
+// Returns 0 if the pattern is not found.
+uint8_t resolve_scene_script_size(const RomData& rom);
+
+// Derive MAP_LENGTH (bytes per MapGroup entry, i.e. map_entry_size).
+// XREF: GetAnyMapPointer in home bank — "dec c / ld b,0 / ld a,MAP_LENGTH / rst".
+//   Vanilla: 0D 06 00 3E NN DF → MAP_LENGTH=9
+//   Polished: same pattern → MAP_LENGTH=7
+// Returns 0 if the pattern is not found.
+uint8_t resolve_map_entry_stride(const RomData& rom);
+
+// Derive COORD_EVENT_SIZE (bytes per coord-event entry).
+// XREF: map-events counting loop in home bank.
+//   Vanilla: C8 01 NN 00 CD → COORD_EVENT_SIZE=8
+//   Polished: 3D 01 NN 00 DF → COORD_EVENT_SIZE=5
+// Returns 0 if the pattern is not found.
+uint8_t resolve_coord_event_size(const RomData& rom);
+
+// ============================================================================
+// Group-level MapAttributes bank resolver
+//
+// For ROMs where map entries carry no explicit attr_bank byte
+// (MapFormatRules::attr_bank_in_entry == false, resolve_attr_bank_by_scan == true),
+// determines the correct MapAttributes bank for each map group by group-level
+// consistency proof:
+//
+//   For each group G (1..num_map_groups):
+//     Count = exact entry count derived from MapGroupPointers[G+1] - MapGroupPointers[G]
+//             divided by map_entry_size.
+//     For each candidate bank B (1..max_bank):
+//       Score = number of group G entries whose attr_ptr at bank B passes the
+//               full 9-point structural validity test:
+//                 h/w in [1,max_map_dimension], blockdata_bank < 128,
+//                 blockdata_ptr in banked range,
+//                 script_bank < 128, script_ptr in valid range,
+//                 MapScriptHeader: scene_count <= 30,
+//                                 callback_count <= 20,
+//                                 warp_count <= 50.
+//     If exactly one bank scores == Count: that is the proven attr_bank for group G.
+//     If no bank scores == Count but one bank has the unique highest score: fail
+//       (ambiguous — do not guess).
+//     If zero banks score > 0: fail (not found).
+//
+// This replaces the per-map minimum-area heuristic scan entirely.
+// Vanilla Crystal (attr_bank_in_entry == true) is not affected; the function
+// returns immediately with resolved=0 for those profiles.
+//
+// Results are stored in profile.offsets.group_attr_banks[1..num_map_groups].
+// Returns the number of groups successfully resolved.
+// ============================================================================
+int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile,
+                              bool verbose = false);
+
+// ============================================================================
 // Composite resolver
 //
 // Runs all individual resolvers and populates any zero fields in the profile.

@@ -77,7 +77,14 @@ struct MapFormatRules {
     uint8_t connections_offset = 11;    // connections byte (bitfield)
     
     // Map scripts header
-    uint8_t map_script_header_size = 3; // callbacks pointer + scene scripts count
+    // scene_script_size: bytes per scene script entry in the MapScriptHeader.
+    // Vanilla Crystal: 4 bytes (dw script_ptr, dw 0 filler) — SCENE_SCRIPT_SIZE = 4
+    // Polished Crystal: 2 bytes (dw script_ptr only)       — SCENE_SCRIPT_SIZE = 2
+    // This value is ROM-derivable via the xref pattern in the map-loading routine:
+    //   ld a, [hli] / ld bc, SCENE_SCRIPT_SIZE / call|rst AddNTimes
+    // resolve_crystal_layout() fills this from the ROM; the default below is the
+    // vanilla correct value so vanilla-profile compilations work without the resolver.
+    uint8_t map_script_header_size = 4; // SCENE_SCRIPT_SIZE: vanilla=4, Polished=2
     
     // Connection format (from data/maps/attributes.asm connection macro)
     // group, map, blocks_ptr(2), map_ptr(2), length, width, y, x, window_ptr(2)
@@ -152,6 +159,22 @@ struct MapFormatRules {
     //   mapped to "unknown:<hex>" rather than throwing. Required for Polished Crystal
     //   which extends the fixed sprite range beyond 0x66.
     bool allow_unknown_sprites = false;
+
+    // max_environment_value: largest valid environment byte in a map group entry.
+    // Vanilla Crystal: 7 (TOWN=1..DUNGEON=7, from map_data_constants.asm NUM_ENVIRONMENTS)
+    // Polished Crystal: 8 (adds ISOLATED=3, shifting INDOOR/GATE/CAVE/DUNGEON up by 1)
+    // This is a profile field rather than a ROM-derivable constant because the
+    // EnvironmentColorsPointers table uses different encoding (dw vs dr) across versions,
+    // making generic counting unreliable.
+    uint8_t max_environment_value = 7;
+
+    // max_map_dimension: largest valid single map dimension (width or height, in blocks).
+    // Used as a structural plausibility guard when scanning ROM banks for MapAttributes.
+    // Vanilla Crystal: actual maximum is 54×40 (large outdoor routes); 128 is conservative
+    //   and covers all known vanilla maps with headroom.
+    // Polished Crystal: outdoor maps can be ~50×50+; set to 200 in profile.
+    // This is not a ROM-derivable constant — no single ROM value encodes "max map size".
+    uint8_t max_map_dimension = 128;
 };
 
 // Pokemon data format rules
@@ -331,6 +354,30 @@ struct ProfileOffsets {
     uint8_t map_groups_bank;            // Bank containing MapGroupPointers (0x25 for Crystal)
     uint32_t map_names;                 // MapNames (for display)
     uint32_t spawn_points;              // SpawnPoints table (fly/respawn destinations)
+
+    // Per-group MapAttributes bank table.
+    //
+    // When a map entry does not carry an explicit attr_bank byte
+    // (MapFormatRules::attr_bank_in_entry == false), the bank for each map
+    // group's MapAttributes block is resolved once at compile time by
+    // resolve_group_attr_banks() in crystal_layout_resolver and stored here.
+    //
+    // Index: group number (1-based).  group_attr_banks[0] is unused (sentinel).
+    // Value 0xFF means "not yet resolved" (also the initial sentinel value).
+    // Entries for groups beyond num_map_groups are 0xFF.
+    //
+    // Vanilla Crystal (attr_bank_in_entry == true): all entries stay 0xFF —
+    // the bank is read directly from each map entry and this table is unused.
+    //
+    // Array sized to MAX_MAP_GROUPS (64) — enough headroom for any known hack.
+    // The resolver fills only groups [1 .. num_map_groups].
+    static constexpr uint8_t  ATTR_BANK_UNRESOLVED = 0xFF;
+    static constexpr uint32_t MAX_MAP_GROUPS        = 64;
+    std::array<uint8_t, 64> group_attr_banks = [](){
+        std::array<uint8_t, 64> a{};
+        a.fill(0xFF);
+        return a;
+    }();
     
     // Script system
     uint32_t script_command_table;      // ScriptCommandTable

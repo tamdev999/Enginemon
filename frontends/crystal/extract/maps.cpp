@@ -408,9 +408,9 @@ bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEn
     }
 
     // ── Validate environment ─────────────────────────────────────────────────
-    // Vanilla: 1-7 (TOWN through DUNGEON)
-    // Polished: 1-8 (adds ISOLATED=3, shifting INDOOR/GATE/CAVE/DUNGEON up by 1)
-    if (out.environment == 0 || out.environment > 8) {
+    // Vanilla: 1-7 (TOWN through DUNGEON)  — max_environment_value = 7
+    // Polished: 1-8 (adds ISOLATED=3)      — max_environment_value = 8
+    if (out.environment == 0 || out.environment > fmt.max_environment_value) {
         return false;
     }
 
@@ -424,82 +424,19 @@ bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEn
             if (out.attr_ptr < 0x4000 || out.attr_ptr >= 0x8000) return false;
         }
     } else if (fmt.resolve_attr_bank_by_scan) {
-        // Polished: attr_ptr is bank-local but no bank stored in entry.
-        // Scan all valid ROM banks to find the one where attr_ptr resolves to a
-        // plausible MapAttributes header (h/w in [1,200], blk_bank < 0x80).
+        // Polished: attr_ptr is bank-local.  The correct bank was resolved at
+        // compile-time by resolve_group_attr_banks() and stored in
+        // profile_.offsets.group_attr_banks[group].  Use it directly — no
+        // per-map scanning or heuristic selection.
         if (out.attr_ptr < 0x4000 || out.attr_ptr >= 0x8000) return false;
-        const uint32_t rom_size = static_cast<uint32_t>(rom_.size());
-        const uint32_t max_bank = rom_size / 0x4000;
-        uint8_t found_bank = 0xFF;
-        uint32_t found_area = UINT32_MAX;
-        // Scan banks starting near map_groups_bank for MapAttributes placement locality.
-        // Polished places MapAttributes in or near the same banks as the group data.
-        // Scanning from bank 1 risks picking false positives in early ROM banks.
-        // Try: [map_groups_bank .. max_bank) first, then [1 .. map_groups_bank).
-        // Keep minimum-area winner across both passes.
-        auto try_bank = [&](uint32_t b) {
-            if (b == 0 || b >= max_bank) return;
-            uint32_t flat = b * 0x4000 + (out.attr_ptr - 0x4000);
-            if (flat + fmt.header_size > rom_size) return;
-            uint8_t h = rom_.read_byte(flat + fmt.height_offset);
-            uint8_t w = rom_.read_byte(flat + fmt.width_offset);
-            if (h == 0 || h > 200 || w == 0 || w > 200) return;
-            uint8_t bb = rom_.read_byte(flat + fmt.blockdata_bank_offset);
-            if (bb >= 128) return;
-            uint16_t bp = static_cast<uint16_t>(rom_.read_byte(flat + fmt.blockdata_ptr_offset))
-                        | (static_cast<uint16_t>(rom_.read_byte(flat + fmt.blockdata_ptr_offset + 1)) << 8);
-            if (bb > 0 && (bp < 0x4000 || bp >= 0x8000)) return;
-            uint8_t sb = rom_.read_byte(flat + fmt.script_bank_offset);
-            if (sb >= 128) return;
-            uint16_t sp = static_cast<uint16_t>(rom_.read_byte(flat + fmt.script_ptr_offset))
-                        | (static_cast<uint16_t>(rom_.read_byte(flat + fmt.script_ptr_offset + 1)) << 8);
-            if (sp >= 0x8000) return;
-            if (sb > 0 && sp < 0x4000) return;
-            uint32_t sh_flat = (sp < 0x4000) ? static_cast<uint32_t>(sp)
-                                              : (static_cast<uint32_t>(sb) * 0x4000u + sp - 0x4000u);
-            if (sh_flat + 4 > rom_size) return;
-            uint8_t sh_sc = rom_.read_byte(sh_flat);
-            if (sh_sc > 30) return;
-            uint32_t sh_p = sh_flat + 1u + static_cast<uint32_t>(sh_sc) * 2u;
-            if (sh_p + 1 > rom_size) return;
-            uint8_t sh_cc = rom_.read_byte(sh_p);
-            if (sh_cc > 20) return;
-            sh_p += 1u + static_cast<uint32_t>(sh_cc) * 3u;
-            if (sh_p + 1 > rom_size) return;
-            uint8_t sh_wc = rom_.read_byte(sh_p);
-            if (sh_wc > 50) return;
-            // CROSS-validation: warp targets must be plausible group:map pairs.
-            // This eliminates false positives that pass all structural checks but
-            // whose "warps" point to garbage map IDs.  We check up to 3 warps.
-            if (sh_wc > 0) {
-                uint32_t warp_ptr = sh_p + 1u;
-                bool cross_ok = true;
-                const uint8_t max_grp = profile_.counts.num_map_groups;
-                const uint8_t WARP_SZ = fmt.warp_size;
-                for (uint8_t wi = 0; wi < std::min<uint8_t>(sh_wc, 3u); ++wi) {
-                    if (warp_ptr + WARP_SZ > rom_size) { cross_ok = false; break; }
-                    uint8_t tgt_grp = rom_.read_byte(warp_ptr + 3u);
-                    uint8_t tgt_map = rom_.read_byte(warp_ptr + 4u);
-                    // tgt_grp==0 is the LAST_MAP sentinel — also valid
-                    if (tgt_grp > 0 && tgt_grp > max_grp) { cross_ok = false; break; }
-                    if (tgt_map == 0 || tgt_map > 99u) { cross_ok = false; break; }
-                    warp_ptr += WARP_SZ;
-                }
-                if (!cross_ok) return;
-            }
-            // Valid candidate: prefer smallest area (most specific/compact map)
-            uint32_t area = static_cast<uint32_t>(h) * w;
-            if (area < found_area) { found_area = area; found_bank = static_cast<uint8_t>(b); }
-        };
-        // First pass: banks near/above map_groups_bank (where Polished places attrs)
-        for (uint32_t b = o.map_groups_bank; b < max_bank; ++b) try_bank(b);
-        // Second pass: banks below (rarely needed)
-        for (uint32_t b = 1; b < o.map_groups_bank; ++b) try_bank(b);
-        if (found_bank == 0xFF) {
+        if (group >= ProfileOffsets::MAX_MAP_GROUPS) return false;
+        uint8_t resolved_bank = o.group_attr_banks[group];
+        if (resolved_bank == ProfileOffsets::ATTR_BANK_UNRESOLVED) {
+            // Group bank was not resolved at startup — hard failure, not a silent guess.
             stats_.bounds_check_failures++;
-            return false;  // No valid bank found for this attr_ptr
+            return false;
         }
-        out.attr_bank = found_bank;
+        out.attr_bank = resolved_bank;
     } else {
         // No bank in entry, no scan: use map_groups_bank as default
         out.attr_bank = o.map_groups_bank;
@@ -513,7 +450,7 @@ bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEn
     }
     uint8_t height = rom_.read_byte(header_addr + fmt.height_offset);
     uint8_t width  = rom_.read_byte(header_addr + fmt.width_offset);
-    if (height == 0 || height > 200 || width == 0 || width > 200) {
+    if (height == 0 || height > fmt.max_map_dimension || width == 0 || width > fmt.max_map_dimension) {
         return false;
     }
     
@@ -1035,9 +972,9 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
     map.height = header[fmt.height_offset];
     map.width = header[fmt.width_offset];
     
-    // Validate dimensions — Polished Crystal has larger maps (up to ~200 blocks)
-    if (map.width == 0 || map.height == 0 || 
-        map.width > 200 || map.height > 200) {
+    // Validate dimensions using profile-gated max (default 128, Polished overrides to 200)
+    if (map.width == 0 || map.height == 0 ||
+        map.width > fmt.max_map_dimension || map.height > fmt.max_map_dimension) {
         result.error = std::format("Invalid dimensions: {}x{}", map.width, map.height);
         stats_.maps_failed++;
         return result;

@@ -517,11 +517,13 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     // COORD_EVENT_SIZE = 5 (Polished: db scene_id, y, x, dw script = 5 bytes; vanilla was 8)
     // BG_EVENT_SIZE = 5 (same as vanilla)
     // OBJECT_EVENT_SIZE = 13 (same as vanilla)
-    fmt.map.map_script_header_size = 2;   // SCENE_SCRIPT_SIZE = 2 in Polished
+    fmt.map.map_script_header_size = 2;   // SCENE_SCRIPT_SIZE = 2 in Polished (ROM-derivable)
     fmt.map.warp_size              = 5;
-    fmt.map.coord_event_size       = 5;   // Polished: 5 bytes (vanilla was 8)
+    fmt.map.coord_event_size       = 5;   // Polished: 5 bytes (vanilla was 8, ROM-derivable)
     fmt.map.bg_event_size          = 5;
     fmt.map.object_event_size      = 13;
+    fmt.map.max_environment_value  = 8;   // Polished adds ISOLATED=3, max env = DUNGEON=8
+    fmt.map.max_map_dimension      = 200; // Polished has large outdoor maps (up to ~50x50)
 
     // ── Pokémon data format ───────────────────────────────────────────────────
     // Same as vanilla Crystal (32-byte BaseData records).
@@ -700,7 +702,8 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     c.num_items           = 256;
     c.num_types           = 19;    // 18 vanilla + Fairy (0x1C)
     c.num_tilesets        = 200;   // generous upper bound for Polished's expanded set
-    c.num_map_groups      = 39;    // confirmed from MapGroupPointers table
+    c.num_map_groups      = 0;     // derived at compile time from MapGroupPointers table boundary
+                                   // (resolve_crystal_layout fills this before extraction runs)
     c.num_trainer_classes = 67;    // conservative vanilla value
     c.num_specials        = 305;   // confirmed from structural scan
     c.num_script_commands = 0xA9;  // Polished adds a few more commands
@@ -916,59 +919,68 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     // ── Probe 4a: TypeMatchups table — structural sentinel + multiplier set ──
     // The TypeMatchups table is identified by:
     //   • 3-byte entries: {atk_type, def_type, multiplier}
-    //   • multiplier in the Crystal-family multiplier set (see below)
+    //   • multiplier in the known Crystal-family multiplier set
     //   • separated by optional 0xFE bytes (Gen2 boundary marker)
-    //   • terminated by 0xFF
-    // We require at least 30 valid entries before the 0xFF sentinel to
-    // distinguish it from random data that happens to have valid multipliers.
+    //   • terminated by 0xFF, or cleanly broken by first-invalid-mult
     //
-    // MULTIPLIER SET — STRUCTURAL, generic across Crystal-family ROMs:
-    //   Vanilla Crystal: {0, 5, 20}    (immune, not-very, super-effective)
-    //   Polished Crystal: {0, 8, 16, 32} (immune, NVE, neutral, SE — q4 format)
+    // MULTIPLIER SETS (STRUCTURAL — not content):
+    //   Vanilla Crystal: {0, 5, 20}         (immune, not-very, super-effective)
+    //   Polished Crystal: {0, 8, 16, 32}    (immune, NVE, neutral, SE — q4 format)
     //   Union (used here): {0, 5, 8, 10, 16, 20, 32}
-    //   This is a structural format property, NOT a content anchor.
+    //
+    // Both vanilla and Polished tables have a 0xFE section-separator after which
+    // the encoding changes or non-matchup data follows.  The forward scan stops at
+    // the first invalid multiplier, which naturally terminates at the clean section
+    // boundary.  A sentinel (0xFF) is not required — >= MIN_EXPECTED_ENTRIES valid
+    // entries is sufficient proof that the configured address is correct.
+    //
+    // STRATEGY:
+    //   • Configured-address forward scan: use the BROAD union set.
+    //     Vanilla gets 108 valid entries; Polished gets 117.  Both >> 30.
+    //   • Fallback structural search (only when configured address fails):
+    //     also uses broad set, requires MIN_FALLBACK_ENTRIES=50 to limit false
+    //     positives from arbitrary ROM regions.
     if (o.type_matchups != 0) {
-        // Scan forward from configured address, counting valid entries.
-        constexpr uint32_t MIN_EXPECTED_ENTRIES = 30u;
-        // Generic multiplier set — union of vanilla and Polished Crystal
-        static const uint8_t VALID_MULTS[] = {0, 5, 8, 10, 16, 20, 32};
-        auto is_valid_mult = [](uint8_t m) -> bool {
-            // Generic Crystal-family multiplier set:
-            // Vanilla Crystal: {0,5,20} | Polished Crystal: {0,8,16,32}
-            // STRUCTURAL: these are format-defined values, not game content.
+        // Broad set — covers vanilla {0,5,20} and Polished {0,8,16,32} encodings.
+        // Used for both the forward probe and the fallback scan.
+        auto is_valid_mult_broad = [](uint8_t m) -> bool {
             switch (m) {
                 case 0: case 5: case 8: case 10: case 16: case 20: case 32: return true;
                 default: return false;
             }
         };
+
+        constexpr uint32_t MIN_EXPECTED_ENTRIES = 30u;   // for the configured-address probe
+        constexpr uint32_t MIN_FALLBACK_ENTRIES = 50u;   // higher bar for untargeted scan
+
         uint32_t valid_entries = 0;
         uint32_t ptr = o.type_matchups;
         bool found_sentinel = false;
         for (uint32_t i = 0; i < 2048u && ptr < rom_size; ++i) {
             uint8_t b = read_byte(ptr);
             if (b == 0xFF) { found_sentinel = true; break; }
-            if (b == 0xFE) { ptr += 1; continue; }  // Gen2 separator
+            if (b == 0xFE) { ptr += 1; continue; }  // Gen2 section separator
             if (ptr + 3u > rom_size) break;
             uint8_t mult = read_byte(ptr + 2);
-            if (is_valid_mult(mult)) {
+            if (is_valid_mult_broad(mult)) {
                 ++valid_entries;
                 ptr += 3;
             } else {
-                break;  // invalid multiplier: not a type matchup table
+                break;  // first invalid multiplier — clean end of matchup data
             }
         }
-        if (!found_sentinel || valid_entries < MIN_EXPECTED_ENTRIES) {
+        if (!found_sentinel && valid_entries < MIN_EXPECTED_ENTRIES) {
             // Configured address does not look like a valid TypeMatchups table.
-            // Search for a better candidate with generous type-ID limit.
+            // Fall back to a broad structural scan.
+            // Require more entries (MIN_FALLBACK_ENTRIES) to keep false-positive rate low.
             constexpr uint8_t MAX_TYPE_ID_SEARCH = 0x3F;
             uint32_t best_candidate = 0;
             uint32_t best_count = 0;
             for (uint32_t search = 0;
-                 search + 12 <= rom_size && best_count < MIN_EXPECTED_ENTRIES;
+                 search + 12 <= rom_size && best_count < MIN_FALLBACK_ENTRIES;
                  search += 3)
             {
                 if (read_byte(search) == 0xFE || read_byte(search) == 0xFF) {
-                    // Skip to next 3-byte boundary; avoid underflow
                     if (search < 2) break;
                     search -= 2; continue;
                 }
@@ -983,12 +995,12 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
                     uint8_t d2 = read_byte(p2 + 1);
                     uint8_t m2 = read_byte(p2 + 2);
                     if (a2 > MAX_TYPE_ID_SEARCH || d2 > MAX_TYPE_ID_SEARCH) break;
-                    if (!is_valid_mult(m2)) break;
+                    if (!is_valid_mult_broad(m2)) break;
                     ++cnt; p2 += 3;
                 }
                 if (ok && cnt > best_count) { best_count = cnt; best_candidate = search; }
             }
-            if (best_count >= MIN_EXPECTED_ENTRIES && best_candidate != o.type_matchups) {
+            if (best_count >= MIN_FALLBACK_ENTRIES && best_candidate != o.type_matchups) {
                 mismatches.push_back({
                     "type_matchups_address",
                     0,  // not a count field; reuse profile_count=0 as sentinel
@@ -1001,7 +1013,7 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
                                 o.type_matchups, valid_entries, found_sentinel,
                                 best_candidate, best_count, best_candidate)
                 });
-            } else if (!found_sentinel || valid_entries < MIN_EXPECTED_ENTRIES) {
+            } else if (valid_entries < MIN_EXPECTED_ENTRIES) {
                 mismatches.push_back({
                     "type_matchups_address",
                     0, 0,

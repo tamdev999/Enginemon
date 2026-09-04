@@ -805,6 +805,452 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
         try_resolve("ScriptCommandTable", o.script_command_table, r, &diag);
     }
 
+    // --- ROM-derived layout constants ---
+    // These replace hardcoded defaults with values extracted from the compiled
+    // SM83 code in the ROM's home bank.  Fail gracefully (keep existing) if
+    // the pattern is not found.
+
+    // --- num_map_groups from MapGroupPointers table boundary ---
+    // Count consecutive valid bank-local 2-byte ptrs (each in [0x4000, 0x7FFF]).
+    // The first entry that falls outside that range terminates the table.
+    // This is exact — it uses the same criterion as Probe 2 in probe_profile_counts
+    // but applies the result rather than just flagging a mismatch.
+    // Must run before resolve_group_attr_banks() which uses num_map_groups.
+    if (o.map_group_pointers != 0) {
+        const uint32_t mgp = o.map_group_pointers;
+        uint16_t rom_group_count = 0;
+        for (uint32_t i = 0; i < 256u; ++i) {
+            uint32_t ea = mgp + i * 2u;
+            if (ea + 2u > static_cast<uint32_t>(rom.size())) break;
+            uint16_t ptr = static_cast<uint16_t>(rom.read_byte(ea))
+                         | (static_cast<uint16_t>(rom.read_byte(ea + 1u)) << 8);
+            if (ptr < 0x4000u || ptr > 0x7FFFu) break;
+            ++rom_group_count;
+        }
+        if (rom_group_count > 0 &&
+            rom_group_count != static_cast<uint16_t>(profile.counts.num_map_groups)) {
+            if (verbose) {
+                std::fprintf(stderr,
+                    "[layout] %-26s num_map_groups=%u (ROM table boundary, was %u)\n",
+                    "Counts.num_map_groups", rom_group_count, profile.counts.num_map_groups);
+            }
+            profile.counts.num_map_groups = rom_group_count;
+            ++resolved;
+        }
+    }
+    {
+        // scene_script_size (map_script_header_size)
+        uint8_t ss = resolve_scene_script_size(rom);
+        if (ss != 0 && ss != fmt.map.map_script_header_size) {
+            fmt.map.map_script_header_size = ss;
+            ++resolved;
+            if (verbose) {
+                std::fprintf(stderr, "[layout] %-26s scene_script_size=%u (ROM xref)\n",
+                             "MapFormat.scene_size", ss);
+            }
+        } else if (ss != 0 && verbose) {
+            // Already correct — no change, no increment
+        } else if (ss == 0 && verbose) {
+            std::fprintf(stderr, "[layout] %-26s NOT FOUND — using default %u\n",
+                         "MapFormat.scene_size", fmt.map.map_script_header_size);
+        }
+    }
+    {
+        // map_entry_size (MAP_LENGTH)
+        uint8_t ms = resolve_map_entry_stride(rom);
+        if (ms != 0 && ms != fmt.map.map_entry_size) {
+            fmt.map.map_entry_size = ms;
+            ++resolved;
+            if (verbose) {
+                std::fprintf(stderr, "[layout] %-26s map_entry_size=%u (ROM xref)\n",
+                             "MapFormat.entry_stride", ms);
+            }
+        } else if (ms == 0 && verbose) {
+            std::fprintf(stderr, "[layout] %-26s NOT FOUND — using default %u\n",
+                         "MapFormat.entry_stride", fmt.map.map_entry_size);
+        }
+    }
+    {
+        // coord_event_size (COORD_EVENT_SIZE)
+        uint8_t cs = resolve_coord_event_size(rom);
+        if (cs != 0 && cs != fmt.map.coord_event_size) {
+            fmt.map.coord_event_size = cs;
+            ++resolved;
+            if (verbose) {
+                std::fprintf(stderr, "[layout] %-26s coord_event_size=%u (ROM xref)\n",
+                             "MapFormat.coord_size", cs);
+            }
+        } else if (cs == 0 && verbose) {
+            std::fprintf(stderr, "[layout] %-26s NOT FOUND — using default %u\n",
+                         "MapFormat.coord_size", fmt.map.coord_event_size);
+        }
+    }
+
+    // --- Group-level MapAttributes bank resolution ---
+    // Only fires when map entries lack an explicit bank byte (Polished Crystal).
+    // Populates profile.offsets.group_attr_banks[1..num_map_groups].
+    // Must run AFTER the scene_script_size and map_entry_size resolvers above
+    // so that fmt.map.map_script_header_size and fmt.map.map_entry_size are correct.
+    if (!fmt.map.attr_bank_in_entry && fmt.map.resolve_attr_bank_by_scan) {
+        int gb = resolve_group_attr_banks(rom, profile, verbose);
+        resolved += gb;
+        if (verbose && gb == 0) {
+            std::fprintf(stderr,
+                "[layout] %-26s no groups resolved\n", "GroupAttrBanks");
+        }
+        // max_map_dimension and max_environment_value are NOT tightened here.
+        // Observed maxima are not semantic maxima: a map or environment value that
+        // exceeds the largest value seen in this ROM is not necessarily invalid.
+        // These fields remain at their profile-declared values, which represent the
+        // correct structural acceptance range for this ROM family.
+    }
+
+    return resolved;
+}
+
+// ============================================================================
+// Layout constant resolvers — home-bank SM83 xrefs
+// ============================================================================
+
+uint8_t resolve_scene_script_size(const RomData& rom) {
+    // SCENE_SCRIPT_SIZE xref: map-loading routine in home bank.
+    //
+    // The map-loading code parses the MapScriptHeader with two sequential patterns,
+    // one for scene entries (size = SCENE_SCRIPT_SIZE) and one for callbacks (size = 3).
+    // Both follow the same template: lead / ld bc,SIZE / call|rst AddNTimes.
+    //
+    // Lead bytes differ between versions:
+    //   Vanilla Crystal: C8 (ret z) 01 NN 00 CD  — ret-z guarded ld bc
+    //   Polished Crystal: 2A (ld a,[hli]) 01 NN 00 DF  — inline ld a,[hli]
+    //
+    // Vanilla  (scene=4): C8 01 04 00 CD  at home bank ~0x023BB,
+    //          callback=3 at ~0x023D2 — 23 bytes after scene pattern.
+    // Polished (scene=2): 2A 01 02 00 DF  at home bank ~0x01E9C,
+    //          callback=3 at ~0x01EA4 — 8 bytes after scene pattern (2A 01 03 00 DF).
+    //
+    // Secondary validation: 01 03 00 (ld bc,3 for CALLBACK_SIZE) must appear within
+    // 28 bytes after the scene pattern.  Window is 28 to cover vanilla's 23-byte gap.
+    const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
+                                             static_cast<uint32_t>(0x4000u));
+    for (uint32_t i = 0; i + 6u < home_bank_end; ++i) {
+        uint8_t lead = rom.read_byte(i);
+        if (lead != 0x2A && lead != 0xC8) continue;  // ld a,[hli] or ret z
+        if (rom.read_byte(i+1) != 0x01) continue;     // ld bc, nn
+        uint8_t nn = rom.read_byte(i+2);
+        if (nn < 2u || nn > 8u) continue;
+        if (rom.read_byte(i+3) != 0x00) continue;
+        uint8_t next = rom.read_byte(i+4);
+        if (next != 0xCD && next != 0xDF && next != 0xE7 && next != 0xD7) continue;
+        // Secondary: CALLBACK_SIZE=3 must appear within 28 bytes as ld bc,3 (01 03 00)
+        bool cb_found = false;
+        for (uint32_t j = i + 5u; j < i + 28u && j + 3u < home_bank_end; ++j) {
+            if (rom.read_byte(j)   == 0x01 &&
+                rom.read_byte(j+1) == 0x03 &&
+                rom.read_byte(j+2) == 0x00) { cb_found = true; break; }
+        }
+        if (!cb_found) continue;
+        return nn;
+    }
+    return 0;
+}
+
+uint8_t resolve_map_entry_stride(const RomData& rom) {
+    // MAP_LENGTH xref: GetAnyMapPointer in home bank.
+    // Source: "dec c / ld b, 0 / ld a, MAP_LENGTH / rst|call AddNTimes / ret"
+    // Pattern: 0D 06 00 3E NN [DF|E7|D7|CD]   where NN = MAP_LENGTH ∈ [5,16]
+    //   Vanilla: NN=9, Polished: NN=7
+    const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
+                                             static_cast<uint32_t>(0x4000u));
+    for (uint32_t i = 0; i + 6u < home_bank_end; ++i) {
+        if (rom.read_byte(i)   != 0x0D) continue;  // dec c
+        if (rom.read_byte(i+1) != 0x06) continue;  // ld b, n
+        if (rom.read_byte(i+2) != 0x00) continue;  //   n=0
+        if (rom.read_byte(i+3) != 0x3E) continue;  // ld a, n
+        uint8_t nn = rom.read_byte(i+4);
+        if (nn < 5u || nn > 16u) continue;
+        uint8_t next = rom.read_byte(i+5);
+        if (next != 0xDF && next != 0xE7 && next != 0xD7 && next != 0xCD) continue;
+        return nn;
+    }
+    return 0;
+}
+
+uint8_t resolve_coord_event_size(const RomData& rom) {
+    // COORD_EVENT_SIZE xref: map-events counting loop in home bank.
+    //
+    // The map-event-parsing code iterates each event type with:
+    //   ret z                       ; C8  — return if count is zero
+    //   ld bc, EVENT_SIZE           ; 01 NN 00
+    //   call|rst AddNTimes          ; CD|DF|E7|D7
+    //
+    // Vanilla Crystal (8 bytes per coord event):
+    //   → NN=8; warp=5 and bg=5 produce identical patterns with NN=5.
+    //   To isolate the coord pattern, search first for NN >= 6 (larger than warp/bg).
+    //
+    // Polished Crystal (5 bytes per coord event):
+    //   All event sizes are 5.  No NN>=6 hit exists.  Fall back to NN in [4,6]
+    //   with C8 lead, excluding the false-positive "2A 66 6F 79" prefix (which
+    //   is a different loop that uses a similar ld bc,5 sequence).
+    //
+    // Two-pass strategy guarantees exactly one correct hit per ROM:
+    //   Pass 1: C8 01 NN 00 (call|rst)  where NN ∈ [6,12]  — vanilla coord (NN=8)
+    //   Pass 2: C8 01 NN 00 (call|rst)  where NN ∈ [4,6],
+    //           NOT preceded by [2A 66 6F 79]              — Polished coord (NN=5)
+    const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
+                                             static_cast<uint32_t>(0x4000u));
+
+    // Pass 1: require NN >= 6 (unambiguous in vanilla; absent in Polished)
+    for (uint32_t i = 0; i + 5u < home_bank_end; ++i) {
+        if (rom.read_byte(i) != 0xC8) continue;         // ret z — strict lead
+        if (rom.read_byte(i+1) != 0x01) continue;       // ld bc, nn
+        uint8_t nn = rom.read_byte(i+2);
+        if (nn < 6u || nn > 12u) continue;              // coord > warp/bg size
+        if (rom.read_byte(i+3) != 0x00) continue;
+        uint8_t next = rom.read_byte(i+4);
+        if (next != 0xCD && next != 0xDF && next != 0xE7 && next != 0xD7) continue;
+        return nn;
+    }
+
+    // Pass 2: Polished fallback — C8 lead with NN in [4,6], excluding the
+    // scene/callback-loop false positive identified by the "2A 66 6F 79" prefix.
+    for (uint32_t i = 0; i + 5u < home_bank_end; ++i) {
+        if (rom.read_byte(i) != 0xC8) continue;
+        if (rom.read_byte(i+1) != 0x01) continue;
+        uint8_t nn = rom.read_byte(i+2);
+        if (nn < 4u || nn > 6u) continue;
+        if (rom.read_byte(i+3) != 0x00) continue;
+        uint8_t next = rom.read_byte(i+4);
+        if (next != 0xCD && next != 0xDF && next != 0xE7 && next != 0xD7) continue;
+        // Exclude "2A 66 6F 79" (ld a,[hli] / ld h,a / ld l,a / ld a,c) prefix —
+        // this marks the scene-skip loop, not the coord-event counting loop.
+        if (i >= 4u &&
+            rom.read_byte(i-4) == 0x2A && rom.read_byte(i-3) == 0x66 &&
+            rom.read_byte(i-2) == 0x6F && rom.read_byte(i-1) == 0x79) continue;
+        return nn;
+    }
+
+    return 0;  // not found
+}
+
+// ============================================================================
+// Group-level MapAttributes bank resolver
+// ============================================================================
+
+int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, bool verbose)
+{
+    const auto& fmt = profile.format.map;
+    const auto& o   = profile.offsets;
+    auto& c         = profile.counts;
+
+    // Only applies when the map entry has no explicit bank byte.
+    if (fmt.attr_bank_in_entry) return 0;
+
+    const uint32_t rom_size   = static_cast<uint32_t>(rom.size());
+    const uint32_t max_bank   = rom_size / 0x4000u;
+    const uint8_t  num_groups = static_cast<uint8_t>(c.num_map_groups);
+    const uint8_t  UNRESOLVED = ProfileOffsets::ATTR_BANK_UNRESOLVED;
+
+    // Derive MapScriptHeader scene_count and callback_count limits from format.
+    // scene_script_size already resolved; use it here.
+    const uint8_t  scene_entry_sz = fmt.map_script_header_size;  // 2 or 4
+    const uint8_t  cb_entry_sz    = 3;                           // CALLBACK_SIZE always 3
+
+    // Validate that MapGroupPointers is available.
+    if (o.map_group_pointers == 0) return 0;
+    const uint32_t mgp_flat     = o.map_group_pointers;
+    const uint8_t  groups_bank  = o.map_groups_bank;
+    const uint8_t  entry_stride = fmt.map_entry_size;
+
+    // Helper: compute the flat ROM address of a group's first entry.
+    // Returns 0 on invalid pointer.
+    auto group_data_flat = [&](uint8_t grp) -> uint32_t {
+        uint32_t tbl_off = mgp_flat + static_cast<uint32_t>(grp - 1u) * 2u;
+        if (tbl_off + 2u > rom_size) return 0;
+        uint16_t ptr = static_cast<uint16_t>(rom.read_byte(tbl_off))
+                     | (static_cast<uint16_t>(rom.read_byte(tbl_off + 1u)) << 8);
+        if (ptr < 0x4000u || ptr >= 0x8000u) return 0;
+        return static_cast<uint32_t>(groups_bank) * 0x4000u + (ptr - 0x4000u);
+    };
+
+    // Derive observed max tileset ID from groups whose entry count is exactly known
+    // (pointer-difference is divisible by entry_stride).  Used to tighten the
+    // sentinel scan for groups that don't have a clean pointer difference.
+    uint8_t observed_max_ts = 0;
+    for (uint8_t grp = 1u; grp <= num_groups && grp < ProfileOffsets::MAX_MAP_GROUPS; ++grp) {
+        uint32_t gflat = group_data_flat(grp);
+        if (gflat == 0) continue;
+        if (grp < num_groups) {
+            uint32_t nflat = group_data_flat(static_cast<uint8_t>(grp + 1u));
+            if (nflat == 0 || nflat <= gflat) continue;
+            uint32_t diff = nflat - gflat;
+            if (diff % entry_stride != 0) continue;  // not exact — skip for max-ts derivation
+            uint32_t ec = diff / entry_stride;
+            for (uint32_t i = 0; i < ec; ++i) {
+                uint32_t ef = gflat + i * entry_stride;
+                if (ef + entry_stride > rom_size) break;
+                uint8_t ts = rom.read_byte(ef);
+                if (ts > observed_max_ts) observed_max_ts = ts;
+            }
+        }
+    }
+    // Clamp to at least 36 (vanilla minimum) and fall back to profile count if
+    // no observed value could be derived.
+    if (observed_max_ts == 0) observed_max_ts = static_cast<uint8_t>(
+        std::min<uint32_t>(c.num_tilesets, 255u));
+    // Add a small headroom factor (×1.5) to tolerate additional tilesets in
+    // extended groups without false negatives.
+    {
+        uint8_t ts_ceil = static_cast<uint8_t>(
+            std::min<uint32_t>(static_cast<uint32_t>(observed_max_ts) * 3u / 2u + 1u, 255u));
+        observed_max_ts = ts_ceil;
+    }
+
+    // Helper: derive the exact entry count for group G from the pointer difference.
+    // group G ends where group G+1 begins; last group uses a strict sentinel scan.
+    auto group_entry_count = [&](uint8_t grp) -> uint32_t {
+        uint32_t gf = group_data_flat(grp);
+        if (gf == 0) return 0;
+        if (grp < num_groups) {
+            uint32_t next_gf = group_data_flat(static_cast<uint8_t>(grp + 1u));
+            if (next_gf > gf && (next_gf - gf) % entry_stride == 0) {
+                return (next_gf - gf) / entry_stride;
+            }
+            // Pointer difference is not divisible by stride.  Fall through to
+            // sentinel scan but use strict tileset+environment validity to
+            // avoid counting SM83 opcodes as map entries.
+        }
+        // Sentinel scan: stop at first entry whose tileset byte exceeds the
+        // observed max (with headroom) or whose environment nibble is 0 or > max_env.
+        const uint8_t max_env = fmt.max_environment_value;
+        for (uint32_t i = 0; i < 256u; ++i) {
+            uint32_t ef = gf + i * entry_stride;
+            if (ef + entry_stride > rom_size) return i;
+            uint8_t ts = rom.read_byte(ef);
+            if (ts == 0 || ts > observed_max_ts) return i;
+            // Additional env validity (only for sign_env_nibble format; vanilla
+            // uses a different byte layout and this check is not needed there
+            // since vanilla uses exact pointer differences).
+            if (fmt.sign_env_nibble) {
+                uint8_t env = rom.read_byte(ef + 1u) & 0x0Fu;
+                if (env == 0 || env > max_env) return i;
+            }
+        }
+        return 0;
+    };
+
+    // Full structural validity test for a single map entry's attr_ptr at a given bank.
+    // Returns true only when ALL nine criteria pass.
+    auto entry_valid_at_bank = [&](uint32_t ef, uint32_t b) -> bool {
+        uint32_t ptr_off = ef + fmt.attr_ptr_field_offset;
+        if (ptr_off + 2u > rom_size) return false;
+        uint16_t attr_ptr = static_cast<uint16_t>(rom.read_byte(ptr_off))
+                          | (static_cast<uint16_t>(rom.read_byte(ptr_off + 1u)) << 8);
+        if (attr_ptr < 0x4000u || attr_ptr >= 0x8000u) return false;
+        uint32_t flat = b * 0x4000u + (attr_ptr - 0x4000u);
+        if (flat + fmt.header_size > rom_size) return false;
+
+        // 1. Height / width
+        uint8_t h  = rom.read_byte(flat + fmt.height_offset);
+        uint8_t w  = rom.read_byte(flat + fmt.width_offset);
+        if (h == 0 || h > fmt.max_map_dimension || w == 0 || w > fmt.max_map_dimension) return false;
+
+        // 2. Blockdata bank / ptr
+        uint8_t  bb = rom.read_byte(flat + fmt.blockdata_bank_offset);
+        if (bb >= 128u) return false;
+        uint16_t bp = static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset))
+                    | (static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset + 1u)) << 8);
+        if (bb > 0 && (bp < 0x4000u || bp >= 0x8000u)) return false;
+
+        // 3. Script bank / ptr
+        uint8_t  sb = rom.read_byte(flat + fmt.script_bank_offset);
+        if (sb >= 128u) return false;
+        uint16_t sp = static_cast<uint16_t>(rom.read_byte(flat + fmt.script_ptr_offset))
+                    | (static_cast<uint16_t>(rom.read_byte(flat + fmt.script_ptr_offset + 1u)) << 8);
+        if (sp >= 0x8000u) return false;
+        if (sb > 0 && sp < 0x4000u) return false;
+
+        // 4. MapScriptHeader: scene_count / callback_count / warp_count
+        uint32_t sh_flat = (sp < 0x4000u)
+                         ? static_cast<uint32_t>(sp)
+                         : (static_cast<uint32_t>(sb) * 0x4000u + sp - 0x4000u);
+        if (sh_flat + 4u > rom_size) return false;
+
+        uint8_t sh_sc = rom.read_byte(sh_flat);
+        if (sh_sc > 30u) return false;
+        uint32_t sh_p = sh_flat + 1u + static_cast<uint32_t>(sh_sc) * scene_entry_sz;
+        if (sh_p + 1u > rom_size) return false;
+
+        uint8_t sh_cc = rom.read_byte(sh_p);
+        if (sh_cc > 20u) return false;
+        sh_p += 1u + static_cast<uint32_t>(sh_cc) * cb_entry_sz;
+        if (sh_p + 1u > rom_size) return false;
+
+        uint8_t sh_wc = rom.read_byte(sh_p);
+        if (sh_wc > 50u) return false;
+
+        return true;
+    };
+
+    int resolved = 0;
+
+    for (uint8_t grp = 1u; grp <= num_groups; ++grp) {
+        if (grp >= ProfileOffsets::MAX_MAP_GROUPS) break;
+        // Already resolved (e.g. by a prior run or explicit profile metadata).
+        if (profile.offsets.group_attr_banks[grp] != UNRESOLVED) {
+            ++resolved;
+            continue;
+        }
+
+        uint32_t gflat = group_data_flat(grp);
+        if (gflat == 0) continue;
+        uint32_t ec = group_entry_count(grp);
+        if (ec == 0) continue;
+
+        // Score each candidate bank: count entries that pass the full 9-point test.
+        uint8_t  best_bank  = UNRESOLVED;
+        uint32_t best_score = 0;
+        bool     tied       = false;
+
+        for (uint32_t b = 1u; b < max_bank; ++b) {
+            uint32_t score = 0;
+            for (uint32_t i = 0; i < ec; ++i) {
+                uint32_t ef = gflat + i * entry_stride;
+                if (ef + entry_stride > rom_size) break;
+                if (entry_valid_at_bank(ef, b)) ++score;
+            }
+            if (score == ec && ec > 0) {
+                // Perfect: all entries pass at this bank.
+                if (best_bank == UNRESOLVED) {
+                    best_bank  = static_cast<uint8_t>(b);
+                    best_score = score;
+                    tied       = false;
+                } else {
+                    // Two banks both score perfect for all entries.
+                    // Cannot prove uniqueness — will be treated as ambiguous below.
+                    tied = true;
+                }
+            }
+        }
+
+        if (!tied && best_bank != UNRESOLVED && best_score == ec) {
+            // Unique perfect-score bank: proven.
+            profile.offsets.group_attr_banks[grp] = best_bank;
+            ++resolved;
+            if (verbose) {
+                std::fprintf(stderr,
+                    "[layout] %-26s group %2u → bank 0x%02X (%u entries proven)\n",
+                    "GroupAttrBanks", grp, best_bank, ec);
+            }
+        } else {
+            // Ambiguous or not found: leave as UNRESOLVED so extraction fails explicitly.
+            if (verbose) {
+                std::fprintf(stderr,
+                    "[layout] %-26s group %2u NOT RESOLVED (ec=%u best=%u tied=%d)\n",
+                    "GroupAttrBanks", grp, ec, best_score, static_cast<int>(tied));
+            }
+        }
+    }
+
     return resolved;
 }
 
