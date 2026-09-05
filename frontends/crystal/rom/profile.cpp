@@ -522,8 +522,9 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     fmt.map.coord_event_size       = 5;   // Polished: 5 bytes (vanilla was 8, ROM-derivable)
     fmt.map.bg_event_size          = 5;
     fmt.map.object_event_size      = 13;
-    fmt.map.max_environment_value  = 8;   // Polished adds ISOLATED=3, max env = DUNGEON=8
-    fmt.map.max_map_dimension      = 200; // Polished has large outdoor maps (up to ~50x50)
+    fmt.map.max_environment_value  = 7;   // E6 07 mask proven in environment dispatch xref
+                                           // (ROM-derivable; resolve_crystal_layout() fills this)
+    // max_map_dimension removed — dimensions validated by h*w <= 0x8000-blockdata_ptr
 
     // ── Pokémon data format ───────────────────────────────────────────────────
     // Same as vanilla Crystal (32-byte BaseData records).

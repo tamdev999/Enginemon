@@ -162,19 +162,45 @@ struct MapFormatRules {
 
     // max_environment_value: largest valid environment byte in a map group entry.
     // Vanilla Crystal: 7 (TOWN=1..DUNGEON=7, from map_data_constants.asm NUM_ENVIRONMENTS)
-    // Polished Crystal: 8 (adds ISOLATED=3, shifting INDOOR/GATE/CAVE/DUNGEON up by 1)
-    // This is a profile field rather than a ROM-derivable constant because the
-    // EnvironmentColorsPointers table uses different encoding (dw vs dr) across versions,
-    // making generic counting unreliable.
+    // Polished Crystal: 7 (same effective domain — E6 07 mask in all environment consumers)
+    //
+    // This value IS ROM-derivable from the environment dispatch routines in the home bank.
+    // resolve_crystal_layout() fills it via resolve_environment_domain():
+    //   XREF: CD ?? ?? C0 FA ?? ?? E6 NN FE — the NN operand is the mask = max value.
+    // Both vanilla and Polished Crystal use NN=0x07, giving domain [0,7].
+    //
+    // Do NOT set this to 8 for Polished Crystal; env=8 wraps to 0 at runtime (AND $07)
+    // and is therefore semantically out-of-range.  The profile default of 7 is correct
+    // for vanilla compilation even before the resolver runs.
     uint8_t max_environment_value = 7;
 
-    // max_map_dimension: largest valid single map dimension (width or height, in blocks).
-    // Used as a structural plausibility guard when scanning ROM banks for MapAttributes.
-    // Vanilla Crystal: actual maximum is 54×40 (large outdoor routes); 128 is conservative
-    //   and covers all known vanilla maps with headroom.
-    // Polished Crystal: outdoor maps can be ~50×50+; set to 200 in profile.
-    // This is not a ROM-derivable constant — no single ROM value encodes "max map size".
-    uint8_t max_map_dimension = 128;
+    // block_data_encoding: how map block data is stored in ROM and must be extracted.
+    //
+    //   RawBytes:     block data is `h*w` raw metatile-index bytes read directly from
+    //                 `blockdata_bank:blockdata_ptr`.  Used by Gold, Silver, Crystal.
+    //
+    //   LZCompressed: block data is an LZ3-compressed stream starting at
+    //                 `blockdata_bank:blockdata_ptr`.  The stream decompresses to
+    //                 exactly `h*w` bytes.  Used by Polished Crystal 3.2.3.
+    //
+    //   Unknown:      resolver could not determine encoding — fail closed.
+    //
+    // This field IS ROM-derivable via resolve_block_data_encoding(), which classifies
+    // the home-bank ChangeMap routine.  The default is RawBytes (correct for all
+    // stock Gen2 ROMs) so vanilla compilation works without the resolver running.
+    enum class BlockDataEncoding : uint8_t {
+        RawBytes      = 0,  // Direct h*w byte read from ROM (Gold/Silver/Crystal)
+        LZCompressed  = 1,  // LZ3-compressed stream → decompressed h*w bytes (Polished)
+        Unknown       = 2,  // Resolver found no matching pattern — extraction must fail
+    };
+    BlockDataEncoding block_data_encoding = BlockDataEncoding::RawBytes;
+
+    // max_map_dimension has been removed.
+    // Map dimensions are validated by h > 0 && w > 0 only.
+    // No per-axis maximum and no h*w bank-window bound is applied:
+    // block data may legitimately cross bank boundaries in some Crystal-family ROMs
+    // (confirmed in Polished Crystal 3.2.3), making both bounds structurally incorrect
+    // as universal rules.  The zero-dimension check is the only universally valid bound.
 };
 
 // Pokemon data format rules

@@ -892,17 +892,88 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
     // Must run AFTER the scene_script_size and map_entry_size resolvers above
     // so that fmt.map.map_script_header_size and fmt.map.map_entry_size are correct.
     if (!fmt.map.attr_bank_in_entry && fmt.map.resolve_attr_bank_by_scan) {
+
+        // --- MapAttributes bank: prefer direct ROM-code proof over group scan ---
+        // resolve_map_attr_bank() finds the "3E NN CF C9" literal in the home bank
+        // GetMapAttrBank routine.  When this gives a unique proven bank, pre-fill
+        // every group_attr_banks slot with that bank so that resolve_group_attr_banks()
+        // can skip the per-bank structural scoring for groups it trusts.
+        // The group-level scanner still runs as a validation/fallback: groups whose
+        // attr_ptr does NOT resolve at the claimed bank will stay UNRESOLVED.
+        {
+            uint8_t proven_bank = resolve_map_attr_bank(rom);
+            if (proven_bank != 0xFF) {
+                const uint8_t num_grps = static_cast<uint8_t>(profile.counts.num_map_groups);
+                for (uint8_t grp = 1u; grp <= num_grps && grp < ProfileOffsets::MAX_MAP_GROUPS; ++grp) {
+                    if (profile.offsets.group_attr_banks[grp] == ProfileOffsets::ATTR_BANK_UNRESOLVED)
+                        profile.offsets.group_attr_banks[grp] = proven_bank;
+                }
+                ++resolved;
+                if (verbose) {
+                    std::fprintf(stderr,
+                        "[layout] %-26s attr_bank=0x%02X (GetMapAttrBank literal)\n",
+                        "MapFormat.attr_bank", proven_bank);
+                }
+            }
+        }
+
         int gb = resolve_group_attr_banks(rom, profile, verbose);
         resolved += gb;
         if (verbose && gb == 0) {
             std::fprintf(stderr,
                 "[layout] %-26s no groups resolved\n", "GroupAttrBanks");
         }
-        // max_map_dimension and max_environment_value are NOT tightened here.
-        // Observed maxima are not semantic maxima: a map or environment value that
-        // exceeds the largest value seen in this ROM is not necessarily invalid.
-        // These fields remain at their profile-declared values, which represent the
-        // correct structural acceptance range for this ROM family.
+        // max_map_dimension has been removed. Map dimensions are validated by h>0 && w>0 only.
+        // No h*w bank-window bound is applied — some Crystal-family ROMs (e.g. Polished Crystal)
+        // have block data that crosses bank boundaries, making that bound structurally incorrect.
+    }
+
+    // --- Environment domain maximum ---
+    // resolve_environment_domain() extracts the AND mask (E6 NN) from the home-bank
+    // environment dispatch routines.  The mask is the authoritative domain bound:
+    // values above NN silently wrap at runtime and are therefore out-of-range.
+    // Applies to both vanilla and Polished Crystal (NN=7 in all known ROMs).
+    // Only updates when the resolved value is non-zero and differs from the current setting
+    // (avoids overwriting a stricter already-set value).
+    {
+        uint8_t env_max = resolve_environment_domain(rom);
+        if (env_max != 0 && env_max != fmt.map.max_environment_value) {
+            fmt.map.max_environment_value = env_max;
+            ++resolved;
+            if (verbose) {
+                std::fprintf(stderr,
+                    "[layout] %-26s max_env=%u (E6 mask xref)\n",
+                    "MapFormat.env_domain", env_max);
+            }
+        } else if (env_max == 0 && verbose) {
+            std::fprintf(stderr,
+                "[layout] %-26s NOT FOUND — using default %u\n",
+                "MapFormat.env_domain", fmt.map.max_environment_value);
+        }
+    }
+
+    // --- Block-data encoding mode ---
+    // resolve_block_data_encoding() classifies the home-bank ChangeMap routine
+    // as RawBytes (Gold/Silver/Crystal) or LZCompressed (Polished Crystal).
+    // Applies unconditionally; overrides the profile default only when the
+    // resolver finds an unambiguous match.
+    {
+        using Enc = MapFormatRules::BlockDataEncoding;
+        Enc enc = resolve_block_data_encoding(rom);
+        if (enc != Enc::Unknown && enc != fmt.map.block_data_encoding) {
+            fmt.map.block_data_encoding = enc;
+            ++resolved;
+            if (verbose) {
+                const char* name = (enc == Enc::RawBytes) ? "RawBytes" : "LZCompressed";
+                std::fprintf(stderr,
+                    "[layout] %-26s block_encoding=%s (ChangeMap xref)\n",
+                    "MapFormat.block_encoding", name);
+            }
+        } else if (enc == Enc::Unknown && verbose) {
+            std::fprintf(stderr,
+                "[layout] %-26s NOT FOUND — using default RawBytes\n",
+                "MapFormat.block_encoding");
+        }
     }
 
     return resolved;
@@ -1033,6 +1104,199 @@ uint8_t resolve_coord_event_size(const RomData& rom) {
 }
 
 // ============================================================================
+// ============================================================================
+// resolve_environment_domain
+// ============================================================================
+
+uint8_t resolve_environment_domain(const RomData& rom) {
+    // Environment dispatch XREF in home bank.
+    //
+    // Crystal-family map loaders contain exactly four consecutive environment-direction
+    // dispatch routines, one per map connection direction (N/S/E/W).  Each has the
+    // identical structure:
+    //
+    //   call SomePrepRoutine ; CD lo hi   (same call target across all four)
+    //   ret nz               ; C0
+    //   ld a, [wCurEnvDir_N] ; FA lo hi   (one of four env-direction WRAM vars)
+    //   and ENV_MASK         ; E6 NN      ← NN is the authoritative domain maximum
+    //   cp ENV_CONST_N       ; FE zz
+    //   ...
+    //
+    // ENV_MASK (NN) is the operand of AND — values above NN wrap modularly at runtime,
+    // so they are outside the valid domain.  For all known Crystal-family ROMs NN = 0x07,
+    // giving the effective domain [0, 7] (map entry env bytes 1–7 are the valid range).
+    //
+    // Pattern: CD ?? ?? C0 FA ?? ?? E6 NN FE
+    //   - home bank only (always-mapped bank)
+    //   - at least 2 consecutive occurrences with the same NN
+    //   - NN in [3, 15] (plausibility bounds: min 3 environments, max 1 nibble)
+    //
+    // Returns NN if exactly one consistent mask value is found across all occurrences.
+    // Returns 0 if pattern not found or mask values differ across occurrences (ambiguous).
+    const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
+                                             static_cast<uint32_t>(0x4000u));
+    uint8_t found_mask  = 0;
+    uint32_t hit_count  = 0;
+
+    for (uint32_t i = 0; i + 10u < home_bank_end; ++i) {
+        if (rom.read_byte(i)    != 0xCD) continue;  // call
+        if (rom.read_byte(i+3)  != 0xC0) continue;  // ret nz
+        if (rom.read_byte(i+4)  != 0xFA) continue;  // ld a, [nn]
+        if (rom.read_byte(i+7)  != 0xE6) continue;  // and n
+        if (rom.read_byte(i+9)  != 0xFE) continue;  // cp n (must follow immediately)
+        uint8_t mask = rom.read_byte(i+8);
+        if (mask < 3u || mask > 15u) continue;      // plausibility: [3,15]
+        if (found_mask == 0) {
+            found_mask = mask;
+            hit_count  = 1;
+        } else if (mask == found_mask) {
+            ++hit_count;
+        } else {
+            // Different mask values — ambiguous, cannot prove domain.
+            return 0;
+        }
+    }
+
+    // Require at least 2 occurrences (there are always 4, but 2 is sufficient proof)
+    if (hit_count < 2u) return 0;
+    return found_mask;
+}
+
+// ============================================================================
+// resolve_block_data_encoding
+// ============================================================================
+
+MapFormatRules::BlockDataEncoding resolve_block_data_encoding(const RomData& rom) {
+    // Scan home bank (always-mapped 0x0000–0x3FFF) for one of two mutually
+    // exclusive patterns that identify the ChangeMap block-data loader mode.
+    //
+    // Both patterns require three WRAM reads at consecutive addresses (hi byte
+    // the same, lo bytes sequential: W, W+1, W+2) with hi ∈ [0xC0, 0xDF].
+    //
+    // Pattern RawBytes:
+    //   FA W D7  FA W+1 5F  FA W+2 57
+    //   ld a,[blockBank] / rst Bankswitch / ld a,[ptrLo]/ld e,a / ld a,[ptrHi]/ld d,a
+    //   → bank switch immediately; raw byte copy loop follows.
+    //
+    // Pattern LZCompressed:
+    //   FA W 47  21 W+1  2A 66 6F
+    //   ld a,[blockBank] / ld b,a / ld hl,[blockPtr] / read 2-byte ptr into HL
+    //   → bank stored in B (FarDecompressInB convention); decompressor call follows.
+    //
+    // Rules:
+    //   - Exactly one pattern, exactly one match → authoritative classification.
+    //   - Both patterns match or multiple matches of same → Unknown (ambiguous).
+    //   - Neither matches → Unknown (not found).
+
+    const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
+                                             static_cast<uint32_t>(0x4000u));
+    uint32_t raw_hits = 0;
+    uint32_t lzp_hits = 0;
+
+    for (uint32_t i = 0; i + 12u < home_bank_end; ++i) {
+        // Both patterns start: FA lo hi (ld a,[WRAM])
+        if (rom.read_byte(i) != 0xFA) continue;
+        uint8_t lo = rom.read_byte(i + 1u);
+        uint8_t hi = rom.read_byte(i + 2u);
+        // hi must be a valid WRAM page [0xC0, 0xDF]
+        if (hi < 0xC0u || hi > 0xDFu) continue;
+
+        // --- Pattern RawBytes: FA lo hi D7  FA lo+1 hi 5F  FA lo+2 hi 57 ---
+        if (rom.read_byte(i + 3u) == 0xD7u &&          // rst Bankswitch
+            rom.read_byte(i + 4u) == 0xFAu &&
+            rom.read_byte(i + 5u) == static_cast<uint8_t>(lo + 1u) &&
+            rom.read_byte(i + 6u) == hi &&
+            rom.read_byte(i + 7u) == 0x5Fu &&          // ld e,a
+            rom.read_byte(i + 8u) == 0xFAu &&
+            rom.read_byte(i + 9u) == static_cast<uint8_t>(lo + 2u) &&
+            rom.read_byte(i + 10u) == hi &&
+            rom.read_byte(i + 11u) == 0x57u) {         // ld d,a
+            ++raw_hits;
+            if (raw_hits > 1u) return MapFormatRules::BlockDataEncoding::Unknown;
+            continue;
+        }
+
+        // --- Pattern LZCompressed: FA lo hi 47  21 lo+1 hi  2A 66 6F ---
+        if (i + 10u < home_bank_end &&
+            rom.read_byte(i + 3u) == 0x47u &&          // ld b,a
+            rom.read_byte(i + 4u) == 0x21u &&          // ld hl, nn
+            rom.read_byte(i + 5u) == static_cast<uint8_t>(lo + 1u) &&
+            rom.read_byte(i + 6u) == hi &&
+            rom.read_byte(i + 7u) == 0x2Au &&          // ld a,[hl+]
+            rom.read_byte(i + 8u) == 0x66u &&          // ld h,a
+            rom.read_byte(i + 9u) == 0x6Fu) {          // ld l,a
+            ++lzp_hits;
+            if (lzp_hits > 1u) return MapFormatRules::BlockDataEncoding::Unknown;
+        }
+    }
+
+    // Exactly one pattern, one match → authoritative.
+    if (raw_hits == 1u && lzp_hits == 0u)
+        return MapFormatRules::BlockDataEncoding::RawBytes;
+    if (lzp_hits == 1u && raw_hits == 0u)
+        return MapFormatRules::BlockDataEncoding::LZCompressed;
+
+    // Both matched, or neither → Unknown.
+    return MapFormatRules::BlockDataEncoding::Unknown;
+}
+
+// ============================================================================
+// resolve_map_attr_bank
+// ============================================================================
+
+uint8_t resolve_map_attr_bank(const RomData& rom) {
+    // GetMapAttrBank XREF in home bank.
+    //
+    // For ROMs that omit the attr_bank byte from each map group entry (Polished Crystal),
+    // a dedicated home-bank routine selects the MapAttributes bank unconditionally.
+    // The routine has a fixed structure:
+    //
+    //   ld a, [wCurMap]       ; FA lo hi
+    //   ld b, a               ; 47
+    //   ld a, [wCurMapGroup]  ; FA lo hi
+    //   ld c, a               ; 4F
+    //   ld a, ATTR_BANK       ; 3E NN   ← hardcoded bank literal
+    //   rst BankedCall        ; CF
+    //   ret                   ; C9
+    //
+    // The literal NN in "3E NN" is the MapAttributes bank used for ALL groups.
+    //
+    // Pattern: FA ?? ?? 47 FA ?? ?? 4F 3E NN CF C9
+    //   - home bank only
+    //   - exactly one occurrence required (ambiguous if multiple)
+    //   - NN in [1, 127] (valid ROM bank)
+    //
+    // Returns NN on unique match, or 0xFF if not found / ambiguous.
+    const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
+                                             static_cast<uint32_t>(0x4000u));
+    uint8_t found_bank = 0xFF;
+    uint32_t hit_count = 0;
+
+    for (uint32_t i = 0; i + 12u < home_bank_end; ++i) {
+        if (rom.read_byte(i)    != 0xFA) continue;  // ld a, [nn]
+        if (rom.read_byte(i+3)  != 0x47) continue;  // ld b, a
+        if (rom.read_byte(i+4)  != 0xFA) continue;  // ld a, [nn]
+        if (rom.read_byte(i+7)  != 0x4F) continue;  // ld c, a
+        if (rom.read_byte(i+8)  != 0x3E) continue;  // ld a, n
+        if (rom.read_byte(i+10) != 0xCF) continue;  // rst $08 (BankedCall)
+        if (rom.read_byte(i+11) != 0xC9) continue;  // ret
+        uint8_t bank = rom.read_byte(i+9);
+        if (bank < 1u || bank >= 128u) continue;     // must be valid ROM bank
+        if (found_bank == 0xFF) {
+            found_bank = bank;
+            hit_count  = 1;
+        } else if (bank == found_bank) {
+            ++hit_count;  // same bank repeated — still unique
+        } else {
+            return 0xFF;  // different banks — ambiguous
+        }
+    }
+
+    if (hit_count == 0) return 0xFF;
+    return found_bank;
+}
+
+// ============================================================================
 // Group-level MapAttributes bank resolver
 // ============================================================================
 
@@ -1149,10 +1413,10 @@ int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, boo
         uint32_t flat = b * 0x4000u + (attr_ptr - 0x4000u);
         if (flat + fmt.header_size > rom_size) return false;
 
-        // 1. Height / width
+        // 1. Height / width — zero dimensions are always invalid.
         uint8_t h  = rom.read_byte(flat + fmt.height_offset);
         uint8_t w  = rom.read_byte(flat + fmt.width_offset);
-        if (h == 0 || h > fmt.max_map_dimension || w == 0 || w > fmt.max_map_dimension) return false;
+        if (h == 0 || w == 0) return false;
 
         // 2. Blockdata bank / ptr
         uint8_t  bb = rom.read_byte(flat + fmt.blockdata_bank_offset);
@@ -1160,6 +1424,8 @@ int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, boo
         uint16_t bp = static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset))
                     | (static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset + 1u)) << 8);
         if (bb > 0 && (bp < 0x4000u || bp >= 0x8000u)) return false;
+        // Note: no h*w <= 0x8000-bp check — Polished Crystal has maps whose block data
+        // legitimately crosses bank boundaries (8 maps in 3.2.3).
 
         // 3. Script bank / ptr
         uint8_t  sb = rom.read_byte(flat + fmt.script_bank_offset);

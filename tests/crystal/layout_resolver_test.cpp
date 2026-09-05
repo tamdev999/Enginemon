@@ -841,6 +841,149 @@ TEST(resolver_vanilla_rom_no_churn) {
 }
 
 // ============================================================================
+// TEST 14–20: Block-data encoding resolver tests
+// ============================================================================
+
+// Helper: write Pattern V (RawBytes) into a synthetic 16 KB home bank.
+// lo/hi: WRAM address bytes; pos: byte offset in home bank to write pattern.
+static void write_raw_pattern(std::vector<uint8_t>& rom, uint32_t pos,
+                               uint8_t lo, uint8_t hi) {
+    // FA lo hi D7  FA lo+1 hi 5F  FA lo+2 hi 57
+    rom[pos+0]=0xFA; rom[pos+1]=lo;    rom[pos+2]=hi;
+    rom[pos+3]=0xD7;
+    rom[pos+4]=0xFA; rom[pos+5]=lo+1;  rom[pos+6]=hi;
+    rom[pos+7]=0x5F;
+    rom[pos+8]=0xFA; rom[pos+9]=lo+2;  rom[pos+10]=hi;
+    rom[pos+11]=0x57;
+}
+
+// Helper: write Pattern P (LZCompressed) into a synthetic home bank.
+static void write_lzp_pattern(std::vector<uint8_t>& rom, uint32_t pos,
+                               uint8_t lo, uint8_t hi) {
+    // FA lo hi 47  21 lo+1 hi  2A 66 6F
+    rom[pos+0]=0xFA; rom[pos+1]=lo;    rom[pos+2]=hi;
+    rom[pos+3]=0x47;
+    rom[pos+4]=0x21; rom[pos+5]=lo+1;  rom[pos+6]=hi;
+    rom[pos+7]=0x2A; rom[pos+8]=0x66;  rom[pos+9]=0x6F;
+}
+
+using Enc = crystal::MapFormatRules::BlockDataEncoding;
+
+// Make a blank 2 MB ROM (128 banks, home bank all zeros).
+static std::vector<uint8_t> make_blank_rom() {
+    return std::vector<uint8_t>(0x200000, 0x00);
+}
+
+TEST(block_encoding_raw_pattern_detected) {
+    auto buf = make_blank_rom();
+    write_raw_pattern(buf, 0x1000, 0xA0, 0xD0);  // hi=0xD0 in [0xC0,0xDF]
+    auto p = write_temp_rom(buf);
+    auto rom = load_temp(p);
+    ASSERT_TRUE(rom != nullptr);
+    Enc enc = crystal::resolve_block_data_encoding(*rom);
+    ASSERT_EQ(enc, Enc::RawBytes);
+}
+
+TEST(block_encoding_lzp_pattern_detected) {
+    auto buf = make_blank_rom();
+    write_lzp_pattern(buf, 0x1000, 0xB0, 0xD1);  // hi=0xD1 in [0xC0,0xDF]
+    auto p = write_temp_rom(buf);
+    auto rom = load_temp(p);
+    ASSERT_TRUE(rom != nullptr);
+    Enc enc = crystal::resolve_block_data_encoding(*rom);
+    ASSERT_EQ(enc, Enc::LZCompressed);
+}
+
+TEST(block_encoding_neither_is_unknown) {
+    // Empty home bank — no pattern → Unknown.
+    auto buf = make_blank_rom();
+    auto p = write_temp_rom(buf);
+    auto rom = load_temp(p);
+    ASSERT_TRUE(rom != nullptr);
+    Enc enc = crystal::resolve_block_data_encoding(*rom);
+    ASSERT_EQ(enc, Enc::Unknown);
+}
+
+TEST(block_encoding_ambiguous_both_patterns_is_unknown) {
+    // Both Pattern V and Pattern P present → ambiguous → Unknown.
+    auto buf = make_blank_rom();
+    write_raw_pattern(buf, 0x0800, 0xA0, 0xD0);
+    write_lzp_pattern(buf, 0x1000, 0xB0, 0xD1);
+    auto p = write_temp_rom(buf);
+    auto rom = load_temp(p);
+    ASSERT_TRUE(rom != nullptr);
+    Enc enc = crystal::resolve_block_data_encoding(*rom);
+    ASSERT_EQ(enc, Enc::Unknown);
+}
+
+TEST(block_encoding_multiple_raw_patterns_is_unknown) {
+    // Two Pattern V hits at different WRAM addresses → ambiguous → Unknown.
+    auto buf = make_blank_rom();
+    write_raw_pattern(buf, 0x0800, 0xA0, 0xD0);
+    write_raw_pattern(buf, 0x1000, 0xB0, 0xD1);
+    auto p = write_temp_rom(buf);
+    auto rom = load_temp(p);
+    ASSERT_TRUE(rom != nullptr);
+    Enc enc = crystal::resolve_block_data_encoding(*rom);
+    ASSERT_EQ(enc, Enc::Unknown);
+}
+
+TEST(block_encoding_hi_out_of_wram_range_not_matched) {
+    // hi = 0xBF (below [0xC0,0xDF]) → pattern invalid → Unknown.
+    auto buf = make_blank_rom();
+    // Write pattern with hi=0xBF (just below the valid WRAM range)
+    uint32_t pos = 0x1000;
+    buf[pos+0]=0xFA; buf[pos+1]=0xA0; buf[pos+2]=0xBF;
+    buf[pos+3]=0xD7;
+    buf[pos+4]=0xFA; buf[pos+5]=0xA1; buf[pos+6]=0xBF;
+    buf[pos+7]=0x5F;
+    buf[pos+8]=0xFA; buf[pos+9]=0xA2; buf[pos+10]=0xBF;
+    buf[pos+11]=0x57;
+    auto p = write_temp_rom(buf);
+    auto rom = load_temp(p);
+    ASSERT_TRUE(rom != nullptr);
+    Enc enc = crystal::resolve_block_data_encoding(*rom);
+    ASSERT_EQ(enc, Enc::Unknown);  // hi=0xBF not in [0xC0,0xDF]
+}
+
+// ROM-backed tests: Gold, Silver, Crystal → RawBytes; Polished → LZCompressed.
+// These require the multi-ROM environment.
+TEST(block_encoding_real_roms_classification) {
+    struct RomSpec { const char* env_var; Enc expected; const char* label; };
+    const RomSpec specs[] = {
+        { "ENGINEMON_GOLD_ROM",     Enc::RawBytes,     "Gold"     },
+        { "ENGINEMON_SILVER_ROM",   Enc::RawBytes,     "Silver"   },
+        { "ENGINEMON_TEST_ROM",     Enc::RawBytes,     "Crystal"  },
+        { "ENGINEMON_POLISHED_ROM", Enc::LZCompressed, "Polished" },
+    };
+    bool any_ran = false;
+    for (const auto& spec : specs) {
+        const char* path_env = std::getenv(spec.env_var);
+        if (!path_env) continue;
+        auto rom = crystal::RomData::load(std::filesystem::path(path_env));
+        if (!rom) continue;
+        any_ran = true;
+        Enc enc = crystal::resolve_block_data_encoding(*rom);
+        if (enc != spec.expected) {
+            std::fprintf(stderr, "  FAIL: %s expected %s got %s\n",
+                spec.label,
+                spec.expected == Enc::RawBytes ? "RawBytes" : "LZCompressed",
+                enc == Enc::RawBytes ? "RawBytes" :
+                enc == Enc::LZCompressed ? "LZCompressed" : "Unknown");
+            g_current_failed = true;
+        } else {
+            std::cout << "\n    [" << spec.label << ": "
+                      << (enc == Enc::RawBytes ? "RawBytes" : "LZCompressed") << " ✓]";
+        }
+    }
+    if (!any_ran) {
+        std::cout << "\n    [SKIP: no ROM env vars set]";
+    } else {
+        std::cout << "\n";
+    }
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -883,6 +1026,15 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\n--- ROM-backed tests (require ENGINEMON_TEST_ROM) ---\n";
     RUN_TEST(resolver_vanilla_rom_no_churn);
+
+    std::cout << "\n--- Block-data encoding resolver ---\n";
+    RUN_TEST(block_encoding_raw_pattern_detected);
+    RUN_TEST(block_encoding_lzp_pattern_detected);
+    RUN_TEST(block_encoding_neither_is_unknown);
+    RUN_TEST(block_encoding_ambiguous_both_patterns_is_unknown);
+    RUN_TEST(block_encoding_multiple_raw_patterns_is_unknown);
+    RUN_TEST(block_encoding_hi_out_of_wram_range_not_matched);
+    RUN_TEST(block_encoding_real_roms_classification);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

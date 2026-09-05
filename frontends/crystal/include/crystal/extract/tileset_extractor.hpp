@@ -193,6 +193,18 @@ struct TilesetExtractionResult {
 
 //=============================================================================
 // EXTRACTOR
+// Decompress Crystal-family LZ3 data from a flat ROM address into `out`.
+//
+// Format: base LZ3 commands 0–7 (DATA, REPEAT, ALTERNATE, ZERO, COPY, FLIP, REVERSE,
+// LONG) terminated by 0xFF.  This is the same format used for all compressed assets
+// in Crystal-family ROMs (tileset graphics, map block data in Polished Crystal, etc.)
+//
+// Returns true on clean LZ_END termination with non-empty output.
+// Returns false on any error (truncated stream, invalid back-reference, ROM overrun,
+// output exceeds safety limit) — fail-closed, never returns partial data.
+bool decompress_lz_crystal(const RomData& rom, uint32_t addr,
+                            std::vector<uint8_t>& out);
+
 //=============================================================================
 
 class TilesetExtractor {

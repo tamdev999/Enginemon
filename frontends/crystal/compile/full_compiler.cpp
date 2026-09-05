@@ -2082,16 +2082,19 @@ std::vector<MapIdRef> discover_reachable_maps(
         
         const auto& map = map_result.map;
         
-        // A reachable map with degenerate dimensions is structurally wrong —
-        // extract_map() already validates dimensions and returns failure for
-        // 0×0 or oversized maps, so reaching here means the extractor validated
-        // them and the BFS accepted them.
+        // A reachable map with degenerate dimensions or a block vector that does
+        // not match width*height is structurally wrong.  extract_map() enforces
+        // out.size() == expected in read_block_data, so a mismatch here means the
+        // extractor and the compiler disagree about what a valid map looks like.
+        const size_t expected_blocks = static_cast<size_t>(map.width) * map.height;
         if (map.width == 0 || map.height == 0 ||
-            map.width > fmt.max_map_dimension || map.height > fmt.max_map_dimension) {
+            map.blocks.size() != expected_blocks) {
             throw std::runtime_error(
                 std::format("discover_reachable_maps: reachable map ({},{}) has invalid "
-                            "dimensions {}x{} — extraction inconsistency",
-                            ref.group, ref.map, map.width, map.height));
+                            "dimensions {}x{} or block count {} (expected {}) — "
+                            "extraction inconsistency",
+                            ref.group, ref.map, map.width, map.height,
+                            map.blocks.size(), expected_blocks));
         }
         
         // Record discovered map

@@ -8,6 +8,7 @@
 
 #include "crystal/extract/map_extractor.hpp"
 #include "crystal/extract/sprite_ids.hpp"
+#include "crystal/extract/tileset_extractor.hpp"
 #include <format>
 #include <algorithm>
 #include <cctype>
@@ -38,15 +39,52 @@ bool MapExtractor::read_map_header(uint32_t addr, std::vector<uint8_t>& out) con
 
 bool MapExtractor::read_block_data(uint8_t bank, uint16_t addr, uint8_t w, uint8_t h,
                                    std::vector<uint8_t>& out) const {
-    uint32_t flat = rom_.bank_to_flat(bank, addr);
-    size_t size = static_cast<size_t>(w) * h;
-    
-    if (flat + size > rom_.size()) {
+    const size_t expected = static_cast<size_t>(w) * h;
+    using Enc = MapFormatRules::BlockDataEncoding;
+    const Enc enc = profile_.format.map.block_data_encoding;
+
+    // Unknown encoding: the resolver could not determine how block data is stored.
+    // This is a hard failure — falling through to RawBytes would silently misinterpret
+    // compressed data as raw bytes, producing garbage block indices.
+    if (enc == Enc::Unknown) {
         stats_.bounds_check_failures++;
         return false;
     }
-    
-    auto span = rom_.read_bytes(flat, size);
+
+    if (enc == Enc::LZCompressed) {
+        // Decompress LZ3-compressed block data.
+        // The stream starts at blockdata_bank:blockdata_ptr (flat ROM address).
+        // Output must be exactly h*w bytes after decompression.
+        uint32_t flat = rom_.bank_to_flat(bank, addr);
+        if (flat >= rom_.size()) {
+            stats_.bounds_check_failures++;
+            return false;  // pointer out of ROM
+        }
+        out.clear();
+        if (!decompress_lz_crystal(rom_, flat, out)) {
+            stats_.bounds_check_failures++;
+            return false;  // decompression failed or malformed stream
+        }
+        // Decompressed output must be exactly h*w bytes.
+        // Partial output (e.g. from a pre-buffer negative back-reference that the
+        // decompressor correctly rejects) is not acceptable — the map would have
+        // fewer blocks than its declared dimensions, which is a hard extraction
+        // failure, not a recoverable condition.
+        if (out.size() != expected) {
+            stats_.bounds_check_failures++;
+            return false;
+        }
+        return true;
+    }
+
+    // RawBytes: flat ROM read of exactly h*w bytes.
+    uint32_t flat = rom_.bank_to_flat(bank, addr);
+    if (flat + expected > rom_.size()) {
+        stats_.bounds_check_failures++;
+        return false;
+    }
+
+    auto span = rom_.read_bytes(flat, expected);
     out.assign(span.begin(), span.end());
     return true;
 }
@@ -443,14 +481,16 @@ bool MapExtractor::read_map_group_entry(uint8_t group, uint8_t index, MapGroupEn
         if (out.attr_ptr < 0x4000 || out.attr_ptr >= 0x8000) return false;
     }
 
-    // Final validation: probe the resolved MapAttributes header
+    // Final validation: probe the resolved MapAttributes header.
+    // Only zero dimensions are universally invalid — non-zero h/w is the sole structural
+    // requirement here (block data size is validated later by the extractor).
     uint32_t header_addr = rom_.bank_to_flat(out.attr_bank, out.attr_ptr);
     if (header_addr + fmt.header_size > rom_.size()) {
         return false;
     }
     uint8_t height = rom_.read_byte(header_addr + fmt.height_offset);
     uint8_t width  = rom_.read_byte(header_addr + fmt.width_offset);
-    if (height == 0 || height > fmt.max_map_dimension || width == 0 || width > fmt.max_map_dimension) {
+    if (height == 0 || width == 0) {
         return false;
     }
     
@@ -971,19 +1011,20 @@ MapExtractionResult MapExtractor::extract_map(uint8_t group, uint8_t index) cons
     map.border_block = header[fmt.border_block_offset];
     map.height = header[fmt.height_offset];
     map.width = header[fmt.width_offset];
-    
-    // Validate dimensions using profile-gated max (default 128, Polished overrides to 200)
-    if (map.width == 0 || map.height == 0 ||
-        map.width > fmt.max_map_dimension || map.height > fmt.max_map_dimension) {
-        result.error = std::format("Invalid dimensions: {}x{}", map.width, map.height);
-        stats_.maps_failed++;
-        return result;
-    }
-    
+
     // Block data pointer
     uint8_t block_bank = header[fmt.blockdata_bank_offset];
     uint16_t block_ptr = static_cast<uint16_t>(header[fmt.blockdata_ptr_offset])
                        | (static_cast<uint16_t>(header[fmt.blockdata_ptr_offset + 1]) << 8);
+
+    // Zero dimensions are always invalid.
+    // No per-axis maximum is applied — block data may legitimately cross bank
+    // boundaries in some Crystal-family ROMs (e.g. Polished Crystal 3.2.3).
+    if (map.width == 0 || map.height == 0) {
+        result.error = std::format("Invalid dimensions: {}x{}", map.width, map.height);
+        stats_.maps_failed++;
+        return result;
+    }
     
     // Script/MapScriptHeader pointer (also determines bank for events in vanilla)
     uint8_t script_bank = header[fmt.script_bank_offset];

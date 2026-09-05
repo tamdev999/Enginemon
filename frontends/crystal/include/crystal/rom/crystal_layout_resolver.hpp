@@ -153,6 +153,82 @@ uint8_t resolve_map_entry_stride(const RomData& rom);
 // Returns 0 if the pattern is not found.
 uint8_t resolve_coord_event_size(const RomData& rom);
 
+// Derive block-data encoding mode from the ChangeMap routine in the home bank.
+//
+// Two mutually exclusive structural patterns are recognised.  Both require three
+// consecutive WRAM addresses (blockBank, ptrLo, ptrHi) with the same WRAM hi byte
+// and sequential lo bytes (W, W+1, W+2), hi byte in [0xC0, 0xDF].
+//
+// Pattern RawBytes (Gold/Silver/Crystal):
+//   FA lo hi  D7   FA lo+1 hi  5F   FA lo+2 hi  57
+//   = ld a,[blockBank] / rst Bankswitch
+//     / ld a,[ptrLo] / ld e,a
+//     / ld a,[ptrHi] / ld d,a
+//   → bank switch immediately before building the block-data pointer into DE.
+//     Subsequent loop "1A 13 22" (ld a,[DE] / inc DE / ld [HL+],a) is raw byte copy.
+//
+// Pattern LZCompressed (Polished Crystal):
+//   FA lo hi  47   21 lo+1 hi   2A 66 6F
+//   = ld a,[blockBank] / ld b,a
+//     / ld hl,[blockPtr] / read 2-byte ptr into HL
+//   → bank stored in B (FarDecompressInB calling convention), not directly switched.
+//     Call to FarDecompressInB follows.
+//
+// No ROM-specific addresses.  Returns BlockDataEncoding::Unknown if:
+//   - neither pattern matches (0 hits of either kind)
+//   - both patterns match (internally contradictory ROM — ambiguous)
+//   - multiple distinct hits of the same kind (ambiguous)
+//
+// This is a global-per-ROM property: there is exactly one ChangeMap routine and
+// it applies to all map groups uniformly.
+MapFormatRules::BlockDataEncoding resolve_block_data_encoding(const RomData& rom);
+
+// Derive the environment domain maximum (max_environment_value).
+// XREF: Environment dispatch routines in home bank.
+//
+// In both vanilla and Polished Crystal, the home bank contains exactly four
+// consecutive environment-direction dispatch routines.  Each follows the pattern:
+//
+//   call SomePrep      ; CD ?? ??   (prep routine, same target across all four)
+//   ret nz             ; C0
+//   ld a, [wCurEnvN]   ; FA lo hi   (one of the four directional env WRAM vars)
+//   and ENV_MASK       ; E6 NN      ← NN is the max environment value
+//   cp ENV_CONST       ; FE zz
+//
+// ENV_MASK = $07 in all known Crystal-family ROMs, giving a 3-bit domain [0,7].
+// The mask value NN IS the authoritative maximum: environment values above NN wrap
+// silently (env=8 → 0 after AND $07), so they are semantically out of range.
+//
+// Pattern to find: CD ?? ?? C0 FA ?? ?? E6 NN FE   (home bank only)
+// at least 2 consecutive occurrences with the same NN value.
+//
+// Returns NN (the mask = max environment value), or 0 if not found.
+// Ambiguous (multiple different mask values found) returns 0.
+uint8_t resolve_environment_domain(const RomData& rom);
+
+// Derive the MapAttributes bank for ROMs that omit the bank byte from each map entry
+// (MapFormatRules::attr_bank_in_entry == false).
+//
+// XREF: GetMapAttrBank routine in home bank.
+// In Polished Crystal, a dedicated routine selects the bank for MapAttributes access:
+//
+//   ld a, [wCurMap]      ; FA lo hi
+//   ld b, a              ; 47
+//   ld a, [wCurMapGroup] ; FA lo hi
+//   ld c, a              ; 4F
+//   ld a, ATTR_BANK      ; 3E NN   ← NN is the MapAttributes bank (hardcoded literal)
+//   rst BankedCall        ; CF
+//   ret                  ; C9
+//
+// The literal NN in "3E NN CF C9" is the MapAttributes bank constant.
+//
+// Pattern: FA ?? ?? 47 FA ?? ?? 4F 3E NN CF C9   (home bank only)
+// Must be unique (exactly one match).
+//
+// Returns NN (the bank byte), or 0xFF (invalid) if not found / ambiguous.
+// Vanilla Crystal (attr_bank_in_entry == true) does not use this pattern; returns 0xFF.
+uint8_t resolve_map_attr_bank(const RomData& rom);
+
 // ============================================================================
 // Group-level MapAttributes bank resolver
 //
@@ -167,7 +243,8 @@ uint8_t resolve_coord_event_size(const RomData& rom);
 //     For each candidate bank B (1..max_bank):
 //       Score = number of group G entries whose attr_ptr at bank B passes the
 //               full 9-point structural validity test:
-//                 h/w in [1,max_map_dimension], blockdata_bank < 128,
+//                 h/w > 0 (zero dimensions always invalid — no per-axis maximum applied),
+//                 blockdata_bank < 128,
 //                 blockdata_ptr in banked range,
 //                 script_bank < 128, script_ptr in valid range,
 //                 MapScriptHeader: scene_count <= 30,
