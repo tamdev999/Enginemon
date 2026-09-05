@@ -85,7 +85,7 @@ static constexpr uint32_t flat(uint8_t bank, uint16_t ptr) {
 // Allocate a temporary .gbc file, write buf to it, return the path.
 // The file is created in the system temp directory.
 static std::filesystem::path write_temp_rom(const std::vector<uint8_t>& buf,
-                                             const std::string& tag) {
+                                             const std::string& tag = "test") {
     auto p = std::filesystem::temp_directory_path()
            / ("layout_test_" + tag + ".gbc");
     std::ofstream f(p, std::ios::binary);
@@ -174,28 +174,6 @@ static void write_base_data_xref(std::vector<uint8_t>& rom,
     rom[o++] = 0xCD;          // call FarCopyBytes
     rom[o++] = 0x00;
     rom[o++] = 0x30;
-}
-
-// Write the TrainerGroups RandomPhoneMon XREF pattern.
-// Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 09 3E bb
-static void write_trainer_groups_xref(std::vector<uint8_t>& rom,
-                                       uint32_t site_flat,
-                                       uint16_t table_ptr,
-                                       uint8_t  table_bank) {
-    uint32_t o = site_flat;
-    rom[o++] = 0x21;          // ld hl, nn
-    rom[o++] = table_ptr & 0xFF;
-    rom[o++] = table_ptr >> 8;
-    rom[o++] = 0x7A;          // ld a, d
-    rom[o++] = 0x3D;          // dec a
-    rom[o++] = 0x4F;          // ld c, a
-    rom[o++] = 0x06;          // ld b, n
-    rom[o++] = 0x00;
-    rom[o++] = 0x09;          // add hl, bc
-    rom[o++] = 0x09;          // add hl, bc
-    rom[o++] = 0x09;          // add hl, bc
-    rom[o++] = 0x3E;          // ld a, n
-    rom[o++] = table_bank;
 }
 
 // Write the TypeMatchups branch XREF pattern.
@@ -309,7 +287,45 @@ static void write_move_records(std::vector<uint8_t>& rom,
     if (sentinel < rom.size()) rom[sentinel + 3] = 0x40;
 }
 
-// Write a run of valid TrainerGroups dba entries.
+// Write TrainerGroups XREF dispatch pattern (2× add hl,bc — dw stride).
+// Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 3E bb
+// This matches the actual Gen2 dispatch (TrainerGroups is a dw table, stride=2).
+static void write_trainer_groups_xref(std::vector<uint8_t>& rom,
+                                       uint32_t site_flat,
+                                       uint16_t table_ptr,
+                                       uint8_t  table_bank) {
+    uint32_t o = site_flat;
+    rom[o++] = 0x21;          // ld hl, nn
+    rom[o++] = table_ptr & 0xFF;
+    rom[o++] = table_ptr >> 8;
+    rom[o++] = 0x7A;          // ld a, d
+    rom[o++] = 0x3D;          // dec a
+    rom[o++] = 0x4F;          // ld c, a
+    rom[o++] = 0x06;          // ld b, n
+    rom[o++] = 0x00;
+    rom[o++] = 0x09;          // add hl, bc   (1st — dw stride = 2 bytes)
+    rom[o++] = 0x09;          // add hl, bc   (2nd)
+    rom[o++] = 0x3E;          // ld a, n      (immediately follows, no 3rd 0x09)
+    rom[o++] = table_bank;
+}
+
+// Write a run of valid TrainerGroups dw entries (2-byte bank-local pointers).
+// This matches the actual Gen2 format (table_width 2 in party_pointers.asm).
+static void write_trainer_groups_dw(std::vector<uint8_t>& rom,
+                                     uint32_t flat_addr,
+                                     uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t o = flat_addr + i * 2u;
+        if (o + 2u > rom.size()) break;
+        uint16_t ptr = static_cast<uint16_t>(0x5000u + i * 0x20u);
+        if (ptr < 0x4000u) ptr = static_cast<uint16_t>(0x4000u + i * 0x20u);
+        rom[o + 0] = ptr & 0xFF;
+        rom[o + 1] = ptr >> 8;
+    }
+}
+
+// Write a run of valid TrainerGroups dba entries (legacy helper, kept for
+// profile-address-precedence test which passes dba-style data as profile address).
 static void write_trainer_groups_dba(std::vector<uint8_t>& rom,
                                       uint32_t flat_addr,
                                       uint8_t  group_bank,
@@ -542,6 +558,8 @@ TEST(resolver_base_data_larger_record) {
 // TEST 6: TrainerGroups relocated — xref pattern locates it generically
 // ============================================================================
 TEST(resolver_trainer_groups_relocated) {
+    // TrainerGroups is a dw table (2-byte bank-local pointers, stride=2).
+    // The dispatch uses 2× add hl,bc. Verify the resolver finds a relocated table.
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
 
     const uint8_t  tbl_bank = 0x07;
@@ -549,7 +567,7 @@ TEST(resolver_trainer_groups_relocated) {
     const uint32_t tbl_flat = flat(tbl_bank, tbl_ptr);
 
     write_trainer_groups_xref(rom, flat(0x0C, 0x5016), tbl_ptr, tbl_bank);
-    write_trainer_groups_dba(rom, tbl_flat, 0x7C, 80);  // 80 trainer classes
+    write_trainer_groups_dw(rom, tbl_flat, 80);  // 80 dw entries
 
     auto p = write_temp_rom(rom, "trainergroups_relocated");
     auto rom_data = load_temp(p);
@@ -561,7 +579,7 @@ TEST(resolver_trainer_groups_relocated) {
     ASSERT_EQ(r.flat, tbl_flat);
     ASSERT_FALSE(r.ambiguous);
 
-    std::cout << "\n    [TrainerGroups relocated to bank 0x07 found at 0x"
+    std::cout << "\n    [TrainerGroups (dw) relocated to bank 0x07 found at 0x"
               << std::hex << r.flat << std::dec << "]\n";
 }
 
@@ -692,19 +710,18 @@ TEST(resolver_multiple_false_candidates_ambiguous) {
 TEST(resolver_profile_address_valid_unchanged) {
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
 
-    // Place TrainerGroups at bank 0x07, ptr 0x4249 (profile address)
+    // Place TrainerGroups (dw format) at bank 0x07, ptr 0x4249 (profile address)
     const uint8_t  tbl_bank = 0x07;
     const uint16_t tbl_ptr  = 0x4249;
     const uint32_t tbl_flat = flat(tbl_bank, tbl_ptr);
 
-    write_trainer_groups_dba(rom, tbl_flat, 0x7C, 67);
+    write_trainer_groups_dw(rom, tbl_flat, 67);
 
-    // Also plant an xref (but at a DIFFERENT location that would point elsewhere)
-    // to prove the profile address takes priority
+    // Also plant an xref pointing to a DIFFERENT table to prove profile takes priority
     const uint8_t  fake_bank = 0x0A;
     const uint16_t fake_ptr  = 0x5000;
     const uint32_t fake_flat = flat(fake_bank, fake_ptr);
-    write_trainer_groups_dba(rom, fake_flat, 0x7C, 67);
+    write_trainer_groups_dw(rom, fake_flat, 67);
     write_trainer_groups_xref(rom, flat(0x0C, 0x5016), fake_ptr, fake_bank);
 
     auto p = write_temp_rom(rom, "trainergroups_profile_valid");
@@ -714,7 +731,7 @@ TEST(resolver_profile_address_valid_unchanged) {
     // Pass tbl_flat as profile address
     auto r = crystal::resolve_trainer_groups(*rom_data, tbl_flat, nullptr);
 
-    // Profile address is valid → resolver returns it unchanged (not the xref result)
+    // Profile address is valid (dw count ≥ 10) → resolver returns it unchanged
     ASSERT_TRUE(r.flat != 0);
     ASSERT_EQ(r.flat, tbl_flat);  // profile address, not fake_flat from xref
 
@@ -984,6 +1001,89 @@ TEST(block_encoding_real_roms_classification) {
 }
 
 // ============================================================================
+// TrainerGroups: two xref sites → ambiguous → resolver returns flat=0
+// ============================================================================
+TEST(resolver_trainer_groups_two_sites_ambiguous) {
+    // Plant two separate xref sites pointing to two different dw tables.
+    // Neither dominates → resolver must report ambiguity.
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00);
+
+    const uint8_t  bank_a = 0x07;
+    const uint16_t ptr_a  = 0x4100;
+    const uint32_t flat_a = flat(bank_a, ptr_a);
+    const uint8_t  bank_b = 0x09;
+    const uint16_t ptr_b  = 0x4200;
+    const uint32_t flat_b = flat(bank_b, ptr_b);
+
+    write_trainer_groups_dw(rom, flat_a, 70);
+    write_trainer_groups_dw(rom, flat_b, 70);
+    write_trainer_groups_xref(rom, flat(0x05, 0x5010), ptr_a, bank_a);
+    write_trainer_groups_xref(rom, flat(0x06, 0x5010), ptr_b, bank_b);
+
+    auto p = write_temp_rom(rom, "trainergroups_ambiguous");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    auto r = crystal::resolve_trainer_groups(*rom_data, 0, &diag);
+
+    ASSERT_EQ(r.flat, 0u);
+    ASSERT_TRUE(r.ambiguous);
+    ASSERT_FALSE(diag.empty());
+
+    std::cout << "\n    [Two equal xref candidates → ambiguous, flat=0, diag=\""
+              << diag << "\"]\n";
+}
+
+// ============================================================================
+// TrainerGroups: ROM-backed tests for Crystal, Gold, Silver
+// Proves the fixed resolver finds the correct table in each ROM independently.
+// Requires ENGINEMON_TEST_ROM (Crystal), ENGINEMON_GOLD_ROM, ENGINEMON_SILVER_ROM.
+// ============================================================================
+TEST(resolver_trainer_groups_real_roms) {
+    struct Spec {
+        const char* env_var;
+        const char* label;
+        uint32_t    expected_flat;  // flat = bank*0x4000 + (ptr-0x4000)
+    };
+    // Crystal: 0x0E:0x5999  = 0x0E*0x4000 + (0x5999-0x4000) = 0x38000 + 0x1999 = 0x39999
+    // Gold:    0x0E:0x593E  = 0x0E*0x4000 + (0x593E-0x4000) = 0x38000 + 0x193E = 0x3993E
+    // Silver:  0x0E:0x593E  (same as Gold)
+    const Spec specs[] = {
+        { "ENGINEMON_TEST_ROM",   "Crystal v1.1", 0x39999u },
+        { "ENGINEMON_GOLD_ROM",   "Gold",         0x3993Eu },
+        { "ENGINEMON_SILVER_ROM", "Silver",       0x3993Eu },
+    };
+    bool any_ran = false;
+    for (const auto& spec : specs) {
+        const char* path_env = std::getenv(spec.env_var);
+        if (!path_env) continue;
+        auto rom = crystal::RomData::load(std::filesystem::path(path_env));
+        if (!rom) continue;
+        any_ran = true;
+
+        // Profile address = 0 to force XREF scan (proves generic resolution)
+        std::string diag;
+        auto r = crystal::resolve_trainer_groups(*rom, 0, &diag);
+
+        if (r.flat != spec.expected_flat) {
+            std::fprintf(stderr,
+                "  FAIL: %s expected 0x%05X got 0x%05X diag=\"%s\"\n",
+                spec.label, spec.expected_flat, r.flat, diag.c_str());
+            g_current_failed = true;
+        } else {
+            std::cout << "\n    [" << spec.label
+                      << ": TrainerGroups at 0x" << std::hex << r.flat << std::dec << " ✓]";
+        }
+    }
+    if (!any_ran) {
+        std::cout << "\n    [SKIP: no ROM env vars set]";
+    } else {
+        std::cout << "\n";
+    }
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -1012,6 +1112,8 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\n--- TrainerGroups resolution ---\n";
     RUN_TEST(resolver_trainer_groups_relocated);
+    RUN_TEST(resolver_trainer_groups_two_sites_ambiguous);
+    RUN_TEST(resolver_trainer_groups_real_roms);
 
     std::cout << "\n--- TypeMatchups resolution ---\n";
     RUN_TEST(resolver_type_matchups_polished_multipliers);

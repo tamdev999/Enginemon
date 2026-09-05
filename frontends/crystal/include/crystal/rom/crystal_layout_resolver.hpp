@@ -92,9 +92,9 @@ ResolvedAddress resolve_moves(
     std::string* out_diagnostic = nullptr);
 
 // Locate TrainerGroups table.
-// XREF: RandomPhoneMon — ld hl,TrainerGroups / ld a,d / dec a / ld c,a / ld b,0 /
-//                          add hl,bc × 3 / ld a,BANK
-// Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 09 3E bb
+// XREF: ReadTrainerParty / RandomPhoneMon dispatch (dw table, stride = 2 bytes).
+//   ld hl,TrainerGroups / ld a,d / dec a / ld c,a / ld b,0 / add hl,bc ×2 / ld a,BANK
+// Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 3E bb   (two 0x09, NOT three)
 ResolvedAddress resolve_trainer_groups(
     const RomData& rom,
     uint32_t profile_address,

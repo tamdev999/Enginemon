@@ -444,19 +444,21 @@ ResolvedAddress resolve_moves(
 // ============================================================================
 // resolve_trainer_groups
 //
-// XREF pattern: RandomPhoneMon (engine/overworld/wildmons.asm).
-// Source:
+// XREF pattern: ReadTrainerParty / RandomPhoneMon dispatch.
+// The TrainerGroups table is a dw table (2-byte bank-local pointers, table_width 2
+// in data/trainers/party_pointers.asm). The dispatch multiplies by 2, not 3:
+//
 //   ld hl, TrainerGroups   ; 21 lo hi
 //   ld a, d                ; 7A
 //   dec a                  ; 3D
 //   ld c, a                ; 4F
 //   ld b, 0                ; 06 00
 //   add hl, bc             ; 09
-//   add hl, bc             ; 09
-//   add hl, bc             ; 09            ← ×3 for 3-byte dba stride
+//   add hl, bc             ; 09        ← ×2 for 2-byte dw stride (NOT ×3)
 //   ld a, BANK(TrainerGroups) ; 3E bb
 //
-// Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 09 3E bb
+// Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 3E bb   (two 0x09, not three)
+// Confirmed at ROM+0x2A56D (Crystal), ROM+0x2AAB9 (Gold, Silver).
 // ============================================================================
 
 ResolvedAddress resolve_trainer_groups(
@@ -464,16 +466,24 @@ ResolvedAddress resolve_trainer_groups(
     uint32_t profile_address,
     std::string* out_diagnostic)
 {
+    // Profile-address path: validate with count_dw_entries (dw table, 2-byte stride).
+    // The previous code used count_dba_entries (3-byte stride), which always returned 0
+    // for a dw table and caused the profile path to fall through silently.
     if (profile_address != 0 && profile_address < rom.size()) {
-        uint32_t cnt = count_dba_entries(rom, profile_address, 256);
+        uint32_t cnt = count_dw_entries(rom, profile_address, 256);
         if (cnt >= 10) {
             return { profile_address,
-                     std::format("profile address 0x{:05X} validated ({} dba entries)", profile_address, cnt) };
+                     std::format("profile address 0x{:05X} validated ({} dw entries)", profile_address, cnt) };
         }
     }
 
+    // XREF scan for 2× add hl,bc dispatch (dw stride).
+    // Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 3E bb
+    //   offset:  0  1  2  3  4  5  6  7  8  9 10 11
+    // Table bank in bb (byte 11); table ptr from lo/hi (bytes 1-2).
+    // The bank (bb) for the caller-side ld a,BANK must be valid [1,127].
     std::vector<uint32_t> candidates;
-    const uint32_t limit = (rom.size() >= 14) ? static_cast<uint32_t>(rom.size()) - 14u : 0u;
+    const uint32_t limit = (rom.size() >= 12u) ? static_cast<uint32_t>(rom.size()) - 12u : 0u;
 
     for (uint32_t i = 0; i < limit; ++i) {
         if (rom.read_byte(i)    != 0x21) continue; // ld hl, nn
@@ -482,27 +492,27 @@ ResolvedAddress resolve_trainer_groups(
         if (rom.read_byte(i+5)  != 0x4F) continue; // ld c, a
         if (rom.read_byte(i+6)  != 0x06) continue; // ld b, n
         if (rom.read_byte(i+7)  != 0x00) continue; //   n=0
-        if (rom.read_byte(i+8)  != 0x09) continue; // add hl, bc
-        if (rom.read_byte(i+9)  != 0x09) continue; // add hl, bc
-        if (rom.read_byte(i+10) != 0x09) continue; // add hl, bc
-        if (rom.read_byte(i+11) != 0x3E) continue; // ld a, BANK
+        if (rom.read_byte(i+8)  != 0x09) continue; // add hl, bc   (1st)
+        if (rom.read_byte(i+9)  != 0x09) continue; // add hl, bc   (2nd)
+        if (rom.read_byte(i+10) != 0x3E) continue; // ld a, BANK   (immediately follows)
         uint8_t lo = rom.read_byte(i+1);
         uint8_t hi = rom.read_byte(i+2);
-        uint8_t bb = rom.read_byte(i+12);
+        uint8_t bb = rom.read_byte(i+11);
         uint16_t ptr = static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
         if (!valid_any_ptr(ptr)) continue;
         if (bb == 0 || bb >= 128u) continue;
         uint32_t tbl_flat = flat_of(bb, ptr);
         if (tbl_flat >= rom.size()) continue;
-        uint32_t cnt = count_dba_entries(rom, tbl_flat, 256);
+        // Validate as dw table (2-byte bank-local pointers).
+        uint32_t cnt = count_dw_entries(rom, tbl_flat, 256);
         if (cnt < 10) continue;
         candidates.push_back(tbl_flat);
     }
 
     if (candidates.size() == 1) {
         return { candidates[0],
-                 std::format("XREF scan → 0x{:05X} ({} dba entries)",
-                             candidates[0], count_dba_entries(rom, candidates[0], 256)) };
+                 std::format("XREF scan → 0x{:05X} ({} dw entries)",
+                             candidates[0], count_dw_entries(rom, candidates[0], 256)) };
     }
     if (candidates.size() > 1) {
         if (out_diagnostic) {
