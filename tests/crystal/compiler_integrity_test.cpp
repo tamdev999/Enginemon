@@ -1199,6 +1199,84 @@ TEST(palmap_bank_derived_from_tilesets_table_bank) {
               << " (expected 1 and 2 from sentinel; 0 if hardcoded 0x13)]\n";
 }
 
+// ── Negative: offsets.tilesets == 0 → extract_tileset must hard-fail ──────
+//
+// When profile_.offsets.tilesets is 0 the PalMap bank cannot be derived.
+// Silently falling back to bank 0 would read from ROM0 and produce garbage
+// palette data with no error signal.  The extractor must return an error
+// result instead.
+//
+// The test verifies the exact failure mode: extract_tileset returns !success
+// with a non-empty error string when offsets.tilesets is not set.
+TEST(palmap_unset_tilesets_address_is_hard_failure) {
+    // Build a ROM that would otherwise succeed (valid GFX, valid meta/coll, valid palmap)
+    // but profile_.offsets.tilesets is deliberately left at 0.
+    constexpr uint8_t  TILESETS_BANK  = 0x20;
+    constexpr uint32_t TILESETS_FLAT  = static_cast<uint32_t>(TILESETS_BANK) * 0x4000;
+    constexpr uint16_t GFX_PTR        = 0x5000;
+    constexpr uint16_t META_PTR       = 0x6000;
+    constexpr uint16_t COLL_PTR       = 0x6800;
+    constexpr uint16_t PALMAP_PTR     = 0x7000;
+
+    constexpr uint32_t GFX_FLAT   = TILESETS_FLAT + (GFX_PTR   - 0x4000);
+    constexpr uint32_t META_FLAT  = TILESETS_FLAT + (META_PTR  - 0x4000);
+    constexpr uint32_t COLL_FLAT  = TILESETS_FLAT + (COLL_PTR  - 0x4000);
+    constexpr uint32_t PALMAP_FLAT_CORRECT = TILESETS_FLAT + (PALMAP_PTR - 0x4000);
+
+    auto rom_bytes = make_base_rom();
+
+    // Tileset entry at TILESETS_FLAT + 1*15
+    {
+        uint32_t entry = TILESETS_FLAT + 1 * 15;
+        rom_bytes[entry +  0] = TILESETS_BANK; rom_bytes[entry +  1] = GFX_PTR  & 0xFF; rom_bytes[entry +  2] = GFX_PTR  >> 8;
+        rom_bytes[entry +  3] = TILESETS_BANK; rom_bytes[entry +  4] = META_PTR & 0xFF; rom_bytes[entry +  5] = META_PTR >> 8;
+        rom_bytes[entry +  6] = TILESETS_BANK; rom_bytes[entry +  7] = COLL_PTR & 0xFF; rom_bytes[entry +  8] = COLL_PTR >> 8;
+        rom_bytes[entry +  9] = 0x00; rom_bytes[entry + 10] = 0x40;
+        rom_bytes[entry + 11] = 0x00; rom_bytes[entry + 12] = 0x40;
+        rom_bytes[entry + 13] = PALMAP_PTR & 0xFF; rom_bytes[entry + 14] = PALMAP_PTR >> 8;
+    }
+    std::fill(rom_bytes.begin() + GFX_FLAT,  rom_bytes.begin() + GFX_FLAT  + 200, 0x00);
+    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
+    std::fill(rom_bytes.begin() + META_FLAT,  rom_bytes.begin() + META_FLAT  + 128 * 16, 0x00);
+    std::fill(rom_bytes.begin() + COLL_FLAT,  rom_bytes.begin() + COLL_FLAT  + 128 *  4, 0x00);
+    constexpr size_t FULL_PALMAP_SIZE = 48 + 16 + 48;
+    std::fill(rom_bytes.begin() + PALMAP_FLAT_CORRECT,
+              rom_bytes.begin() + PALMAP_FLAT_CORRECT + FULL_PALMAP_SIZE, 0x21);
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_unset_tilesets");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    // Profile with offsets.tilesets deliberately set to 0 (not configured)
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets = 2;
+    prof.format.tileset.tileset_size      = 15;
+    prof.format.tileset.metatile_size     = 16;
+    prof.format.tileset.metatile_count    = 128;
+    prof.format.tileset.gfx_bank_offset      = 0;
+    prof.format.tileset.gfx_ptr_offset       = 1;
+    prof.format.tileset.metatile_bank_offset  = 3;
+    prof.format.tileset.metatile_ptr_offset   = 4;
+    prof.format.tileset.coll_bank_offset      = 6;
+    prof.format.tileset.coll_ptr_offset       = 7;
+    prof.format.tileset.palmap_offset         = 13;
+    prof.offsets.tilesets = 0;  // ← deliberately unset: cannot derive PalMap bank
+    prof.offsets.tileset_bg_palette = 0;
+    prof.offsets.special_tileset_palette_count = 0;
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_tileset(1);
+
+    // Must fail — not silently succeed with wrong (bank 0) palette data
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(!result.error.empty());
+    // The error must come from the early tilesets==0 guard, not a downstream
+    // accident.  Confirm the diagnostic references the tilesets address.
+    ASSERT_TRUE(result.error.find("profile.offsets.tilesets") != std::string::npos);
+
+    std::cout << "\n    [offsets.tilesets=0 → hard failure: \""
+              << result.error << "\"]\n";
+}
+
 //=============================================================================
 // SCENE/CALLBACK ENTRY TRUNCATION TESTS
 //
@@ -1361,6 +1439,7 @@ int main(int argc, char* argv[]) {
 
     // PALMAP bank derivation: relocated tilesets table uses its own bank
     RUN_TEST(palmap_bank_derived_from_tilesets_table_bank);
+    RUN_TEST(palmap_unset_tilesets_address_is_hard_failure);
 
     // Scene/callback entry truncation adversarial tests
     RUN_TEST(scene_entry_truncation_throws_not_silent);

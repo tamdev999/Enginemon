@@ -316,6 +316,20 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
                                    tileset_index, profile_.counts.num_tilesets);
         return result;
     }
+
+    // The PalMap bank is derived from profile_.offsets.tilesets (see below).
+    // Require it to be set before going any further: an unset address would
+    // cause the palmap bank to be 0 (ROM0), producing garbage palette data
+    // with no error signal.  Catch it here with a clear diagnostic rather than
+    // letting the extractor silently misread from the wrong bank.
+    if (profile_.offsets.tilesets == 0) {
+        result.error = std::format(
+            "Cannot extract tileset {}: profile.offsets.tilesets is not configured "
+            "(required to derive the PalMap bank)",
+            tileset_index);
+        stats_.bounds_check_failures++;
+        return result;
+    }
     
     const auto& o = profile_.offsets;
     const auto& fmt = profile_.format.tileset;
@@ -535,11 +549,8 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
     // bank of the Tilesets table itself.  Deriving it from profile_.offsets.tilesets
     // makes this work for Gold (bank 0x12), Crystal (bank 0x13), and any relocated hack
     // without per-ROM hardcoding.
-    // Fallback to bank 0 (ROM0) when the Tilesets offset is not set; the bounds check
-    // below will reject it safely.
-    const uint8_t PALMAP_BANK = (profile_.offsets.tilesets != 0)
-                                ? static_cast<uint8_t>(profile_.offsets.tilesets / 0x4000u)
-                                : 0u;
+    // profile_.offsets.tilesets != 0 is guaranteed by the guard at function entry.
+    const uint8_t PALMAP_BANK = static_cast<uint8_t>(profile_.offsets.tilesets / 0x4000u);
     uint32_t palmap_addr = rom_.bank_to_flat(PALMAP_BANK, palmap_ptr);
     
     // Full palette map: bank 0 (48 bytes) + gap (16 bytes) + bank 1 (48 bytes) = 112 bytes
