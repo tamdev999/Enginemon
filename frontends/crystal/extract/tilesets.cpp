@@ -529,8 +529,17 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
     // See pokecrystal gfx/tilesets/*_palette_map.asm and tilepal macro.
     uint16_t palmap_ptr = entry[fmt.palmap_offset] | (entry[fmt.palmap_offset + 1] << 8);
     
-    // Palette map is in bank 0x13 (same bank as tilesets data)
-    constexpr uint8_t PALMAP_BANK = 0x13;
+    // The palette map data (gfx/tilesets/*_palette_map.asm) is placed in the same ROM
+    // bank as the Tilesets table (data/tilesets.asm) by the linker.  The tileset entry
+    // stores only a bank-local dw pointer — no bank byte — so the correct bank is the
+    // bank of the Tilesets table itself.  Deriving it from profile_.offsets.tilesets
+    // makes this work for Gold (bank 0x12), Crystal (bank 0x13), and any relocated hack
+    // without per-ROM hardcoding.
+    // Fallback to bank 0 (ROM0) when the Tilesets offset is not set; the bounds check
+    // below will reject it safely.
+    const uint8_t PALMAP_BANK = (profile_.offsets.tilesets != 0)
+                                ? static_cast<uint8_t>(profile_.offsets.tilesets / 0x4000u)
+                                : 0u;
     uint32_t palmap_addr = rom_.bank_to_flat(PALMAP_BANK, palmap_ptr);
     
     // Full palette map: bank 0 (48 bytes) + gap (16 bytes) + bank 1 (48 bytes) = 112 bytes

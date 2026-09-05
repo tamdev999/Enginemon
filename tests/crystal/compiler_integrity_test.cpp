@@ -1008,6 +1008,198 @@ TEST(lz_valid_prefix_then_corruption_returns_failure) {
 }
 
 //=============================================================================
+// PALMAP BANK DERIVATION TEST
+//
+// Proves that the PalMap bank is derived from profile_.offsets.tilesets / 0x4000
+// rather than hardcoded to 0x13.
+//
+// Scenario:
+//   - Tilesets table is placed in bank 0x20 (not 0x13)
+//   - A tileset entry with palmap_ptr=0x5000 is written at the table
+//   - A recognisable sentinel pattern (0xAB, 0xCD, ...) is placed at
+//     bank 0x20, ptr 0x5000 (the CORRECT palmap location)
+//   - Bank 0x13, ptr 0x5000 (the WRONG hardcoded location) is left all-zeros
+//   - A minimal but fully valid tileset is wired up so extraction succeeds
+//     past GFX / meta / collision far enough for the palmap bounds check to pass
+//
+// If PALMAP_BANK is correctly derived as bank_of(tilesets) = 0x20:
+//   palette_map entries come from the sentinel bytes → non-zero values present
+// If PALMAP_BANK were still hardcoded to 0x13:
+//   palette_map entries would be all-zero (bank 0x13 at that ptr is zeros)
+//
+// The test does not need the GFX / meta / collision extraction to produce
+// semantically correct tiles — it only needs the palmap read to be reached.
+// We achieve this by placing the GFX LZ_END immediately (empty decompression
+// fails the GFX step), which means the test exercises the palmap bank choice
+// by checking whether the bounds check selects the right address — OR by using
+// a profile with num_tilesets=0 guard disabled and observing the palmap_addr
+// calculation independently.
+//
+// Simpler approach: directly compute the palmap address in a profile with
+// tilesets at bank 0x20 and confirm bank_of(tilesets) == 0x20, then verify
+// that a full extraction (where GFX succeeds with a minimal valid LZ stream)
+// reads palette data from bank 0x20 and NOT from bank 0x13.
+//=============================================================================
+
+// Write a minimal valid LZ stream that decompresses to exactly `tile_count * 16`
+// non-zero bytes. Uses ITERATE commands to fill.
+static void write_minimal_lz_tiles(std::vector<uint8_t>& rom,
+                                    uint32_t addr,
+                                    size_t tile_count) {
+    // Each iteration: LZ_ITERATE cmd (0x20 | count-1) + value byte
+    // LZ_ITERATE = cmd 1 = bits [7:5]=001, bits [4:0]=count-1
+    // Max count per command = 32 (5-bit field, 0b11111+1=32)
+    size_t total_bytes = tile_count * 16;
+    uint32_t o = addr;
+    size_t remaining = total_bytes;
+    while (remaining > 0) {
+        size_t chunk = std::min(remaining, size_t(32));
+        rom[o++] = static_cast<uint8_t>(0x20 | (chunk - 1));  // ITERATE, count=chunk
+        rom[o++] = 0x11;  // non-zero fill value
+        remaining -= chunk;
+    }
+    rom[o] = 0xFF;  // LZ_END
+}
+
+TEST(palmap_bank_derived_from_tilesets_table_bank) {
+    // ── ROM layout ──────────────────────────────────────────────────────────
+    //   bank 0x20 (flat 0x80000): Tilesets table (entry for tileset 1)
+    //   bank 0x20 + 0x1000 offset: GFX LZ data (minimal valid tiles)
+    //   bank 0x20 + 0x2000 offset: metatile data (128 × 16 bytes of zeros)
+    //   bank 0x20 + 0x3000 offset: collision data (128 × 4 bytes of zeros)
+    //   bank 0x20 + 0x5000 offset: CORRECT palmap location — sentinel bytes
+    //   bank 0x13 + 0x5000 offset: WRONG location (if hardcoded) — all zeros
+    // ────────────────────────────────────────────────────────────────────────
+    constexpr uint8_t  TILESETS_BANK  = 0x20;
+    constexpr uint32_t TILESETS_FLAT  = static_cast<uint32_t>(TILESETS_BANK) * 0x4000;
+
+    // Sub-offsets within the bank (all bank-local, in [0x4000, 0x8000))
+    constexpr uint16_t GFX_PTR   = 0x5000;
+    constexpr uint16_t META_PTR  = 0x6000;
+    constexpr uint16_t COLL_PTR  = 0x6800;  // after 128*16=2048 bytes of meta
+    constexpr uint16_t PALMAP_PTR = 0x7000;
+
+    constexpr uint32_t GFX_FLAT   = TILESETS_FLAT + (GFX_PTR   - 0x4000);
+    constexpr uint32_t META_FLAT  = TILESETS_FLAT + (META_PTR  - 0x4000);
+    constexpr uint32_t COLL_FLAT  = TILESETS_FLAT + (COLL_PTR  - 0x4000);
+    constexpr uint32_t PALMAP_FLAT_CORRECT = TILESETS_FLAT + (PALMAP_PTR - 0x4000);
+    constexpr uint32_t PALMAP_FLAT_WRONG   = static_cast<uint32_t>(0x13) * 0x4000
+                                             + (PALMAP_PTR - 0x4000);
+
+    auto rom_bytes = make_base_rom();  // 2 MB, all 0xFF
+
+    // ── Tileset entry at TILESETS_FLAT + 1 * 15 (index 1) ──
+    // Layout: gfx_bank(1) + gfx_ptr(2) + meta_bank(1) + meta_ptr(2)
+    //       + coll_bank(1) + coll_ptr(2) + anim_ptr(2) + null_ptr(2) + palmap_ptr(2)
+    {
+        uint32_t entry = TILESETS_FLAT + 1 * 15;
+        rom_bytes[entry +  0] = TILESETS_BANK;
+        rom_bytes[entry +  1] = GFX_PTR & 0xFF;
+        rom_bytes[entry +  2] = GFX_PTR >> 8;
+        rom_bytes[entry +  3] = TILESETS_BANK;
+        rom_bytes[entry +  4] = META_PTR & 0xFF;
+        rom_bytes[entry +  5] = META_PTR >> 8;
+        rom_bytes[entry +  6] = TILESETS_BANK;
+        rom_bytes[entry +  7] = COLL_PTR & 0xFF;
+        rom_bytes[entry +  8] = COLL_PTR >> 8;
+        rom_bytes[entry +  9] = 0x00;  // anim_ptr lo (null)
+        rom_bytes[entry + 10] = 0x40;  // anim_ptr hi (0x4000, valid banked)
+        rom_bytes[entry + 11] = 0x00;  // null_ptr lo
+        rom_bytes[entry + 12] = 0x40;  // null_ptr hi
+        rom_bytes[entry + 13] = PALMAP_PTR & 0xFF;
+        rom_bytes[entry + 14] = PALMAP_PTR >> 8;
+    }
+
+    // ── GFX: minimal valid LZ stream decompressing to 128 tiles (2048 bytes) ──
+    // LZ at GFX_FLAT: fill 128 × 16 = 2048 bytes using ITERATE commands
+    // Zero out this region first (it's currently 0xFF = LZ_END everywhere)
+    std::fill(rom_bytes.begin() + GFX_FLAT,
+              rom_bytes.begin() + GFX_FLAT + 200, 0x00);
+    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
+
+    // ── Metatile data: 128 × 16 bytes of zeros (tile index 0 everywhere) ──
+    // Already zero from the std::fill above, but META_FLAT is in a different range.
+    // Zero it explicitly.
+    std::fill(rom_bytes.begin() + META_FLAT,
+              rom_bytes.begin() + META_FLAT + 128 * 16, 0x00);
+
+    // ── Collision data: 128 × 4 bytes (4 quadrant values per metatile) ──
+    std::fill(rom_bytes.begin() + COLL_FLAT,
+              rom_bytes.begin() + COLL_FLAT + 128 * 4, 0x00);
+
+    // ── CORRECT palmap (bank 0x20): write sentinel non-zero bytes ──
+    // PalMap format: packed nibbles, each byte encodes 2 tile palette IDs.
+    // Full size = 48 + 16 (gap) + 48 = 112 bytes.
+    // Write non-zero palette IDs so we can detect the read happened.
+    constexpr size_t FULL_PALMAP_SIZE = 48 + 16 + 48;  // 112 bytes
+    std::fill(rom_bytes.begin() + PALMAP_FLAT_CORRECT,
+              rom_bytes.begin() + PALMAP_FLAT_CORRECT + FULL_PALMAP_SIZE, 0x00);
+    // Each packed byte: lo-nibble = palette 1 (GREEN), hi-nibble = palette 2 (WATER)
+    // Value = (2 << 4) | 1 = 0x21 — non-zero, valid (palette IDs 1 and 2)
+    for (size_t i = 0; i < FULL_PALMAP_SIZE; ++i) {
+        rom_bytes[PALMAP_FLAT_CORRECT + i] = 0x21;
+    }
+
+    // ── WRONG palmap (bank 0x13): leave all-zero ──
+    // PALMAP_FLAT_WRONG is within the ROM; it's already 0xFF (from make_base_rom).
+    // Explicitly zero it so "reads from here → palette_map all-zero" is clear.
+    if (PALMAP_FLAT_WRONG + FULL_PALMAP_SIZE <= rom_bytes.size()) {
+        std::fill(rom_bytes.begin() + PALMAP_FLAT_WRONG,
+                  rom_bytes.begin() + PALMAP_FLAT_WRONG + FULL_PALMAP_SIZE, 0x00);
+    }
+
+    // ── Profile ──
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets = 2;  // allow index 1
+    prof.format.tileset.tileset_size      = 15;
+    prof.format.tileset.metatile_size     = 16;
+    prof.format.tileset.metatile_count    = 128;
+    prof.format.tileset.gfx_bank_offset      = 0;
+    prof.format.tileset.gfx_ptr_offset       = 1;
+    prof.format.tileset.metatile_bank_offset  = 3;
+    prof.format.tileset.metatile_ptr_offset   = 4;
+    prof.format.tileset.coll_bank_offset      = 6;
+    prof.format.tileset.coll_ptr_offset       = 7;
+    prof.format.tileset.palmap_offset         = 13;
+    prof.offsets.tilesets = TILESETS_FLAT;                  // ← bank 0x20
+    prof.offsets.tileset_bg_palette = 0;                    // not tested here
+    prof.offsets.special_tileset_palette_count = 0;
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_bank_derived");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_tileset(1);
+
+    ASSERT_TRUE(result.success);
+
+    // The palette map should have been read from bank 0x20 (sentinel 0x21 bytes).
+    // Each 0x21 byte → lo-nibble=1 (palette 1), hi-nibble=2 (palette 2) after masking.
+    // Tile 0: palette_map[0] = 0x21 & 0x07 = 1
+    // Tile 1: palette_map[1] = (0x21 >> 4) & 0x07 = 2
+    ASSERT_TRUE(result.tileset.palette_map.size() == 256);
+    ASSERT_TRUE(result.tileset.palette_map[0] != 0);  // non-zero → read from bank 0x20
+
+    // Confirm the exact values: lo-nibble of 0x21 = 1, hi-nibble = 2
+    ASSERT_TRUE(result.tileset.palette_map[0] == 1);  // tile 0 → palette 1
+    ASSERT_TRUE(result.tileset.palette_map[1] == 2);  // tile 1 → palette 2
+
+    // If PALMAP_BANK were still 0x13, the read would land on all-zero data and
+    // every palette entry would be 0.  The non-zero check above proves bank 0x20
+    // was used.
+
+    // Verify bank derivation arithmetic directly.
+    // bank_of(TILESETS_FLAT) = TILESETS_FLAT / 0x4000 = 0x20
+    ASSERT_TRUE(TILESETS_FLAT / 0x4000u == TILESETS_BANK);
+
+    std::cout << "\n    [PALMAP bank derived from tilesets bank 0x"
+              << std::hex << static_cast<int>(TILESETS_BANK) << std::dec
+              << ": palette_map[0]=" << (int)result.tileset.palette_map[0]
+              << " palette_map[1]=" << (int)result.tileset.palette_map[1]
+              << " (expected 1 and 2 from sentinel; 0 if hardcoded 0x13)]\n";
+}
+
+//=============================================================================
 // SCENE/CALLBACK ENTRY TRUNCATION TESTS
 //
 // These tests verify that when a map's MapScripts header declares N scene or
@@ -1166,6 +1358,9 @@ int main(int argc, char* argv[]) {
     RUN_TEST(lz_invalid_back_reference_returns_failure);
     RUN_TEST(lz_missing_terminator_returns_failure);
     RUN_TEST(lz_valid_prefix_then_corruption_returns_failure);
+
+    // PALMAP bank derivation: relocated tilesets table uses its own bank
+    RUN_TEST(palmap_bank_derived_from_tilesets_table_bank);
 
     // Scene/callback entry truncation adversarial tests
     RUN_TEST(scene_entry_truncation_throws_not_silent);
