@@ -568,7 +568,7 @@ struct ProfileCounts {
     uint16_t num_types = 18;            // 17 types + ??? type
     uint16_t num_tilesets = 36;
     uint16_t num_map_groups = 26;
-    uint16_t num_trainer_classes = 67;
+    uint16_t num_trainer_classes = 0;   // 0 = not configured; resolved from ROM at compile time
     uint16_t num_specials = 0x100;      // Special function count (SpecialsPointers)
     uint16_t num_script_commands = 0xA7;
     

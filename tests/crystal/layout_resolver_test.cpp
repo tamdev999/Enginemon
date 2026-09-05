@@ -1112,11 +1112,13 @@ TEST(resolver_num_trainer_classes_single_match) {
 }
 
 // ============================================================================
-// num_trainer_classes: two matches with same NN → still resolves (same value)
+// num_trainer_classes: two matches with same NN → NOW ambiguous (strict uniqueness)
 // ============================================================================
-TEST(resolver_num_trainer_classes_two_same_matches) {
-    // Crystal at 0x2A56D and 0x397A2 both use the same TrainerGroups ptr — plant
-    // two identical patterns in different banks; both resolve to NN=67 (Gold style).
+TEST(resolver_num_trainer_classes_two_same_matches_now_ambiguous) {
+    // Plant two identical patterns in different banks; both produce NN=67.
+    // Under the strict uniqueness requirement, two matches → ambiguous → returns 0,
+    // even when both encode the same count.  This prevents accepting a generic
+    // bounds-check inlined at multiple call sites as authoritative.
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
 
     for (uint32_t site : {flat(0x14u, 0x5200u), flat(0x0Eu, 0x5780u)}) {
@@ -1132,9 +1134,10 @@ TEST(resolver_num_trainer_classes_two_same_matches) {
     std::string diag;
     uint16_t ntc = crystal::resolve_num_trainer_classes(*rom_data, &diag);
 
-    ASSERT_EQ(ntc, 66u);
-    ASSERT_TRUE(diag.empty());
-    std::cout << "\n    [Two matches, same NN=67 → num_trainer_classes=66 ✓]\n";
+    // Two structural matches → ambiguous, even if NN is identical.
+    ASSERT_EQ(ntc, 0u);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [Two matches, same NN=67 → now ambiguous (strict uniqueness), returns 0 ✓]\n";
 }
 
 // ============================================================================
@@ -1318,7 +1321,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\n--- num_trainer_classes resolution ---\n";
     RUN_TEST(resolver_num_trainer_classes_single_match);
-    RUN_TEST(resolver_num_trainer_classes_two_same_matches);
+    RUN_TEST(resolver_num_trainer_classes_two_same_matches_now_ambiguous);
     RUN_TEST(resolver_num_trainer_classes_ambiguous_different_nn);
     RUN_TEST(resolver_num_trainer_classes_not_found);
     RUN_TEST(resolver_num_trainer_classes_real_roms);

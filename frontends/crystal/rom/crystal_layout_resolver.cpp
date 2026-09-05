@@ -1071,19 +1071,19 @@ uint16_t resolve_num_trainer_classes(const RomData& rom, std::string* out_diagno
         }
         return 0;
     }
-    // Multiple hits are acceptable if all agree on the same NN.
-    uint8_t first = candidates[0];
-    for (uint8_t v : candidates) {
-        if (v != first) {
-            if (out_diagnostic) {
-                *out_diagnostic = std::format(
-                    "num_trainer_classes: {} candidates with different NN values — ambiguous",
-                    candidates.size());
-            }
-            return 0;
+    // Require exactly one structural match.  Multiple hits — even with the same NN —
+    // are ambiguous: the pattern exists at more than one location, which means it could
+    // be a generic bounds-check function called from multiple places rather than the
+    // unique GetTrainerPic instance.  A single hit is the only reliable authority.
+    if (candidates.size() != 1u) {
+        if (out_diagnostic) {
+            *out_diagnostic = std::format(
+                "num_trainer_classes: {} candidates — exactly one match required (ambiguous)",
+                candidates.size());
         }
+        return 0;
     }
-    return static_cast<uint16_t>(first - 1u);
+    return static_cast<uint16_t>(candidates[0] - 1u);
 }
 
 uint8_t resolve_scene_script_size(const RomData& rom) {
