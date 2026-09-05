@@ -1084,6 +1084,207 @@ TEST(resolver_trainer_groups_real_roms) {
 }
 
 // ============================================================================
+// num_trainer_classes: synthetic single-match → correct count
+// ============================================================================
+TEST(resolver_num_trainer_classes_single_match) {
+    // Plant exactly one GetTrainerPic pattern: FA lo hi A7 C8 FE NN D0
+    // with NN=68 → num_trainer_classes=67 (Crystal).
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00);
+
+    const uint32_t site = flat(0x14, 0x5200);
+    rom[site+0] = 0xFA; rom[site+1] = 0x33; rom[site+2] = 0xD2;  // ld a,[wTrainerClass]
+    rom[site+3] = 0xA7;   // and a
+    rom[site+4] = 0xC8;   // ret z
+    rom[site+5] = 0xFE;   // cp n
+    rom[site+6] = 68;     // NN = NUM_TRAINER_CLASSES+1 = 68
+    rom[site+7] = 0xD0;   // ret nc
+
+    auto p = write_temp_rom(rom, "ntc_single");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    uint16_t ntc = crystal::resolve_num_trainer_classes(*rom_data, &diag);
+
+    ASSERT_EQ(ntc, 67u);
+    ASSERT_TRUE(diag.empty());
+    std::cout << "\n    [Single match NN=68 → num_trainer_classes=67 ✓]\n";
+}
+
+// ============================================================================
+// num_trainer_classes: two matches with same NN → still resolves (same value)
+// ============================================================================
+TEST(resolver_num_trainer_classes_two_same_matches) {
+    // Crystal at 0x2A56D and 0x397A2 both use the same TrainerGroups ptr — plant
+    // two identical patterns in different banks; both resolve to NN=67 (Gold style).
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00);
+
+    for (uint32_t site : {flat(0x14u, 0x5200u), flat(0x0Eu, 0x5780u)}) {
+        rom[site+0]=0xFA; rom[site+1]=0x1D; rom[site+2]=0xD1;
+        rom[site+3]=0xA7; rom[site+4]=0xC8; rom[site+5]=0xFE;
+        rom[site+6]=67;   rom[site+7]=0xD0;
+    }
+
+    auto p = write_temp_rom(rom, "ntc_two_same");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    uint16_t ntc = crystal::resolve_num_trainer_classes(*rom_data, &diag);
+
+    ASSERT_EQ(ntc, 66u);
+    ASSERT_TRUE(diag.empty());
+    std::cout << "\n    [Two matches, same NN=67 → num_trainer_classes=66 ✓]\n";
+}
+
+// ============================================================================
+// num_trainer_classes: two matches with DIFFERENT NN → ambiguous → returns 0
+// ============================================================================
+TEST(resolver_num_trainer_classes_ambiguous_different_nn) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00);
+
+    // First site: NN=68 (Crystal count)
+    uint32_t s1 = flat(0x14, 0x5200);
+    rom[s1+0]=0xFA; rom[s1+1]=0x33; rom[s1+2]=0xD2;
+    rom[s1+3]=0xA7; rom[s1+4]=0xC8; rom[s1+5]=0xFE;
+    rom[s1+6]=68;   rom[s1+7]=0xD0;
+
+    // Second site: NN=50 (different count — contradictory)
+    uint32_t s2 = flat(0x0A, 0x4800);
+    rom[s2+0]=0xFA; rom[s2+1]=0x20; rom[s2+2]=0xD2;
+    rom[s2+3]=0xA7; rom[s2+4]=0xC8; rom[s2+5]=0xFE;
+    rom[s2+6]=50;   rom[s2+7]=0xD0;
+
+    auto p = write_temp_rom(rom, "ntc_ambiguous");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    uint16_t ntc = crystal::resolve_num_trainer_classes(*rom_data, &diag);
+
+    ASSERT_EQ(ntc, 0u);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [Different NN values (68 vs 50) → ambiguous, returns 0 ✓]\n";
+}
+
+// ============================================================================
+// num_trainer_classes: no pattern → returns 0
+// ============================================================================
+TEST(resolver_num_trainer_classes_not_found) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00);
+    // No pattern planted → should return 0
+
+    auto p = write_temp_rom(rom, "ntc_empty");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    uint16_t ntc = crystal::resolve_num_trainer_classes(*rom_data, &diag);
+
+    ASSERT_EQ(ntc, 0u);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [No pattern → returns 0 ✓]\n";
+}
+
+// ============================================================================
+// num_trainer_classes: ROM-backed Crystal=67, Gold=66, Silver=66
+// ============================================================================
+TEST(resolver_num_trainer_classes_real_roms) {
+    struct Spec {
+        const char* env_var;
+        const char* label;
+        uint16_t    expected_ntc;
+    };
+    const Spec specs[] = {
+        { "ENGINEMON_TEST_ROM",   "Crystal v1.1", 67u },
+        { "ENGINEMON_GOLD_ROM",   "Gold",          66u },
+        { "ENGINEMON_SILVER_ROM", "Silver",         66u },
+    };
+    bool any_ran = false;
+    for (const auto& spec : specs) {
+        const char* path_env = std::getenv(spec.env_var);
+        if (!path_env) continue;
+        auto rom = crystal::RomData::load(std::filesystem::path(path_env));
+        if (!rom) continue;
+        any_ran = true;
+
+        std::string diag;
+        uint16_t ntc = crystal::resolve_num_trainer_classes(*rom, &diag);
+
+        if (ntc != spec.expected_ntc) {
+            std::fprintf(stderr,
+                "  FAIL: %s expected %u got %u diag=\"%s\"\n",
+                spec.label, spec.expected_ntc, ntc, diag.c_str());
+            g_current_failed = true;
+        } else {
+            std::cout << "\n    [" << spec.label
+                      << ": num_trainer_classes=" << ntc << " ✓]";
+        }
+    }
+    if (!any_ran) {
+        std::cout << "\n    [SKIP: no ROM env vars set]";
+    } else {
+        std::cout << "\n";
+    }
+}
+
+// ============================================================================
+// Profile/ROM mismatch: resolve_crystal_layout returns -1 when profile
+// num_trainer_classes disagrees with the ROM-derived value.
+// ============================================================================
+TEST(resolver_num_trainer_classes_profile_mismatch_rejected) {
+    // Build a ROM with the GetTrainerPic pattern encoding NN=68 (NTC=67).
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00);
+    const uint32_t site = flat(0x14, 0x5200);
+    rom[site+0]=0xFA; rom[site+1]=0x33; rom[site+2]=0xD2;
+    rom[site+3]=0xA7; rom[site+4]=0xC8; rom[site+5]=0xFE;
+    rom[site+6]=68;   rom[site+7]=0xD0;
+
+    auto p = write_temp_rom(rom, "ntc_profile_mismatch");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    // Build a profile that says num_trainer_classes=42 — contradicts ROM (67).
+    crystal::ExtractionProfile prof;
+    prof.counts.num_trainer_classes = 42;  // ← intentional wrong value
+
+    // resolve_crystal_layout must detect the mismatch and return -1.
+    int result = crystal::resolve_crystal_layout(*rom_data, prof, /*verbose=*/false);
+
+    ASSERT_TRUE(result < 0);  // -1 signals hard mismatch
+    std::cout << "\n    [profile NTC=42 vs ROM NTC=67 → resolve_crystal_layout returns "
+              << result << " (< 0) ✓]\n";
+}
+
+// ============================================================================
+// Profile/ROM agree: resolve_crystal_layout proceeds normally when NTC matches.
+// ============================================================================
+TEST(resolver_num_trainer_classes_profile_match_accepted) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00);
+    const uint32_t site = flat(0x14, 0x5200);
+    rom[site+0]=0xFA; rom[site+1]=0x33; rom[site+2]=0xD2;
+    rom[site+3]=0xA7; rom[site+4]=0xC8; rom[site+5]=0xFE;
+    rom[site+6]=68;   rom[site+7]=0xD0;
+
+    auto p = write_temp_rom(rom, "ntc_profile_match");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    // Profile already says 67 — matches ROM.
+    crystal::ExtractionProfile prof;
+    prof.counts.num_trainer_classes = 67;
+
+    int result = crystal::resolve_crystal_layout(*rom_data, prof, /*verbose=*/false);
+
+    // No mismatch — result should be >= 0 (0 or more resolved fields).
+    ASSERT_TRUE(result >= 0);
+    // Count in profile unchanged (already correct).
+    ASSERT_EQ(prof.counts.num_trainer_classes, 67u);
+    std::cout << "\n    [profile NTC=67 matches ROM NTC=67 → no mismatch, result="
+              << result << " ✓]\n";
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -1114,6 +1315,15 @@ int main(int argc, char* argv[]) {
     RUN_TEST(resolver_trainer_groups_relocated);
     RUN_TEST(resolver_trainer_groups_two_sites_ambiguous);
     RUN_TEST(resolver_trainer_groups_real_roms);
+
+    std::cout << "\n--- num_trainer_classes resolution ---\n";
+    RUN_TEST(resolver_num_trainer_classes_single_match);
+    RUN_TEST(resolver_num_trainer_classes_two_same_matches);
+    RUN_TEST(resolver_num_trainer_classes_ambiguous_different_nn);
+    RUN_TEST(resolver_num_trainer_classes_not_found);
+    RUN_TEST(resolver_num_trainer_classes_real_roms);
+    RUN_TEST(resolver_num_trainer_classes_profile_mismatch_rejected);
+    RUN_TEST(resolver_num_trainer_classes_profile_match_accepted);
 
     std::cout << "\n--- TypeMatchups resolution ---\n";
     RUN_TEST(resolver_type_matchups_polished_multipliers);

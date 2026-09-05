@@ -795,6 +795,52 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
         try_resolve("TrainerGroups", o.trainer_groups, r, &diag);
     }
 
+    // --- num_trainer_classes from GetTrainerPic bounds check ---
+    // resolve_num_trainer_classes() extracts the cp NN literal from GetTrainerPic:
+    //   ld a,[wTrainerClass] / and a / ret z / cp NN / ret nc
+    // where NN = NUM_TRAINER_CLASSES + 1, so num_trainer_classes = NN - 1.
+    // This is a compile-time constant baked into the ROM — no table scan needed.
+    //
+    // Mismatch policy: if the ROM-derived count conflicts with a non-default profile
+    // value (profile already configured and different), the build is rejected as
+    // inconsistent rather than silently preferring one or the other.  A profile
+    // count of 0 means "not yet configured" and is replaced by the ROM value.
+    {
+        std::string diag;
+        uint16_t rom_ntc = resolve_num_trainer_classes(rom, &diag);
+        if (rom_ntc != 0) {
+            const uint16_t profile_ntc = profile.counts.num_trainer_classes;
+            if (profile_ntc == 0 || profile_ntc == rom_ntc) {
+                // Profile not configured, or matches — apply ROM value.
+                if (profile_ntc != rom_ntc) {
+                    profile.counts.num_trainer_classes = rom_ntc;
+                    ++resolved;
+                }
+                if (verbose) {
+                    std::fprintf(stderr,
+                        "[layout] %-26s num_trainer_classes=%u (GetTrainerPic cp literal)\n",
+                        "Counts.num_trainer_classes", rom_ntc);
+                }
+            } else {
+                // ROM-derived count contradicts existing profile count.
+                // This means the profile was built for a different ROM.
+                // Surface the mismatch so the caller can reject the package.
+                if (verbose) {
+                    std::fprintf(stderr,
+                        "[layout] %-26s MISMATCH: profile=%u ROM=%u — profile may be wrong for this ROM\n",
+                        "Counts.num_trainer_classes", profile_ntc, rom_ntc);
+                }
+                // Return -1 to signal hard mismatch to resolve_crystal_layout caller.
+                // Convention: resolved < 0 means a structural contradiction was found.
+                return -1;
+            }
+        } else if (verbose) {
+            std::fprintf(stderr,
+                "[layout] %-26s NOT FOUND — using profile value %u\n",
+                "Counts.num_trainer_classes", profile.counts.num_trainer_classes);
+        }
+    }
+
     // --- TypeMatchups ---
     {
         std::string diag;
@@ -992,6 +1038,53 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
 // ============================================================================
 // Layout constant resolvers — home-bank SM83 xrefs
 // ============================================================================
+
+uint16_t resolve_num_trainer_classes(const RomData& rom, std::string* out_diagnostic) {
+    // Pattern: FA lo hi A7 C8 FE NN D0
+    //   offsets: 0  1  2  3  4  5  6  7
+    // Require FA (ld a,[nn]) at i-3 and A7 C8 FE NN D0 at i..i+4.
+    // NN plausibility: [0x30, 0x80] — generous for any reasonable ROM hack.
+    //
+    // Proven: Crystal=0x44→67, Gold=0x43→66, Silver=0x43→66.
+    // Full pattern: ld a,[wTrainerClass] / and a / ret z / cp NN / ret nc
+    // in GetTrainerPic (bounds check for trainer class index).
+    constexpr uint8_t NN_MIN = 0x30u;
+    constexpr uint8_t NN_MAX = 0x80u;
+
+    std::vector<uint8_t> candidates;
+
+    const uint32_t limit = (rom.size() >= 8u) ? static_cast<uint32_t>(rom.size()) - 8u : 0u;
+    for (uint32_t i = 3u; i < limit; ++i) {
+        if (rom.read_byte(i)   != 0xA7u) continue;  // and a
+        if (rom.read_byte(i+1) != 0xC8u) continue;  // ret z
+        if (rom.read_byte(i+2) != 0xFEu) continue;  // cp n
+        if (rom.read_byte(i+4) != 0xD0u) continue;  // ret nc
+        if (rom.read_byte(i-3) != 0xFAu) continue;  // ld a,[nn]
+        uint8_t nn = rom.read_byte(i+3);
+        if (nn < NN_MIN || nn > NN_MAX) continue;
+        candidates.push_back(nn);
+    }
+
+    if (candidates.empty()) {
+        if (out_diagnostic) {
+            *out_diagnostic = "num_trainer_classes: GetTrainerPic pattern not found in ROM";
+        }
+        return 0;
+    }
+    // Multiple hits are acceptable if all agree on the same NN.
+    uint8_t first = candidates[0];
+    for (uint8_t v : candidates) {
+        if (v != first) {
+            if (out_diagnostic) {
+                *out_diagnostic = std::format(
+                    "num_trainer_classes: {} candidates with different NN values — ambiguous",
+                    candidates.size());
+            }
+            return 0;
+        }
+    }
+    return static_cast<uint16_t>(first - 1u);
+}
 
 uint8_t resolve_scene_script_size(const RomData& rom) {
     // SCENE_SCRIPT_SIZE xref: map-loading routine in home bank.

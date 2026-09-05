@@ -100,6 +100,16 @@ ResolvedAddress resolve_trainer_groups(
     uint32_t profile_address,
     std::string* out_diagnostic = nullptr);
 
+// Derive num_trainer_classes from the GetTrainerPic bounds check.
+// Pattern: FA ?? ?? A7 C8 FE NN D0
+//   = ld a,[wTrainerClass] / and a / ret z / cp NN / ret nc
+// where NN = NUM_TRAINER_CLASSES + 1 → num_trainer_classes = NN - 1.
+// Exactly one unique NN is required; zero or conflicting hits → returns 0.
+// Crystal v1.1: cp 0x44 (68) → 67.  Gold/Silver: cp 0x43 (67) → 66.
+uint16_t resolve_num_trainer_classes(
+    const RomData& rom,
+    std::string* out_diagnostic = nullptr);
+
 // Locate TypeMatchups table.
 // XREF: Type effectiveness branch — ld hl,InvTypeMatchups / ld a,[wBattleType] /
 //         cp BATTLETYPE_INVERSE / jr z / ld hl,TypeMatchups / ld a,[hli]
