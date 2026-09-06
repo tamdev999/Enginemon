@@ -130,6 +130,31 @@ enum class ChunkType : uint32_t {
                                  // Runtime populates HeadlessRuntime::battle_rules from this chunk.
 };
 
+// ============================================================================
+// CHUNK SCHEMA VERSIONS
+//
+// Each chunk that carries a schema version embeds a u8 schema version as its
+// very first byte.  Readers must reject (return nullopt) when the version byte
+// does not match.  This prevents old packages from being silently misread when
+// the chunk layout changes.
+//
+// These constants are engine-owned so the reader (engine) and writer (frontend)
+// share the same values without the engine importing Crystal headers.
+// ============================================================================
+
+// MVDT schema version.
+// v1 (no version byte): 9 bytes per entry (id u16, type, power, accuracy, pp,
+//                        effect_id, effect_chance, category).  No effect_desc.
+// v2: prepends 1 schema-version byte to the chunk; each entry grows by 43 bytes
+//     for the serialized SemanticEffectDescription.
+static constexpr uint8_t MVDT_SCHEMA_VERSION = 2;
+
+// BRLS schema version.
+// v1 (no version byte): trailing optional bytes read with has_bytes() guards.
+// v2: prepends 1 schema-version byte to the chunk; all fields are mandatory.
+//     Old packages (no version byte or wrong version) are rejected.
+static constexpr uint8_t BRLS_SCHEMA_VERSION = 2;
+
 struct TocEntry {
     ChunkType type;
     uint32_t offset;

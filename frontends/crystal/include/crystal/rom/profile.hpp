@@ -279,6 +279,16 @@ struct TilesetFormatRules {
     uint8_t null_offset = 11;           // 2 bytes (unused)
     uint8_t palmap_offset = 13;         // 2 bytes (palette map pointer)
     
+    // PalMap ROM data size in bytes.  This is a source-format fact — different
+    // Crystal-family games lay out the palette map differently:
+    //   Crystal: 48 (bank0) + 16 (0xFF filler) + 48 (bank1) = 112 bytes
+    //            (bank 1 tiles added in Crystal; tilepal 1 entries in source)
+    //   Gold/Silver: 48 bytes only (bank 0; no bank-1 tile palette entries)
+    //
+    // 0 = not configured.  The extractor hard-fails on 0 rather than silently
+    // inheriting a Crystal-specific default.  Profiles must set this explicitly.
+    uint8_t palmap_size = 0;            // bytes of PalMap ROM data; 0 = not configured
+    
     // Metatile format: 16 bytes per metatile (4×4 tile indices)
     // Each metatile is a 4×4 arrangement of 8x8 tiles = 32×32 pixels
     // From pokecrystal/constants/gfx_constants.asm: DEF METATILE_WIDTH EQU 4
@@ -463,6 +473,14 @@ struct ProfileOffsets {
     uint32_t icon_pointers;             // IconPointers table (2 bytes/icon_type, dw)
     uint32_t obj_palettes;              // MapObjectPals (OBJ time-of-day palette sets)
     uint32_t tileset_bg_palette;        // TilesetBGPalette (BG time-of-day palette sets)
+    uint8_t  palmap_consumer_bank = 0;  // Bank of _LoadOverworldAttrmapPals (PalMap ROM bank).
+                                        // This is the bank that homecall switches to before
+                                        // dereferencing the wTilesetPalettes (dw) pointer as
+                                        // a direct ROM address.  0 = not configured; the
+                                        // resolver populates this from the homecall call site
+                                        // pattern in the home bank.  The extractor hard-fails
+                                        // if this field is 0 when palmap extraction is needed.
+                                        // Crystal v1.1 = 0x13, Gold/Silver = 0x02.
     uint32_t font_tiles;                // Font (main 1bpp font, 128 tiles)
     uint32_t font_extra_tiles;          // FontExtra (border/extra 2bpp font, 32 tiles)
 
@@ -538,6 +556,31 @@ struct ProfileOffsets {
     uint32_t sm83_get_eighth_max_hp      = 0;  // 0f:4c83 GetEighthMaxHP
     uint32_t sm83_get_sixteenth_max_hp   = 0;  // 0f:4c76 GetSixteenthMaxHP
     uint32_t sm83_critical               = 0;  // 0d:4631 BattleCommand_Critical
+    uint32_t sm83_battle_recoil          = 0;  // 0d:~5670 BattleCommand_Recoil (structural scan if 0)
+    uint32_t sm83_sap_health             = 0;  // 0d:~3844 SapHealth             (structural scan if 0)
+
+    // Effect-script table addresses — used by the Crystal effect-script decoder.
+    // Both are resolved deterministically from ROM dispatcher patterns if the profile
+    // address is 0; see EffectScriptDecoder::resolve_tables().
+    //
+    // MoveEffectsPointers: 2-byte-per-entry LE pointer table, bank 9.
+    //   Consumer pattern: 4F 06 00 21 lo hi 09 09 3E bank CD
+    //   (ld c,a / ld b,0 / ld hl,MEP_addr / add hl,bc / add hl,bc / ld a,bank / call GetFarWord)
+    //   Crystal v1.1: 09:71f4 → flat 0x271F4
+    //
+    // BattleCommandPointers: 2-byte-per-entry LE pointer table, bank 15.
+    //   Consumer pattern: 3D 4F 06 00 21 lo hi 09 09 C1 3E bank CD
+    //   (dec a / ld c,a / ld b,0 / ld hl,BCP_addr / add hl,bc / add hl,bc / pop bc /
+    //    ld a,bank / call GetFarWord)
+    //   Crystal v1.1: 0f:7d28 → flat 0x3FD28
+    uint32_t move_effects_pointers       = 0;  // 09:71f4 MoveEffectsPointers (0 = use scan)
+    uint32_t battle_command_pointers     = 0;  // 0f:7d28 BattleCommandPointers (0 = use scan)
+
+    // Direct-read battle tables (not SM83 lifts — raw data tables).
+    uint32_t magnitude_power             = 0;  // 0d:79b4 MagnitudePower (7×3 bytes)
+    uint32_t present_power               = 0;  // 0d:7907 PresentPower (3×2 bytes + FF sentinel)
+    uint32_t flail_reversal_power        = 0;  // 0d:5807 FlailReversalPower (6×2 bytes)
+
     // Span sizes (bytes to read from each routine address for pattern matching).
     // Conservative defaults — must cover all expected patterns.
     static constexpr uint32_t SM83_SPAN_AI_DISCOURAGE     = 8;
@@ -551,6 +594,8 @@ struct ProfileOffsets {
     static constexpr uint32_t SM83_SPAN_GET_EIGHTH_HP     = 30;
     static constexpr uint32_t SM83_SPAN_GET_SIXTEENTH_HP  = 25;
     static constexpr uint32_t SM83_SPAN_CRITICAL          = 90;
+    static constexpr uint32_t SM83_SPAN_RECOIL            = 30;  // covers ld loads + up to 6 shift pairs + min-1 check
+    static constexpr uint32_t SM83_SPAN_DRAIN             = 25;  // covers ldi + up to 6 srl a + ldh + ld b,a + ld a,[hl] + rr a + ldh
 
     // Fixed count for WobbleProbabilities (24 in vanilla; may differ in hacks that
     // rewrite the table but keep the same format).
@@ -566,7 +611,7 @@ struct ProfileCounts {
     uint16_t num_moves = 251;           // Includes move 0 (none)
     uint16_t num_items = 256;           // 0-255
     uint16_t num_types = 18;            // 17 types + ??? type
-    uint16_t num_tilesets = 36;
+    uint16_t num_tilesets = 0;         // 0 = not configured; Crystal v1.1 = 36
     uint16_t num_map_groups = 26;
     uint16_t num_trainer_classes = 0;   // 0 = not configured; resolved from ROM at compile time
     uint16_t num_specials = 0x100;      // Special function count (SpecialsPointers)
@@ -582,6 +627,14 @@ struct ProfileCounts {
     uint16_t num_npc_trades = 7;        // NUM_NPC_TRADES (0-6)
     uint16_t num_fruit_trees = 30;      // NUM_FRUIT_TREES (1-30, 0 is invalid)
     uint16_t num_marts = 34;            // NUM_MARTS (0-33)
+
+    // Effect-script decoder domain counts.
+    // Defaults are 0 (fail-closed): a 0 here means the decoder is not permitted
+    // to run — it cannot proceed without an explicit profile-supplied count.
+    // Crystal v1.1: num_move_effects=157 (EFFECT_* constants 0–156),
+    //               num_effect_commands=175 (BattleCommandPointers entries 0x01–0xAF).
+    uint16_t num_move_effects    = 0;   // 0 = not configured; fail-closed
+    uint16_t num_effect_commands = 0;   // 0 = not configured; fail-closed
 };
 
 //=============================================================================

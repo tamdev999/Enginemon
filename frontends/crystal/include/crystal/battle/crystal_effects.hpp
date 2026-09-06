@@ -213,6 +213,23 @@ namespace EffectId {
 inline enginemon::EffectId to_semantic_effect(uint8_t crystal_effect) {
     using namespace enginemon;
     switch (crystal_effect) {
+        // Strict pure-damage: single-hit damage is HP-correct for every reachable battle state.
+        // Only these three Crystal raw effect IDs meet the criterion:
+        //   0  NORMAL_HIT  — ordinary damage, no additional HP consequences
+        //   17 ALWAYS_HIT  — accuracy=0xFF handles the hit guarantee independently; damage formula correct
+        //   103 PRIORITY_HIT — priority is stored in MoveData; damage formula correct
+        // All other damaging effects remain SemEffect::Unknown until explicitly implemented.
+        case EffectId::NORMAL_HIT:    return SemEffect::PureDamage;
+        case EffectId::ALWAYS_HIT:    return SemEffect::PureDamage;
+        case EffectId::PRIORITY_HIT:  return SemEffect::PureDamage;
+        // Recoil: user takes max(1, damage/4) after dealing damage.
+        // Crystal: Take Down (NORMAL_HIT with RECOIL_HIT), Double-Edge, Submission, Struggle
+        // all use the same BattleCommand_Recoil routine (shift_count=2 from ROM lift).
+        case EffectId::RECOIL_HIT:    return SemEffect::Recoil;
+        // Drain: user heals max(1, damage/2) after dealing damage.
+        // Crystal: Absorb, Mega Drain, Giga Drain use SapHealth (shift_count=1 from ROM lift).
+        // NOTE: DREAM_EATER (8) also drains but requires target to be asleep — not mapped here.
+        case EffectId::LEECH_HIT:     return SemEffect::Drain;
         case EffectId::SLEEP:         return SemEffect::Sleep;
         case EffectId::HEAL:          return SemEffect::Heal;
         case EffectId::MORNING_SUN:   return SemEffect::Heal;

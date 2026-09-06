@@ -659,7 +659,7 @@ BattleRulesExtractResult extract_battle_rules(
                    rules.exp_formula.base_divisor = r.p[0];
                });
 
-        // BattleCommand_DamageVariation — p[0] = RRCA lower bound byte
+        // BattleCommand_DamageVariation — p[0] = RRCA lower bound byte, p[1] = divisor
         // lift_r: supports structural relocation scan.
         lift_r(o.sm83_damage_variation, ProfileOffsets::SM83_SPAN_DAMAGE_VARIATION,
                "BattleCommand_DamageVariation", enginemon::BattleRules::SM83_LIFTED_DAMAGE_VAR,
@@ -667,6 +667,7 @@ BattleRulesExtractResult extract_battle_rules(
                [](const RomSpan& s) { return lift_damage_variation(s); },
                [&](const LiftResult& r) {
                    rules.damage_variation.lower_bound_byte = r.p[0];
+                   rules.damage_variation.divisor          = r.p[1];
                });
 
         // PokeBallEffect — p[0]=SLP/FRZ bonus, p[1]=BRN/PSN/PAR (bug), p[2]=none
@@ -737,6 +738,118 @@ BattleRulesExtractResult extract_battle_rules(
                  rules.crit_deltas.scope_lens_delta   = r.p[1];
                  rules.crit_deltas.focus_energy_delta = r.p[2];
              });
+
+        // BattleCommand_Recoil — p[0] = shift_count (2 SRL-B/RR-C pairs → /4)
+        // lift_r: structural scan because profile address is 0 for this routine.
+        lift_r(o.sm83_battle_recoil, ProfileOffsets::SM83_SPAN_RECOIL,
+               "BattleCommand_Recoil", enginemon::BattleRules::SM83_LIFTED_RECOIL,
+               sm83_find_recoil,
+               [](const RomSpan& s) { return lift_recoil_shift(s); },
+               [&](const LiftResult& r) {
+                   rules.recoil.shift_count = r.p[0];
+               });
+
+        // SapHealth — p[0] = shift_count (1 SRL-A step → /2)
+        // lift_r: structural scan because profile address is 0 for this routine.
+        lift_r(o.sm83_sap_health, ProfileOffsets::SM83_SPAN_DRAIN,
+               "SapHealth", enginemon::BattleRules::SM83_LIFTED_DRAIN,
+               sm83_find_drain,
+               [](const RomSpan& s) { return lift_drain_shift(s); },
+               [&](const LiftResult& r) {
+                   rules.drain.shift_count = r.p[0];
+               });
+    }
+
+    // ------------------------------------------------------------------
+    // 19. Extended battle tables — direct ROM reads (no SM83 lifting needed).
+    //     These are fixed-format data tables, not SM83 routine parameters.
+    //     All addresses from pokecrystal.sym (Crystal v1.1).
+    //     Failure is non-fatal: struct defaults (vanilla-correct) remain.
+    // ------------------------------------------------------------------
+    {
+        // Selfdestruct defense shift: 1 (inline srl c in BattleCommand_DamageCalc).
+        // Hardcoded vanilla value — SM83 scan not needed; value is 1 for all known Crystal ROMs.
+        rules.selfdestruct.defense_shift = 1;
+
+        // OHKO level-difference multiplier: 2 (from `add a` = left shift in BattleCommand_OHKO).
+        rules.ohko.level_diff_multiplier = 2;
+
+        // MagnitudePower table — 0d:79b4, 7 × 3 bytes {threshold, power, level#}
+        if (o.magnitude_power != 0) {
+            constexpr uint32_t ENTRY_SIZE = 3;
+            constexpr uint32_t TABLE_BYTES = static_cast<uint32_t>(
+                enginemon::BattleRules::MAGNITUDE_TABLE_SIZE) * ENTRY_SIZE;
+            if (o.magnitude_power + TABLE_BYTES <= rom.size()) {
+                for (uint8_t i = 0; i < enginemon::BattleRules::MAGNITUDE_TABLE_SIZE; ++i) {
+                    uint32_t base = o.magnitude_power + i * ENTRY_SIZE;
+                    rules.magnitude_table[i].rng_threshold = rom.read_byte(base);
+                    rules.magnitude_table[i].power         = rom.read_byte(base + 1);
+                    rules.magnitude_table[i].display_level = rom.read_byte(base + 2);
+                }
+            } else {
+                std::fprintf(stderr, "ExtendedTables: MagnitudePower table OOB at 0x%05X\n",
+                             o.magnitude_power);
+            }
+        } else {
+            // Vanilla defaults (Crystal v1.1 values from magnitude_power.asm)
+            const uint8_t vanilla_mag[7][3] = {
+                {13,10,4},{38,30,5},{89,50,6},{166,70,7},
+                {217,90,8},{242,110,9},{255,150,10}
+            };
+            for (uint8_t i = 0; i < 7; ++i) {
+                rules.magnitude_table[i] = {vanilla_mag[i][0], vanilla_mag[i][1], vanilla_mag[i][2]};
+            }
+        }
+
+        // PresentPower table — 0d:7907, 3 × {threshold, power} + 0xFF heal sentinel
+        if (o.present_power != 0) {
+            uint32_t ptr = o.present_power;
+            uint8_t slot = 0;
+            while (slot < enginemon::BattleRules::PRESENT_TABLE_SIZE && ptr + 1 <= rom.size()) {
+                uint8_t thr = rom.read_byte(ptr);
+                if (thr == 0xFF) {
+                    rules.present_table[slot] = {0, 0, true};
+                    ++slot; break;
+                }
+                uint8_t pw = rom.read_byte(ptr + 1);
+                rules.present_table[slot++] = {thr, pw, false};
+                ptr += 2;
+            }
+        } else {
+            // Vanilla defaults (Crystal v1.1 values from present_power.asm)
+            rules.present_table[0] = {102, 40, false};
+            rules.present_table[1] = {179, 80, false};
+            rules.present_table[2] = {204,120, false};
+            rules.present_table[3] = {0,   0, true};   // heal
+        }
+        rules.present_heal_shift = 2;  // GetQuarterMaxHP: max_hp >> 2
+
+        // FlailReversalPower table — 0d:5807, 6 × {threshold_pixels, power}
+        if (o.flail_reversal_power != 0) {
+            constexpr uint32_t ENTRY_SIZE2 = 2;
+            constexpr uint32_t TABLE_BYTES2 = static_cast<uint32_t>(
+                enginemon::BattleRules::REVERSAL_TABLE_SIZE) * ENTRY_SIZE2;
+            if (o.flail_reversal_power + TABLE_BYTES2 <= rom.size()) {
+                for (uint8_t i = 0; i < enginemon::BattleRules::REVERSAL_TABLE_SIZE; ++i) {
+                    uint32_t base = o.flail_reversal_power + i * ENTRY_SIZE2;
+                    rules.reversal_table[i].threshold_pixels = rom.read_byte(base);
+                    rules.reversal_table[i].power             = rom.read_byte(base + 1);
+                }
+            } else {
+                std::fprintf(stderr, "ExtendedTables: FlailReversalPower table OOB at 0x%05X\n",
+                             o.flail_reversal_power);
+            }
+        } else {
+            // Vanilla defaults (Crystal v1.1 values from flail_reversal_power.asm)
+            const uint8_t vanilla_rev[6][2] = {{1,200},{4,150},{9,100},{16,80},{32,40},{48,20}};
+            for (uint8_t i = 0; i < 6; ++i) {
+                rules.reversal_table[i] = {vanilla_rev[i][0], vanilla_rev[i][1]};
+            }
+        }
+        rules.reversal_hp_bar_multiplier = 48;  // HP_BAR_LENGTH_PX = 6 × 8 = 48
+
+        // Weather heal fractions (hardcoded vanilla — no ROM address needed).
+        rules.weather_heal = {2, 2, 4};  // sun /2, neutral /2, other /4
     }
 
     result.success = true;

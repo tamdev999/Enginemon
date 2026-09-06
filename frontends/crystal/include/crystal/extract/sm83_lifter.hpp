@@ -40,6 +40,8 @@ namespace SM83 {
     static constexpr uint8_t RR_C         = 0x19;  // (after CB) rr c
     static constexpr uint8_t SRL_B        = 0x38;  // (after CB) srl b
     static constexpr uint8_t RR_B         = 0x18;  // wait — this is 0x18 = jr n; use LD_HL_IND_N
+    static constexpr uint8_t SRL_A        = 0x3F;  // (after CB) srl a
+    static constexpr uint8_t RR_A         = 0x1F;  // (after CB) rr a
     // Two-byte instructions: opcode + immediate
     static constexpr uint8_t ADD_A_N      = 0xC6;  // add a, n
     static constexpr uint8_t CP_N         = 0xFE;  // cp n
@@ -223,6 +225,30 @@ std::vector<Sm83Candidate> sm83_find_eighth_max_hp(const RomData& rom);
 // Locate GetSixteenthMaxHP candidates: CD ?? ?? CB 39 CB 39  (call + 2 srl c)
 // Strict: CALL followed by exactly two SRL C; denominator must be 16.
 std::vector<Sm83Candidate> sm83_find_sixteenth_max_hp(const RomData& rom);
+
+// --- BattleCommand_Recoil shift count ---
+// Shape: ld a,[wCurDamage] | ld b,a | ld a,[wCurDamage+1] | ld c,a |
+//        (srl b / rr c) ×K | ld a,b | or c | jr nz | inc c
+// Counts SRL-B/RR-C pairs after the two ld loads → shift_count = K (vanilla: 2 → /4).
+// Returns shift_count as p[0].  Fails if K=0 or K>6.
+LiftResult lift_recoil_shift(const RomSpan& span);
+
+// --- SapHealth drain shift count ---
+// Shape: ld hl,wCurDamage | ldi a,[hl] | (srl a)×K | ldh [hDividend],a |
+//        ld b,a | ld a,[hl] | rr a | ldh [hDividend+1],a
+// Counts SRL-A steps after the ldi → shift_count = K (vanilla: 1 → /2).
+// Returns shift_count as p[0].  Fails if K=0 or K>6.
+LiftResult lift_drain_shift(const RomSpan& span);
+
+// Locate BattleCommand_Recoil candidates.
+// Pattern: CB 38 CB 19 CB 38 CB 19  (srl b / rr c / srl b / rr c — two shift pairs)
+// Returns candidates where lift_recoil_shift succeeds with shift_count >= 1.
+std::vector<Sm83Candidate> sm83_find_recoil(const RomData& rom);
+
+// Locate SapHealth candidates.
+// Pattern: CB 3F E0 hh  (srl a / ldh [hDividend])  — the first SRL-A then ldh store
+// Returns candidates where lift_drain_shift succeeds with shift_count >= 1.
+std::vector<Sm83Candidate> sm83_find_drain(const RomData& rom);
 
 // Generic helper: given a profile sm83 address and a find function,
 // return the first candidate address that passes the strict recognizer.

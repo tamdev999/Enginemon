@@ -63,7 +63,8 @@ def ensure_log_dir():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def run(cmd: list[str], log_path: Path | None = None, cwd: Path | None = None) -> int:
+def run(cmd: list[str], log_path: Path | None = None, cwd: Path | None = None,
+        env: dict | None = None) -> int:
     """
     Run a command.  If log_path is given, tee stdout+stderr there while also
     streaming to the terminal.  Returns exit code.
@@ -77,17 +78,22 @@ def run(cmd: list[str], log_path: Path | None = None, cwd: Path | None = None) -
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w", encoding="utf-8", errors="replace") as log:
             proc = subprocess.Popen(
-                cmd, cwd=cwd,
+                cmd, cwd=cwd, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace"
             )
             for line in proc.stdout:
-                sys.stdout.write(line)
+                # On Windows, sys.stdout may use a narrow encoding (e.g. cp1252)
+                # that cannot represent Unicode characters emitted by test output
+                # (e.g. U+2192 → in CTest result lines).  Write with replacement
+                # so the console does not crash; the log file always gets full UTF-8.
+                sys.stdout.write(line.encode(sys.stdout.encoding, errors="replace")
+                                      .decode(sys.stdout.encoding))
                 log.write(line)
             proc.wait()
         return proc.returncode
     else:
-        return subprocess.call(cmd, cwd=cwd)
+        return subprocess.call(cmd, cwd=cwd, env=env)
 
 
 def first_error(log_path: Path) -> str:
@@ -129,14 +135,35 @@ def cmd_build(preset: str = "all", clean: bool = False, configure: bool = False)
         return 1
 
     # Configure if build dir missing or explicitly requested
-    if configure or not (BUILD_DIR / "CMakeCache.txt").exists():
+    if configure or not (BUILD_DIR / "CMakeCache.txt").exists() \
+               or not (BUILD_DIR / "build.ninja").exists():
         print("  Configuring...")
         rom = find_rom()
         rom_arg = f"-DENGINEMON_ROM_PATH={rom}" if rom else ""
+
+        # Ensure Ninja and rc.exe are findable.  On Windows the Visual Studio
+        # Developer shell normally provides these, but some shells (plain
+        # PowerShell, CI agents) may not have them in PATH.  Search the two
+        # standard VS/SDK locations and prepend them when found.
+        import shutil
+        env = os.environ.copy()
+        path_extra = []
+        for probe in [
+            r"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja",
+            r"C:\Program Files\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja",
+            r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64",
+            r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64",
+            r"C:\Program Files\LLVM\bin",
+        ]:
+            if os.path.isdir(probe) and probe not in env.get("PATH", ""):
+                path_extra.append(probe)
+        if path_extra:
+            env["PATH"] = os.pathsep.join(path_extra) + os.pathsep + env.get("PATH", "")
+
         cfg_cmd = [str(CMAKE), "--preset", "default"]
         if rom_arg:
             cfg_cmd.append(rom_arg)
-        rc = run(cfg_cmd, LOG_DIR / "configure.log")
+        rc = run(cfg_cmd, LOG_DIR / "configure.log", env=env)
         if rc != 0:
             fail(f"Configure failed (exit {rc})  log: {LOG_DIR / 'configure.log'}")
             return 1
@@ -147,7 +174,13 @@ def cmd_build(preset: str = "all", clean: bool = False, configure: bool = False)
 
     t0 = time.perf_counter()
     log_path = LOG_DIR / f"build_{preset}.log"
-    rc = run([str(CMAKE), "--build", "--preset", preset], log_path)
+    # Override the preset's -j12 with a more conservative job count to avoid
+    # LLVM/clang OOM in resource-constrained environments.  Prefer the user's
+    # ENGINEMON_BUILD_JOBS env var, then half of CPU count, floor 4.
+    import multiprocessing
+    default_jobs = max(4, multiprocessing.cpu_count() // 2)
+    jobs = int(os.environ.get("ENGINEMON_BUILD_JOBS", default_jobs))
+    rc = run([str(CMAKE), "--build", "--preset", preset, "--", f"-j{jobs}"], log_path)
     elapsed = time.perf_counter() - t0
 
     if rc == 0:

@@ -48,6 +48,9 @@ class RomData {
 public:
     // Load from file
     static std::unique_ptr<RomData> load(const std::filesystem::path& path);
+    // Construct from raw bytes (for testing/synthetic ROM construction).
+    // Does NOT validate Crystal ROM structure — use only where ROM identity is not needed.
+    static RomData from_bytes(std::vector<uint8_t> bytes);
     
     // Validation
     bool validate() const;

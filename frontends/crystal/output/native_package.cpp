@@ -725,13 +725,47 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
                 std::format("PackageWriter::add_move_data: duplicate MoveId {}", e.id));
         }
     }
+
+    // Wire format (v2):
+    //   u8  schema_version   = MVDT_SCHEMA_VERSION (currently 2)
+    //   u32 count LE
+    //   per entry (9 base bytes + 43 effect_desc bytes = 52 bytes):
+    //     u16 move_id, u8 type_id, power, accuracy, pp, effect_id, effect_chance, category
+    //     43 bytes SemanticEffectDescription — see serialize_effect_desc() below
+    //
+    // Readers that see schema_version != MVDT_SCHEMA_VERSION must reject.
+    // This prevents old packages from being silently misread as new format.
+
     auto count32 = static_cast<uint32_t>(entries.size());
+    constexpr uint32_t DESC_SIZE = 43;  // SemanticEffectDescription serialized size
     std::vector<uint8_t> buf;
-    buf.reserve(4 + entries.size() * 9);
+    buf.reserve(1 + 4 + entries.size() * (9 + DESC_SIZE));
+
+    // Schema version byte — reader rejects if this doesn't match MVDT_SCHEMA_VERSION.
+    buf.push_back(enginemon::MVDT_SCHEMA_VERSION);
+
+    // count
     buf.push_back(static_cast<uint8_t>(count32 & 0xFF));
     buf.push_back(static_cast<uint8_t>((count32 >> 8) & 0xFF));
     buf.push_back(static_cast<uint8_t>((count32 >> 16) & 0xFF));
     buf.push_back(static_cast<uint8_t>((count32 >> 24) & 0xFF));
+
+    // Helper: serialize SemanticEffectDescription as a fixed 43-byte block.
+    // Layout (every field is u8 unless noted; booleans serialized as 0/1 u8):
+    //  [0]  has_standard_damage    [1]  has_recoil           [2]  has_drain
+    //  [3]  drain_requires_sleep   [4]  user_faints          [5]  is_ohko
+    //  [6]  cannot_ko              [7]  sets_recharge        [8]  constant_damage_source
+    //  [9]  set_power_source       [10] conditional_double   [11] secondary_effect
+    //  [12] primary_status         [13] stat_change          [14] heal_source
+    //  [15] set_screen             [16] set_weather          [17] sets_spikes
+    //  [18] is_multi_hit           [19] is_charge            [20] is_future_sight
+    //  [21] is_rampage             [22] is_escalating_power  [23] is_trapping
+    //  [24] is_counter             [25] is_mirror_coat       [26] is_bide
+    //  [27] is_pursuit             [28] is_copy_move         [29] clears_hazards
+    //  [30] is_sleep_move          [31] needs_kingsrock      [32] needs_substitute
+    //  [33] needs_rage             [34] ai_classification    [35] is_supported
+    //  [36..42] reserved (7 × u8, must be 0x00 — for future fields without schema bump)
+
     for (const auto& e : entries) {
         auto mid = static_cast<uint16_t>(e.id);
         buf.push_back(static_cast<uint8_t>(mid & 0xFF));
@@ -742,7 +776,14 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
         buf.push_back(e.pp);
         buf.push_back(e.effect_id);
         buf.push_back(e.effect_chance);
-        buf.push_back(e.category);  // was reserved; now holds MoveCategory (0=Physical,1=Special,2=Status)
+        buf.push_back(e.category);  // 0=Physical,1=Special,2=Status
+
+        // SemanticEffectDescription — 43 bytes (layout matches write side)
+        const auto& d = e.effect_desc_raw;
+        static_assert(PackageWriter::MoveDataEntry::EFFECT_DESC_BYTES == 43,
+                      "effect_desc_raw size mismatch");
+        // Write all 43 bytes directly from the raw array
+        buf.insert(buf.end(), d, d + 43);
     }
     move_data_data_ = std::move(buf);
 }
@@ -758,6 +799,7 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
 
     // Wire format (all little-endian where multi-byte):
     //
+    //  [schema_version]       u8 = BRLS_SCHEMA_VERSION       =  1 byte  ← NEW v2
     //  [stat_stage_mult]      13 × {u8 num, u8 den}          = 26 bytes
     //  [acc_stage_mult]       13 × {u8 num, u8 den}          = 26 bytes
     //  [crit_chances]         7  × u8                        =  7 bytes
@@ -796,7 +838,7 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     //  [trainer_class_ai]     count × {u8 item1, u8 item2, u8 reward, u8 ai_passes, u16 LE item_flags,
     //                                  u8 dv_atk_def, u8 dv_spd_spc}   = count×8 bytes
     //
-    //  SM83-lifted formula parameters (appended, 20 bytes, optional — old readers use defaults):
+    //  SM83-lifted formula parameters (all mandatory in BRLS schema v2 — no optional reads):
     //  [sm83_damage_formula]  4 × u8  {level_div, level_add, damage_div, min_damage}
     //  [sm83_ai_scores]       2 × u8  {init_score, discourage_strong}
     //  [sm83_stat_formula]    3 × u8  {level_div, non_hp_offset, hp_offset}
@@ -824,6 +866,11 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
         buf.push_back(static_cast<uint8_t>(v & 0xFF));
         buf.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
     };
+
+    // Schema version byte — reader rejects if this doesn't match BRLS_SCHEMA_VERSION.
+    // This replaces the old "trailing optional bytes" approach which caused silent
+    // misinterpretation of old-package bytes as new fields.
+    push_u8(enginemon::BRLS_SCHEMA_VERSION);
 
     // stat_stage_mult: 13 × {num, den}
     for (const auto& e : rules.stat_stage_mult) {
@@ -924,10 +971,9 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     }
 
     // =========================================================================
-    // SM83-lifted formula parameters — appended after existing fields.
-    // Each sub-struct serialised as a fixed-length block; the reader checks
-    // remaining bytes before reading so old packages without this section still
-    // load cleanly (struct defaults are retained).
+    // SM83-lifted formula parameters — all mandatory in BRLS schema v2.
+    // The reader rejects any package that does not contain all of these fields.
+    // The old "has_bytes() optional" pattern has been removed.
     //
     // All values are u8 (single byte per parameter).
     // =========================================================================
@@ -939,9 +985,11 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     //  [sm83_exp]               1 × u8  {base_divisor}
     //  [sm83_residual]          2 × u8  {burn_poison_denom, toxic_denom}
     //  [sm83_crit_deltas]       3 × u8  {held_item_delta, scope_lens_delta, focus_energy_delta}
-    //  [sm83_damage_variation]  1 × u8  {lower_bound_byte}
+    //  [sm83_damage_variation]  2 × u8  {lower_bound_byte, divisor}
+    //  [sm83_recoil]            1 × u8  {shift_count}
+    //  [sm83_drain]             1 × u8  {shift_count}
     //
-    // Total appended: 20 bytes
+    // Total appended: 22 bytes
     push_u8(rules.damage_formula.level_divisor);
     push_u8(rules.damage_formula.level_addend);
     push_u8(rules.damage_formula.damage_divisor);
@@ -962,6 +1010,42 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     push_u8(rules.crit_deltas.scope_lens_delta);
     push_u8(rules.crit_deltas.focus_energy_delta);
     push_u8(rules.damage_variation.lower_bound_byte);
+    push_u8(rules.damage_variation.divisor);
+    //  [sm83_recoil]            1 × u8  {shift_count}
+    //  [sm83_drain]             1 × u8  {shift_count}
+    push_u8(rules.recoil.shift_count);
+    push_u8(rules.drain.shift_count);
+
+    // Extended battle params — single-turn tranche tables.
+    // All mandatory in BRLS schema v2; reader rejects if truncated.
+    //  [sm83_selfdestruct]        1 × u8  {defense_shift}
+    //  [sm83_ohko]                1 × u8  {level_diff_multiplier}
+    //  [magnitude_table]          7 × 3u8 {threshold, power, display_level}
+    //  [present_table]            4 × 2u8 {threshold, power} (last entry: threshold=0xFF heal)
+    //  [present_heal_shift]       1 × u8
+    //  [reversal_table]           6 × 2u8 {threshold_pixels, power}
+    //  [reversal_hp_bar_mult]     1 × u8
+    //  [weather_heal]             3 × u8  {sun_divisor, neutral_divisor, other_divisor}
+    push_u8(rules.selfdestruct.defense_shift);
+    push_u8(rules.ohko.level_diff_multiplier);
+    for (uint8_t i = 0; i < enginemon::BattleRules::MAGNITUDE_TABLE_SIZE; ++i) {
+        push_u8(rules.magnitude_table[i].rng_threshold);
+        push_u8(rules.magnitude_table[i].power);
+        push_u8(rules.magnitude_table[i].display_level);
+    }
+    for (uint8_t i = 0; i < enginemon::BattleRules::PRESENT_TABLE_SIZE; ++i) {
+        push_u8(rules.present_table[i].rng_threshold);
+        push_u8(static_cast<uint8_t>(rules.present_table[i].is_heal ? 0xFF : rules.present_table[i].power));
+    }
+    push_u8(rules.present_heal_shift);
+    for (uint8_t i = 0; i < enginemon::BattleRules::REVERSAL_TABLE_SIZE; ++i) {
+        push_u8(rules.reversal_table[i].threshold_pixels);
+        push_u8(rules.reversal_table[i].power);
+    }
+    push_u8(rules.reversal_hp_bar_multiplier);
+    push_u8(rules.weather_heal.sun_divisor);
+    push_u8(rules.weather_heal.neutral_divisor);
+    push_u8(rules.weather_heal.other_divisor);
 
     // SM83 lift-status mask — 2 bytes LE.
     // Indicates which sub-structs were actually extracted vs defaulted.
@@ -969,7 +1053,7 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
 
     // Frontend economy limits — 3 × int32_t LE.
     // Derived from source frontend's SRAM/BCD layout widths.
-    // Old readers (before this field) will load struct defaults (vanilla-correct).
+    // All mandatory in BRLS schema v2; reader rejects if absent.
     auto push_i32 = [&](int32_t v) {
         buf.push_back(static_cast<uint8_t>(v & 0xFF));
         buf.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));

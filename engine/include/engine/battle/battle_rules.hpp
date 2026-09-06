@@ -49,6 +49,8 @@
 //   GetEighthMaxHP                0f:4c83  burn/poison residual (/8 from shift count)
 //   GetSixteenthMaxHP             0f:4c76  toxic residual (/16 from shift count)
 //   BattleCommand_Critical        0d:4631  crit stage deltas (+2 held, +1 focus/scope)
+//   BattleCommand_Recoil          0d:~5670 recoil shift count (2 SRL-B/RR-C pairs → /4)
+//   SapHealth                     0d:~3844 drain shift count (1 SRL-A → /2)
 
 #include "engine/core/types.hpp"
 #include "engine/core/registry.hpp"
@@ -282,10 +284,90 @@ struct BattleRules {
     // The random byte is rotated right once (RRCA), then must be >= lower_bound_byte.
     // lower_bound_byte is the assembled immediate of `cp 85 percent + 1`:
     //   85 * 255 / 100 + 1 = 217 (0xD9)
-    // Semantic: values [0xD9..0xFF] map to damage ×(value/0xFF) ≈ 85%..100%.
+    // divisor is the assembled immediate of `ld a, 100 percent`:
+    //   100 * 255 / 100 = 255 (0xFF)
+    // Semantic: values [0xD9..0xFF] map to damage ×(value/divisor) ≈ 85%..100%.
     struct DamageVariationParams {
         uint8_t lower_bound_byte = 0xD9;  // `cp 85 percent + 1` assembled → 0xD9
+        uint8_t divisor          = 0xFF;  // `ld a, 100 percent` assembled → 0xFF
     } damage_variation{};
+
+    // Recoil damage shift — BattleCommand_Recoil (0d:5670)
+    // Crystal uses two SRL B / RR C pairs on wCurDamage to compute damage/4.
+    // Each SRL-B/RR-C pair = one right-shift of the 16-bit value.
+    // shift_count = 2 → recoil = max(1, damage >> 2) = max(1, damage / 4).
+    // Source: srl b / rr c / srl b / rr c at BattleCommand_Recoil+9
+    // All recoil moves (Take Down, Double-Edge, Submission, Struggle) share this one routine.
+    struct RecoilParams {
+        uint8_t shift_count = 2;  // count of SRL-B/RR-C pairs (vanilla: 2 → /4)
+    } recoil{};
+
+    // Drain heal shift — SapHealth (0d:~3844, called by BattleCommand_DrainTarget)
+    // Crystal uses one SRL A / RR A pair on wCurDamage to compute damage/2.
+    // shift_count = 1 → heal = max(1, damage >> 1) = max(1, damage / 2).
+    // Source: srl a / ldh [hDividend], a / rr a / ldh [hDividend+1], a at SapHealth+4
+    // All drain moves (Absorb, Mega Drain, Giga Drain, Dream Eater) share this routine.
+    // NOTE: Crystal SapHealth reads wCurDamage directly (pre-target-clamp value).
+    //       If target had less HP than wCurDamage, the user still heals for damage/2,
+    //       not min(target_remaining_hp, damage)/2.  This is the correct Crystal behaviour.
+    struct DrainParams {
+        uint8_t shift_count = 1;  // count of SRL-A steps (vanilla: 1 → /2)
+    } drain{};
+
+    // Selfdestruct/Explosion defense shift — BattleCommand_DamageCalc (0d:5612)
+    // Crystal halves the defender's defense register with one `srl c` before the
+    // damage division: defense_shift=1 → def = max(1, def >> 1).
+    // Source: cp EFFECT_SELFDESTRUCT / srl c / jr nz / inc c  in DamageCalc
+    struct SelfdestructParams {
+        uint8_t defense_shift = 1;  // vanilla: 1 srl c → /2
+    } selfdestruct{};
+
+    // OHKO accuracy formula — BattleCommand_OHKO (0d:~5420)
+    // effective_accuracy = min(255, base_acc + (user_level - target_level) × multiplier)
+    // Source: sub [target_level] / jr c / add a (left shift = ×2) / add [base_acc]
+    struct OhkoParams {
+        uint8_t level_diff_multiplier = 2;  // vanilla: add a (×2)
+    } ohko{};
+
+    // Magnitude power table — data/moves/magnitude_power.asm (0d:79b4)
+    // 7 entries, each 3 bytes: {rng_threshold, power, display_level}
+    struct MagnitudeEntry {
+        uint8_t rng_threshold = 0;
+        uint8_t power         = 0;
+        uint8_t display_level = 0;
+    };
+    static constexpr uint8_t MAGNITUDE_TABLE_SIZE = 7;
+    std::array<MagnitudeEntry, MAGNITUDE_TABLE_SIZE> magnitude_table{};
+
+    // Present power/heal table — data/moves/present_power.asm (0d:7907)
+    // 3 damage entries + 1 heal entry (is_heal=true, power=0)
+    struct PresentEntry {
+        uint8_t rng_threshold = 0;
+        uint8_t power         = 0;
+        bool    is_heal       = false;
+    };
+    static constexpr uint8_t PRESENT_TABLE_SIZE = 4;
+    std::array<PresentEntry, PRESENT_TABLE_SIZE> present_table{};
+    uint8_t present_heal_shift = 2;  // max_hp >> 2 = /4 (GetQuarterMaxHP)
+
+    // Reversal/Flail HP-bar table — data/moves/flail_reversal_power.asm (0d:5807)
+    // 6 entries, each 2 bytes: {threshold_pixels, power}
+    // hp_bar_pixels = floor(current_hp * hp_bar_multiplier / max_hp)
+    struct ReversalEntry {
+        uint8_t threshold_pixels = 0;
+        uint8_t power            = 0;
+    };
+    static constexpr uint8_t REVERSAL_TABLE_SIZE = 6;
+    std::array<ReversalEntry, REVERSAL_TABLE_SIZE> reversal_table{};
+    uint8_t reversal_hp_bar_multiplier = 48;  // HP_BAR_LENGTH_PX = 6 tiles × 8 px = 48
+
+    // Weather healing fractions — Morning Sun / Synthesis / Moonlight.
+    // Sun: max_hp / sun_divisor, Neutral: / neutral_divisor, Other: / other_divisor
+    struct WeatherHealParams {
+        uint8_t sun_divisor     = 2;
+        uint8_t neutral_divisor = 2;
+        uint8_t other_divisor   = 4;
+    } weather_heal{};
 
     // ========================================================================
     // Frontend-derived economy limits.
@@ -333,6 +415,10 @@ struct BattleRules {
         SM83_LIFTED_RESIDUAL       = 1u << 6,   // ResidualFractionParams (both routines)
         SM83_LIFTED_CRIT_DELTAS    = 1u << 7,   // CritStageDeltaParams
         SM83_LIFTED_DAMAGE_VAR     = 1u << 8,   // DamageVariationParams
+        SM83_LIFTED_RECOIL         = 1u << 9,   // RecoilParams (BattleCommand_Recoil)
+        SM83_LIFTED_DRAIN          = 1u << 10,  // DrainParams  (SapHealth)
+        SM83_LIFTED_SELFDESTRUCT   = 1u << 11,  // SelfdestructParams (DamageCalc inline)
+        SM83_LIFTED_OHKO           = 1u << 12,  // OhkoParams (BattleCommand_OHKO)
     };
     uint16_t sm83_lifted_mask = 0;  // initially: nothing lifted (all defaults)
 
@@ -463,6 +549,41 @@ struct BattleRules {
     uint8_t  get_crit_scope_lens_delta()  const { return crit_deltas.scope_lens_delta; }
     uint8_t  get_crit_focus_energy_delta()const { return crit_deltas.focus_energy_delta; }
     uint8_t  get_damage_var_lower_bound() const { return damage_variation.lower_bound_byte; }
+    uint8_t  get_damage_var_divisor()     const { return damage_variation.divisor; }
+    uint8_t  get_recoil_shift()           const { return recoil.shift_count; }
+    uint8_t  get_drain_shift()            const { return drain.shift_count; }
+    uint8_t  get_selfdestruct_def_shift() const { return selfdestruct.defense_shift; }
+    uint8_t  get_ohko_level_mult()        const { return ohko.level_diff_multiplier; }
+    uint8_t  get_present_heal_shift()     const { return present_heal_shift; }
+    uint8_t  get_reversal_hp_bar_mult()   const { return reversal_hp_bar_multiplier; }
+
+    // Magnitude: lookup by RNG byte — walk table, first entry where rng_byte <= threshold
+    uint8_t get_magnitude_power(uint8_t rng_byte) const {
+        for (uint8_t i = 0; i < MAGNITUDE_TABLE_SIZE; ++i) {
+            if (rng_byte <= magnitude_table[i].rng_threshold)
+                return magnitude_table[i].power;
+        }
+        return magnitude_table[MAGNITUDE_TABLE_SIZE - 1].power;
+    }
+
+    // Present: lookup by RNG byte — walk table, first entry where rng_byte <= threshold
+    // Returns power=0 and is_heal=true for the heal outcome.
+    const PresentEntry& get_present_outcome(uint8_t rng_byte) const {
+        for (uint8_t i = 0; i < PRESENT_TABLE_SIZE; ++i) {
+            if (present_table[i].is_heal || rng_byte <= present_table[i].rng_threshold)
+                return present_table[i];
+        }
+        return present_table[PRESENT_TABLE_SIZE - 1];
+    }
+
+    // Reversal/Flail: lookup by hp_bar_pixels — walk table, first entry where pixels <= threshold
+    uint8_t get_reversal_power(uint8_t hp_bar_pixels) const {
+        for (uint8_t i = 0; i < REVERSAL_TABLE_SIZE; ++i) {
+            if (hp_bar_pixels <= reversal_table[i].threshold_pixels)
+                return reversal_table[i].power;
+        }
+        return reversal_table[REVERSAL_TABLE_SIZE - 1].power;
+    }
 };
 
 } // namespace enginemon

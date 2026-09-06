@@ -284,6 +284,17 @@ if(MSVC)
     target_compile_options(sm83_lifter_test PRIVATE /bigobj)
 endif()
 
+add_executable(effect_script_test
+    crystal/effect_script_test.cpp
+)
+target_link_libraries(effect_script_test PRIVATE
+    enginemon_crystal
+    enginemon_engine
+)
+if(MSVC)
+    target_compile_options(effect_script_test PRIVATE /bigobj)
+endif()
+
 # Expansion compatibility adversarial tests — count probes, P/S split, unknown effects
 add_executable(expansion_compat_test
     crystal/expansion_compat_test.cpp
@@ -431,7 +442,8 @@ if(ENGINEMON_ENABLE_ENGINE)
     # layout_resolver_test: adversarial relocation/xref tests, all synthetic
     add_test(NAME layout_resolver_test_no_rom COMMAND $<TARGET_FILE:layout_resolver_test>)
     set_tests_properties(layout_resolver_test_no_rom
-        PROPERTIES LABELS "standalone;crystal" TIMEOUT 60)
+        PROPERTIES LABELS "standalone;crystal" TIMEOUT 60
+                   RESOURCE_LOCK "layout_resolver_temp_files")
 
     # --- ROM-dependent --------------------------------------------------------
     if(ENGINEMON_ROM_PATH)
@@ -496,7 +508,8 @@ if(ENGINEMON_ENABLE_ENGINE)
                 "ENGINEMON_TEST_ROM=${ENGINEMON_ROM_PATH}"
                 $<TARGET_FILE:layout_resolver_test>)
         set_tests_properties(layout_resolver_test
-            PROPERTIES LABELS "rom-required;crystal" TIMEOUT 60)
+            PROPERTIES LABELS "rom-required;crystal" TIMEOUT 60
+                       RESOURCE_LOCK "layout_resolver_temp_files")
 
         add_test(NAME corpus_lowering_audit
             COMMAND $<TARGET_FILE:corpus_lowering_audit> "${ENGINEMON_ROM_PATH}")
@@ -512,6 +525,29 @@ if(ENGINEMON_ENABLE_ENGINE)
             COMMAND $<TARGET_FILE:trainer_verify> "${ENGINEMON_ROM_PATH}")
         set_tests_properties(trainer_verify
             PROPERTIES LABELS "rom-required" TIMEOUT 30)
+
+        # ── All ROM-dependent tests must run from the repo source root ──────
+        # The ROM path argument ("references/...") is relative to the source
+        # tree, not the build directory.  Without WORKING_DIRECTORY the test
+        # process inherits the build dir as its working directory (CTest
+        # default) and cannot resolve "references/..." correctly.
+        set_tests_properties(
+            runtime_test_engine
+            runtime_test_compiler
+            golden_test
+            legality_gate_test
+            corpus_test
+            linker_test
+            compiler_integrity_test
+            battle_rom_test
+            sm83_lifter_test
+            expansion_compat_test
+            oracle_test
+            layout_resolver_test
+            corpus_lowering_audit
+            profile_verify
+            trainer_verify
+            PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     else()
         message(STATUS
             "CTest: ROM-dependent tests not registered (set -DENGINEMON_ROM_PATH=... to enable)")

@@ -464,6 +464,10 @@ private:
     // Default 0xFF/0xFF = no injection.
     uint8_t test_throw_map_group_ = 0xFF;
     uint8_t test_throw_map_index_ = 0xFF;
+    // Species-extraction failure seam: when true, build_production_game_data()
+    // forces extract_all_species() to fail by zeroing num_pokemon in a local copy
+    // of the profile.  Default false = no injection.
+    bool test_fail_species_extraction_ = false;
     
 public:
     // Test-only injection methods — call before compile()
@@ -505,6 +509,14 @@ public:
     void for_test_throw_map(uint8_t group, uint8_t index) {
         test_throw_map_group_ = group;
         test_throw_map_index_ = index;
+    }
+
+    // Forces build_production_game_data() to fail at the species extraction step,
+    // simulating a ROM whose BaseData table cannot be read (zero num_pokemon).
+    // Tests that the resulting std::runtime_error is caught by compile() and
+    // returns false rather than terminating the process.
+    void for_test_fail_species_extraction() {
+        test_fail_species_extraction_ = true;
     }
 
     // Expose make_build_identity for testing: allows tests to verify that the

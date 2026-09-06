@@ -21,6 +21,10 @@
 #include <vector>
 #include <optional>
 #include <span>
+// SemanticEffectDescription lives in engine/battle/semantic_effect.hpp.
+// Included here so MoveData can embed it.  semantic_effect.hpp has no
+// back-include of types.hpp (uses only <cstdint>) so there is no cycle.
+#include "engine/battle/semantic_effect.hpp"
 
 namespace enginemon {
 
@@ -235,6 +239,13 @@ namespace SemEffect {
     // Stat stage modifiers — broad semantic categories used by ai_setup
     static constexpr EffectId StatUp       =  18;  // Any stat-raising move
     static constexpr EffectId StatDown     =  19;  // Any stat-lowering move (on opponent)
+    // Strict pure-damage: executing as single-hit damage is HP-correct for all reachable states.
+    // Mapped from Crystal NORMAL_HIT(0), ALWAYS_HIT(17), PRIORITY_HIT(103).
+    // All other damaging effects — including named ones like Selfdestruct, DreamEater, HyperBeam —
+    // are NOT mapped here; they remain SemEffect::Unknown until explicitly implemented.
+    static constexpr EffectId PureDamage   =  20;  // Ordinary single-hit; no extra HP consequences
+    static constexpr EffectId Recoil       =  21;  // User takes max(1, damage >> recoil_shift) after dealing damage
+    static constexpr EffectId Drain        =  22;  // User heals max(1, damage >> drain_shift) after dealing damage
     // Used for sleep-synergy detection in AI_Smart
     // (ai_basic/ai_setup use BattleRules lists; only ai_smart uses these direct checks)
 }
@@ -254,13 +265,19 @@ struct MoveData {
     int8_t priority;        // Usually 0, positive = faster
     
     EffectId effect_id  = SemEffect::Unknown;  // Semantic effect identifier (EMON-stable)
-    uint8_t effect_chance;  // Percent chance of secondary effect
+    uint8_t effect_chance;  // Percent chance of secondary effect (0–100)
     
     bool makes_contact;
     bool is_sound_based;
     
     // Animation/presentation
     uint8_t animation_id;
+    
+    // Semantic effect description — produced by Crystal frontend from decoded effect script.
+    // execute_move() reads this struct for execution dispatch instead of effect_id.
+    // Populated at package load time; zero-init gives "ordinary single-hit damage" defaults.
+    // Defined in engine/include/engine/battle/semantic_effect.hpp.
+    SemanticEffectDescription effect_desc;
 };
 
 // Item pocket types
@@ -359,6 +376,7 @@ enum class VolatileStatus : uint16_t {
     Infatuation  = 1 << 6,
     FocusEnergy  = 1 << 7,
     Substitute   = 1 << 8,
+    Recharge     = 1 << 9,   // Must recharge next turn (Hyper Beam)
     // etc.
 };
 

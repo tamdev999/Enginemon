@@ -5,18 +5,18 @@
 // Each test constructs a minimal synthetic ROM, then runs a specific resolver
 // and asserts exact behavior.  The adversarial cases are:
 //
-//   1. Table relocated to a different bank → resolver finds it without profiling help
-//   2. Routine relocated → SM83 xref still locates the table
-//   3. Table contents changed (e.g. Pound stats changed) → content anchor fails,
+//   1. Table relocated to a different bank â†’ resolver finds it without profiling help
+//   2. Routine relocated â†’ SM83 xref still locates the table
+//   3. Table contents changed (e.g. Pound stats changed) â†’ content anchor fails,
 //      structural xref still succeeds
-//   4. Vanilla content anchor removed → resolver reports NOT FOUND (hard failure,
+//   4. Vanilla content anchor removed â†’ resolver reports NOT FOUND (hard failure,
 //      not silent fallback to stock address)
-//   5. Multiple false candidate tables → resolver detects ambiguity and returns 0
-//   6. Ambiguous discovery with disambiguation criterion → resolver succeeds
-//   7. Profile address already set and valid → resolver returns it unchanged
-//   8. Profile address set but wrong (structurally invalid) → resolver replaces it
+//   5. Multiple false candidate tables â†’ resolver detects ambiguity and returns 0
+//   6. Ambiguous discovery with disambiguation criterion â†’ resolver succeeds
+//   7. Profile address already set and valid â†’ resolver returns it unchanged
+//   8. Profile address set but wrong (structurally invalid) â†’ resolver replaces it
 //
-// Every test that expects NOT FOUND proves failure explicitly — no silent fallback.
+// Every test that expects NOT FOUND proves failure explicitly â€” no silent fallback.
 //
 // Run: layout_resolver_test
 //   (no ROM path required; all ROMs are synthetic)
@@ -287,7 +287,7 @@ static void write_move_records(std::vector<uint8_t>& rom,
     if (sentinel < rom.size()) rom[sentinel + 3] = 0x40;
 }
 
-// Write TrainerGroups XREF dispatch pattern (2× add hl,bc — dw stride).
+// Write TrainerGroups XREF dispatch pattern (2Ã— add hl,bc â€” dw stride).
 // Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 3E bb
 // This matches the actual Gen2 dispatch (TrainerGroups is a dw table, stride=2).
 static void write_trainer_groups_xref(std::vector<uint8_t>& rom,
@@ -303,7 +303,7 @@ static void write_trainer_groups_xref(std::vector<uint8_t>& rom,
     rom[o++] = 0x4F;          // ld c, a
     rom[o++] = 0x06;          // ld b, n
     rom[o++] = 0x00;
-    rom[o++] = 0x09;          // add hl, bc   (1st — dw stride = 2 bytes)
+    rom[o++] = 0x09;          // add hl, bc   (1st â€” dw stride = 2 bytes)
     rom[o++] = 0x09;          // add hl, bc   (2nd)
     rom[o++] = 0x3E;          // ld a, n      (immediately follows, no 3rd 0x09)
     rom[o++] = table_bank;
@@ -373,7 +373,7 @@ static void write_script_command_table(std::vector<uint8_t>& rom,
 }
 
 // ============================================================================
-// TEST 1: StdScripts relocated to a different bank — xref finds it
+// TEST 1: StdScripts relocated to a different bank â€” xref finds it
 // ============================================================================
 TEST(resolver_std_scripts_relocated) {
     // Build a 2MB ROM with:
@@ -410,7 +410,7 @@ TEST(resolver_std_scripts_relocated) {
 }
 
 // ============================================================================
-// TEST 2: StdScripts in dw (2-byte) format — Polished-style
+// TEST 2: StdScripts in dw (2-byte) format â€” Polished-style
 // ============================================================================
 TEST(resolver_std_scripts_dw_format) {
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
@@ -443,7 +443,7 @@ TEST(resolver_std_scripts_dw_format) {
 }
 
 // ============================================================================
-// TEST 3: Vanilla content anchor removed — Pound signature NOT present,
+// TEST 3: Vanilla content anchor removed â€” Pound signature NOT present,
 //         but Moves xref (structural) still locates the table
 // ============================================================================
 TEST(resolver_moves_pound_removed_xref_succeeds) {
@@ -458,7 +458,7 @@ TEST(resolver_moves_pound_removed_xref_succeeds) {
     const uint8_t  move_len  = 7;
 
     write_moves_xref(rom, flat(0x00, 0x1A00), tbl_ptr, tbl_bank, move_len);
-    // Write 80 move records with power=50 (not 40 — Pound content anchor removed)
+    // Write 80 move records with power=50 (not 40 â€” Pound content anchor removed)
     for (uint32_t i = 0; i < 80; ++i) {
         uint32_t o = tbl_flat + i * move_len;
         std::fill(rom.begin() + o, rom.begin() + o + move_len, 0);
@@ -471,13 +471,13 @@ TEST(resolver_moves_pound_removed_xref_succeeds) {
         rom[o + 6] = 0;
     }
     // Sentinel
-    rom[tbl_flat + 80 * move_len + 3] = 0x50; // invalid type → terminates scan
+    rom[tbl_flat + 80 * move_len + 3] = 0x50; // invalid type â†’ terminates scan
 
     auto p = write_temp_rom(rom, "moves_no_pound");
     auto rom_data = load_temp(p);
     ASSERT_TRUE(rom_data != nullptr);
 
-    // Profile address = 0 (not configured) → must find via xref
+    // Profile address = 0 (not configured) â†’ must find via xref
     std::string diag;
     uint8_t out_size = 0;
     auto r = crystal::resolve_moves(*rom_data, 0, &out_size, &diag);
@@ -492,7 +492,7 @@ TEST(resolver_moves_pound_removed_xref_succeeds) {
 }
 
 // ============================================================================
-// TEST 4: BaseData relocated to another bank — xref finds it
+// TEST 4: BaseData relocated to another bank â€” xref finds it
 // ============================================================================
 TEST(resolver_base_data_relocated) {
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
@@ -555,11 +555,11 @@ TEST(resolver_base_data_larger_record) {
 }
 
 // ============================================================================
-// TEST 6: TrainerGroups relocated — xref pattern locates it generically
+// TEST 6: TrainerGroups relocated â€” xref pattern locates it generically
 // ============================================================================
 TEST(resolver_trainer_groups_relocated) {
     // TrainerGroups is a dw table (2-byte bank-local pointers, stride=2).
-    // The dispatch uses 2× add hl,bc. Verify the resolver finds a relocated table.
+    // The dispatch uses 2Ã— add hl,bc. Verify the resolver finds a relocated table.
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
 
     const uint8_t  tbl_bank = 0x07;
@@ -599,7 +599,7 @@ TEST(resolver_type_matchups_polished_multipliers) {
         uint32_t o = tm_flat + i * 3;
         rom[o + 0] = static_cast<uint8_t>(i % 20);        // atk type
         rom[o + 1] = static_cast<uint8_t>((i + 1) % 20);  // def type
-        // Rotate through {0, 8, 32} — all valid Polished multipliers
+        // Rotate through {0, 8, 32} â€” all valid Polished multipliers
         static const uint8_t mults[] = {0, 8, 32, 8};
         rom[o + 2] = mults[i % 4];
     }
@@ -620,10 +620,10 @@ TEST(resolver_type_matchups_polished_multipliers) {
 }
 
 // ============================================================================
-// TEST 8: XREF pattern NOT FOUND → resolver returns 0 (no silent fallback)
+// TEST 8: XREF pattern NOT FOUND â†’ resolver returns 0 (no silent fallback)
 // ============================================================================
 TEST(resolver_missing_xref_returns_zero) {
-    // ROM has NO StdScript dispatch xref — all zeros.
+    // ROM has NO StdScript dispatch xref â€” all zeros.
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
 
     auto p = write_temp_rom(rom, "missing_xref");
@@ -634,17 +634,17 @@ TEST(resolver_missing_xref_returns_zero) {
     uint8_t esz = 3;
     auto r = crystal::resolve_std_scripts(*rom_data, 0, &esz, &diag);
 
-    // Must return 0 — NOT silently use any stock address
+    // Must return 0 â€” NOT silently use any stock address
     ASSERT_EQ(r.flat, 0u);
     ASSERT_FALSE(r.ambiguous);
     ASSERT_FALSE(diag.empty());  // diagnostic must explain failure
 
-    std::cout << "\n    [Missing StdScripts xref → r.flat=0, diag=\""
+    std::cout << "\n    [Missing StdScripts xref â†’ r.flat=0, diag=\""
               << diag.substr(0, 40) << "...\"]\n";
 }
 
 // ============================================================================
-// TEST 9: Multiple false candidate tables → ambiguous → returns 0, not first hit
+// TEST 9: Multiple false candidate tables â†’ ambiguous â†’ returns 0, not first hit
 // ============================================================================
 TEST(resolver_multiple_false_candidates_ambiguous) {
     // Place TWO identical ScriptCommandTable-like structures in different banks.
@@ -681,22 +681,22 @@ TEST(resolver_multiple_false_candidates_ambiguous) {
     auto r = crystal::resolve_script_command_table(*rom_data, 0, &diag);
 
     // With two equal-length candidates, the resolver should detect ambiguity.
-    // Either ambiguous=true OR it found a dominant winner (>= 2× the other).
-    // Since both tables have exactly 30 entries, neither dominates → ambiguous.
+    // Either ambiguous=true OR it found a dominant winner (>= 2Ã— the other).
+    // Since both tables have exactly 30 entries, neither dominates â†’ ambiguous.
     if (r.flat != 0) {
-        // Allowed only if one candidate clearly dominates (>= 2× + 20)
+        // Allowed only if one candidate clearly dominates (>= 2Ã— + 20)
         // With equal-length tables this should NOT happen.
         ASSERT_TRUE(r.ambiguous == false);  // winner was declared
-        // The resolver picked the one with more entries — both have 30,
+        // The resolver picked the one with more entries â€” both have 30,
         // so the first one (tbl1) by scan order should be picked.
         // This is acceptable behavior for equal-length tables.
         std::cout << "\n    [Two equal candidates: resolver picked first at 0x"
                   << std::hex << r.flat << std::dec << " (valid disambiguation)]\n";
     } else {
-        // Ambiguous → returned 0
+        // Ambiguous â†’ returned 0
         ASSERT_TRUE(r.ambiguous);
         ASSERT_FALSE(diag.empty());
-        std::cout << "\n    [Two equal candidates → ambiguous, r.flat=0]\n";
+        std::cout << "\n    [Two equal candidates â†’ ambiguous, r.flat=0]\n";
     }
     // Key invariant: result is deterministic (not random)
     auto r2 = crystal::resolve_script_command_table(*rom_data, 0, nullptr);
@@ -705,7 +705,7 @@ TEST(resolver_multiple_false_candidates_ambiguous) {
 }
 
 // ============================================================================
-// TEST 10: Profile address already set and structurally valid → unchanged
+// TEST 10: XREF confirms profile address — no mismatch when they agree
 // ============================================================================
 TEST(resolver_profile_address_valid_unchanged) {
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
@@ -717,26 +717,22 @@ TEST(resolver_profile_address_valid_unchanged) {
 
     write_trainer_groups_dw(rom, tbl_flat, 67);
 
-    // Also plant an xref pointing to a DIFFERENT table to prove profile takes priority
-    const uint8_t  fake_bank = 0x0A;
-    const uint16_t fake_ptr  = 0x5000;
-    const uint32_t fake_flat = flat(fake_bank, fake_ptr);
-    write_trainer_groups_dw(rom, fake_flat, 67);
-    write_trainer_groups_xref(rom, flat(0x0C, 0x5016), fake_ptr, fake_bank);
+    // Plant the XREF pointing to the SAME address as the profile.
+    // The scanner must find this XREF and return tbl_flat, matching the profile.
+    write_trainer_groups_xref(rom, flat(0x0Cu, 0x5016u), tbl_ptr, tbl_bank);
 
-    auto p = write_temp_rom(rom, "trainergroups_profile_valid");
+    auto p = write_temp_rom(rom, "trainergroups_xref_confirms_profile");
     auto rom_data = load_temp(p);
     ASSERT_TRUE(rom_data != nullptr);
 
-    // Pass tbl_flat as profile address
+    // Both XREF and profile point to tbl_flat -> XREF scan returns tbl_flat
     auto r = crystal::resolve_trainer_groups(*rom_data, tbl_flat, nullptr);
 
-    // Profile address is valid (dw count ≥ 10) → resolver returns it unchanged
     ASSERT_TRUE(r.flat != 0);
-    ASSERT_EQ(r.flat, tbl_flat);  // profile address, not fake_flat from xref
+    ASSERT_EQ(r.flat, tbl_flat);  // XREF-proven address (happens to match profile)
 
-    std::cout << "\n    [Profile address validated without scan; "
-                 "profile=0x" << std::hex << tbl_flat << " returned]\n";
+    std::cout << "\n    [XREF confirms profile address 0x" << std::hex << tbl_flat
+              << "; returns XREF-proven address checkmark]\n";
 }
 
 // ============================================================================
@@ -787,7 +783,7 @@ TEST(resolver_type_matchups_finds_inverse_too) {
     // Write InverseTypeMatchups (same format, different entries)
     write_type_matchups(rom, inv_flat, 40, 5);   // 40 NVE entries
 
-    // Write xref at caller site — points to inv_ptr first, then tm_ptr
+    // Write xref at caller site â€” points to inv_ptr first, then tm_ptr
     uint32_t o = flat(caller_bank, 0x6000);
     rom[o++] = 0x21; rom[o++] = inv_ptr & 0xFF; rom[o++] = inv_ptr >> 8;
     rom[o++] = 0xFA; rom[o++] = 0x00; rom[o++] = 0xD2;  // ld a, [wBattleType]
@@ -815,7 +811,7 @@ TEST(resolver_type_matchups_finds_inverse_too) {
 }
 
 // ============================================================================
-// TEST 13: Vanilla ROM — resolver confirms all addresses already set in profile
+// TEST 13: Vanilla ROM â€” resolver confirms all addresses already set in profile
 //           and makes no changes (zero-churn invariant)
 // ============================================================================
 TEST(resolver_vanilla_rom_no_churn) {
@@ -845,8 +841,11 @@ TEST(resolver_vanilla_rom_no_churn) {
     crystal::ExtractionProfile profile = *vanilla;
     int n = crystal::resolve_crystal_layout(*rom, profile, /*verbose=*/false);
 
-    // resolve_crystal_layout should find 0 new addresses (all already set).
-    // It may validate existing ones — check that addresses are unchanged.
+    // The fully populated Crystal v1.1 profile needs no new fields filled.
+    // resolve_crystal_layout must return exactly 0 (no new discoveries, no mismatch).
+    // A non-zero positive result means a resolver incorrectly overwrote a pre-set field.
+    ASSERT_EQ(n, 0);
+
     ASSERT_EQ(profile.offsets.std_scripts, vanilla->offsets.std_scripts);
     ASSERT_EQ(profile.offsets.base_data,   vanilla->offsets.base_data);
     ASSERT_EQ(profile.offsets.moves,       vanilla->offsets.moves);
@@ -858,7 +857,7 @@ TEST(resolver_vanilla_rom_no_churn) {
 }
 
 // ============================================================================
-// TEST 14–20: Block-data encoding resolver tests
+// TEST 14â€“20: Block-data encoding resolver tests
 // ============================================================================
 
 // Helper: write Pattern V (RawBytes) into a synthetic 16 KB home bank.
@@ -912,7 +911,7 @@ TEST(block_encoding_lzp_pattern_detected) {
 }
 
 TEST(block_encoding_neither_is_unknown) {
-    // Empty home bank — no pattern → Unknown.
+    // Empty home bank â€” no pattern â†’ Unknown.
     auto buf = make_blank_rom();
     auto p = write_temp_rom(buf);
     auto rom = load_temp(p);
@@ -922,7 +921,7 @@ TEST(block_encoding_neither_is_unknown) {
 }
 
 TEST(block_encoding_ambiguous_both_patterns_is_unknown) {
-    // Both Pattern V and Pattern P present → ambiguous → Unknown.
+    // Both Pattern V and Pattern P present â†’ ambiguous â†’ Unknown.
     auto buf = make_blank_rom();
     write_raw_pattern(buf, 0x0800, 0xA0, 0xD0);
     write_lzp_pattern(buf, 0x1000, 0xB0, 0xD1);
@@ -934,7 +933,7 @@ TEST(block_encoding_ambiguous_both_patterns_is_unknown) {
 }
 
 TEST(block_encoding_multiple_raw_patterns_is_unknown) {
-    // Two Pattern V hits at different WRAM addresses → ambiguous → Unknown.
+    // Two Pattern V hits at different WRAM addresses â†’ ambiguous â†’ Unknown.
     auto buf = make_blank_rom();
     write_raw_pattern(buf, 0x0800, 0xA0, 0xD0);
     write_raw_pattern(buf, 0x1000, 0xB0, 0xD1);
@@ -946,7 +945,7 @@ TEST(block_encoding_multiple_raw_patterns_is_unknown) {
 }
 
 TEST(block_encoding_hi_out_of_wram_range_not_matched) {
-    // hi = 0xBF (below [0xC0,0xDF]) → pattern invalid → Unknown.
+    // hi = 0xBF (below [0xC0,0xDF]) â†’ pattern invalid â†’ Unknown.
     auto buf = make_blank_rom();
     // Write pattern with hi=0xBF (just below the valid WRAM range)
     uint32_t pos = 0x1000;
@@ -963,7 +962,7 @@ TEST(block_encoding_hi_out_of_wram_range_not_matched) {
     ASSERT_EQ(enc, Enc::Unknown);  // hi=0xBF not in [0xC0,0xDF]
 }
 
-// ROM-backed tests: Gold, Silver, Crystal → RawBytes; Polished → LZCompressed.
+// ROM-backed tests: Gold, Silver, Crystal â†’ RawBytes; Polished â†’ LZCompressed.
 // These require the multi-ROM environment.
 TEST(block_encoding_real_roms_classification) {
     struct RomSpec { const char* env_var; Enc expected; const char* label; };
@@ -990,7 +989,7 @@ TEST(block_encoding_real_roms_classification) {
             g_current_failed = true;
         } else {
             std::cout << "\n    [" << spec.label << ": "
-                      << (enc == Enc::RawBytes ? "RawBytes" : "LZCompressed") << " ✓]";
+                      << (enc == Enc::RawBytes ? "RawBytes" : "LZCompressed") << " âœ“]";
         }
     }
     if (!any_ran) {
@@ -1001,11 +1000,11 @@ TEST(block_encoding_real_roms_classification) {
 }
 
 // ============================================================================
-// TrainerGroups: two xref sites → ambiguous → resolver returns flat=0
+// TrainerGroups: two xref sites â†’ ambiguous â†’ resolver returns flat=0
 // ============================================================================
 TEST(resolver_trainer_groups_two_sites_ambiguous) {
     // Plant two separate xref sites pointing to two different dw tables.
-    // Neither dominates → resolver must report ambiguity.
+    // Neither dominates â†’ resolver must report ambiguity.
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
 
     const uint8_t  bank_a = 0x07;
@@ -1031,7 +1030,7 @@ TEST(resolver_trainer_groups_two_sites_ambiguous) {
     ASSERT_TRUE(r.ambiguous);
     ASSERT_FALSE(diag.empty());
 
-    std::cout << "\n    [Two equal xref candidates → ambiguous, flat=0, diag=\""
+    std::cout << "\n    [Two equal xref candidates â†’ ambiguous, flat=0, diag=\""
               << diag << "\"]\n";
 }
 
@@ -1073,7 +1072,7 @@ TEST(resolver_trainer_groups_real_roms) {
             g_current_failed = true;
         } else {
             std::cout << "\n    [" << spec.label
-                      << ": TrainerGroups at 0x" << std::hex << r.flat << std::dec << " ✓]";
+                      << ": TrainerGroups at 0x" << std::hex << r.flat << std::dec << " âœ“]";
         }
     }
     if (!any_ran) {
@@ -1084,11 +1083,11 @@ TEST(resolver_trainer_groups_real_roms) {
 }
 
 // ============================================================================
-// num_trainer_classes: synthetic single-match → correct count
+// num_trainer_classes: synthetic single-match â†’ correct count
 // ============================================================================
 TEST(resolver_num_trainer_classes_single_match) {
     // Plant exactly one GetTrainerPic pattern: FA lo hi A7 C8 FE NN D0
-    // with NN=68 → num_trainer_classes=67 (Crystal).
+    // with NN=68 â†’ num_trainer_classes=67 (Crystal).
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
 
     const uint32_t site = flat(0x14, 0x5200);
@@ -1108,15 +1107,15 @@ TEST(resolver_num_trainer_classes_single_match) {
 
     ASSERT_EQ(ntc, 67u);
     ASSERT_TRUE(diag.empty());
-    std::cout << "\n    [Single match NN=68 → num_trainer_classes=67 ✓]\n";
+    std::cout << "\n    [Single match NN=68 â†’ num_trainer_classes=67 âœ“]\n";
 }
 
 // ============================================================================
-// num_trainer_classes: two matches with same NN → NOW ambiguous (strict uniqueness)
+// num_trainer_classes: two matches with same NN â†’ NOW ambiguous (strict uniqueness)
 // ============================================================================
 TEST(resolver_num_trainer_classes_two_same_matches_now_ambiguous) {
     // Plant two identical patterns in different banks; both produce NN=67.
-    // Under the strict uniqueness requirement, two matches → ambiguous → returns 0,
+    // Under the strict uniqueness requirement, two matches â†’ ambiguous â†’ returns 0,
     // even when both encode the same count.  This prevents accepting a generic
     // bounds-check inlined at multiple call sites as authoritative.
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
@@ -1134,14 +1133,14 @@ TEST(resolver_num_trainer_classes_two_same_matches_now_ambiguous) {
     std::string diag;
     uint16_t ntc = crystal::resolve_num_trainer_classes(*rom_data, &diag);
 
-    // Two structural matches → ambiguous, even if NN is identical.
+    // Two structural matches â†’ ambiguous, even if NN is identical.
     ASSERT_EQ(ntc, 0u);
     ASSERT_FALSE(diag.empty());
-    std::cout << "\n    [Two matches, same NN=67 → now ambiguous (strict uniqueness), returns 0 ✓]\n";
+    std::cout << "\n    [Two matches, same NN=67 â†’ now ambiguous (strict uniqueness), returns 0 âœ“]\n";
 }
 
 // ============================================================================
-// num_trainer_classes: two matches with DIFFERENT NN → ambiguous → returns 0
+// num_trainer_classes: two matches with DIFFERENT NN â†’ ambiguous â†’ returns 0
 // ============================================================================
 TEST(resolver_num_trainer_classes_ambiguous_different_nn) {
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
@@ -1152,7 +1151,7 @@ TEST(resolver_num_trainer_classes_ambiguous_different_nn) {
     rom[s1+3]=0xA7; rom[s1+4]=0xC8; rom[s1+5]=0xFE;
     rom[s1+6]=68;   rom[s1+7]=0xD0;
 
-    // Second site: NN=50 (different count — contradictory)
+    // Second site: NN=50 (different count â€” contradictory)
     uint32_t s2 = flat(0x0A, 0x4800);
     rom[s2+0]=0xFA; rom[s2+1]=0x20; rom[s2+2]=0xD2;
     rom[s2+3]=0xA7; rom[s2+4]=0xC8; rom[s2+5]=0xFE;
@@ -1167,15 +1166,15 @@ TEST(resolver_num_trainer_classes_ambiguous_different_nn) {
 
     ASSERT_EQ(ntc, 0u);
     ASSERT_FALSE(diag.empty());
-    std::cout << "\n    [Different NN values (68 vs 50) → ambiguous, returns 0 ✓]\n";
+    std::cout << "\n    [Different NN values (68 vs 50) â†’ ambiguous, returns 0 âœ“]\n";
 }
 
 // ============================================================================
-// num_trainer_classes: no pattern → returns 0
+// num_trainer_classes: no pattern â†’ returns 0
 // ============================================================================
 TEST(resolver_num_trainer_classes_not_found) {
     std::vector<uint8_t> rom(ROM_SIZE, 0x00);
-    // No pattern planted → should return 0
+    // No pattern planted â†’ should return 0
 
     auto p = write_temp_rom(rom, "ntc_empty");
     auto rom_data = load_temp(p);
@@ -1186,7 +1185,7 @@ TEST(resolver_num_trainer_classes_not_found) {
 
     ASSERT_EQ(ntc, 0u);
     ASSERT_FALSE(diag.empty());
-    std::cout << "\n    [No pattern → returns 0 ✓]\n";
+    std::cout << "\n    [No pattern â†’ returns 0 âœ“]\n";
 }
 
 // ============================================================================
@@ -1221,7 +1220,7 @@ TEST(resolver_num_trainer_classes_real_roms) {
             g_current_failed = true;
         } else {
             std::cout << "\n    [" << spec.label
-                      << ": num_trainer_classes=" << ntc << " ✓]";
+                      << ": num_trainer_classes=" << ntc << " âœ“]";
         }
     }
     if (!any_ran) {
@@ -1247,16 +1246,16 @@ TEST(resolver_num_trainer_classes_profile_mismatch_rejected) {
     auto rom_data = load_temp(p);
     ASSERT_TRUE(rom_data != nullptr);
 
-    // Build a profile that says num_trainer_classes=42 — contradicts ROM (67).
+    // Build a profile that says num_trainer_classes=42 â€” contradicts ROM (67).
     crystal::ExtractionProfile prof;
-    prof.counts.num_trainer_classes = 42;  // ← intentional wrong value
+    prof.counts.num_trainer_classes = 42;  // â† intentional wrong value
 
     // resolve_crystal_layout must detect the mismatch and return -1.
     int result = crystal::resolve_crystal_layout(*rom_data, prof, /*verbose=*/false);
 
     ASSERT_TRUE(result < 0);  // -1 signals hard mismatch
-    std::cout << "\n    [profile NTC=42 vs ROM NTC=67 → resolve_crystal_layout returns "
-              << result << " (< 0) ✓]\n";
+    std::cout << "\n    [profile NTC=42 vs ROM NTC=67 â†’ resolve_crystal_layout returns "
+              << result << " (< 0) âœ“]\n";
 }
 
 // ============================================================================
@@ -1273,18 +1272,746 @@ TEST(resolver_num_trainer_classes_profile_match_accepted) {
     auto rom_data = load_temp(p);
     ASSERT_TRUE(rom_data != nullptr);
 
-    // Profile already says 67 — matches ROM.
+    // Profile already says 67 â€” matches ROM.
     crystal::ExtractionProfile prof;
     prof.counts.num_trainer_classes = 67;
 
     int result = crystal::resolve_crystal_layout(*rom_data, prof, /*verbose=*/false);
 
-    // No mismatch — result should be >= 0 (0 or more resolved fields).
+    // No mismatch â€” result should be >= 0 (0 or more resolved fields).
     ASSERT_TRUE(result >= 0);
     // Count in profile unchanged (already correct).
     ASSERT_EQ(prof.counts.num_trainer_classes, 67u);
-    std::cout << "\n    [profile NTC=67 matches ROM NTC=67 → no mismatch, result="
+    std::cout << "\n    [profile NTC=67 matches ROM NTC=67 â†’ no mismatch, result="
+              << result << " âœ“]\n";
+}
+
+// ============================================================================
+// OverworldSprites: correct triplet planted in synthetic ROM â†’ base returned
+// ============================================================================
+TEST(resolver_overworld_sprites_relocated) {
+    // Plant the table at a non-default location: bank 0x07, ptr 0x5100.
+    // base     = 0x5100  (SPRITEDATA_ADDR  offset 0)
+    // base+4   = 0x5104  (SPRITEDATA_TYPE  offset 4)
+    // base+5   = 0x5105  (SPRITEDATA_PALETTE offset 5)
+    // All three dispatch sites live in the same bank (0x07).
+    const uint8_t  TABLE_BANK = 0x07u;
+    const uint16_t BASE_PTR   = 0x5100u;
+
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    auto plant = [&](uint32_t site, uint16_t ptr) {
+        rom[site+0] = 0x21u;                        // ld hl, nn
+        rom[site+1] = static_cast<uint8_t>(ptr);    //   lo
+        rom[site+2] = static_cast<uint8_t>(ptr>>8); //   hi
+        rom[site+3] = 0x3Du;                        // dec a
+        rom[site+4] = 0x4Fu;                        // ld c, a
+        rom[site+5] = 0x06u;                        // ld b, n
+        rom[site+6] = 0x00u;                        //   0
+        rom[site+7] = 0x3Eu;                        // ld a, n
+        rom[site+8] = 0x06u;                        //   6  (NUM_SPRITEDATA_FIELDS)
+        rom[site+9] = 0xCDu;                        // call nn
+    };
+
+    // Place the three sites in bank 0x07 at different offsets.
+    const uint32_t s0 = flat(TABLE_BANK, 0x4800u);  // GetSprite            â†’ ptr=BASE_PTR+0
+    const uint32_t s1 = flat(TABLE_BANK, 0x4900u);  // _DoesSpriteHaveFacings â†’ ptr=BASE_PTR+4
+    const uint32_t s2 = flat(TABLE_BANK, 0x4A00u);  // _GetSpritePalette     â†’ ptr=BASE_PTR+5
+    plant(s0, BASE_PTR + 0u);
+    plant(s1, BASE_PTR + 4u);
+    plant(s2, BASE_PTR + 5u);
+
+    // Also drop 6 plausible-looking bytes at the table location so that the
+    // profile-path validation (first entry check) would also pass if invoked.
+    const uint32_t tbl_flat = flat(TABLE_BANK, BASE_PTR);
+    rom[tbl_flat+0] = 0x36u; rom[tbl_flat+1] = 0x47u;  // ptr lo/hi (0x4736)
+    rom[tbl_flat+2] = 0x00u;                             // padding
+    rom[tbl_flat+3] = TABLE_BANK;                        // bank byte
+    rom[tbl_flat+4] = 0x00u; rom[tbl_flat+5] = 0x00u;
+
+    auto p = write_temp_rom(rom, "ows_relocated");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    auto r = crystal::resolve_overworld_sprites(*rom_data, 0u, &diag);
+
+    ASSERT_TRUE(r.flat != 0u);
+    ASSERT_EQ(r.flat, tbl_flat);
+    std::cout << "\n    [relocated triplet â†’ 0x" << std::hex << tbl_flat
+              << std::dec << " âœ“ diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// OverworldSprites: 3 hits but wrong triplet offsets â†’ ambiguous
+// ============================================================================
+TEST(resolver_overworld_sprites_wrong_triplet) {
+    // Plant base, base+2, base+5 â€” that is NOT {base, base+4, base+5}.
+    const uint8_t  TABLE_BANK = 0x07u;
+    const uint16_t BASE_PTR   = 0x5100u;
+
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    auto plant = [&](uint32_t site, uint16_t ptr) {
+        rom[site+0] = 0x21u;
+        rom[site+1] = static_cast<uint8_t>(ptr);
+        rom[site+2] = static_cast<uint8_t>(ptr>>8);
+        rom[site+3] = 0x3Du; rom[site+4] = 0x4Fu;
+        rom[site+5] = 0x06u; rom[site+6] = 0x00u;
+        rom[site+7] = 0x3Eu; rom[site+8] = 0x06u;
+        rom[site+9] = 0xCDu;
+    };
+
+    plant(flat(TABLE_BANK, 0x4800u), BASE_PTR + 0u);
+    plant(flat(TABLE_BANK, 0x4900u), BASE_PTR + 2u);  // wrong: +2, not +4
+    plant(flat(TABLE_BANK, 0x4A00u), BASE_PTR + 5u);
+
+    auto p = write_temp_rom(rom, "ows_wrong_triplet");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    auto r = crystal::resolve_overworld_sprites(*rom_data, 0u, &diag);
+
+    // Must not resolve â€” wrong offset spacing.
+    ASSERT_EQ(r.flat, 0u);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [wrong triplet offsets {+0,+2,+5} â†’ unresolved âœ“ diag=\""
+              << diag << "\"]\n";
+}
+
+// ============================================================================
+// OverworldSprites: more than 3 hits â†’ ambiguous (too many)
+// ============================================================================
+TEST(resolver_overworld_sprites_too_many_hits) {
+    const uint8_t  TABLE_BANK = 0x07u;
+    const uint16_t BASE_PTR   = 0x5100u;
+
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    auto plant = [&](uint32_t site, uint16_t ptr) {
+        rom[site+0] = 0x21u;
+        rom[site+1] = static_cast<uint8_t>(ptr);
+        rom[site+2] = static_cast<uint8_t>(ptr>>8);
+        rom[site+3] = 0x3Du; rom[site+4] = 0x4Fu;
+        rom[site+5] = 0x06u; rom[site+6] = 0x00u;
+        rom[site+7] = 0x3Eu; rom[site+8] = 0x06u;
+        rom[site+9] = 0xCDu;
+    };
+
+    // A complete valid tripletâ€¦
+    plant(flat(TABLE_BANK, 0x4800u), BASE_PTR + 0u);
+    plant(flat(TABLE_BANK, 0x4900u), BASE_PTR + 4u);
+    plant(flat(TABLE_BANK, 0x4A00u), BASE_PTR + 5u);
+    // â€¦plus an extra spurious hit using a different base.
+    const uint16_t ALT_PTR = 0x5200u;
+    plant(flat(0x09u, 0x4800u), ALT_PTR + 0u);
+    plant(flat(0x09u, 0x4900u), ALT_PTR + 4u);
+    plant(flat(0x09u, 0x4A00u), ALT_PTR + 5u);
+
+    auto p = write_temp_rom(rom, "ows_too_many");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    auto r = crystal::resolve_overworld_sprites(*rom_data, 0u, &diag);
+
+    // 6 hits â†’ cannot form a unique triplet â†’ ambiguous.
+    ASSERT_EQ(r.flat, 0u);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [6 hits â†’ ambiguous âœ“ diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// OverworldSprites: no pattern in ROM â†’ not found
+// ============================================================================
+TEST(resolver_overworld_sprites_not_found) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+    // No pattern planted.
+
+    auto p = write_temp_rom(rom, "ows_empty");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    auto r = crystal::resolve_overworld_sprites(*rom_data, 0u, &diag);
+
+    ASSERT_EQ(r.flat, 0u);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [no pattern â†’ not found âœ“ diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// OverworldSprites: ROM-backed Crystal/Gold/Silver
+// ============================================================================
+TEST(resolver_overworld_sprites_real_roms) {
+    struct Spec {
+        const char* env_var;
+        const char* label;
+        uint32_t    expected_flat;
+    };
+    const Spec specs[] = {
+        { "ENGINEMON_TEST_ROM",   "Crystal v1.1", 0x14736u },
+        { "ENGINEMON_GOLD_ROM",   "Gold",          0x147DEu },
+        { "ENGINEMON_SILVER_ROM", "Silver",         0x147DEu },
+    };
+    bool any_ran = false;
+    for (const auto& spec : specs) {
+        const char* path_env = std::getenv(spec.env_var);
+        if (!path_env) continue;
+        auto rom = crystal::RomData::load(std::filesystem::path(path_env));
+        if (!rom) continue;
+        any_ran = true;
+
+        std::string diag;
+        auto r = crystal::resolve_overworld_sprites(*rom, 0u, &diag);
+
+        if (r.flat != spec.expected_flat) {
+            std::fprintf(stderr,
+                "  FAIL: %s expected flat=0x%05X got flat=0x%05X diag=\"%s\"\n",
+                spec.label, spec.expected_flat, r.flat, diag.c_str());
+            g_current_failed = true;
+        } else {
+            std::cout << "\n    [" << spec.label
+                      << ": OverworldSprites=0x" << std::hex << r.flat
+                      << std::dec << " âœ“]";
+        }
+    }
+    if (!any_ran) {
+        std::cout << "\n    [SKIP: no ROM env vars set]";
+    } else {
+        std::cout << "\n";
+    }
+}
+
+// ============================================================================
+// SpecialsPointers: dispatcher pattern perfect match but ld hl operand < 0x4000
+//                  → invalid table ptr → rejected as not-found
+// ============================================================================
+TEST(resolver_special_pointers_invalid_table_ptr_rejected) {
+    // Plant the full 12-byte pattern but with ptr = 0x3FFF (below banked window).
+    // valid_banked_ptr(0x3FFF) is false, so the candidate must be skipped.
+    const uint8_t  DISP_BANK = 0x03u;
+    const uint16_t BAD_PTR   = 0x3FFFu;  // ROM0 address — not a valid ROMX table ptr
+
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+    const uint32_t site = flat(DISP_BANK, 0x4800u);
+    rom[site+0]  = 0x21u;
+    rom[site+1]  = static_cast<uint8_t>(BAD_PTR & 0xFFu);
+    rom[site+2]  = static_cast<uint8_t>(BAD_PTR >> 8);
+    rom[site+3]  = 0x19u; rom[site+4]  = 0x19u; rom[site+5]  = 0x19u;
+    rom[site+6]  = 0x46u; rom[site+7]  = 0x23u;
+    rom[site+8]  = 0x2Au; rom[site+9]  = 0x66u;
+    rom[site+10] = 0x6Fu; rom[site+11] = 0x78u;
+
+    auto p = write_temp_rom(rom, "sp_bad_ptr");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    bool mismatch = false;
+    auto r = crystal::resolve_special_pointers(*rom_data, 0u, &mismatch, &diag);
+
+    // Pattern bytes match but ptr=0x3FFF is outside [0x4000,0x7FFF] →
+    // candidate rejected → 0 hits → not-found (not ambiguous).
+    ASSERT_EQ(r.flat, 0u);
+    ASSERT_FALSE(r.ambiguous);
+    ASSERT_FALSE(mismatch);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [ptr=0x3FFF below banked window → rejected as not-found ✓"
+              << " diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// SpecialsPointers: valid dispatcher planted in synthetic ROM → address returned
+// ============================================================================
+TEST(resolver_special_pointers_synthetic_match) {
+    // Place the Special:: dispatcher in bank 0x03 at ptr 0x4800.
+    // SpecialsPointers = ptr 0x5100 (arbitrary).
+    const uint8_t  DISP_BANK = 0x03u;
+    const uint16_t DISP_PTR  = 0x4800u;
+    const uint16_t TBL_PTR   = 0x5100u;
+
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    // Write the 12-byte pattern at the dispatcher site.
+    // Bytes [0..2]: 21 lo hi   (ld hl, SpecialsPointers)
+    // Bytes [3..5]: 19 19 19   (add hl,de × 3)
+    // Bytes [6..7]: 46 23       (vanilla: ld b,[hl] / inc hl — bytes [6..7] are wildcarded)
+    // Bytes [8..11]: 2A 66 6F 78 (ld a,[hl+] / ld h,[hl] / ld l,a / ld a,b)
+    const uint32_t site = flat(DISP_BANK, DISP_PTR);
+    rom[site+0]  = 0x21u;
+    rom[site+1]  = static_cast<uint8_t>(TBL_PTR & 0xFFu);
+    rom[site+2]  = static_cast<uint8_t>(TBL_PTR >> 8);
+    rom[site+3]  = 0x19u; rom[site+4] = 0x19u; rom[site+5] = 0x19u;
+    rom[site+6]  = 0x46u; rom[site+7]  = 0x23u;  // wildcard bytes — any value
+    rom[site+8]  = 0x2Au; rom[site+9]  = 0x66u;
+    rom[site+10] = 0x6Fu; rom[site+11] = 0x78u;
+
+    auto p = write_temp_rom(rom, "sp_synth");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    const uint32_t expected_flat = flat(DISP_BANK, TBL_PTR);
+
+    std::string diag;
+    bool mismatch = false;
+    auto r = crystal::resolve_special_pointers(*rom_data, 0u, &mismatch, &diag);
+
+    ASSERT_TRUE(r.flat != 0u);
+    ASSERT_EQ(r.flat, expected_flat);
+    ASSERT_FALSE(mismatch);
+    std::cout << "\n    [synthetic match → flat=0x" << std::hex << r.flat
+              << std::dec << " ✓ diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// SpecialsPointers: no pattern in ROM → not found
+// ============================================================================
+TEST(resolver_special_pointers_not_found) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+    // No dispatcher planted.
+
+    auto p = write_temp_rom(rom, "sp_empty");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    bool mismatch = false;
+    auto r = crystal::resolve_special_pointers(*rom_data, 0u, &mismatch, &diag);
+
+    ASSERT_EQ(r.flat, 0u);
+    ASSERT_FALSE(r.ambiguous);
+    ASSERT_FALSE(mismatch);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [no pattern → not found ✓ diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// SpecialsPointers: two matching dispatcher sites → ambiguous
+// ============================================================================
+TEST(resolver_special_pointers_ambiguous) {
+    // Plant the full 12-byte pattern at two different locations.
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    auto plant = [&](uint32_t site, uint16_t tbl_ptr) {
+        rom[site+0]  = 0x21u;
+        rom[site+1]  = static_cast<uint8_t>(tbl_ptr & 0xFFu);
+        rom[site+2]  = static_cast<uint8_t>(tbl_ptr >> 8);
+        rom[site+3]  = 0x19u; rom[site+4]  = 0x19u; rom[site+5]  = 0x19u;
+        rom[site+6]  = 0x46u; rom[site+7]  = 0x23u;
+        rom[site+8]  = 0x2Au; rom[site+9]  = 0x66u;
+        rom[site+10] = 0x6Fu; rom[site+11] = 0x78u;
+    };
+
+    plant(flat(0x03u, 0x4800u), 0x5100u);
+    plant(flat(0x07u, 0x4A00u), 0x5200u);  // second spurious dispatcher
+
+    auto p = write_temp_rom(rom, "sp_ambiguous");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    bool mismatch = false;
+    auto r = crystal::resolve_special_pointers(*rom_data, 0u, &mismatch, &diag);
+
+    ASSERT_EQ(r.flat, 0u);
+    ASSERT_TRUE(r.ambiguous);
+    ASSERT_FALSE(mismatch);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [two dispatcher sites → ambiguous ✓ diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// SpecialsPointers: ROM resolves to address A, profile has nonzero address B → mismatch
+// ============================================================================
+TEST(resolver_special_pointers_profile_mismatch_rejected) {
+    // Plant dispatcher pointing to 0x5100 in bank 3.
+    const uint8_t  DISP_BANK = 0x03u;
+    const uint16_t TBL_PTR   = 0x5100u;
+
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+    const uint32_t site = flat(DISP_BANK, 0x4800u);
+    rom[site+0]  = 0x21u;
+    rom[site+1]  = static_cast<uint8_t>(TBL_PTR & 0xFFu);
+    rom[site+2]  = static_cast<uint8_t>(TBL_PTR >> 8);
+    rom[site+3]  = 0x19u; rom[site+4]  = 0x19u; rom[site+5]  = 0x19u;
+    rom[site+6]  = 0x46u; rom[site+7]  = 0x23u;
+    rom[site+8]  = 0x2Au; rom[site+9]  = 0x66u;
+    rom[site+10] = 0x6Fu; rom[site+11] = 0x78u;
+
+    auto p = write_temp_rom(rom, "sp_mismatch");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    const uint32_t rom_flat     = flat(DISP_BANK, TBL_PTR);        // 0x0D100
+    const uint32_t profile_flat = flat(DISP_BANK, 0x5200u);        // different address
+
+    std::string diag;
+    bool mismatch = false;
+    auto r = crystal::resolve_special_pointers(*rom_data, profile_flat, &mismatch, &diag);
+
+    ASSERT_EQ(r.flat, 0u);     // resolver returns {} on mismatch
+    ASSERT_TRUE(mismatch);
+    ASSERT_FALSE(diag.empty());
+    // Also verify through resolve_crystal_layout: must return -1
+    crystal::ExtractionProfile prof;
+    prof.offsets.special_pointers = profile_flat;   // stale profile address
+    int layout_result = crystal::resolve_crystal_layout(*rom_data, prof, false);
+    ASSERT_TRUE(layout_result < 0);
+    std::cout << "\n    [ROM=0x" << std::hex << rom_flat
+              << " vs profile=0x" << profile_flat
+              << " → mismatch ✓, layout returns " << std::dec << layout_result << "]\n";
+}
+
+// ============================================================================
+// SpecialsPointers: profile address matches ROM → accepted, no mismatch
+// ============================================================================
+TEST(resolver_special_pointers_profile_match_accepted) {
+    const uint8_t  DISP_BANK = 0x03u;
+    const uint16_t TBL_PTR   = 0x5100u;
+
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+    const uint32_t site = flat(DISP_BANK, 0x4800u);
+    rom[site+0]  = 0x21u;
+    rom[site+1]  = static_cast<uint8_t>(TBL_PTR & 0xFFu);
+    rom[site+2]  = static_cast<uint8_t>(TBL_PTR >> 8);
+    rom[site+3]  = 0x19u; rom[site+4]  = 0x19u; rom[site+5]  = 0x19u;
+    rom[site+6]  = 0x46u; rom[site+7]  = 0x23u;
+    rom[site+8]  = 0x2Au; rom[site+9]  = 0x66u;
+    rom[site+10] = 0x6Fu; rom[site+11] = 0x78u;
+
+    auto p = write_temp_rom(rom, "sp_match");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    const uint32_t expected_flat = flat(DISP_BANK, TBL_PTR);
+
+    std::string diag;
+    bool mismatch = false;
+    auto r = crystal::resolve_special_pointers(*rom_data, expected_flat, &mismatch, &diag);
+
+    ASSERT_TRUE(r.flat != 0u);
+    ASSERT_EQ(r.flat, expected_flat);
+    ASSERT_FALSE(mismatch);
+    std::cout << "\n    [profile=ROM=0x" << std::hex << expected_flat
+              << std::dec << " → accepted ✓]\n";
+}
+
+// ============================================================================
+// SpecialsPointers: ROM-backed Crystal/Gold/Silver/Polished canary
+// ============================================================================
+TEST(resolver_special_pointers_real_roms) {
+    struct Spec {
+        const char* env_var;
+        const char* label;
+        uint32_t    expected_flat;
+    };
+    const Spec specs[] = {
+        { "ENGINEMON_TEST_ROM",      "Crystal v1.1",  0x0C029u },
+        { "ENGINEMON_GOLD_ROM",      "Gold",           0x0C239u },
+        { "ENGINEMON_SILVER_ROM",    "Silver",         0x0C239u },
+        { "ENGINEMON_POLISHED_ROM",  "Polished 3.2.3", 0x0C02Au },
+    };
+    bool any_ran = false;
+    for (const auto& spec : specs) {
+        const char* path_env = std::getenv(spec.env_var);
+        if (!path_env) continue;
+        auto rom = crystal::RomData::load(std::filesystem::path(path_env));
+        if (!rom) continue;
+        any_ran = true;
+
+        std::string diag;
+        bool mismatch = false;
+        auto r = crystal::resolve_special_pointers(*rom, 0u, &mismatch, &diag);
+
+        if (r.flat != spec.expected_flat || mismatch) {
+            std::fprintf(stderr,
+                "  FAIL: %s expected flat=0x%05X got flat=0x%05X mismatch=%d diag=\"%s\"\n",
+                spec.label, spec.expected_flat, r.flat, (int)mismatch, diag.c_str());
+            g_current_failed = true;
+        } else {
+            std::cout << "\n    [" << spec.label
+                      << ": SpecialsPointers=0x" << std::hex << r.flat
+                      << std::dec << " ✓]";
+        }
+    }
+    if (!any_ran) {
+        std::cout << "\n    [SKIP: no ROM env vars set]";
+    } else {
+        std::cout << "\n";
+    }
+}
+
+// ============================================================================
+// PalMapConsumerBank: ROM-backed Crystal/Gold/Silver, and Polished canary (0 = not found)
+// ============================================================================
+TEST(resolver_palmap_consumer_bank_real_roms) {
+    struct Spec {
+        const char* env_var;
+        const char* label;
+        uint8_t     expected;  // 0 = expect not-found (resolver returns 0)
+    };
+    const Spec specs[] = {
+        { "ENGINEMON_TEST_ROM",   "Crystal v1.1",  0x13u },
+        { "ENGINEMON_GOLD_ROM",   "Gold",           0x02u },
+        { "ENGINEMON_SILVER_ROM", "Silver",         0x02u },
+        { "ENGINEMON_POLISHED_ROM","Polished 3.2.3", 0x00u },  // pattern absent → 0
+    };
+    bool any_ran = false;
+    for (const auto& spec : specs) {
+        const char* env = std::getenv(spec.env_var);
+        if (!env) continue;
+        auto rom = crystal::RomData::load(std::filesystem::path(env));
+        if (!rom) continue;
+        any_ran = true;
+
+        std::string diag;
+        uint8_t bank = crystal::resolve_palmap_consumer_bank(*rom, &diag);
+
+        if (bank != spec.expected) {
+            std::fprintf(stderr,
+                "  FAIL: %s expected bank=0x%02X got 0x%02X diag=\"%s\"\n",
+                spec.label, spec.expected, bank, diag.c_str());
+            g_current_failed = true;
+        } else {
+            if (spec.expected == 0) {
+                std::cout << "\n    [" << spec.label
+                          << ": palmap_consumer_bank=0 (not found, correct) ✓]";
+            } else {
+                std::cout << "\n    [" << spec.label
+                          << ": palmap_consumer_bank=0x" << std::hex << (int)bank
+                          << std::dec << " ✓]";
+            }
+        }
+    }
+    if (!any_ran) { std::cout << "\n    [SKIP: no ROM env vars set]"; }
+    else { std::cout << "\n"; }
+}
+
+// ============================================================================
+// PalMapConsumerBank: two homecall candidates with SAME NN → now ambiguous
+//   (strict uniqueness: exactly 1 candidate required)
+// ============================================================================
+TEST(resolver_palmap_consumer_bank_ambiguous_same_nn) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    auto plant = [&](uint32_t site, uint8_t nn) {
+        rom[site+0] = 0xF5u; rom[site+1] = 0x3Eu; rom[site+2] = nn;
+        rom[site+3] = 0xD7u; rom[site+4] = 0xCDu; rom[site+5] = 0x00u; rom[site+6] = 0x40u;
+        rom[site+7] = 0xF1u; rom[site+8] = 0xD7u; rom[site+9] = 0xC9u;
+    };
+
+    plant(0x0D00u, 0x13u);  // first candidate: bank 0x13
+    plant(0x0E00u, 0x13u);  // second candidate: same bank 0x13 — still ambiguous
+
+    auto p = write_temp_rom(rom, "palmap_same_nn");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    uint8_t bank = crystal::resolve_palmap_consumer_bank(*rom_data, &diag);
+
+    ASSERT_EQ(bank, 0u);  // two candidates → ambiguous even when same value
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [two candidates same NN=0x13 → ambiguous=0 ✓"
+              << " diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// PalMapConsumerBank: two homecall candidates with different NN → ambiguous
+// ============================================================================
+TEST(resolver_palmap_consumer_bank_ambiguous_different_nn) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    // Plant two valid homecall patterns in home bank with different bank values.
+    auto plant = [&](uint32_t site, uint8_t nn) {
+        rom[site+0] = 0xF5u;               // push af
+        rom[site+1] = 0x3Eu;               // ld a, n
+        rom[site+2] = nn;                  // bank literal
+        rom[site+3] = 0xD7u;               // rst $10 (Bankswitch)
+        rom[site+4] = 0xCDu;               // call nn
+        rom[site+5] = 0x00u;               //   lo = 0x00
+        rom[site+6] = 0x40u;               //   hi = 0x40  → call 0x4000
+        rom[site+7] = 0xF1u;               // pop af
+        rom[site+8] = 0xD7u;               // rst $10 (Bankswitch restore)
+        rom[site+9] = 0xC9u;               // ret
+    };
+
+    plant(0x0D00u, 0x13u);  // first candidate: bank 0x13
+    plant(0x0E00u, 0x05u);  // second candidate: bank 0x05 (different)
+
+    auto p = write_temp_rom(rom, "palmap_ambiguous");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    uint8_t bank = crystal::resolve_palmap_consumer_bank(*rom_data, &diag);
+
+    ASSERT_EQ(bank, 0u);  // conflicting → returns 0
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [two candidates NN=0x13 vs NN=0x05 → ambiguous=0 ✓"
+              << " diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// PalMapConsumerBank: no pattern in ROM → not found, returns 0
+// ============================================================================
+TEST(resolver_palmap_consumer_bank_not_found) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+    // No pattern planted.
+
+    auto p = write_temp_rom(rom, "palmap_not_found");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    std::string diag;
+    uint8_t bank = crystal::resolve_palmap_consumer_bank(*rom_data, &diag);
+
+    ASSERT_EQ(bank, 0u);
+    ASSERT_FALSE(diag.empty());
+    std::cout << "\n    [no pattern → bank=0 ✓ diag=\"" << diag << "\"]\n";
+}
+
+// ============================================================================
+// PalMapConsumerBank: ROM resolves to bank A, profile has bank B ≠ A → mismatch
+// ============================================================================
+TEST(resolver_palmap_consumer_bank_profile_mismatch_rejected) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    // Plant the homecall pattern: bank 0x13
+    uint32_t site = 0x0D00u;
+    rom[site+0]=0xF5u; rom[site+1]=0x3Eu; rom[site+2]=0x13u;  // bank=0x13
+    rom[site+3]=0xD7u; rom[site+4]=0xCDu; rom[site+5]=0x00u; rom[site+6]=0x40u;
+    rom[site+7]=0xF1u; rom[site+8]=0xD7u; rom[site+9]=0xC9u;
+
+    auto p = write_temp_rom(rom, "palmap_mismatch");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    // Profile says bank 0x05 — contradicts ROM result of 0x13
+    crystal::ExtractionProfile prof;
+    prof.offsets.palmap_consumer_bank = 0x05u;  // stale/wrong profile value
+
+    int result = crystal::resolve_crystal_layout(*rom_data, prof, /*verbose=*/false);
+
+    ASSERT_TRUE(result < 0);  // must hard-fail
+    std::cout << "\n    [profile bank=0x05 vs ROM bank=0x13 → mismatch, resolve_crystal_layout="
+              << result << " (< 0) ✓]\n";
+}
+
+// ============================================================================
+// PalMapConsumerBank: profile agrees with ROM → accepted
+// ============================================================================
+TEST(resolver_palmap_consumer_bank_profile_match_accepted) {
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    uint32_t site = 0x0D00u;
+    rom[site+0]=0xF5u; rom[site+1]=0x3Eu; rom[site+2]=0x13u;
+    rom[site+3]=0xD7u; rom[site+4]=0xCDu; rom[site+5]=0x00u; rom[site+6]=0x40u;
+    rom[site+7]=0xF1u; rom[site+8]=0xD7u; rom[site+9]=0xC9u;
+
+    auto p = write_temp_rom(rom, "palmap_match");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof;
+    prof.offsets.palmap_consumer_bank = 0x13u;  // matches ROM
+
+    int result = crystal::resolve_crystal_layout(*rom_data, prof, /*verbose=*/false);
+
+    ASSERT_TRUE(result >= 0);  // no mismatch
+    ASSERT_EQ(prof.offsets.palmap_consumer_bank, 0x13u);  // unchanged
+    std::cout << "\n    [profile bank=0x13 matches ROM bank=0x13 → accepted, result="
               << result << " ✓]\n";
+}
+
+// ============================================================================
+// TrainerGroups: profile has different address from ROM-proven address → mismatch
+// ============================================================================
+TEST(resolver_trainer_groups_profile_mismatch_rejected) {
+    // Plant a valid TrainerGroups dispatch pattern at one address but supply
+    // a different nonzero profile address — the mismatch must abort compilation.
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    const uint8_t  TBL_BANK = 0x0Eu;
+    const uint16_t TBL_PTR  = 0x5999u;  // the ROM-proven address
+    const uint32_t ROM_FLAT = flat(TBL_BANK, TBL_PTR);
+    const uint32_t PROFILE_FLAT = flat(TBL_BANK, 0x4000u);  // different address
+
+    // Plant the XREF pattern: 21 lo hi 7A 3D 4F 06 00 09 09 3E bb
+    uint32_t site = flat(0x10u, 0x5000u);
+    rom[site+0]=0x21u; rom[site+1]=(TBL_PTR&0xFF); rom[site+2]=(TBL_PTR>>8);
+    rom[site+3]=0x7Au; rom[site+4]=0x3Du; rom[site+5]=0x4Fu;
+    rom[site+6]=0x06u; rom[site+7]=0x00u;
+    rom[site+8]=0x09u; rom[site+9]=0x09u;
+    rom[site+10]=0x3Eu; rom[site+11]=TBL_BANK;
+
+    // Plant plausible dw entries at the ROM-proven address (>= 10 required)
+    for (uint32_t i = 0; i < 12u; ++i) {
+        uint16_t ptr = static_cast<uint16_t>(0x4100u + i * 0x20u);
+        rom[ROM_FLAT + i*2u]     = ptr & 0xFFu;
+        rom[ROM_FLAT + i*2u + 1] = ptr >> 8;
+    }
+
+    auto p = write_temp_rom(rom, "tg_mismatch");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    // Profile supplies a different (stale) address
+    crystal::ExtractionProfile prof;
+    prof.offsets.trainer_groups = PROFILE_FLAT;  // different from ROM-proven
+
+    int result = crystal::resolve_crystal_layout(*rom_data, prof, /*verbose=*/false);
+
+    ASSERT_TRUE(result < 0);  // must hard-fail
+    std::cout << "\n    [TrainerGroups: profile=0x" << std::hex << PROFILE_FLAT
+              << " vs ROM=0x" << ROM_FLAT << std::dec
+              << " → mismatch, resolve_crystal_layout=" << result << " (< 0) ✓]\n";
+}
+
+// ============================================================================
+// OverworldSprites: profile has different address from ROM-proven address → mismatch
+// ============================================================================
+TEST(resolver_overworld_sprites_profile_mismatch_rejected) {
+    // Plant the three-hit XREF triplet for OverworldSprites at one address but
+    // supply a different nonzero profile address — the mismatch must abort.
+    const uint8_t  TABLE_BANK = 0x07u;
+    const uint16_t BASE_PTR   = 0x5100u;  // ROM-proven base
+    const uint16_t STALE_PTR  = 0x5200u;  // profile stale address
+
+    std::vector<uint8_t> rom(ROM_SIZE, 0x00u);
+
+    auto plant = [&](uint32_t site, uint16_t ptr) {
+        rom[site+0] = 0x21u;
+        rom[site+1] = static_cast<uint8_t>(ptr & 0xFFu);
+        rom[site+2] = static_cast<uint8_t>(ptr >> 8);
+        rom[site+3] = 0x3Du; rom[site+4] = 0x4Fu;
+        rom[site+5] = 0x06u; rom[site+6] = 0x00u;
+        rom[site+7] = 0x3Eu; rom[site+8] = 0x06u;
+        rom[site+9] = 0xCDu;
+    };
+
+    plant(flat(TABLE_BANK, 0x4800u), BASE_PTR + 0u);
+    plant(flat(TABLE_BANK, 0x4900u), BASE_PTR + 4u);
+    plant(flat(TABLE_BANK, 0x4A00u), BASE_PTR + 5u);
+
+    auto p = write_temp_rom(rom, "ows_mismatch");
+    auto rom_data = load_temp(p);
+    ASSERT_TRUE(rom_data != nullptr);
+
+    const uint32_t rom_flat     = flat(TABLE_BANK, BASE_PTR);
+    const uint32_t profile_flat = flat(TABLE_BANK, STALE_PTR);
+
+    crystal::ExtractionProfile prof;
+    prof.offsets.overworld_sprites = profile_flat;  // stale/different
+
+    int result = crystal::resolve_crystal_layout(*rom_data, prof, /*verbose=*/false);
+
+    ASSERT_TRUE(result < 0);  // must hard-fail
+    std::cout << "\n    [OverworldSprites: profile=0x" << std::hex << profile_flat
+              << " vs ROM=0x" << rom_flat << std::dec
+              << " → mismatch, resolve_crystal_layout=" << result << " (< 0) ✓]\n";
 }
 
 // ============================================================================
@@ -1318,6 +2045,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(resolver_trainer_groups_relocated);
     RUN_TEST(resolver_trainer_groups_two_sites_ambiguous);
     RUN_TEST(resolver_trainer_groups_real_roms);
+    RUN_TEST(resolver_trainer_groups_profile_mismatch_rejected);
 
     std::cout << "\n--- num_trainer_classes resolution ---\n";
     RUN_TEST(resolver_num_trainer_classes_single_match);
@@ -1350,6 +2078,31 @@ int main(int argc, char* argv[]) {
     RUN_TEST(block_encoding_multiple_raw_patterns_is_unknown);
     RUN_TEST(block_encoding_hi_out_of_wram_range_not_matched);
     RUN_TEST(block_encoding_real_roms_classification);
+
+    std::cout << "\n--- OverworldSprites resolution ---\n";
+    RUN_TEST(resolver_overworld_sprites_relocated);
+    RUN_TEST(resolver_overworld_sprites_wrong_triplet);
+    RUN_TEST(resolver_overworld_sprites_too_many_hits);
+    RUN_TEST(resolver_overworld_sprites_not_found);
+    RUN_TEST(resolver_overworld_sprites_real_roms);
+    RUN_TEST(resolver_overworld_sprites_profile_mismatch_rejected);
+
+    std::cout << "\n--- SpecialsPointers resolution ---\n";
+    RUN_TEST(resolver_special_pointers_invalid_table_ptr_rejected);
+    RUN_TEST(resolver_special_pointers_synthetic_match);
+    RUN_TEST(resolver_special_pointers_not_found);
+    RUN_TEST(resolver_special_pointers_ambiguous);
+    RUN_TEST(resolver_special_pointers_profile_mismatch_rejected);
+    RUN_TEST(resolver_special_pointers_profile_match_accepted);
+    RUN_TEST(resolver_special_pointers_real_roms);
+
+    std::cout << "\n--- PalMap consumer bank resolution ---\n";
+    RUN_TEST(resolver_palmap_consumer_bank_real_roms);
+    RUN_TEST(resolver_palmap_consumer_bank_ambiguous_same_nn);
+    RUN_TEST(resolver_palmap_consumer_bank_ambiguous_different_nn);
+    RUN_TEST(resolver_palmap_consumer_bank_not_found);
+    RUN_TEST(resolver_palmap_consumer_bank_profile_mismatch_rejected);
+    RUN_TEST(resolver_palmap_consumer_bank_profile_match_accepted);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

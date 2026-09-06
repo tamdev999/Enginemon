@@ -216,6 +216,14 @@ std::unique_ptr<RomData> RomData::load(const std::filesystem::path& path) {
     return rom;
 }
 
+RomData RomData::from_bytes(std::vector<uint8_t> bytes) {
+    RomData rom;
+    rom.data_ = std::move(bytes);
+    // Do not parse Crystal ROM header — synthetic buffers are not full Crystal ROMs.
+    // hash_ and header_ stay default-initialised; size() and raw() work normally.
+    return rom;
+}
+
 bool RomData::validate() const {
     return header_.is_valid && data_.size() >= CRYSTAL_ROM_SIZE;
 }

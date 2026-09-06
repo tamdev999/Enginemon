@@ -148,8 +148,14 @@ LiftResult lift_exp_divisor(const RomSpan& span) {
 //   0F          rrca
 //   FE NN       cp N             ← lower bound (vanilla: 0xD9 = 85%)
 //   38 FA       jr c, .-6 (loop)
+//   E0 xx       ldh [hMultiplier], a
+//   CD xx xx    call Multiply
+//   3E DD       ld a, D          ← divisor (vanilla: 0xFF = 100 percent)
+//   E0 B7       ldh [hDivisor], a
 //
-// Vanilla: 0F FE D9 38 F8  (N=0xD9=217)
+// Vanilla: N=0xD9=217, D=0xFF=255
+//
+// Returns: p[0]=lower_bound_byte, p[1]=divisor
 // ============================================================================
 
 LiftResult lift_damage_variation(const RomSpan& span) {
@@ -168,7 +174,31 @@ LiftResult lift_damage_variation(const RomSpan& span) {
             return LiftResult::fail(std::format(
                 "DamageVariation: lower bound {:02X} out of semantic range [0x80,0xFF]", n));
 
-        return LiftResult::pass({n});
+        // Now scan forward (up to 32 bytes) for the divisor pattern:
+        //   E0 xx    ldh [hMultiplier], a
+        //   CD xx xx call Multiply
+        //   3E DD    ld a, D   ← divisor
+        //   E0 B7    ldh [hDivisor], a
+        uint8_t divisor = 0;
+        bool found_divisor = false;
+        for (uint32_t j = i + 4; j + 4 < span.size && j < i + 40; ++j) {
+            if (span.at(j)   != SM83::LD_A_N)  continue;   // 3E
+            if (span.at(j+2) != 0xE0)           continue;   // ldh prefix
+            if (span.at(j+3) != 0xB7)           continue;   // hDivisor
+            divisor = span.at(j+1);
+            found_divisor = true;
+            break;
+        }
+
+        if (!found_divisor)
+            return LiftResult::fail(
+                "DamageVariation: found RRCA/cp/jr but could not locate ld a,N / ldh [hDivisor] divisor pattern");
+
+        if (divisor == 0)
+            return LiftResult::fail(
+                "DamageVariation: divisor is 0 — would cause division by zero");
+
+        return LiftResult::pass({n, divisor});
     }
     return LiftResult::fail("DamageVariation: did not find RRCA / cp N / jr c pattern");
 }
@@ -865,4 +895,221 @@ uint32_t sm83_resolve_address(
     return 0;
 }
 
-}  // namespace crystal
+// ============================================================================
+// lift_recoil_shift
+//
+// BattleCommand_Recoil shape (relative to span start).
+// The routine loads wCurDamage into b:c then performs K SRL-B/RR-C pairs:
+//
+//   FA lo hi    ld a, [wCurDamage]       ← 3 bytes, opcode FA
+//   47          ld b, a
+//   FA lo hi    ld a, [wCurDamage + 1]   ← 3 bytes
+//   4F          ld c, a
+//   CB 38       srl b                    ← pair 1
+//   CB 19       rr c                     ←
+//   CB 38       srl b                    ← pair 2 (vanilla K=2)
+//   CB 19       rr c                     ←
+//   78/7B       ld a, b  OR  ld a, c
+//   B1          or c
+//   20 01       jr nz, .min_damage
+//   0C          inc c
+//
+// Recognizer: scans forward in span for the first CB 38 / CB 19 sequence,
+// then counts consecutive SRL-B/RR-C pairs.
+// Returns p[0] = K.  Fails if K == 0 or K > 6.
+// ============================================================================
+LiftResult lift_recoil_shift(const RomSpan& span) {
+    if (!span.data || span.size < 10)
+        return LiftResult::fail("RecoilShift: span too short");
+
+    // Scan for first CB 38 (srl b) in the span
+    for (uint32_t i = 0; i + 4 < span.size; ++i) {
+        if (span.at(i) != SM83::PREFIX_CB || span.at(i + 1) != SM83::SRL_B)
+            continue;
+
+        // Found the first srl b.  Count consecutive (srl b / rr c) pairs from here.
+        uint8_t shift_count = 0;
+        uint32_t pos = i;
+        while (pos + 3 < span.size
+               && span.at(pos)     == SM83::PREFIX_CB && span.at(pos + 1) == SM83::SRL_B
+               && span.at(pos + 2) == SM83::PREFIX_CB && span.at(pos + 3) == SM83::RR_C) {
+            ++shift_count;
+            pos += 4;
+        }
+
+        if (shift_count == 0)
+            return LiftResult::fail("RecoilShift: found CB 38 but not followed by CB 19");
+        if (shift_count > 6)
+            return LiftResult::fail(std::format(
+                "RecoilShift: shift_count {} out of semantic range [1,6]", shift_count));
+
+        // Verify the minimum-1 guard: after the shift pairs, expect one of:
+        //   78 or 7B (ld a,b or ld a,c), B1 (or c / or b), 20 xx (jr nz), 0C (inc c)
+        if (pos + 3 < span.size) {
+            const uint8_t after = span.at(pos);     // ld a,b (78) or ld a,c (7B)
+            const uint8_t or_op = span.at(pos + 1); // or c (B1) or or b (B0)
+            const uint8_t jr_op = span.at(pos + 2); // jr nz (20)
+            (void)after; (void)or_op; (void)jr_op;  // structural shape check only
+            // Check for inc c (0C) somewhere in the next 4 bytes
+            bool found_inc = false;
+            for (uint32_t k = pos + 3; k < pos + 7 && k < span.size; ++k) {
+                if (span.at(k) == 0x0C) { found_inc = true; break; }
+            }
+            if (!found_inc)
+                return LiftResult::fail("RecoilShift: expected inc c (0C) min-1 guard after shift pairs");
+        }
+
+        return LiftResult::pass({shift_count});
+    }
+    return LiftResult::fail("RecoilShift: did not find CB 38 (srl b) in span");
+}
+
+// ============================================================================
+// lift_drain_shift
+//
+// SapHealth shape (relative to span start, which is the first byte of SapHealth):
+//
+//   21 lo hi    ld hl, wCurDamage         ← 3 bytes
+//   2A          ldi a, [hl]               ← ld a, [hli]  opcode 0x2A
+//   CB 3F       srl a                     ← K=1 (vanilla)
+//   E0 hh       ldh [hDividend], a        ← hh = low byte of hDividend
+//   47          ld b, a
+//   7E          ld a, [hl]
+//   CB 1F       rr a
+//   E0 hh2      ldh [hDividend + 1], a
+//
+// Recognizer: scans for ldi a,[hl] (2A) followed by CB 3F (srl a), counts
+// consecutive srl a steps, then verifies ldh [hDividend] pattern after.
+// Returns p[0] = K.  Fails if K == 0 or K > 6.
+// ============================================================================
+LiftResult lift_drain_shift(const RomSpan& span) {
+    if (!span.data || span.size < 8)
+        return LiftResult::fail("DrainShift: span too short");
+
+    // Scan for LDI A,[HL] (0x2A) followed by at least one CB 3F (srl a)
+    for (uint32_t i = 0; i + 4 < span.size; ++i) {
+        if (span.at(i) != 0x2A) continue;  // ldi a,[hl]
+        if (span.at(i + 1) != SM83::PREFIX_CB || span.at(i + 2) != SM83::SRL_A) continue;
+
+        // Count consecutive srl a (CB 3F) steps
+        uint8_t shift_count = 0;
+        uint32_t pos = i + 1;  // position of first CB prefix
+        while (pos + 1 < span.size
+               && span.at(pos) == SM83::PREFIX_CB && span.at(pos + 1) == SM83::SRL_A) {
+            ++shift_count;
+            pos += 2;
+        }
+
+        if (shift_count == 0)
+            return LiftResult::fail("DrainShift: found 2A but no CB 3F (srl a) after");
+        if (shift_count > 6)
+            return LiftResult::fail(std::format(
+                "DrainShift: shift_count {} out of semantic range [1,6]", shift_count));
+
+        // Verify the ldh [hDividend], a store follows the srl chain
+        // E0 hh  (ldh [N], a) — hh is hDividend & 0xFF, any value acceptable
+        if (pos + 1 >= span.size || span.at(pos) != 0xE0)
+            return LiftResult::fail(
+                "DrainShift: expected ldh [hDividend],a (E0 hh) after srl a chain");
+
+        // Verify ld b,a (47) follows
+        if (pos + 2 >= span.size || span.at(pos + 2) != 0x47)
+            return LiftResult::fail(
+                "DrainShift: expected ld b,a (47) after ldh [hDividend],a");
+
+        // Verify ld a,[hl] (7E) and rr a (CB 1F) follow
+        if (pos + 3 >= span.size || span.at(pos + 3) != 0x7E)
+            return LiftResult::fail(
+                "DrainShift: expected ld a,[hl] (7E) after ld b,a");
+        if (pos + 5 >= span.size
+            || span.at(pos + 4) != SM83::PREFIX_CB || span.at(pos + 5) != SM83::RR_A)
+            return LiftResult::fail(
+                "DrainShift: expected rr a (CB 1F) after ld a,[hl]");
+
+        return LiftResult::pass({shift_count});
+    }
+    return LiftResult::fail("DrainShift: did not find ldi a,[hl] (2A) / srl a pattern");
+}
+
+// ============================================================================
+// sm83_find_recoil
+//
+// Structural anchor: 4F CB 38 CB 19
+//   4F = ld c,a  — loads low byte of wCurDamage into c, immediately before the shift chain.
+//   CB 38 CB 19 = first SRL-B/RR-C pair.
+// This anchor is stable regardless of how many shift pairs follow (shift_count = 1..6).
+// The vanilla two-pair anchor (CB 38 CB 19 CB 38 CB 19) was parameter-specific:
+//   shift_count=1 → anchor never matched (only one pair).
+// Building the span 9 bytes before the CB 38 covers the ld a,[wCurDamage] loads.
+// lift_recoil_shift() counts the actual consecutive SRL-B/RR-C pairs.
+// ============================================================================
+std::vector<Sm83Candidate> sm83_find_recoil(const RomData& rom) {
+    std::vector<Sm83Candidate> out;
+    const uint32_t span_len = ProfileOffsets::SM83_SPAN_RECOIL;
+    // Anchor: 4F CB 38 CB 19  (4 bytes minimum)
+    const uint32_t limit = (rom.size() >= 4) ? static_cast<uint32_t>(rom.size()) - 4u : 0u;
+    for (uint32_t i = 0; i < limit; ++i) {
+        if (rom_byte(rom, i)   != 0x4F)             continue;  // ld c,a
+        if (rom_byte(rom, i+1) != SM83::PREFIX_CB)  continue;  // CB
+        if (rom_byte(rom, i+2) != SM83::SRL_B)      continue;  // 38 (srl b)
+        if (rom_byte(rom, i+3) != SM83::PREFIX_CB)  continue;  // CB
+        if (rom_byte(rom, i+4) != SM83::RR_C)       continue;  // 19 (rr c)
+
+        // Build span starting 9 bytes before the CB 38 (i+1) to cover:
+        //   FA lo hi  ld a,[wCurDamage]   (3 bytes)
+        //   47        ld b,a              (1 byte)
+        //   FA lo hi  ld a,[wCurDamage+1] (3 bytes)
+        //   4F        ld c,a              (1 byte)  ← anchor byte at i
+        // Then the shift chain follows at i+1.
+        const uint32_t shift_chain_offset = i + 1;  // first CB 38
+        const uint32_t back = 9;
+        const uint32_t scan_start = (shift_chain_offset >= back) ? shift_chain_offset - back : 0;
+        auto span = rom_span_at(rom, scan_start,
+                                std::min(span_len, static_cast<uint32_t>(rom.size()) - scan_start));
+        auto r = lift_recoil_shift(span);
+        if (r.ok) {
+            bool dup = false;
+            for (auto& c : out) if (c.flat_address == scan_start) { dup = true; break; }
+            if (!dup) out.push_back({scan_start, r});
+        }
+    }
+    return out;
+}
+
+// ============================================================================
+// sm83_find_drain
+//
+// Structural anchor: 2A CB 3F
+//   2A    = ldi a,[hl]  — loads high byte of wCurDamage, structurally stable.
+//   CB 3F = first srl a.
+// The prior anchor also checked i+3 == 0xE0, which is the ldh instruction that
+// follows the srl chain.  That byte is at position i+3 only when shift_count=1.
+// With shift_count=2, it appears at i+5, breaking the finder.
+// Removing the E0 positional check makes the finder parameter-independent.
+// lift_drain_shift() walks the variable srl-a chain and validates E0...47 7E CB 1F.
+// ============================================================================
+std::vector<Sm83Candidate> sm83_find_drain(const RomData& rom) {
+    std::vector<Sm83Candidate> out;
+    const uint32_t span_len = ProfileOffsets::SM83_SPAN_DRAIN;
+    // Anchor: 2A CB 3F  (3 bytes minimum)
+    const uint32_t limit = (rom.size() >= 3) ? static_cast<uint32_t>(rom.size()) - 3u : 0u;
+    for (uint32_t i = 0; i < limit; ++i) {
+        if (rom_byte(rom, i)   != 0x2A)             continue;  // ldi a,[hl]
+        if (rom_byte(rom, i+1) != SM83::PREFIX_CB)  continue;  // CB
+        if (rom_byte(rom, i+2) != SM83::SRL_A)      continue;  // 3F  srl a
+        // No positional E0 check here — its offset depends on shift_count.
+        // lift_drain_shift() validates the full shape including the E0 store.
+
+        auto span = rom_span_at(rom, i,
+                                std::min(span_len, static_cast<uint32_t>(rom.size()) - i));
+        auto r = lift_drain_shift(span);
+        if (r.ok) {
+            bool dup = false;
+            for (auto& c : out) if (c.flat_address == i) { dup = true; break; }
+            if (!dup) out.push_back({i, r});
+        }
+    }
+    return out;
+}
+
+} // namespace crystal

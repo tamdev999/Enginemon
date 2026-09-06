@@ -309,23 +309,32 @@ std::string TilesetExtractor::make_tileset_id(uint8_t index) const {
 
 TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index) const {
     TilesetExtractionResult result;
-    
-    // Validate index - Crystal tilesets are 1-indexed (1..num_tilesets)
+
+    // num_tilesets == 0 means "not configured" — fail immediately rather than
+    // allowing the index range check below to silently accept nothing.
+    if (profile_.counts.num_tilesets == 0) {
+        result.error = std::format(
+            "Cannot extract tileset {}: profile.counts.num_tilesets is not configured "
+            "(0 = unknown; Crystal v1.1 = 36)",
+            tileset_index);
+        stats_.bounds_check_failures++;
+        return result;
+    }
+
+    // Validate index — Crystal tilesets are 1-indexed (1..num_tilesets).
     if (tileset_index == 0 || tileset_index > profile_.counts.num_tilesets) {
-        result.error = std::format("Invalid tileset index: {} (valid range: 1-{})", 
+        result.error = std::format("Invalid tileset index: {} (valid range: 1-{})",
                                    tileset_index, profile_.counts.num_tilesets);
         return result;
     }
 
-    // The PalMap bank is derived from profile_.offsets.tilesets (see below).
-    // Require it to be set before going any further: an unset address would
-    // cause the palmap bank to be 0 (ROM0), producing garbage palette data
-    // with no error signal.  Catch it here with a clear diagnostic rather than
-    // letting the extractor silently misread from the wrong bank.
+    // The PalMap bank is stored in profile_.offsets.palmap_consumer_bank.
+    // Require it to be set before going any further: an unset value would mean
+    // the tileset entry table cannot be located.
     if (profile_.offsets.tilesets == 0) {
         result.error = std::format(
             "Cannot extract tileset {}: profile.offsets.tilesets is not configured "
-            "(required to derive the PalMap bank)",
+            "(required to locate the tileset entry table)",
             tileset_index);
         stats_.bounds_check_failures++;
         return result;
@@ -542,50 +551,94 @@ TilesetExtractionResult TilesetExtractor::extract_tileset(uint8_t tileset_index)
     // but we normalize to native indices (0-95 bank 0, 96-191 bank 1).
     // See pokecrystal gfx/tilesets/*_palette_map.asm and tilepal macro.
     uint16_t palmap_ptr = entry[fmt.palmap_offset] | (entry[fmt.palmap_offset + 1] << 8);
-    
-    // The palette map data (gfx/tilesets/*_palette_map.asm) is placed in the same ROM
-    // bank as the Tilesets table (data/tilesets.asm) by the linker.  The tileset entry
-    // stores only a bank-local dw pointer — no bank byte — so the correct bank is the
-    // bank of the Tilesets table itself.  Deriving it from profile_.offsets.tilesets
-    // makes this work for Gold (bank 0x12), Crystal (bank 0x13), and any relocated hack
-    // without per-ROM hardcoding.
-    // profile_.offsets.tilesets != 0 is guaranteed by the guard at function entry.
-    const uint8_t PALMAP_BANK = static_cast<uint8_t>(profile_.offsets.tilesets / 0x4000u);
+
+    // The PalMap dw pointer in the tileset entry is a bank-local pointer read by
+    // _LoadOverworldAttrmapPals with its own bank active (via homecall).  The semantic
+    // authority for the PalMap ROM bank is BANK(_LoadOverworldAttrmapPals), stored in
+    // profile_.offsets.palmap_consumer_bank.
+    //
+    // In Crystal v1.1 both _LoadOverworldAttrmapPals and the Tilesets table happen to
+    // live in bank 0x13, so the old bank(Tilesets) derivation gave the right answer.
+    // In Gold/Silver the Tilesets table is in bank 0x05 but _LoadOverworldAttrmapPals
+    // (and the palette map data) is in bank 0x02 — the two banks differ.
+    //
+    // profile_.offsets.palmap_consumer_bank != 0 is guaranteed by the guard at function
+    // entry (see below).
+    if (profile_.offsets.palmap_consumer_bank == 0) {
+        result.error = std::format(
+            "Cannot extract tileset {}: profile.offsets.palmap_consumer_bank is not configured "
+            "(required to resolve the PalMap ROM bank; set by resolver or explicit profile value)",
+            tileset_index);
+        stats_.bounds_check_failures++;
+        return result;
+    }
+    const uint8_t PALMAP_BANK = profile_.offsets.palmap_consumer_bank;
     uint32_t palmap_addr = rom_.bank_to_flat(PALMAP_BANK, palmap_ptr);
-    
-    // Full palette map: bank 0 (48 bytes) + gap (16 bytes) + bank 1 (48 bytes) = 112 bytes
-    constexpr size_t BANK0_PACKED_SIZE = 48;   // 96 tiles (0-95)
-    constexpr size_t GAP_SIZE = 16;            // Filler for tiles 96-127 (not real graphics)
-    constexpr size_t BANK1_PACKED_SIZE = 48;   // 96 tiles (96-191 after normalization)
-    constexpr size_t FULL_PALMAP_SIZE = BANK0_PACKED_SIZE + GAP_SIZE + BANK1_PACKED_SIZE;
-    constexpr size_t TOTAL_TILES = 192;        // Tiles 0-191 (bank 0: 0-95 + bank 1: 96-191)
-    
-    // Initialize palette map with default palette 0 for all 256 possible tile indices
+
+    // PalMap ROM data size from the format rule.
+    // Crystal:      48 (bank0) + 16 (0xFF filler) + 48 (bank1) = 112 bytes
+    // Gold/Silver:  48 bytes only (bank 0; no bank-1 tile palette data)
+    //
+    // palmap_size == 0 means "not configured" — hard fail rather than guessing.
+    // This prevents unknown ROMs from silently inheriting Crystal's 112-byte layout.
+    const size_t PALMAP_SIZE = fmt.palmap_size;
+    if (PALMAP_SIZE == 0u) {
+        result.error = std::format(
+            "Cannot extract tileset {}: profile.format.tileset.palmap_size is not configured "
+            "(Crystal=112, Gold/Silver=48; set explicitly in the profile)",
+            tileset_index);
+        stats_.bounds_check_failures++;
+        return result;
+    }
+
+    // Validate known formats and configure unpacking accordingly.
+    // Crystal 112-byte layout: 48 bank-0 tiles + 16-byte filler + 48 bank-1 tiles.
+    // Gold/Silver 48-byte layout: 48 bank-0 tiles only (no filler, no bank-1 data).
+    //
+    // For any other size the extractor hard-fails rather than guessing the layout.
+    constexpr size_t BANK0_PACKED_BYTES = 48u;  // 96 tiles × 2 tiles/byte
+    constexpr size_t GAP_BYTES          = 16u;  // Crystal 0xFF filler between banks
+    constexpr size_t BANK1_PACKED_BYTES = 48u;  // 96 tiles × 2 tiles/byte
+    constexpr size_t PALMAP_SIZE_CRYSTAL     = BANK0_PACKED_BYTES + GAP_BYTES + BANK1_PACKED_BYTES; // 112
+    constexpr size_t PALMAP_SIZE_GOLD_SILVER = BANK0_PACKED_BYTES;                                   // 48
+
+    if (PALMAP_SIZE != PALMAP_SIZE_CRYSTAL && PALMAP_SIZE != PALMAP_SIZE_GOLD_SILVER) {
+        result.error = std::format(
+            "Cannot extract tileset {}: unsupported palmap_size={} "
+            "(supported: Crystal=112, Gold/Silver=48)",
+            tileset_index, PALMAP_SIZE);
+        stats_.bounds_check_failures++;
+        return result;
+    }
+
+    // Initialize palette map with default palette 0 for all 256 possible tile indices.
     tileset.palette_map.resize(256, 0);
-    
-    if (palmap_addr + FULL_PALMAP_SIZE <= rom_.size()) {
-        auto palmap_data = rom_.read_bytes(palmap_addr, FULL_PALMAP_SIZE);
-        
-        // Unpack bank 0 tiles (native indices 0-95)
-        for (size_t i = 0; i < BANK0_PACKED_SIZE; ++i) {
+
+    if (palmap_addr + PALMAP_SIZE <= rom_.size()) {
+        auto palmap_data = rom_.read_bytes(palmap_addr, PALMAP_SIZE);
+
+        // Unpack bank-0 tiles (native indices 0–95).
+        // Each packed byte: low nybble = even tile, high nybble = odd tile.
+        // Mask off bit 3 (OAM_BANK) to get palette ID 0–6.
+        for (size_t i = 0u; i < BANK0_PACKED_BYTES; ++i) {
             uint8_t packed = palmap_data[i];
-            size_t tile_idx = i * 2;
-            // Low nybble first (even tile), high nybble (odd tile)
-            // Mask off bit 3 (OAM_BANK) to get palette ID 0-6
-            tileset.palette_map[tile_idx] = packed & 0x07;
-            tileset.palette_map[tile_idx + 1] = (packed >> 4) & 0x07;
+            const size_t tile_idx = i * 2u;
+            tileset.palette_map[tile_idx]     = packed & 0x07u;
+            tileset.palette_map[tile_idx + 1] = (packed >> 4) & 0x07u;
         }
-        
-        // Skip gap (not used - Crystal's "tiles 96-127" have no graphics)
-        
-        // Unpack bank 1 tiles (native indices 96-191)
-        // These are stored after the gap in the palette map ROM data
-        for (size_t i = 0; i < BANK1_PACKED_SIZE; ++i) {
-            uint8_t packed = palmap_data[BANK0_PACKED_SIZE + GAP_SIZE + i];
-            size_t tile_idx = 96 + i * 2;  // Bank 1 starts at native tile 96
-            tileset.palette_map[tile_idx] = packed & 0x07;
-            tileset.palette_map[tile_idx + 1] = (packed >> 4) & 0x07;
+
+        if (PALMAP_SIZE == PALMAP_SIZE_CRYSTAL) {
+            // Crystal only: unpack bank-1 tiles (native indices 96–191).
+            // Stored after the 16-byte filler gap in ROM.
+            for (size_t i = 0u; i < BANK1_PACKED_BYTES; ++i) {
+                uint8_t packed = palmap_data[BANK0_PACKED_BYTES + GAP_BYTES + i];
+                const size_t tile_idx = 96u + i * 2u;
+                tileset.palette_map[tile_idx]     = packed & 0x07u;
+                tileset.palette_map[tile_idx + 1] = (packed >> 4) & 0x07u;
+            }
         }
+        // Gold/Silver 48-byte format: no gap, no bank-1 data.
+        // Native indices 96–191 remain at the default palette 0 initialized above.
     }
     
     // Extract time-of-day palettes from TilesetBGPalette.

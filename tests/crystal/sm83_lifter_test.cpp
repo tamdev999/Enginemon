@@ -269,47 +269,116 @@ TEST(exp_divisor_too_large_invalid) {
 // 4. lift_damage_variation
 // ============================================================================
 
-// Vanilla: 0F FE D9 38 FA (rrca / cp 0xD9 / jr c, ...)
+// Helper: build a minimal DamageVariation span.
+// Layout: [pad] 0F FE bound 38 jr_offset [E0 xx CD xx xx xx] 3E divisor E0 B7 [pad]
+static std::vector<uint8_t> make_damage_var_span(uint8_t bound, uint8_t divisor) {
+    // Offset 1: RRCA (0F)
+    // Offset 2: CP N (FE bound)
+    // Offset 4: JR C (38 FA)
+    // Offset 6: ldh [hMultiplier], a (E0 01) — dummy address
+    // Offset 8: call Multiply (CD 00 00)
+    // Offset 11: ld a, divisor (3E divisor)
+    // Offset 13: ldh [hDivisor], a (E0 B7)
+    std::vector<uint8_t> b(20, 0x00);
+    b[1]  = 0x0F;        // RRCA
+    b[2]  = 0xFE;        // CP N
+    b[3]  = bound;       // lower bound
+    b[4]  = 0x38;        // JR C
+    b[5]  = 0xFA;        // jr offset (loop back)
+    b[6]  = 0xE0;        // ldh [hMultiplier]
+    b[7]  = 0x01;        // dummy address
+    b[8]  = 0xCD;        // CALL
+    b[9]  = 0x00; b[10] = 0x00;
+    b[11] = 0x3E;        // LD A, divisor
+    b[12] = divisor;
+    b[13] = 0xE0;        // ldh [hDivisor]
+    b[14] = 0xB7;
+    return b;
+}
+
+// Vanilla: bound=0xD9, divisor=0xFF (100 percent)
 TEST(damage_variation_vanilla) {
-    std::vector<uint8_t> b = {0x00, 0x0F, 0xFE, 0xD9, 0x38, 0xFA, 0x00};
+    auto b = make_damage_var_span(0xD9, 0xFF);
     auto r = crystal::lift_damage_variation(span_from(b));
     ASSERT_OK(r);
     ASSERT_EQ(r.p[0], 0xD9u);
+    ASSERT_EQ(r.p[1], 0xFFu);
+    std::cout << "\n    [vanilla: p[0]=0xD9 p[1]=0xFF ✓]\n";
 }
 
 TEST(damage_variation_modified_bound) {
-    std::vector<uint8_t> b = {0x00, 0x0F, 0xFE, 0xCC, 0x38, 0xFA, 0x00};
+    auto b = make_damage_var_span(0xCC, 0xFF);
     auto r = crystal::lift_damage_variation(span_from(b));
     ASSERT_OK(r);
     ASSERT_EQ(r.p[0], 0xCCu);
+    ASSERT_EQ(r.p[1], 0xFFu);
 }
 
 TEST(damage_variation_malformed_no_rrca) {
     // Replace RRCA (0F) with NOP (00)
-    std::vector<uint8_t> b = {0x00, 0x00, 0xFE, 0xD9, 0x38, 0xFA, 0x00};
+    auto b = make_damage_var_span(0xD9, 0xFF);
+    b[1] = 0x00;
     auto r = crystal::lift_damage_variation(span_from(b));
     ASSERT_FAIL(r);
 }
 
 TEST(damage_variation_malformed_no_cp) {
     // Replace CP (FE) with something else
-    std::vector<uint8_t> b = {0x00, 0x0F, 0x3E, 0xD9, 0x38, 0xFA, 0x00};
+    auto b = make_damage_var_span(0xD9, 0xFF);
+    b[2] = 0x3E;
     auto r = crystal::lift_damage_variation(span_from(b));
     ASSERT_FAIL(r);
 }
 
 TEST(damage_variation_malformed_no_jr_c) {
     // Replace jr c (38) with jr (18)
-    std::vector<uint8_t> b = {0x00, 0x0F, 0xFE, 0xD9, 0x18, 0xFA, 0x00};
+    auto b = make_damage_var_span(0xD9, 0xFF);
+    b[4] = 0x18;
     auto r = crystal::lift_damage_variation(span_from(b));
     ASSERT_FAIL(r);
 }
 
 TEST(damage_variation_lower_bound_too_small) {
     // bound < 0x80 — semantically invalid (loop would never terminate)
-    std::vector<uint8_t> b = {0x00, 0x0F, 0xFE, 0x40, 0x38, 0xFA, 0x00};
+    auto b = make_damage_var_span(0x40, 0xFF);
     auto r = crystal::lift_damage_variation(span_from(b));
     ASSERT_FAIL(r);
+}
+
+// NEW: divisor correctly extracted
+TEST(damage_variation_divisor_extracted) {
+    // Vanilla divisor: 0xFF = 100 percent
+    auto b = make_damage_var_span(0xD9, 0xFF);
+    auto r = crystal::lift_damage_variation(span_from(b));
+    ASSERT_OK(r);
+    ASSERT_EQ(r.p[0], 0xD9u);  // lower bound unchanged
+    ASSERT_EQ(r.p[1], 0xFFu);  // divisor = 100 percent = 255
+    std::cout << "\n    [divisor: p[1]=0xFF=255 (100 percent) ✓]\n";
+}
+
+// NEW: modified divisor is extracted correctly
+TEST(damage_variation_divisor_modified) {
+    auto b = make_damage_var_span(0xD9, 0xCC);  // non-vanilla divisor
+    auto r = crystal::lift_damage_variation(span_from(b));
+    ASSERT_OK(r);
+    ASSERT_EQ(r.p[1], 0xCCu);
+}
+
+// NEW: divisor of 0 is rejected
+TEST(damage_variation_divisor_zero_rejected) {
+    auto b = make_damage_var_span(0xD9, 0x00);  // divisor=0 → divide-by-zero
+    auto r = crystal::lift_damage_variation(span_from(b));
+    ASSERT_FAIL(r);
+    std::cout << "\n    [divisor=0 rejected: ✓]\n";
+}
+
+// NEW: missing divisor pattern → fail
+TEST(damage_variation_divisor_pattern_absent) {
+    // Buffer has RRCA/CP/JRC but no 3E NN E0 B7 afterwards — only 7 bytes
+    std::vector<uint8_t> b = {0x00, 0x0F, 0xFE, 0xD9, 0x38, 0xFA, 0x00};
+    auto r = crystal::lift_damage_variation(span_from(b));
+    ASSERT_FAIL(r);
+    std::cout << "\n    [no divisor pattern → fail ✓]\n";
 }
 
 // ============================================================================
@@ -769,6 +838,8 @@ TEST(rom_vanilla_values_match_known_constants) {
 
     ASSERT_EQ(getval(o.sm83_damage_variation, crystal::ProfileOffsets::SM83_SPAN_DAMAGE_VARIATION,
         [](auto s){return crystal::lift_damage_variation(s);}, 0), 0xD9u);
+    ASSERT_EQ(getval(o.sm83_damage_variation, crystal::ProfileOffsets::SM83_SPAN_DAMAGE_VARIATION,
+        [](auto s){return crystal::lift_damage_variation(s);}, 1), 0xFFu);  // 100 percent = 255
 
     ASSERT_EQ(getval(o.sm83_poke_ball_effect, crystal::ProfileOffsets::SM83_SPAN_POKE_BALL,
         [](auto s){return crystal::lift_capture_status_bonus(s);}, 0), 10u);
@@ -877,7 +948,9 @@ TEST(sm83_lifted_mask_vanilla_rom_all_bits_set) {
         BR::SM83_LIFTED_EXP            |
         BR::SM83_LIFTED_RESIDUAL       |
         BR::SM83_LIFTED_CRIT_DELTAS    |
-        BR::SM83_LIFTED_DAMAGE_VAR;
+        BR::SM83_LIFTED_DAMAGE_VAR     |
+        BR::SM83_LIFTED_RECOIL         |
+        BR::SM83_LIFTED_DRAIN;
 
     ASSERT_EQ(result.rules.sm83_lifted_mask, expected);
     if (result.rules.sm83_lifted_mask != expected) {
@@ -918,23 +991,406 @@ TEST(damage_formula_rules_vs_default_produces_different_damage) {
 }
 
 TEST(damage_variation_lower_bound_byte_used_in_rrca_loop) {
-    // Verify lower_bound_byte distinction is accessible via getter
-    // and survives roundtrip for a fully-valid BattleRules struct.
+    // Verify lower_bound_byte and divisor distinctions are accessible via getters.
     enginemon::BattleRules rules_strict;
     rules_strict.damage_variation.lower_bound_byte = 0xD9;
+    rules_strict.damage_variation.divisor          = 0xFF;
     rules_strict.sm83_lifted_mask = enginemon::BattleRules::SM83_LIFTED_DAMAGE_VAR;
 
     enginemon::BattleRules rules_loose;
     rules_loose.damage_variation.lower_bound_byte = 0x80;
+    rules_loose.damage_variation.divisor          = 0xCC;
     rules_loose.sm83_lifted_mask = enginemon::BattleRules::SM83_LIFTED_DAMAGE_VAR;
 
     ASSERT_EQ(rules_strict.get_damage_var_lower_bound(), 0xD9u);
-    ASSERT_EQ(rules_loose.get_damage_var_lower_bound(), 0x80u);
+    ASSERT_EQ(rules_strict.get_damage_var_divisor(),     0xFFu);
+    ASSERT_EQ(rules_loose.get_damage_var_lower_bound(),  0x80u);
+    ASSERT_EQ(rules_loose.get_damage_var_divisor(),      0xCCu);
     ASSERT_NE(rules_strict.get_damage_var_lower_bound(),
               rules_loose.get_damage_var_lower_bound());
+    ASSERT_NE(rules_strict.get_damage_var_divisor(),
+              rules_loose.get_damage_var_divisor());
 
-    // Values are distinct, getters work correctly.
-    std::cout << "\n    [damage variation lower_bound_byte: 0xD9 != 0x80 getter check OK]\n";
+    std::cout << "\n    [damage variation getters: lower_bound 0xD9≠0x80, divisor 0xFF≠0xCC ✓]\n";
+}
+
+// ============================================================================
+// 12. lift_recoil_shift
+// Source: BattleCommand_Recoil — two SRL-B/RR-C pairs → shift_count=2 → /4.
+// ============================================================================
+
+// Vanilla recoil span: 8 bytes before the CB38 block (ld loads) + two shift pairs.
+// Minimal: pad8 + CB38 CB19 CB38 CB19 + 78 B1 20 01 0C (min-1 guard)
+// We put the span starting right at the CB38 pattern with enough context.
+static std::vector<uint8_t> make_recoil_vanilla_span() {
+    // Layout:
+    //   [0..7]  : filler (ld a,[wCurDamage] etc — recognizer scans for CB38 inside span)
+    //   [8]:  0xCB, [9]:  0x38   srl b  ← pair 1
+    //   [10]: 0xCB, [11]: 0x19   rr c
+    //   [12]: 0xCB, [13]: 0x38   srl b  ← pair 2
+    //   [14]: 0xCB, [15]: 0x19   rr c
+    //   [16]: 0x78                ld a, b
+    //   [17]: 0xB1                or c
+    //   [18]: 0x20, [19]: 0x01    jr nz, +1
+    //   [20]: 0x0C                inc c  ← min-1 guard
+    std::vector<uint8_t> b(30, 0x00);
+    b[8]  = 0xCB; b[9]  = 0x38;  // srl b
+    b[10] = 0xCB; b[11] = 0x19;  // rr c
+    b[12] = 0xCB; b[13] = 0x38;  // srl b
+    b[14] = 0xCB; b[15] = 0x19;  // rr c
+    b[16] = 0x78;                 // ld a, b
+    b[17] = 0xB1;                 // or c
+    b[18] = 0x20; b[19] = 0x01;  // jr nz, 1
+    b[20] = 0x0C;                 // inc c (min-1 guard)
+    return b;
+}
+
+TEST(recoil_shift_vanilla) {
+    auto b = make_recoil_vanilla_span();
+    auto r = crystal::lift_recoil_shift(span_from(b));
+    ASSERT_OK(r);
+    ASSERT_EQ(r.p[0], 2u);  // vanilla: 2 SRL-B/RR-C pairs → shift_count=2 → /4
+    std::cout << "\n    [recoil_shift vanilla: p[0]=2 (two SRL-B/RR-C pairs → /4) ✓]\n";
+}
+
+TEST(recoil_shift_modified_to_three_pairs) {
+    // A ROM hack with 3 shift pairs → /8
+    std::vector<uint8_t> b(30, 0x00);
+    b[4]  = 0xCB; b[5]  = 0x38;  // srl b
+    b[6]  = 0xCB; b[7]  = 0x19;  // rr c
+    b[8]  = 0xCB; b[9]  = 0x38;
+    b[10] = 0xCB; b[11] = 0x19;
+    b[12] = 0xCB; b[13] = 0x38;
+    b[14] = 0xCB; b[15] = 0x19;
+    b[16] = 0x78; b[17] = 0xB1;
+    b[18] = 0x20; b[19] = 0x01;
+    b[20] = 0x0C;
+    auto r = crystal::lift_recoil_shift(span_from(b));
+    ASSERT_OK(r);
+    ASSERT_EQ(r.p[0], 3u);
+}
+
+TEST(recoil_shift_malformed_no_cb38) {
+    // No CB38 in span → fail
+    std::vector<uint8_t> b(30, 0x00);
+    auto r = crystal::lift_recoil_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+TEST(recoil_shift_malformed_cb38_without_cb19) {
+    // CB38 present but not followed immediately by CB19
+    std::vector<uint8_t> b(30, 0x00);
+    b[8] = 0xCB; b[9] = 0x38;   // srl b
+    b[10] = 0xCB; b[11] = 0x3F; // srl a — not rr c
+    auto r = crystal::lift_recoil_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+TEST(recoil_shift_malformed_missing_inc_c) {
+    // CB38/CB19 pairs present but no inc c (0x0C) min-1 guard
+    auto b = make_recoil_vanilla_span();
+    b[20] = 0x00;  // corrupt inc c
+    auto r = crystal::lift_recoil_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+TEST(recoil_shift_span_too_short) {
+    std::vector<uint8_t> b(5, 0x00);
+    auto r = crystal::lift_recoil_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+// ============================================================================
+// 13. lift_drain_shift
+// Source: SapHealth — one SRL-A step → shift_count=1 → /2.
+// ============================================================================
+
+// Vanilla drain span: 2A / CB 3F / E0 hh / 47 / 7E / CB 1F / E0 hh2
+static std::vector<uint8_t> make_drain_vanilla_span() {
+    // [0]: 2A      ldi a,[hl]  (ld a,[hli])
+    // [1]: CB, [2]: 3F          srl a
+    // [3]: E0, [4]: 94          ldh [hDividend], a  (hDividend = 0xFF94 — any addr ok)
+    // [5]: 47                   ld b, a
+    // [6]: 7E                   ld a, [hl]
+    // [7]: CB, [8]: 1F          rr a
+    // [9]: E0, [10]: 95         ldh [hDividend+1], a
+    std::vector<uint8_t> b(20, 0x00);
+    b[0]  = 0x2A;              // ldi a,[hl]
+    b[1]  = 0xCB; b[2]  = 0x3F; // srl a
+    b[3]  = 0xE0; b[4]  = 0x94; // ldh [hDividend],a
+    b[5]  = 0x47;              // ld b, a
+    b[6]  = 0x7E;              // ld a,[hl]
+    b[7]  = 0xCB; b[8]  = 0x1F; // rr a
+    b[9]  = 0xE0; b[10] = 0x95; // ldh [hDividend+1],a
+    return b;
+}
+
+TEST(drain_shift_vanilla) {
+    auto b = make_drain_vanilla_span();
+    auto r = crystal::lift_drain_shift(span_from(b));
+    ASSERT_OK(r);
+    ASSERT_EQ(r.p[0], 1u);  // vanilla: one SRL-A → shift_count=1 → /2
+    std::cout << "\n    [drain_shift vanilla: p[0]=1 (one SRL-A → /2) ✓]\n";
+}
+
+TEST(drain_shift_modified_two_srl_a) {
+    // ROM hack with two SRL-A steps → shift_count=2 → /4
+    std::vector<uint8_t> b(20, 0x00);
+    b[0] = 0x2A;
+    b[1] = 0xCB; b[2] = 0x3F;  // srl a
+    b[3] = 0xCB; b[4] = 0x3F;  // srl a (second)
+    b[5] = 0xE0; b[6] = 0x94;  // ldh [hDividend]
+    b[7] = 0x47;
+    b[8] = 0x7E;
+    b[9] = 0xCB; b[10] = 0x1F;
+    auto r = crystal::lift_drain_shift(span_from(b));
+    ASSERT_OK(r);
+    ASSERT_EQ(r.p[0], 2u);
+}
+
+TEST(drain_shift_malformed_no_ldi) {
+    // No 2A (ldi a,[hl]) → fail
+    std::vector<uint8_t> b(20, 0x00);
+    b[0] = 0xFA;  // ld a,[nn] — not 2A
+    b[1] = 0xCB; b[2] = 0x3F;
+    auto r = crystal::lift_drain_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+TEST(drain_shift_malformed_ldi_without_srl_a) {
+    // 2A present but followed by CB38 (srl b) not CB3F (srl a)
+    std::vector<uint8_t> b(20, 0x00);
+    b[0] = 0x2A;
+    b[1] = 0xCB; b[2] = 0x38;  // srl b — not srl a
+    auto r = crystal::lift_drain_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+TEST(drain_shift_malformed_no_ldh_after_srl) {
+    // srl a present but no E0 (ldh) after it
+    std::vector<uint8_t> b(20, 0x00);
+    b[0] = 0x2A;
+    b[1] = 0xCB; b[2] = 0x3F;
+    b[3] = 0x47;  // ld b,a — no E0 before it
+    auto r = crystal::lift_drain_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+TEST(drain_shift_malformed_no_rr_a) {
+    // ldh present but no CB 1F (rr a) after ld a,[hl]
+    std::vector<uint8_t> b(20, 0x00);
+    b[0] = 0x2A;
+    b[1] = 0xCB; b[2] = 0x3F;
+    b[3] = 0xE0; b[4] = 0x94;
+    b[5] = 0x47;
+    b[6] = 0x7E;
+    b[7] = 0xCB; b[8] = 0x38;  // srl b — not rr a (1F)
+    auto r = crystal::lift_drain_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+TEST(drain_shift_span_too_short) {
+    std::vector<uint8_t> b(4, 0x00);
+    auto r = crystal::lift_drain_shift(span_from(b));
+    ASSERT_FAIL(r);
+}
+
+// ============================================================================
+// 14a. sm83_find_recoil — synthetic modified-count recovery tests
+//
+// Proves the structural anchor (4F CB38 CB19) fires regardless of shift_count.
+// Each synthetic ROM contains only the minimum bytes needed for the anchor + shift
+// chain + min-1 guard.  lift_recoil_shift must return the correct count.
+// ============================================================================
+
+// Build a minimal synthetic ROM buffer for sm83_find_recoil:
+//   offset 0:  00 00 00 00 00 00 00 00 00  (9 bytes of pad — will become the scan_start span)
+//   offset 9:  4F                           ld c,a  ← anchor byte
+//   offset 10: (CB38 CB19) × K             shift chain
+//   offset 10+4K: 78 B1 20 01 0C           min-1 guard
+static std::vector<uint8_t> make_recoil_finder_rom(uint8_t K) {
+    std::vector<uint8_t> buf(60, 0x00);
+    uint32_t pos = 9;
+    buf[pos++] = 0x4F;                      // ld c,a  (anchor)
+    for (uint8_t k = 0; k < K; ++k) {
+        buf[pos++] = 0xCB; buf[pos++] = 0x38;  // srl b
+        buf[pos++] = 0xCB; buf[pos++] = 0x19;  // rr c
+    }
+    buf[pos++] = 0x78;  // ld a,b
+    buf[pos++] = 0xB1;  // or c
+    buf[pos++] = 0x20; buf[pos++] = 0x01;  // jr nz
+    buf[pos++] = 0x0C;  // inc c
+    return buf;
+}
+
+TEST(finder_recoil_shift_count_1_recovered) {
+    // shift_count=1: old anchor (two-pair pattern) never matched this.
+    // New anchor (4F CB38 CB19) must find it and return p[0]=1.
+    auto buf = make_recoil_finder_rom(1);
+    auto rom = crystal::RomData::from_bytes(buf);
+    auto candidates = crystal::sm83_find_recoil(rom);
+    ASSERT_TRUE(!candidates.empty());
+    ASSERT_EQ(candidates[0].lift_result.p[0], 1u);
+    std::cout << "\n    [finder_recoil shift_count=1: " << candidates.size()
+              << " candidate(s), p[0]=1 ✓]\n";
+}
+
+TEST(finder_recoil_shift_count_2_recovered) {
+    // shift_count=2: vanilla case, must still work with new anchor.
+    auto buf = make_recoil_finder_rom(2);
+    auto rom = crystal::RomData::from_bytes(buf);
+    auto candidates = crystal::sm83_find_recoil(rom);
+    ASSERT_TRUE(!candidates.empty());
+    ASSERT_EQ(candidates[0].lift_result.p[0], 2u);
+    std::cout << "\n    [finder_recoil shift_count=2: " << candidates.size()
+              << " candidate(s), p[0]=2 ✓]\n";
+}
+
+TEST(finder_recoil_shift_count_3_recovered) {
+    // shift_count=3: was accidentally recoverable before, must still work.
+    auto buf = make_recoil_finder_rom(3);
+    auto rom = crystal::RomData::from_bytes(buf);
+    auto candidates = crystal::sm83_find_recoil(rom);
+    ASSERT_TRUE(!candidates.empty());
+    ASSERT_EQ(candidates[0].lift_result.p[0], 3u);
+    std::cout << "\n    [finder_recoil shift_count=3: " << candidates.size()
+              << " candidate(s), p[0]=3 ✓]\n";
+}
+
+// ============================================================================
+// 14b. sm83_find_drain — synthetic modified-count recovery tests
+//
+// Proves the structural anchor (2A CB3F) fires regardless of shift_count.
+// ============================================================================
+
+// Build a minimal synthetic ROM buffer for sm83_find_drain:
+//   offset 0: 2A                       ldi a,[hl]  ← anchor byte
+//   offset 1: (CB 3F) × K              srl a chain
+//   offset 1+2K: E0 94                 ldh [hDividend],a
+//   offset 3+2K: 47                    ld b,a
+//   offset 4+2K: 7E                    ld a,[hl]
+//   offset 5+2K: CB 1F                 rr a
+//   offset 7+2K: E0 95                 ldh [hDividend+1],a
+static std::vector<uint8_t> make_drain_finder_rom(uint8_t K) {
+    std::vector<uint8_t> buf(40, 0x00);
+    uint32_t pos = 0;
+    buf[pos++] = 0x2A;                         // ldi a,[hl]
+    for (uint8_t k = 0; k < K; ++k) {
+        buf[pos++] = 0xCB; buf[pos++] = 0x3F;  // srl a
+    }
+    buf[pos++] = 0xE0; buf[pos++] = 0x94;      // ldh [hDividend]
+    buf[pos++] = 0x47;                         // ld b,a
+    buf[pos++] = 0x7E;                         // ld a,[hl]
+    buf[pos++] = 0xCB; buf[pos++] = 0x1F;      // rr a
+    buf[pos++] = 0xE0; buf[pos++] = 0x95;      // ldh [hDividend+1]
+    return buf;
+}
+
+TEST(finder_drain_shift_count_1_recovered) {
+    // shift_count=1: vanilla, still found with simplified anchor.
+    auto buf = make_drain_finder_rom(1);
+    auto rom = crystal::RomData::from_bytes(buf);
+    auto candidates = crystal::sm83_find_drain(rom);
+    ASSERT_TRUE(!candidates.empty());
+    ASSERT_EQ(candidates[0].lift_result.p[0], 1u);
+    std::cout << "\n    [finder_drain shift_count=1: " << candidates.size()
+              << " candidate(s), p[0]=1 ✓]\n";
+}
+
+TEST(finder_drain_shift_count_2_recovered) {
+    // shift_count=2: old finder (E0 at i+3) never matched this.
+    // New anchor (2A CB3F only) must find and return p[0]=2.
+    auto buf = make_drain_finder_rom(2);
+    auto rom = crystal::RomData::from_bytes(buf);
+    auto candidates = crystal::sm83_find_drain(rom);
+    ASSERT_TRUE(!candidates.empty());
+    ASSERT_EQ(candidates[0].lift_result.p[0], 2u);
+    std::cout << "\n    [finder_drain shift_count=2: " << candidates.size()
+              << " candidate(s), p[0]=2 ✓]\n";
+}
+
+TEST(finder_drain_shift_count_3_recovered) {
+    // shift_count=3: also never matched before.
+    auto buf = make_drain_finder_rom(3);
+    auto rom = crystal::RomData::from_bytes(buf);
+    auto candidates = crystal::sm83_find_drain(rom);
+    ASSERT_TRUE(!candidates.empty());
+    ASSERT_EQ(candidates[0].lift_result.p[0], 3u);
+    std::cout << "\n    [finder_drain shift_count=3: " << candidates.size()
+              << " candidate(s), p[0]=3 ✓]\n";
+}
+
+// ============================================================================
+// 14. ROM-backed recoil + drain tests (skip without ROM)
+// ============================================================================
+
+TEST(rom_recoil_shift_vanilla_is_2) {
+    if (!g_rom) { std::cout << "\n    [SKIP: no ROM]\n"; return; }
+    // Structural scan: sm83_find_recoil must find at least one candidate
+    auto candidates = crystal::sm83_find_recoil(*g_rom);
+    ASSERT_TRUE(!candidates.empty());
+    // Verify lift result: shift_count must be 2 (vanilla BattleCommand_Recoil)
+    ASSERT_EQ(candidates[0].lift_result.p[0], 2u);
+    std::cout << "\n    [ROM recoil_shift: found " << candidates.size()
+              << " candidate(s), first p[0]=2 ✓]\n";
+}
+
+TEST(rom_drain_shift_vanilla_is_1) {
+    if (!g_rom) { std::cout << "\n    [SKIP: no ROM]\n"; return; }
+    // Structural scan: sm83_find_drain must find at least one candidate
+    auto candidates = crystal::sm83_find_drain(*g_rom);
+    ASSERT_TRUE(!candidates.empty());
+    // Verify lift result: shift_count must be 1 (vanilla SapHealth)
+    ASSERT_EQ(candidates[0].lift_result.p[0], 1u);
+    std::cout << "\n    [ROM drain_shift: found " << candidates.size()
+              << " candidate(s), first p[0]=1 ✓]\n";
+}
+
+TEST(rom_recoil_shift_vanilla_exactly_one_candidate) {
+    // Uniqueness: the vanilla Crystal ROM must yield exactly 1 recoil candidate.
+    // The structural anchor (4F CB38 CB19) is specific enough not to match
+    // unrelated SM83 code elsewhere in the ROM.
+    if (!g_rom) { std::cout << "\n    [SKIP: no ROM]\n"; return; }
+    auto candidates = crystal::sm83_find_recoil(*g_rom);
+    ASSERT_EQ(candidates.size(), 1u);
+    ASSERT_EQ(candidates[0].lift_result.p[0], 2u);
+    std::cout << "\n    [ROM recoil uniqueness: exactly 1 candidate, shift_count=2 ✓]\n";
+}
+
+TEST(rom_drain_shift_vanilla_exactly_one_candidate) {
+    // Uniqueness: the vanilla Crystal ROM must yield exactly 1 drain candidate.
+    // The anchor (2A CB3F) followed by lift validation is specific enough.
+    if (!g_rom) { std::cout << "\n    [SKIP: no ROM]\n"; return; }
+    auto candidates = crystal::sm83_find_drain(*g_rom);
+    ASSERT_EQ(candidates.size(), 1u);
+    ASSERT_EQ(candidates[0].lift_result.p[0], 1u);
+    std::cout << "\n    [ROM drain uniqueness: exactly 1 candidate, shift_count=1 ✓]\n";
+}
+
+TEST(rom_recoil_drain_lifted_in_battle_rules) {
+    // End-to-end: extract BattleRules from vanilla ROM, verify both lifts succeeded.
+    if (!g_rom || !g_profile) { std::cout << "\n    [SKIP: no ROM]\n"; return; }
+    auto result = crystal::extract_battle_rules(*g_rom, *g_profile);
+    ASSERT_TRUE(result.success);
+    ASSERT_TRUE(result.rules.sm83_is_lifted(enginemon::BattleRules::SM83_LIFTED_RECOIL));
+    ASSERT_TRUE(result.rules.sm83_is_lifted(enginemon::BattleRules::SM83_LIFTED_DRAIN));
+    ASSERT_EQ(result.rules.get_recoil_shift(), 2u);
+    ASSERT_EQ(result.rules.get_drain_shift(),  1u);
+    std::cout << "\n    [ROM recoil+drain lifted: recoil_shift=2, drain_shift=1 ✓]\n";
+}
+
+TEST(rom_recoil_drain_roundtrip) {
+    // End-to-end: extract → package → reload, both shift counts must survive.
+    if (!g_rom || !g_profile) { std::cout << "\n    [SKIP: no ROM]\n"; return; }
+    auto result = crystal::extract_battle_rules(*g_rom, *g_profile);
+    ASSERT_TRUE(result.success);
+    auto loaded = roundtrip(result.rules, "recoil_drain");
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->get_recoil_shift(), 2u);
+    ASSERT_EQ(loaded->get_drain_shift(),  1u);
+    ASSERT_TRUE(loaded->sm83_is_lifted(enginemon::BattleRules::SM83_LIFTED_RECOIL));
+    ASSERT_TRUE(loaded->sm83_is_lifted(enginemon::BattleRules::SM83_LIFTED_DRAIN));
+    std::cout << "\n    [ROM recoil+drain roundtrip: recoil_shift=2, drain_shift=1 survive ✓]\n";
 }
 
 // ============================================================================
@@ -994,6 +1450,10 @@ int main(int argc, char* argv[]) {
     RUN_TEST(damage_variation_malformed_no_cp);
     RUN_TEST(damage_variation_malformed_no_jr_c);
     RUN_TEST(damage_variation_lower_bound_too_small);
+    RUN_TEST(damage_variation_divisor_extracted);
+    RUN_TEST(damage_variation_divisor_modified);
+    RUN_TEST(damage_variation_divisor_zero_rejected);
+    RUN_TEST(damage_variation_divisor_pattern_absent);
 
     std::cout << "\n--- 5. lift_capture_status_bonus ---\n";
     RUN_TEST(capture_bonus_vanilla);
@@ -1053,6 +1513,41 @@ int main(int argc, char* argv[]) {
     std::cout << "\n--- Runtime consumption ---\n";
     RUN_TEST(damage_formula_rules_vs_default_produces_different_damage);
     RUN_TEST(damage_variation_lower_bound_byte_used_in_rrca_loop);
+
+    std::cout << "\n--- 12. lift_recoil_shift ---\n";
+    RUN_TEST(recoil_shift_vanilla);
+    RUN_TEST(recoil_shift_modified_to_three_pairs);
+    RUN_TEST(recoil_shift_malformed_no_cb38);
+    RUN_TEST(recoil_shift_malformed_cb38_without_cb19);
+    RUN_TEST(recoil_shift_malformed_missing_inc_c);
+    RUN_TEST(recoil_shift_span_too_short);
+
+    std::cout << "\n--- 13. lift_drain_shift ---\n";
+    RUN_TEST(drain_shift_vanilla);
+    RUN_TEST(drain_shift_modified_two_srl_a);
+    RUN_TEST(drain_shift_malformed_no_ldi);
+    RUN_TEST(drain_shift_malformed_ldi_without_srl_a);
+    RUN_TEST(drain_shift_malformed_no_ldh_after_srl);
+    RUN_TEST(drain_shift_malformed_no_rr_a);
+    RUN_TEST(drain_shift_span_too_short);
+
+    std::cout << "\n--- 14a. sm83_find_recoil modified-count recovery ---\n";
+    RUN_TEST(finder_recoil_shift_count_1_recovered);
+    RUN_TEST(finder_recoil_shift_count_2_recovered);
+    RUN_TEST(finder_recoil_shift_count_3_recovered);
+
+    std::cout << "\n--- 14b. sm83_find_drain modified-count recovery ---\n";
+    RUN_TEST(finder_drain_shift_count_1_recovered);
+    RUN_TEST(finder_drain_shift_count_2_recovered);
+    RUN_TEST(finder_drain_shift_count_3_recovered);
+
+    std::cout << "\n--- 14. ROM-backed recoil + drain ---\n";
+    RUN_TEST(rom_recoil_shift_vanilla_is_2);
+    RUN_TEST(rom_drain_shift_vanilla_is_1);
+    RUN_TEST(rom_recoil_shift_vanilla_exactly_one_candidate);
+    RUN_TEST(rom_drain_shift_vanilla_exactly_one_candidate);
+    RUN_TEST(rom_recoil_drain_lifted_in_battle_rules);
+    RUN_TEST(rom_recoil_drain_roundtrip);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

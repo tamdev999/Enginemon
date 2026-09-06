@@ -105,5 +105,8 @@ if(ENGINEMON_ENABLE_ENGINE AND ENGINEMON_BUILD_TESTS AND ENGINEMON_BUILD_TOOLS A
         compiler_integrity_test
         battle_rom_test
         oracle_test
+        sm83_lifter_test
+        expansion_compat_test
+        layout_resolver_test
     )
 endif()

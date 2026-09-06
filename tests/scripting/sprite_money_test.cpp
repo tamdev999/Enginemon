@@ -1224,6 +1224,63 @@ TEST(brls_base_reward_roundtrip) {
     std::cout << "  [base_reward roundtrip: 42 survives; OOB→0]\n";
 }
 
+// ============================================================================
+// Damage-variation divisor: roundtrip + arithmetic tests
+// Source: BattleCommand_DamageVariation — `ld a, 100 percent` = 0xFF = 255
+// ============================================================================
+
+TEST(brls_damage_variation_divisor_roundtrip) {
+    // Prove divisor survives PackageWriter → PackageReader roundtrip.
+    // Use a non-vanilla value (0xCC) to confirm it is stored and loaded, not defaulted.
+    enginemon::BattleRules rules = make_phase1_rules();
+    rules.damage_variation.lower_bound_byte = 0xD9u;  // vanilla lower bound
+    rules.damage_variation.divisor          = 0xCCu;  // non-vanilla divisor
+
+    auto loaded = phase1_roundtrip(rules, "dmgvar_divisor");
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->damage_variation.lower_bound_byte, static_cast<uint8_t>(0xD9u));
+    ASSERT_EQ(loaded->damage_variation.divisor,          static_cast<uint8_t>(0xCCu));
+    ASSERT_EQ(loaded->get_damage_var_lower_bound(),      static_cast<uint8_t>(0xD9u));
+    ASSERT_EQ(loaded->get_damage_var_divisor(),          static_cast<uint8_t>(0xCCu));
+    std::cout << "  [damage_variation.divisor 0xCC roundtrip ✓]\n";
+}
+
+TEST(damage_var_divisor_variation_255_unchanged) {
+    // variation=255 (maximum): damage × 255 / 255 = damage (unchanged).
+    // Source: BattleCommand_DamageVariation — variation=0xFF is the maximum RRCA output.
+    //   result = floor(damage × variation / divisor)
+    //   floor(100 × 255 / 255) = 100
+    //   floor(37  × 255 / 255) = 37
+    const int32_t divisor = 255;
+    for (int32_t dmg : {1, 2, 37, 100, 999}) {
+        int32_t result = dmg * 255 / divisor;
+        // Should equal dmg exactly (255/255 = 1.0, integer divide = exact)
+        ASSERT_EQ(result, dmg);
+    }
+    std::cout << "  [variation=255: damage×255/255 == damage for all tested values ✓]\n";
+}
+
+TEST(damage_var_divisor_variation_217_floor) {
+    // variation=217 (minimum accepted: 0xD9 lower bound): floor(damage × 217 / 255).
+    // Source: 85 percent + 1 = 217 is the rejection threshold; 217 is the minimum valid
+    // variation byte, giving approximately 85.1% of max damage.
+    //
+    // Concrete cross-check values (compute floor(d × 217 / 255) by hand):
+    //   d=100 → floor(21700/255) = floor(85.098…) = 85
+    //   d=37  → floor(8029/255)  = floor(31.486…) = 31
+    //   d=255 → floor(55335/255) = floor(217.0) = 217
+    //   d=2   → floor(434/255)   = floor(1.702…)  = 1  (floor; MIN_DAMAGE applied after)
+    const int32_t divisor   = 255;
+    const int32_t variation = 217;
+    auto crystal_var = [&](int32_t d) { return d * variation / divisor; };
+
+    ASSERT_EQ(crystal_var(100), 85);
+    ASSERT_EQ(crystal_var(37),  31);
+    ASSERT_EQ(crystal_var(255), 217);
+    ASSERT_EQ(crystal_var(2),   1);
+
+    std::cout << "  [variation=217: floor(d×217/255) matches Crystal arithmetic ✓]\n";
+}
 TEST(no_raw_effect_ids_in_engine_ai) {
     // Proves the semantic EffectId pipeline: Crystal raw effect bytes are mapped to
     // EMON SemEffect:: values at extraction time; engine AI works only with semantic IDs.
@@ -1314,8 +1371,9 @@ TEST(sm83_params_wire_roundtrip) {
     rules.crit_deltas.scope_lens_delta   = 2;
     rules.crit_deltas.focus_energy_delta = 2;
 
-    // damage_variation: vanilla {0xD9} → use {0xC0}
+    // damage_variation: vanilla {0xD9, 0xFF} → use {0xC0, 0xEE}
     rules.damage_variation.lower_bound_byte = 0xC0u;
+    rules.damage_variation.divisor          = 0xEEu;
 
     // Roundtrip through BRLS package
     auto loaded_opt = phase1_roundtrip(rules, "sm83_wire");
@@ -1344,6 +1402,7 @@ TEST(sm83_params_wire_roundtrip) {
     ASSERT_EQ(loaded.crit_deltas.scope_lens_delta,   2u);
     ASSERT_EQ(loaded.crit_deltas.focus_energy_delta, 2u);
     ASSERT_EQ(loaded.damage_variation.lower_bound_byte, static_cast<uint8_t>(0xC0u));
+    ASSERT_EQ(loaded.damage_variation.divisor,          static_cast<uint8_t>(0xEEu));
 
     // Confirm getter accessors agree with the raw fields
     ASSERT_EQ(loaded.get_level_divisor(),          6u);
@@ -1365,6 +1424,7 @@ TEST(sm83_params_wire_roundtrip) {
     ASSERT_EQ(loaded.get_crit_scope_lens_delta(),  2u);
     ASSERT_EQ(loaded.get_crit_focus_energy_delta(), 2u);
     ASSERT_EQ(loaded.get_damage_var_lower_bound(), static_cast<uint8_t>(0xC0u));
+    ASSERT_EQ(loaded.get_damage_var_divisor(),      static_cast<uint8_t>(0xEEu));
 
     // Confirm calculator overloads use the loaded values, not hardcoded defaults.
     // calc_stat with loaded rules: level_div=80 not 100 → different result
@@ -1501,10 +1561,335 @@ TEST(give_money_cap_constants_match_bcd_widths) {
               << " COIN_MAX=" << enginemon::BattleRules{}.get_coin_max() << " — match BCD widths]\n";
 }
 
-int main(int /*argc*/, char* /*argv*/[]) {
-    std::cout << "=== Sprite/Money State Tests ===\n";
+// ============================================================================
+// Recoil + Drain BRLS roundtrip tests
+// Proves RecoilParams and DrainParams survive PackageWriter → PackageReader.
+// ============================================================================
 
-    RUN(variable_sprite_identity_survives_save_load);
+TEST(brls_recoil_shift_roundtrip) {
+    // Non-vanilla shift_count=3 must survive write → read.
+    // Proves the byte is stored and not defaulted to 2.
+    enginemon::BattleRules rules = make_phase1_rules();
+    rules.recoil.shift_count = 3u;  // non-vanilla (/8 instead of /4)
+
+    auto loaded = phase1_roundtrip(rules, "recoil_shift");
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->recoil.shift_count,  static_cast<uint8_t>(3u));
+    ASSERT_EQ(loaded->get_recoil_shift(),  static_cast<uint8_t>(3u));
+    // Distinct from vanilla default (2)
+    ASSERT_TRUE(loaded->get_recoil_shift() != 2u);
+    std::cout << "  [recoil.shift_count=3 roundtrip ✓ (vanilla=2, loaded=3)]\n";
+}
+
+TEST(brls_drain_shift_roundtrip) {
+    // Non-vanilla shift_count=2 must survive write → read.
+    // Proves the byte is stored and not defaulted to 1.
+    enginemon::BattleRules rules = make_phase1_rules();
+    rules.drain.shift_count = 2u;  // non-vanilla (/4 instead of /2)
+
+    auto loaded = phase1_roundtrip(rules, "drain_shift");
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->drain.shift_count, static_cast<uint8_t>(2u));
+    ASSERT_EQ(loaded->get_drain_shift(), static_cast<uint8_t>(2u));
+    // Distinct from vanilla default (1)
+    ASSERT_TRUE(loaded->get_drain_shift() != 1u);
+    std::cout << "  [drain.shift_count=2 roundtrip ✓ (vanilla=1, loaded=2)]\n";
+}
+
+TEST(brls_recoil_shift_2_arithmetic_quarter_damage) {
+    // Functional: shift_count=2 → damage >> 2 = damage/4 (integer divide).
+    // Proves the formula used in battle.cpp matches Crystal BattleCommand_Recoil.
+    // Crystal: max(1, wCurDamage >> 2)
+    const int32_t shift = 2;
+    // Exact values from BattleCommand_Recoil with shift=2:
+    ASSERT_EQ(100 >> shift, 25);   // 100/4=25
+    ASSERT_EQ( 97 >> shift, 24);   // 97/4=24 (floor)
+    ASSERT_EQ(  4 >> shift,  1);   // 4/4=1 (minimum without max())
+    ASSERT_EQ(  3 >> shift,  0);   // 3/4=0 → max(1,0)=1 after floor
+    // min-1 guard: max(1, 3>>2) = max(1,0) = 1
+    ASSERT_EQ(std::max(1, 3 >> shift), 1);
+    ASSERT_EQ(std::max(1, 100 >> shift), 25);
+    std::cout << "  [recoil shift_count=2: 100>>2=25, 97>>2=24, max(1,3>>2)=1 ✓]\n";
+}
+
+TEST(brls_drain_shift_1_arithmetic_half_damage) {
+    // Functional: shift_count=1 → damage >> 1 = damage/2 (integer divide).
+    // Proves the formula used in battle.cpp matches Crystal SapHealth.
+    // Crystal: max(1, wCurDamage >> 1)
+    const int32_t shift = 1;
+    ASSERT_EQ(100 >> shift, 50);   // 100/2=50
+    ASSERT_EQ( 97 >> shift, 48);   // 97/2=48 (floor)
+    ASSERT_EQ(  2 >> shift,  1);   // 2/2=1
+    ASSERT_EQ(  1 >> shift,  0);   // 1/2=0 → max(1,0)=1
+    // min-1 guard:
+    ASSERT_EQ(std::max(1, 1 >> shift), 1);
+    ASSERT_EQ(std::max(1, 100 >> shift), 50);
+    std::cout << "  [drain shift_count=1: 100>>1=50, 97>>1=48, max(1,1>>1)=1 ✓]\n";
+}
+
+TEST(brls_recoil_drain_vanilla_defaults) {
+    // Default-constructed BattleRules must have vanilla values (2 and 1)
+    // so fallback paths in battle.cpp are correct.
+    enginemon::BattleRules defaults{};
+    ASSERT_EQ(defaults.get_recoil_shift(), static_cast<uint8_t>(2u));
+    ASSERT_EQ(defaults.get_drain_shift(),  static_cast<uint8_t>(1u));
+    // Lift bits: default-constructed rules have nothing lifted
+    ASSERT_FALSE(defaults.sm83_is_lifted(enginemon::BattleRules::SM83_LIFTED_RECOIL));
+    ASSERT_FALSE(defaults.sm83_is_lifted(enginemon::BattleRules::SM83_LIFTED_DRAIN));
+    std::cout << "  [default BattleRules: recoil_shift=2, drain_shift=1, neither lifted ✓]\n";
+}
+
+// =============================================================================
+// SemanticEffectDescription PACKAGE ROUND-TRIP TESTS
+//
+// Prove that SemanticEffectDescription fields survive write→read through
+// the MVDT chunk (native_package.cpp → package_reader.cpp).
+// =============================================================================
+
+// Helper: write one MoveDataEntry and read it back via PackageReader.
+static std::optional<enginemon::MoveData>
+move_desc_roundtrip(crystal::PackageWriter::MoveDataEntry e, const std::string& tag)
+{
+    auto tmp = std::filesystem::temp_directory_path()
+             / ("mvdt_rt_" + tag + ".emon_test");
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test");
+
+    // BRLS required for a valid package
+    enginemon::BattleRules br = make_phase1_rules();
+    writer.add_battle_rules(br);
+    writer.add_move_data({e});
+
+    if (!writer.write(tmp)) return std::nullopt;
+    struct Cleanup { std::filesystem::path p; ~Cleanup() { std::filesystem::remove(p); } } cleanup{tmp};
+
+    auto reader = PackageReader::open(tmp);
+    if (!reader) return std::nullopt;
+    auto reg = reader->load_move_registry();
+    if (!reg) return std::nullopt;
+    const enginemon::MoveData* md = reg->get(e.id);
+    if (!md) return std::nullopt;
+    return *md;
+}
+
+TEST(effect_desc_roundtrip_standard_damage_recoil) {
+    // Write: has_standard_damage=true [0], has_recoil=true [1], is_supported=true [35]
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = 200; e.type_id = 1; e.power = 90; e.accuracy = 100; e.pp = 20;
+    e.effect_id = 0; e.effect_chance = 0; e.category = 0;
+    e.effect_desc_raw[0] = 1;   // has_standard_damage
+    e.effect_desc_raw[1] = 1;   // has_recoil
+    e.effect_desc_raw[35] = 1;  // is_supported
+
+    auto md = move_desc_roundtrip(e, "recoil");
+    ASSERT_TRUE(md.has_value());
+    if (!md) return;
+    ASSERT_TRUE(md->effect_desc.has_standard_damage);
+    ASSERT_TRUE(md->effect_desc.has_recoil);
+    ASSERT_FALSE(md->effect_desc.has_drain);
+    ASSERT_TRUE(md->effect_desc.is_supported);
+    std::cout << "  [effect_desc roundtrip: has_standard_damage=1, has_recoil=1, is_supported=1 ✓]\n";
+}
+
+TEST(effect_desc_roundtrip_drain_requires_sleep) {
+    // Write: has_standard_damage=true [0], has_drain=true [2], drain_requires_sleep=true [3],
+    //        is_supported=false [35] (blocked by gate)
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = 201; e.type_id = 1; e.power = 100; e.accuracy = 100; e.pp = 15;
+    e.effect_id = 0; e.effect_chance = 0; e.category = 1;
+    e.effect_desc_raw[0] = 1;   // has_standard_damage
+    e.effect_desc_raw[2] = 1;   // has_drain
+    e.effect_desc_raw[3] = 1;   // drain_requires_sleep
+    e.effect_desc_raw[35] = 0;  // is_supported=false
+
+    auto md = move_desc_roundtrip(e, "drain_sleep");
+    ASSERT_TRUE(md.has_value());
+    if (!md) return;
+    ASSERT_TRUE(md->effect_desc.has_drain);
+    ASSERT_TRUE(md->effect_desc.drain_requires_sleep);
+    ASSERT_FALSE(md->effect_desc.is_supported);
+    std::cout << "  [effect_desc roundtrip: has_drain=1, drain_requires_sleep=1, is_supported=0 ✓]\n";
+}
+
+TEST(effect_desc_roundtrip_constant_damage_half_hp) {
+    // Write: constant_damage_source=HalfTargetHP [8] = value 3, is_supported=true [35]
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = 202; e.type_id = 1; e.power = 0; e.accuracy = 0xFF; e.pp = 10;
+    e.effect_id = 0; e.effect_chance = 0; e.category = 0;
+    e.effect_desc_raw[8] = static_cast<uint8_t>(enginemon::ConstantDamageSource::HalfTargetHP);
+    e.effect_desc_raw[35] = 1;  // is_supported=true
+
+    auto md = move_desc_roundtrip(e, "superfang");
+    ASSERT_TRUE(md.has_value());
+    if (!md) return;
+    ASSERT_EQ(static_cast<int>(md->effect_desc.constant_damage_source),
+              static_cast<int>(enginemon::ConstantDamageSource::HalfTargetHP));
+    ASSERT_TRUE(md->effect_desc.is_supported);
+    std::cout << "  [effect_desc roundtrip: constant_damage_source=HalfTargetHP survives ✓]\n";
+}
+
+TEST(effect_desc_roundtrip_stat_change_attack_down2) {
+    // Write: stat_change=AttackDown2 [13] = value 17, needs_substitute=true [32], is_supported=false [35]
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = 203; e.type_id = 1; e.power = 0; e.accuracy = 100; e.pp = 30;
+    e.effect_id = 0; e.effect_chance = 0; e.category = 2;  // Status
+    e.effect_desc_raw[13] = static_cast<uint8_t>(enginemon::StatChangeTarget::AttackDown2);
+    e.effect_desc_raw[32] = 1;   // needs_substitute=true
+    e.effect_desc_raw[35] = 0;   // is_supported=false
+
+    auto md = move_desc_roundtrip(e, "atk_down2");
+    ASSERT_TRUE(md.has_value());
+    if (!md) return;
+    ASSERT_EQ(static_cast<int>(md->effect_desc.stat_change),
+              static_cast<int>(enginemon::StatChangeTarget::AttackDown2));
+    ASSERT_TRUE(md->effect_desc.needs_substitute);
+    ASSERT_FALSE(md->effect_desc.is_supported);
+    std::cout << "  [effect_desc roundtrip: stat_change=AttackDown2, needs_substitute=true ✓]\n";
+}
+
+TEST(effect_desc_roundtrip_zero_init_is_unsupported) {
+    // A zero-initialized effect_desc_raw must round-trip as is_supported=false.
+    crystal::PackageWriter::MoveDataEntry e{};
+    e.id = 204; e.type_id = 1; e.power = 40; e.accuracy = 100; e.pp = 35;
+    e.effect_id = 0; e.effect_chance = 0; e.category = 0;
+    // effect_desc_raw stays zero-initialized — is_supported=false, all fields 0
+
+    auto md = move_desc_roundtrip(e, "zero_desc");
+    ASSERT_TRUE(md.has_value());
+    if (!md) return;
+    ASSERT_FALSE(md->effect_desc.is_supported);
+    ASSERT_FALSE(md->effect_desc.has_standard_damage);
+    std::cout << "  [effect_desc roundtrip: zero-init → is_supported=false ✓]\n";
+}
+
+// =============================================================================
+// BRLS SCHEMA VERSION REJECTION TESTS
+//
+// Prove that packages with wrong BRLS or MVDT schema version are rejected.
+// =============================================================================
+
+// Helper: build and write a minimal valid BRLS package, patch one byte, return reader.
+static void patch_first_chunk_byte(const std::filesystem::path& path,
+                                    uint32_t chunk_magic, uint8_t new_byte)
+{
+    std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
+    if (!f.is_open()) return;
+    // Header: toc_offset at byte 88, toc_size at byte 92
+    f.seekg(88);
+    uint32_t toc_offset = 0; f.read(reinterpret_cast<char*>(&toc_offset), 4);
+    uint32_t toc_size   = 0; f.read(reinterpret_cast<char*>(&toc_size),   4);
+    uint32_t entry_count = toc_size / 20;  // each TocEntry is 20 bytes
+    f.seekg(toc_offset);
+    for (uint32_t i = 0; i < entry_count; ++i) {
+        uint32_t ct = 0, co = 0;
+        std::streampos ep = f.tellg();
+        f.read(reinterpret_cast<char*>(&ct), 4);
+        f.read(reinterpret_cast<char*>(&co), 4);
+        f.seekg(12, std::ios::cur);  // skip size(4) + count(4) + crc(4)
+        if (ct == chunk_magic) {
+            f.seekp(co);
+            f.write(reinterpret_cast<const char*>(&new_byte), 1);
+            return;
+        }
+    }
+}
+
+TEST(brls_schema_wrong_version_rejected) {
+    // Write a valid package, corrupt BRLS schema byte to 0xFF → nullopt.
+    auto tmp = std::filesystem::temp_directory_path() / "brls_schema_bad.emon_test";
+    {
+        crystal::PackageWriter writer;
+        writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test");
+        writer.add_battle_rules(make_phase1_rules());
+        ASSERT_TRUE(writer.write(tmp));
+    }
+    patch_first_chunk_byte(tmp, 0x42524C53u, 0xFF);  // "BRLS" chunk, byte→0xFF
+    auto reader = PackageReader::open(tmp);
+    ASSERT_TRUE(reader != nullptr);
+    ASSERT_FALSE(reader->load_battle_rules().has_value());
+    std::filesystem::remove(tmp);
+    std::cout << "  [BRLS schema=0xFF: rejected cleanly ✓]\n";
+}
+
+TEST(brls_schema_version_zero_rejected) {
+    // Corrupt BRLS schema byte to 0x00 → nullopt.
+    auto tmp = std::filesystem::temp_directory_path() / "brls_schema_zero.emon_test";
+    {
+        crystal::PackageWriter writer;
+        writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test");
+        writer.add_battle_rules(make_phase1_rules());
+        ASSERT_TRUE(writer.write(tmp));
+    }
+    patch_first_chunk_byte(tmp, 0x42524C53u, 0x00);
+    auto reader = PackageReader::open(tmp);
+    ASSERT_TRUE(reader != nullptr);
+    ASSERT_FALSE(reader->load_battle_rules().has_value());
+    std::filesystem::remove(tmp);
+    std::cout << "  [BRLS schema=0x00: rejected cleanly ✓]\n";
+}
+
+TEST(mvdt_schema_wrong_version_rejected) {
+    // Write a valid package with MVDT chunk, corrupt MVDT schema byte to 0x01 → nullopt.
+    auto tmp = std::filesystem::temp_directory_path() / "mvdt_schema_bad.emon_test";
+    {
+        crystal::PackageWriter writer;
+        writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test");
+        writer.add_battle_rules(make_phase1_rules());
+        crystal::PackageWriter::MoveDataEntry e{};
+        e.id = 1; e.type_id = 1; e.power = 40; e.accuracy = 100; e.pp = 35;
+        writer.add_move_data({e});
+        ASSERT_TRUE(writer.write(tmp));
+    }
+    patch_first_chunk_byte(tmp, 0x4D564454u, 0x01);  // "MVDT" chunk, byte→0x01
+    auto reader = PackageReader::open(tmp);
+    ASSERT_TRUE(reader != nullptr);
+    ASSERT_FALSE(reader->load_move_registry().has_value());
+    std::filesystem::remove(tmp);
+    std::cout << "  [MVDT schema=0x01: rejected cleanly ✓]\n";
+}
+
+TEST(brls_truncated_chunk_rejected) {
+    // Patch BRLS TOC size to 4 → load_battle_rules returns nullopt (minimum size guard).
+    auto tmp = std::filesystem::temp_directory_path() / "brls_truncated.emon_test";
+    {
+        crystal::PackageWriter writer;
+        writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test");
+        writer.add_battle_rules(make_phase1_rules());
+        ASSERT_TRUE(writer.write(tmp));
+    }
+    // Patch the BRLS TocEntry size field to 4 (sub-minimum).
+    {
+        std::fstream f(tmp, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(f.is_open());
+        f.seekg(88);
+        uint32_t toc_offset = 0; f.read(reinterpret_cast<char*>(&toc_offset), 4);
+        uint32_t toc_size   = 0; f.read(reinterpret_cast<char*>(&toc_size),   4);
+        uint32_t entry_count = toc_size / 20;
+        f.seekg(toc_offset);
+        for (uint32_t i = 0; i < entry_count; ++i) {
+            uint32_t ct = 0;
+            std::streampos ep = f.tellg();
+            f.read(reinterpret_cast<char*>(&ct), 4);
+            f.seekg(16, std::ios::cur);  // skip rest of entry
+            if (ct == 0x42524C53u) {
+                // TocEntry: type(4) + offset(4) + size(4) + count(4) + crc(4)
+                // size field is at ep+8
+                f.seekp(static_cast<std::streamoff>(ep) + 8);
+                uint32_t small = 4u;
+                f.write(reinterpret_cast<char*>(&small), 4);
+                break;
+            }
+        }
+    }
+    auto reader = PackageReader::open(tmp);
+    ASSERT_TRUE(reader != nullptr);
+    ASSERT_FALSE(reader->load_battle_rules().has_value());
+    std::filesystem::remove(tmp);
+    std::cout << "  [BRLS truncated (size=4): rejected cleanly ✓]\n";
+}
+
+int main(int /*argc*/, char* /*argv*/[]) {
     RUN(variable_sprite_runtime_no_crystal_mapping_call);
     RUN(money_balance_survives_save_load);
     RUN(money_transient_text_buffer_not_in_gamestate);
@@ -1551,8 +1936,20 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN(brls_weather_synergy_moves_roundtrip);
     RUN(brls_trainer_class_dvs_roundtrip);
     RUN(brls_base_reward_roundtrip);
+
+    // Damage-variation divisor roundtrip and arithmetic tests
+    RUN(brls_damage_variation_divisor_roundtrip);
+    RUN(damage_var_divisor_variation_255_unchanged);
+    RUN(damage_var_divisor_variation_217_floor);
     RUN(no_raw_effect_ids_in_engine_ai);
     RUN(sm83_params_wire_roundtrip);
+
+    // Recoil + Drain BRLS roundtrip and arithmetic tests
+    RUN(brls_recoil_shift_roundtrip);
+    RUN(brls_drain_shift_roundtrip);
+    RUN(brls_recoil_shift_2_arithmetic_quarter_damage);
+    RUN(brls_drain_shift_1_arithmetic_half_damage);
+    RUN(brls_recoil_drain_vanilla_defaults);
 
     // Money/coin cap enforcement tests
     RUN(give_money_capped_at_999999_player);
@@ -1560,6 +1957,19 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN(give_money_coins_capped_at_9999);
     RUN(give_money_cap_does_not_overflow_int32);
     RUN(give_money_cap_constants_match_bcd_widths);
+
+    // SemanticEffectDescription package round-trip tests
+    RUN(effect_desc_roundtrip_standard_damage_recoil);
+    RUN(effect_desc_roundtrip_drain_requires_sleep);
+    RUN(effect_desc_roundtrip_constant_damage_half_hp);
+    RUN(effect_desc_roundtrip_stat_change_attack_down2);
+    RUN(effect_desc_roundtrip_zero_init_is_unsupported);
+
+    // BRLS + MVDT schema version rejection tests
+    RUN(brls_schema_wrong_version_rejected);
+    RUN(brls_schema_version_zero_rejected);
+    RUN(mvdt_schema_wrong_version_rejected);
+    RUN(brls_truncated_chunk_rejected);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

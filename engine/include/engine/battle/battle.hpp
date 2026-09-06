@@ -94,6 +94,9 @@ struct BattlePokemon {
     uint16_t substitute_hp = 0;
     uint8_t perish_count = 0;
     bool is_transformed = false;
+    uint8_t happiness = 255;    // Gen 2 friendship (0–255). Default=255 for NPC/wild Pokémon.
+                                // Used by Return (max power at 255) / Frustration (max at 0).
+    uint8_t recharge_turns = 0; // Hyper Beam recharge turns remaining (0 = no recharge needed)
     
     // Helpers
     bool is_fainted() const { return stats.hp <= 0; }
@@ -350,6 +353,12 @@ private:
     void check_fainted();
     void finalize_outcome();
     void apply_stat_stages(BattlePokemon& bp);
+    // Secondary-effect helpers (used by execute_move)
+    void apply_secondary_effect(BattlePokemon& user, BattlePokemon& target,
+                                enginemon::SecondaryEffectType effect, bool user_is_player);
+    void apply_one_stage_change(BattlePokemon& mon, int stat_idx, int8_t delta);
+    void apply_stat_change(BattlePokemon& user, BattlePokemon& target,
+                           enginemon::StatChangeTarget change, bool user_is_player);
     // build_ai_context() is defined in battle.cpp (returns AIContext from trainer_ai.hpp)
     
     // Damage calculation

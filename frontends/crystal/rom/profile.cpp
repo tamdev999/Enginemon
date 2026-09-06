@@ -109,6 +109,10 @@ void ProfileRegistry::register_crystal_v11() {
     fmt.tileset.tileset_size = 15;      // TILESET_LENGTH
     fmt.tileset.metatile_size = 16;     // 16 bytes per metatile (2048/128)
     fmt.tileset.metatile_count = 128;   // standard metatiles per tileset
+    fmt.tileset.palmap_size = 112;      // 48 (bank0) + 16 (0xFF filler) + 48 (bank1)
+                                        // Source: gfx/tilesets/*_palette_map.asm — Crystal
+                                        // uses "tilepal 1" entries + "rept 16 / db $ff / endr"
+                                        // between bank-0 and bank-1 tile palette data.
     
     // Script format
     fmt.script.command_table_entry_size = 3;
@@ -191,6 +195,9 @@ void ProfileRegistry::register_crystal_v11() {
     o.icon_pointers         = flat_offset(0x23, 0x6bbf);  // 23:6bbf IconPointers
     o.obj_palettes          = flat_offset(0x02, 0x7469);  // 02:7469 MapObjectPals
     o.tileset_bg_palette    = flat_offset(0x02, 0x7319);  // 02:7319 TilesetBGPalette
+    o.palmap_consumer_bank  = 0x13;  // BANK(_LoadOverworldAttrmapPals): homecall call site
+                                     // at 00:0DB3 has 3E 13 D7 CD 00 40.  Confirmed from sym:
+                                     // _LoadOverworldAttrmapPals = 13:4000 (pokecrystal11.sym).
     o.font_tiles            = flat_offset(0x3e, 0x4200);  // 3e:4200 Font (128 1bpp tiles)
     o.font_extra_tiles      = flat_offset(0x3e, 0x4000);  // 3e:4000 FontExtra (32 2bpp tiles)
 
@@ -228,7 +235,7 @@ void ProfileRegistry::register_crystal_v11() {
     c.num_moves             = 251;  // 1-251 (0 = none)
     c.num_items             = 256;  // 0-255
     c.num_types             = 18;   // 0-17 (includes ???)
-    c.num_tilesets          = 36;
+    c.num_tilesets          = 36;   // Crystal v1.1 exact count (NUM_TILESETS from tileset_constants.asm)
     c.num_map_groups        = 26;   // Groups 1-26 (0 unused in some contexts)
     c.num_trainer_classes   = 67;
     c.num_specials          = 0x100;
@@ -244,6 +251,15 @@ void ProfileRegistry::register_crystal_v11() {
     c.num_npc_trades        = 7;    // NUM_NPC_TRADES (0-6)
     c.num_fruit_trees       = 30;   // NUM_FRUIT_TREES (1-30, 0 is invalid)
     c.num_marts             = 34;   // NUM_MARTS (0-33)
+
+    // Effect-script decoder domain counts.
+    // Source authority: assembly-time constants in pokecrystal (NOT ROM-encoded).
+    //   NUM_MOVE_EFFECTS    = 157: const_def → 157 EFFECT_* constants → 0..156
+    //   NUM_EFFECT_COMMANDS = 175: const_def 1 → 175 command entries (0x01..0xAF) → const_value-1
+    // These are exact for Crystal v1.1 and format-compatible hacks that do not extend
+    // either table.  ROM hacks that add effects or commands must supply a different profile.
+    c.num_move_effects   = 157;  // EFFECT_NORMAL_HIT(0)..EFFECT_DEFENSE_CURL(156)
+    c.num_effect_commands = 175; // BattleCommand 0x01..0xAF
     
     //-------------------------------------------------------------------------
     // Native call specs — moved from NativeCallRegistry::initialize()
@@ -423,6 +439,17 @@ void ProfileRegistry::register_crystal_v11() {
     o.sm83_get_sixteenth_max_hp  = flat_offset(0x0f, 0x4c76); // 0f:4c76 GetSixteenthMaxHP
     o.sm83_critical              = flat_offset(0x0d, 0x4631); // 0d:4631 BattleCommand_Critical
 
+    // Effect-script table addresses — used by EffectScriptDecoder.
+    // Crystal v1.1 addresses verified from pokecrystal11.sym.
+    // Profile address is the primary lookup; structural ROM scan is the fallback.
+    o.move_effects_pointers      = flat_offset(0x09, 0x71f4); // 09:71f4 MoveEffectsPointers
+    o.battle_command_pointers    = flat_offset(0x0f, 0x7d28); // 0f:7d28 BattleCommandPointers
+
+    // Extended battle tables (direct reads, no SM83 lifting).
+    o.magnitude_power            = flat_offset(0x0d, 0x79b4); // 0d:79b4 MagnitudePower
+    o.present_power              = flat_offset(0x0d, 0x7907); // 0d:7907 PresentPower
+    o.flail_reversal_power       = flat_offset(0x0d, 0x5807); // 0d:5807 FlailReversalPower
+
     //-------------------------------------------------------------------------
     // Register
     //-------------------------------------------------------------------------
@@ -517,14 +544,11 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     // COORD_EVENT_SIZE = 5 (Polished: db scene_id, y, x, dw script = 5 bytes; vanilla was 8)
     // BG_EVENT_SIZE = 5 (same as vanilla)
     // OBJECT_EVENT_SIZE = 13 (same as vanilla)
-    fmt.map.map_script_header_size = 2;   // SCENE_SCRIPT_SIZE = 2 in Polished (ROM-derivable)
+    fmt.map.map_script_header_size = 2;   // SCENE_SCRIPT_SIZE = 2 in Polished
     fmt.map.warp_size              = 5;
-    fmt.map.coord_event_size       = 5;   // Polished: 5 bytes (vanilla was 8, ROM-derivable)
+    fmt.map.coord_event_size       = 5;   // Polished: 5 bytes (vanilla was 8)
     fmt.map.bg_event_size          = 5;
     fmt.map.object_event_size      = 13;
-    fmt.map.max_environment_value  = 7;   // E6 07 mask proven in environment dispatch xref
-                                           // (ROM-derivable; resolve_crystal_layout() fills this)
-    // max_map_dimension removed — dimensions validated by h*w <= 0x8000-blockdata_ptr
 
     // ── Pokémon data format ───────────────────────────────────────────────────
     // Same as vanilla Crystal (32-byte BaseData records).
@@ -572,6 +596,9 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     // Polished has many more tilesets; keep sizes the same.
     fmt.tileset.tileset_size       = 15;
     fmt.tileset.metatile_size      = 16;
+    // palmap_size intentionally left at 0: Polished uses a different palette
+    // architecture (no wTilesetPalettes direct-ROM-dereference pattern).
+    // offsets.tilesets is also 0, so the tileset extractor guard fires first.
     fmt.tileset.metatile_count     = 128;
 
     // ── Script format ─────────────────────────────────────────────────────────
@@ -688,8 +715,10 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     // Polished Crystal 3.2.3 extends species and map counts beyond vanilla.
     // Species count: 289 per FEATURES.md ("289 entries in dex_order_new.asm")
     // Map groups: 39 (confirmed from MapGroupPointers table)
-    // Tilesets: Polished has many more tilesets; set generously to 200
-    //           (the tileset field validity check uses num_tilesets as upper bound)
+    // Tilesets: exact count not determined; 200 was only a "generous upper bound"
+    //   (comment in prior code), not a proven value. Left at 0 (not configured)
+    //   since Polished's offsets.tilesets=0 means tileset extraction is already
+    //   blocked — num_tilesets=0 produces the same fail-closed outcome faster.
     // Trainer classes: not yet determined; keep vanilla value as conservative estimate
     // Specials: 305 confirmed from structural scan
     //
@@ -702,9 +731,8 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     c.num_moves           = 251;   // conservative; update when Moves located
     c.num_items           = 256;
     c.num_types           = 19;    // 18 vanilla + Fairy (0x1C)
-    c.num_tilesets        = 200;   // generous upper bound for Polished's expanded set
-    c.num_map_groups      = 0;     // derived at compile time from MapGroupPointers table boundary
-                                   // (resolve_crystal_layout fills this before extraction runs)
+    c.num_tilesets        = 0;     // not configured (exact Polished count unproven; offsets.tilesets=0 anyway)
+    c.num_map_groups      = 39;    // confirmed from MapGroupPointers table
     c.num_trainer_classes = 67;    // conservative vanilla value
     c.num_specials        = 305;   // confirmed from structural scan
     c.num_script_commands = 0xA9;  // Polished adds a few more commands
@@ -920,68 +948,59 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
     // ── Probe 4a: TypeMatchups table — structural sentinel + multiplier set ──
     // The TypeMatchups table is identified by:
     //   • 3-byte entries: {atk_type, def_type, multiplier}
-    //   • multiplier in the known Crystal-family multiplier set
+    //   • multiplier in the Crystal-family multiplier set (see below)
     //   • separated by optional 0xFE bytes (Gen2 boundary marker)
-    //   • terminated by 0xFF, or cleanly broken by first-invalid-mult
+    //   • terminated by 0xFF
+    // We require at least 30 valid entries before the 0xFF sentinel to
+    // distinguish it from random data that happens to have valid multipliers.
     //
-    // MULTIPLIER SETS (STRUCTURAL — not content):
-    //   Vanilla Crystal: {0, 5, 20}         (immune, not-very, super-effective)
-    //   Polished Crystal: {0, 8, 16, 32}    (immune, NVE, neutral, SE — q4 format)
+    // MULTIPLIER SET — STRUCTURAL, generic across Crystal-family ROMs:
+    //   Vanilla Crystal: {0, 5, 20}    (immune, not-very, super-effective)
+    //   Polished Crystal: {0, 8, 16, 32} (immune, NVE, neutral, SE — q4 format)
     //   Union (used here): {0, 5, 8, 10, 16, 20, 32}
-    //
-    // Both vanilla and Polished tables have a 0xFE section-separator after which
-    // the encoding changes or non-matchup data follows.  The forward scan stops at
-    // the first invalid multiplier, which naturally terminates at the clean section
-    // boundary.  A sentinel (0xFF) is not required — >= MIN_EXPECTED_ENTRIES valid
-    // entries is sufficient proof that the configured address is correct.
-    //
-    // STRATEGY:
-    //   • Configured-address forward scan: use the BROAD union set.
-    //     Vanilla gets 108 valid entries; Polished gets 117.  Both >> 30.
-    //   • Fallback structural search (only when configured address fails):
-    //     also uses broad set, requires MIN_FALLBACK_ENTRIES=50 to limit false
-    //     positives from arbitrary ROM regions.
+    //   This is a structural format property, NOT a content anchor.
     if (o.type_matchups != 0) {
-        // Broad set — covers vanilla {0,5,20} and Polished {0,8,16,32} encodings.
-        // Used for both the forward probe and the fallback scan.
-        auto is_valid_mult_broad = [](uint8_t m) -> bool {
+        // Scan forward from configured address, counting valid entries.
+        constexpr uint32_t MIN_EXPECTED_ENTRIES = 30u;
+        // Generic multiplier set — union of vanilla and Polished Crystal
+        static const uint8_t VALID_MULTS[] = {0, 5, 8, 10, 16, 20, 32};
+        auto is_valid_mult = [](uint8_t m) -> bool {
+            // Generic Crystal-family multiplier set:
+            // Vanilla Crystal: {0,5,20} | Polished Crystal: {0,8,16,32}
+            // STRUCTURAL: these are format-defined values, not game content.
             switch (m) {
                 case 0: case 5: case 8: case 10: case 16: case 20: case 32: return true;
                 default: return false;
             }
         };
-
-        constexpr uint32_t MIN_EXPECTED_ENTRIES = 30u;   // for the configured-address probe
-        constexpr uint32_t MIN_FALLBACK_ENTRIES = 50u;   // higher bar for untargeted scan
-
         uint32_t valid_entries = 0;
         uint32_t ptr = o.type_matchups;
         bool found_sentinel = false;
         for (uint32_t i = 0; i < 2048u && ptr < rom_size; ++i) {
             uint8_t b = read_byte(ptr);
             if (b == 0xFF) { found_sentinel = true; break; }
-            if (b == 0xFE) { ptr += 1; continue; }  // Gen2 section separator
+            if (b == 0xFE) { ptr += 1; continue; }  // Gen2 separator
             if (ptr + 3u > rom_size) break;
             uint8_t mult = read_byte(ptr + 2);
-            if (is_valid_mult_broad(mult)) {
+            if (is_valid_mult(mult)) {
                 ++valid_entries;
                 ptr += 3;
             } else {
-                break;  // first invalid multiplier — clean end of matchup data
+                break;  // invalid multiplier: not a type matchup table
             }
         }
-        if (!found_sentinel && valid_entries < MIN_EXPECTED_ENTRIES) {
+        if (!found_sentinel || valid_entries < MIN_EXPECTED_ENTRIES) {
             // Configured address does not look like a valid TypeMatchups table.
-            // Fall back to a broad structural scan.
-            // Require more entries (MIN_FALLBACK_ENTRIES) to keep false-positive rate low.
+            // Search for a better candidate with generous type-ID limit.
             constexpr uint8_t MAX_TYPE_ID_SEARCH = 0x3F;
             uint32_t best_candidate = 0;
             uint32_t best_count = 0;
             for (uint32_t search = 0;
-                 search + 12 <= rom_size && best_count < MIN_FALLBACK_ENTRIES;
+                 search + 12 <= rom_size && best_count < MIN_EXPECTED_ENTRIES;
                  search += 3)
             {
                 if (read_byte(search) == 0xFE || read_byte(search) == 0xFF) {
+                    // Skip to next 3-byte boundary; avoid underflow
                     if (search < 2) break;
                     search -= 2; continue;
                 }
@@ -996,12 +1015,12 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
                     uint8_t d2 = read_byte(p2 + 1);
                     uint8_t m2 = read_byte(p2 + 2);
                     if (a2 > MAX_TYPE_ID_SEARCH || d2 > MAX_TYPE_ID_SEARCH) break;
-                    if (!is_valid_mult_broad(m2)) break;
+                    if (!is_valid_mult(m2)) break;
                     ++cnt; p2 += 3;
                 }
                 if (ok && cnt > best_count) { best_count = cnt; best_candidate = search; }
             }
-            if (best_count >= MIN_FALLBACK_ENTRIES && best_candidate != o.type_matchups) {
+            if (best_count >= MIN_EXPECTED_ENTRIES && best_candidate != o.type_matchups) {
                 mismatches.push_back({
                     "type_matchups_address",
                     0,  // not a count field; reuse profile_count=0 as sentinel
@@ -1014,7 +1033,7 @@ std::vector<ProfileRegistry::CountMismatch> ProfileRegistry::probe_profile_count
                                 o.type_matchups, valid_entries, found_sentinel,
                                 best_candidate, best_count, best_candidate)
                 });
-            } else if (valid_entries < MIN_EXPECTED_ENTRIES) {
+            } else if (!found_sentinel || valid_entries < MIN_EXPECTED_ENTRIES) {
                 mismatches.push_back({
                     "type_matchups_address",
                     0, 0,
@@ -1161,8 +1180,15 @@ bool ProfileRegistry::validate_profile_layout(
     }
 
     // ── Check 4: StdScripts table is reachable ───────────────────────────────
-    if (o.std_scripts != 0 && !in_range(o.std_scripts, o.std_scripts_count * 3u)) {
-        return fail("profile.offsets.std_scripts + count*3 exceeds ROM");
+    if (o.std_scripts != 0) {
+        const uint8_t esz = fmt.script.std_scripts_entry_size;
+        if (esz == 0) {
+            return fail("profile.format.script.std_scripts_entry_size is 0; "
+                        "cannot compute StdScripts table bounds");
+        }
+        if (!in_range(o.std_scripts, o.std_scripts_count * static_cast<uint32_t>(esz))) {
+            return fail("profile.offsets.std_scripts + count*entry_size exceeds ROM");
+        }
     }
 
     // ── Check 5: MonMenuIcons table is reachable ─────────────────────────────
@@ -1355,6 +1381,7 @@ std::string ProfileGenerator::export_cpp(const ExtractionProfile& profile) {
     out << std::format("    o.music_pointers        = 0x{:05x};\n", o.music_pointers);
     out << std::format("    o.sfx_pointers          = 0x{:05x};\n", o.sfx_pointers);
     out << std::format("    o.text_commands         = 0x{:05x};\n", o.text_commands);
+    out << std::format("    o.palmap_consumer_bank  = 0x{:02x};\n", o.palmap_consumer_bank);
     
     out << "\n    // Counts\n";
     out << "    auto& c = profile.counts;\n";

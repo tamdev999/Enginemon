@@ -98,7 +98,7 @@ std::pair<uint32_t,bool> scan_type_matchups(const RomData& rom, uint32_t flat_ad
         uint8_t m = rom.read_byte(p + 2u);
         if (a > max_type_id || d > max_type_id) break;
         // Multiplier set: union of {0,5,20} (vanilla) and {0,8,16,32} (Polished).
-        // This is STRUCTURAL — the value set is format-defined, not game-content.
+        // This is STRUCTURAL â€” the value set is format-defined, not game-content.
         static const std::array<uint8_t,7> valid_mults = {0,5,8,10,16,20,32};
         bool ok = false;
         for (uint8_t vm : valid_mults) { if (m == vm) { ok = true; break; } }
@@ -112,7 +112,7 @@ std::pair<uint32_t,bool> scan_type_matchups(const RomData& rom, uint32_t flat_ad
 // Stops when hp==0 OR type1>0x3F OR type2>0x3F (STRUCTURAL termination).
 // NOTE: type_id<=0x3F is used as a termination hint, not a hard rule.
 //       It is generous enough for all known expansions (Fairy=0x1C, etc.)
-//       and is labeled as HINT-ONLY — it cannot be used to define exact count.
+//       and is labeled as HINT-ONLY â€” it cannot be used to define exact count.
 uint32_t count_base_data_records(const RomData& rom, uint32_t flat_addr,
                                   uint8_t record_size, uint8_t type1_off, uint8_t type2_off,
                                   uint8_t hp_off, uint32_t max_records = 512) {
@@ -156,17 +156,17 @@ uint32_t count_move_records(const RomData& rom, uint32_t flat_addr,
 // Source (home/scripting.asm or engine/overworld/scripting.asm):
 //   ld e, a           ; 5F
 //   ld d, 0           ; 16 00
-//   ld hl, StdScripts ; 21 lo hi     ← StdScripts table address
+//   ld hl, StdScripts ; 21 lo hi     â† StdScripts table address
 //   add hl, de        ; 19
-//   add hl, de        ; 19           ← double for 2-byte stride (dw variant)
-//   ld b, BANK(...)   ; 06 bb        ← bb=0 if dw (same bank), else bank number
+//   add hl, de        ; 19           â† double for 2-byte stride (dw variant)
+//   ld b, BANK(...)   ; 06 bb        â† bb=0 if dw (same bank), else bank number
 //
 // Vanilla: 5F 16 00 21 lo hi 19 19 06 bb   with bb = BANK(StdScripts)
 // Polished: same bytes but bb=0x2F (still bank 0x2F, ptr 0x4000)
 //
 // The table format is determined by bb:
-//   bb > 0  AND ptr matches table bank → 3-byte dba entries (bank+dw)
-//   bb == bank_of(ptr site)            → may be 2-byte dw (all same bank)
+//   bb > 0  AND ptr matches table bank â†’ 3-byte dba entries (bank+dw)
+//   bb == bank_of(ptr site)            â†’ may be 2-byte dw (all same bank)
 //   Distinguisher: at the resolved flat, count_dba_entries vs count_dw_entries
 // ============================================================================
 
@@ -232,12 +232,12 @@ ResolvedAddress resolve_std_scripts(
         uint32_t dw_cnt  = count_dw_entries(rom, tbl, 150);
         uint8_t esz = (dw_cnt > dba_cnt) ? 2 : 3;
         if (out_entry_size) *out_entry_size = esz;
-        return { tbl, std::format("XREF scan → 0x{:05X} ({}-byte entries, {} valid)",
+        return { tbl, std::format("XREF scan â†’ 0x{:05X} ({}-byte entries, {} valid)",
                                    tbl, esz, std::max(dba_cnt, dw_cnt)) };
     }
     if (candidates.size() > 1) {
         if (out_diagnostic) {
-            *out_diagnostic = std::format("StdScripts: {} candidates found by XREF scan — "
+            *out_diagnostic = std::format("StdScripts: {} candidates found by XREF scan â€” "
                                           "ambiguous; profile address required", candidates.size());
         }
         return { 0, "", true };
@@ -255,11 +255,11 @@ ResolvedAddress resolve_std_scripts(
 // XREF pattern: _GetBaseData (home/pokemon.asm).
 // Source:
 //   ld a, BASE_DATA_SIZE   ; 3E sz
-//   ld hl, BaseData        ; 21 lo hi    ← table address
+//   ld hl, BaseData        ; 21 lo hi    â† table address
 //   rst AddNTimes          ; [D7|DF|E7]  (varies by ROM)
 //   ld de, wCurBaseData    ; 11 wl wh    (WRAM address in [0xC000,0xDFFF])
 //   ld bc, BASE_DATA_SIZE  ; 01 sz 00
-//   ld a, BANK(BaseData)   ; 3E bb       ← bank
+//   ld a, BANK(BaseData)   ; 3E bb       â† bank
 //   call FarCopyBytes      ; CD ?? ??
 //
 // Pattern: 3E sz 21 lo hi [D7|DF|E7] 11 wl wh 01 sz 00 3E bb CD
@@ -306,7 +306,7 @@ ResolvedAddress resolve_base_data(
         for (uint8_t r : rst_opcodes) { if (rst == r) { rst_ok = true; break; } }
         if (!rst_ok) continue;
         if (rom.read_byte(i+6) != 0x11) continue; // ld de, nn
-        // wCurBaseData at bytes [7,8] — must be in WRAM [0xC000,0xDFFF]
+        // wCurBaseData at bytes [7,8] â€” must be in WRAM [0xC000,0xDFFF]
         uint16_t wram = read16(rom, i+7);
         if (wram < 0xC000u || wram > 0xDFFFu) continue;
         if (rom.read_byte(i+9) != 0x01) continue;  // ld bc, nn
@@ -330,14 +330,14 @@ ResolvedAddress resolve_base_data(
     if (candidates.size() == 1) {
         if (out_record_size) *out_record_size = candidates[0].second;
         return { candidates[0].first,
-                 std::format("XREF scan → 0x{:05X} (record_size={}, {} records)",
+                 std::format("XREF scan â†’ 0x{:05X} (record_size={}, {} records)",
                              candidates[0].first, candidates[0].second,
                              count_base_data_records(rom, candidates[0].first,
                                  candidates[0].second, 7, 8, 1, 512)) };
     }
     if (candidates.size() > 1) {
         if (out_diagnostic) {
-            *out_diagnostic = std::format("BaseData: {} candidates — ambiguous; "
+            *out_diagnostic = std::format("BaseData: {} candidates â€” ambiguous; "
                                           "profile address required", candidates.size());
         }
         return { 0, "", true };
@@ -355,10 +355,10 @@ ResolvedAddress resolve_base_data(
 // XREF pattern: GetFixedMoveStruct (home/battle.asm or similar).
 // Source:
 //   dec a              ; 3D
-//   ld hl, Moves       ; 21 lo hi    ← table address
+//   ld hl, Moves       ; 21 lo hi    â† table address
 //   ld bc, MOVE_LENGTH ; 01 sz 00
 //   rst AddNTimes      ; [D7|DF|E7]
-//   ld a, BANK(Moves)  ; 3E bb       ← bank
+//   ld a, BANK(Moves)  ; 3E bb       â† bank
 //   [call/jmp FarCopyBytes] ; CD|C3|CF...
 //
 // Pattern: 3D 21 lo hi 01 sz 00 [D7|DF|E7] 3E bb [CD|C3|CF]
@@ -404,7 +404,7 @@ ResolvedAddress resolve_moves(
         if (rom.read_byte(i+8) != 0x3E) continue;  // ld a, BANK
         uint8_t bb = rom.read_byte(i+9);
         if (bb == 0 || bb >= 128u) continue;
-        // byte 10: call/jmp opcode — accept CD (call), CF (rst $08 = rst 8), C3 (jp)
+        // byte 10: call/jmp opcode â€” accept CD (call), CF (rst $08 = rst 8), C3 (jp)
         uint8_t next_op = rom.read_byte(i+10);
         if (next_op != 0xCD && next_op != 0xCF && next_op != 0xC3) continue;
         uint32_t tbl_flat = flat_of(bb, ptr);
@@ -421,7 +421,7 @@ ResolvedAddress resolve_moves(
     if (candidates.size() == 1) {
         if (out_record_size) *out_record_size = candidates[0].second;
         return { candidates[0].first,
-                 std::format("XREF scan → 0x{:05X} (record_size={}, {} records)",
+                 std::format("XREF scan â†’ 0x{:05X} (record_size={}, {} records)",
                              candidates[0].first, candidates[0].second,
                              count_move_records(rom, candidates[0].first,
                                  candidates[0].second,
@@ -429,7 +429,7 @@ ResolvedAddress resolve_moves(
     }
     if (candidates.size() > 1) {
         if (out_diagnostic) {
-            *out_diagnostic = std::format("Moves: {} candidates — ambiguous; "
+            *out_diagnostic = std::format("Moves: {} candidates â€” ambiguous; "
                                           "profile address required", candidates.size());
         }
         return { 0, "", true };
@@ -454,7 +454,7 @@ ResolvedAddress resolve_moves(
 //   ld c, a                ; 4F
 //   ld b, 0                ; 06 00
 //   add hl, bc             ; 09
-//   add hl, bc             ; 09        ← ×2 for 2-byte dw stride (NOT ×3)
+//   add hl, bc             ; 09        â† Ã—2 for 2-byte dw stride (NOT Ã—3)
 //   ld a, BANK(TrainerGroups) ; 3E bb
 //
 // Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 3E bb   (two 0x09, not three)
@@ -466,18 +466,13 @@ ResolvedAddress resolve_trainer_groups(
     uint32_t profile_address,
     std::string* out_diagnostic)
 {
-    // Profile-address path: validate with count_dw_entries (dw table, 2-byte stride).
-    // The previous code used count_dba_entries (3-byte stride), which always returned 0
-    // for a dw table and caused the profile path to fall through silently.
-    if (profile_address != 0 && profile_address < rom.size()) {
-        uint32_t cnt = count_dw_entries(rom, profile_address, 256);
-        if (cnt >= 10) {
-            return { profile_address,
-                     std::format("profile address 0x{:05X} validated ({} dw entries)", profile_address, cnt) };
-        }
-    }
+    // Profile-address fast-path removed: resolve_trainer_groups is classified as
+    // deterministic.  Always run the XREF scan so resolve_crystal_layout() can
+    // detect a genuine mismatch between profile metadata and ROM evidence.
+    // (A fast-path here would short-circuit mismatch detection by returning the
+    // profile address before the XREF scan produces a real comparand.)
 
-    // XREF scan for 2× add hl,bc dispatch (dw stride).
+    // XREF scan for 2Ã— add hl,bc dispatch (dw stride).
     // Pattern: 21 lo hi 7A 3D 4F 06 00 09 09 3E bb
     //   offset:  0  1  2  3  4  5  6  7  8  9 10 11
     // Table bank in bb (byte 11); table ptr from lo/hi (bytes 1-2).
@@ -511,12 +506,12 @@ ResolvedAddress resolve_trainer_groups(
 
     if (candidates.size() == 1) {
         return { candidates[0],
-                 std::format("XREF scan → 0x{:05X} ({} dw entries)",
+                 std::format("XREF scan â†’ 0x{:05X} ({} dw entries)",
                              candidates[0], count_dw_entries(rom, candidates[0], 256)) };
     }
     if (candidates.size() > 1) {
         if (out_diagnostic) {
-            *out_diagnostic = std::format("TrainerGroups: {} candidates — ambiguous", candidates.size());
+            *out_diagnostic = std::format("TrainerGroups: {} candidates â€” ambiguous", candidates.size());
         }
         return { 0, "", true };
     }
@@ -536,15 +531,15 @@ ResolvedAddress resolve_trainer_groups(
 //   ld a, [wBattleType]        ; FA xx xx
 //   cp BATTLETYPE_INVERSE      ; FE nn
 //   jr z, .TypesLoop           ; 28 xx
-//   ld hl, TypeMatchups        ; 21 t_lo t_hi  ← table address
+//   ld hl, TypeMatchups        ; 21 t_lo t_hi  â† table address
 //  .TypesLoop:
 //   ld a, [hli]                ; 2A
-//   cp $ff                     ; FE FF          ← sentinel check
+//   cp $ff                     ; FE FF          â† sentinel check
 //
 // Pattern: 21 i_lo i_hi FA ?? ?? FE ?? 28 ?? 21 t_lo t_hi 2A FE FF
 //
-// Multiplier validation uses {0,5,8,10,16,20,32} — union of vanilla and
-// Polished Crystal — so this is generic across Crystal-family ROMs.
+// Multiplier validation uses {0,5,8,10,16,20,32} â€” union of vanilla and
+// Polished Crystal â€” so this is generic across Crystal-family ROMs.
 // ============================================================================
 
 ResolvedAddress resolve_type_matchups(
@@ -598,11 +593,11 @@ ResolvedAddress resolve_type_matchups(
         if (out_inverse_flat) *out_inverse_flat = candidates[0].second;
         auto [cnt, _] = scan_type_matchups(rom, candidates[0].first);
         return { candidates[0].first,
-                 std::format("XREF scan → 0x{:05X} ({} entries)", candidates[0].first, cnt) };
+                 std::format("XREF scan â†’ 0x{:05X} ({} entries)", candidates[0].first, cnt) };
     }
     if (candidates.size() > 1) {
         if (out_diagnostic) {
-            *out_diagnostic = std::format("TypeMatchups: {} candidates — ambiguous", candidates.size());
+            *out_diagnostic = std::format("TypeMatchups: {} candidates â€” ambiguous", candidates.size());
         }
         return { 0, "", true };
     }
@@ -658,7 +653,7 @@ ResolvedAddress resolve_script_command_table(
 
     if (candidates.size() == 1) {
         return { candidates[0],
-                 std::format("XREF scan → 0x{:05X} ({} dw entries)",
+                 std::format("XREF scan â†’ 0x{:05X} ({} dw entries)",
                              candidates[0], count_dw_entries(rom, candidates[0], 300)) };
     }
     if (candidates.size() > 1) {
@@ -668,7 +663,7 @@ ResolvedAddress resolve_script_command_table(
             uint32_t cnt = count_dw_entries(rom, c, 300);
             if (cnt > best_cnt) { best_cnt = cnt; best_flat = c; }
         }
-        // Check if the winner is clearly dominant (2× more entries than runner-up)
+        // Check if the winner is clearly dominant (2Ã— more entries than runner-up)
         uint32_t second_best = 0;
         for (uint32_t c : candidates) {
             if (c == best_flat) continue;
@@ -677,7 +672,7 @@ ResolvedAddress resolve_script_command_table(
         }
         if (best_cnt >= second_best * 2 + 20) {
             return { best_flat,
-                     std::format("XREF scan → 0x{:05X} ({} entries, best of {} candidates)",
+                     std::format("XREF scan â†’ 0x{:05X} ({} entries, best of {} candidates)",
                                  best_flat, best_cnt, candidates.size()) };
         }
         if (out_diagnostic) {
@@ -695,7 +690,7 @@ ResolvedAddress resolve_script_command_table(
 
 
 // ============================================================================
-// resolve_crystal_layout — composite entry point
+// resolve_crystal_layout â€” composite entry point
 // ============================================================================
 
 int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool verbose)
@@ -716,17 +711,17 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
                                  name, result.flat, result.source.c_str());
                 }
             } else if (verbose && result.flat != addr_field) {
-                std::fprintf(stderr, "[layout] %-26s profile=0x%05X scan=0x%05X — using profile\n",
+                std::fprintf(stderr, "[layout] %-26s profile=0x%05X scan=0x%05X â€” using profile\n",
                              name, addr_field, result.flat);
             }
         } else if (result.ambiguous) {
             if (verbose) {
-                std::fprintf(stderr, "[layout] %-26s AMBIGUOUS — %s\n",
+                std::fprintf(stderr, "[layout] %-26s AMBIGUOUS â€” %s\n",
                              name, diag ? diag->c_str() : "multiple candidates");
             }
         } else {
             if (verbose && addr_field == 0) {
-                std::fprintf(stderr, "[layout] %-26s NOT FOUND — %s\n",
+                std::fprintf(stderr, "[layout] %-26s NOT FOUND â€” %s\n",
                              name, diag ? diag->c_str() : "pattern not found");
             }
         }
@@ -789,9 +784,22 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
     }
 
     // --- TrainerGroups ---
+    // Uses profile mismatch semantics: if ROM proves a different address than
+    // a nonzero profile value, that is a structural contradiction.
+    // TrainerGroups uses a unique structural XREF (dw dispatch, no heuristic
+    // count component) — the same class of deterministic proof as SpecialsPointers.
     {
         std::string diag;
         auto r = resolve_trainer_groups(rom, o.trainer_groups, &diag);
+        if (r.flat != 0 && o.trainer_groups != 0 && r.flat != o.trainer_groups) {
+            if (verbose) {
+                std::fprintf(stderr,
+                    "[layout] %-26s MISMATCH: profile=0x%05X ROM=0x%05X — "
+                    "profile may be stale or built for a different ROM\n",
+                    "TrainerGroups", o.trainer_groups, r.flat);
+            }
+            return -1;
+        }
         try_resolve("TrainerGroups", o.trainer_groups, r, &diag);
     }
 
@@ -799,7 +807,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
     // resolve_num_trainer_classes() extracts the cp NN literal from GetTrainerPic:
     //   ld a,[wTrainerClass] / and a / ret z / cp NN / ret nc
     // where NN = NUM_TRAINER_CLASSES + 1, so num_trainer_classes = NN - 1.
-    // This is a compile-time constant baked into the ROM — no table scan needed.
+    // This is a compile-time constant baked into the ROM â€” no table scan needed.
     //
     // Mismatch policy: if the ROM-derived count conflicts with a non-default profile
     // value (profile already configured and different), the build is rejected as
@@ -811,7 +819,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
         if (rom_ntc != 0) {
             const uint16_t profile_ntc = profile.counts.num_trainer_classes;
             if (profile_ntc == 0 || profile_ntc == rom_ntc) {
-                // Profile not configured, or matches — apply ROM value.
+                // Profile not configured, or matches â€” apply ROM value.
                 if (profile_ntc != rom_ntc) {
                     profile.counts.num_trainer_classes = rom_ntc;
                     ++resolved;
@@ -827,7 +835,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
                 // Surface the mismatch so the caller can reject the package.
                 if (verbose) {
                     std::fprintf(stderr,
-                        "[layout] %-26s MISMATCH: profile=%u ROM=%u — profile may be wrong for this ROM\n",
+                        "[layout] %-26s MISMATCH: profile=%u ROM=%u â€” profile may be wrong for this ROM\n",
                         "Counts.num_trainer_classes", profile_ntc, rom_ntc);
                 }
                 // Return -1 to signal hard mismatch to resolve_crystal_layout caller.
@@ -836,7 +844,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
             }
         } else if (verbose) {
             std::fprintf(stderr,
-                "[layout] %-26s NOT FOUND — using profile value %u\n",
+                "[layout] %-26s NOT FOUND â€” using profile value %u\n",
                 "Counts.num_trainer_classes", profile.counts.num_trainer_classes);
         }
     }
@@ -869,7 +877,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
     // --- num_map_groups from MapGroupPointers table boundary ---
     // Count consecutive valid bank-local 2-byte ptrs (each in [0x4000, 0x7FFF]).
     // The first entry that falls outside that range terminates the table.
-    // This is exact — it uses the same criterion as Probe 2 in probe_profile_counts
+    // This is exact â€” it uses the same criterion as Probe 2 in probe_profile_counts
     // but applies the result rather than just flagging a mismatch.
     // Must run before resolve_group_attr_banks() which uses num_map_groups.
     if (o.map_group_pointers != 0) {
@@ -905,9 +913,9 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
                              "MapFormat.scene_size", ss);
             }
         } else if (ss != 0 && verbose) {
-            // Already correct — no change, no increment
+            // Already correct â€” no change, no increment
         } else if (ss == 0 && verbose) {
-            std::fprintf(stderr, "[layout] %-26s NOT FOUND — using default %u\n",
+            std::fprintf(stderr, "[layout] %-26s NOT FOUND â€” using default %u\n",
                          "MapFormat.scene_size", fmt.map.map_script_header_size);
         }
     }
@@ -922,7 +930,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
                              "MapFormat.entry_stride", ms);
             }
         } else if (ms == 0 && verbose) {
-            std::fprintf(stderr, "[layout] %-26s NOT FOUND — using default %u\n",
+            std::fprintf(stderr, "[layout] %-26s NOT FOUND â€” using default %u\n",
                          "MapFormat.entry_stride", fmt.map.map_entry_size);
         }
     }
@@ -937,7 +945,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
                              "MapFormat.coord_size", cs);
             }
         } else if (cs == 0 && verbose) {
-            std::fprintf(stderr, "[layout] %-26s NOT FOUND — using default %u\n",
+            std::fprintf(stderr, "[layout] %-26s NOT FOUND â€” using default %u\n",
                          "MapFormat.coord_size", fmt.map.coord_event_size);
         }
     }
@@ -980,7 +988,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
                 "[layout] %-26s no groups resolved\n", "GroupAttrBanks");
         }
         // max_map_dimension has been removed. Map dimensions are validated by h>0 && w>0 only.
-        // No h*w bank-window bound is applied — some Crystal-family ROMs (e.g. Polished Crystal)
+        // No h*w bank-window bound is applied â€” some Crystal-family ROMs (e.g. Polished Crystal)
         // have block data that crosses bank boundaries, making that bound structurally incorrect.
     }
 
@@ -1003,7 +1011,7 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
             }
         } else if (env_max == 0 && verbose) {
             std::fprintf(stderr,
-                "[layout] %-26s NOT FOUND — using default %u\n",
+                "[layout] %-26s NOT FOUND â€” using default %u\n",
                 "MapFormat.env_domain", fmt.map.max_environment_value);
         }
     }
@@ -1027,8 +1035,86 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
             }
         } else if (enc == Enc::Unknown && verbose) {
             std::fprintf(stderr,
-                "[layout] %-26s NOT FOUND — using default RawBytes\n",
+                "[layout] %-26s NOT FOUND â€” using default RawBytes\n",
                 "MapFormat.block_encoding");
+        }
+    }
+
+    // --- OverworldSprites ---
+    // Uses profile mismatch semantics: if ROM proves a different address than
+    // a nonzero profile value, that is a structural contradiction.
+    // OverworldSprites uses a fully deterministic XREF — exactly 3 pattern hits
+    // must form the proven {base, base+4, base+5} triplet with no heuristic
+    // content component.
+    {
+        std::string diag;
+        auto r = resolve_overworld_sprites(rom, o.overworld_sprites, &diag);
+        if (r.flat != 0 && o.overworld_sprites != 0 && r.flat != o.overworld_sprites) {
+            if (verbose) {
+                std::fprintf(stderr,
+                    "[layout] %-26s MISMATCH: profile=0x%05X ROM=0x%05X — "
+                    "profile may be stale or built for a different ROM\n",
+                    "OverworldSprites", o.overworld_sprites, r.flat);
+            }
+            return -1;
+        }
+        try_resolve("OverworldSprites", o.overworld_sprites, r, &diag);
+    }
+
+    // --- SpecialsPointers ---
+    // Uses profile mismatch semantics (analogous to num_trainer_classes):
+    // if the ROM-derived address contradicts a nonzero profile address, hard-fail.
+    // If ROM cannot resolve the address, preserve any existing profile value.
+    {
+        std::string diag;
+        bool mismatch = false;
+        auto r = resolve_special_pointers(rom, o.special_pointers, &mismatch, &diag);
+        if (mismatch) {
+            // ROM-derived address contradicts profile — surface as hard failure.
+            if (verbose) {
+                std::fprintf(stderr, "[layout] %-26s MISMATCH — %s\n",
+                             "SpecialsPointers", diag.c_str());
+            }
+            return -1;
+        }
+        try_resolve("SpecialsPointers", o.special_pointers, r, &diag);
+    }
+
+    // --- PalMap consumer bank ---
+    // The PalMap dw pointer in each tileset entry is read by _LoadOverworldAttrmapPals
+    // with the bank of that function active (via homecall).  The semantic authority
+    // is BANK(_LoadOverworldAttrmapPals), NOT bank(Tilesets table).
+    // In Crystal they happen to be the same (both bank 0x13); in Gold/Silver they differ
+    // (Tilesets=bank 5, _LoadOverworldAttrmapPals=bank 2).
+    {
+        std::string diag;
+        uint8_t resolved_bank = resolve_palmap_consumer_bank(rom, &diag);
+        if (resolved_bank != 0) {
+            if (o.palmap_consumer_bank == 0) {
+                o.palmap_consumer_bank = resolved_bank;
+                ++resolved;
+                if (verbose) {
+                    std::fprintf(stderr,
+                        "[layout] %-26s bank=0x%02X (homecall call site)\n",
+                        "PalMapConsumerBank", resolved_bank);
+                }
+            } else if (o.palmap_consumer_bank != resolved_bank) {
+                // ROM-derived bank contradicts explicit profile value — hard mismatch.
+                // Silently keeping the profile value could produce wrong palette data
+                // on a ROM where the bank authority genuinely differs.
+                if (verbose) {
+                    std::fprintf(stderr,
+                        "[layout] %-26s MISMATCH: profile=0x%02X ROM=0x%02X\n",
+                        "PalMapConsumerBank",
+                        o.palmap_consumer_bank, resolved_bank);
+                }
+                return -1;
+            }
+            // else: profile == ROM-derived → already correct, no change needed
+        } else if (verbose && o.palmap_consumer_bank == 0) {
+            std::fprintf(stderr,
+                "[layout] %-26s NOT FOUND — %s\n",
+                "PalMapConsumerBank", diag.c_str());
         }
     }
 
@@ -1036,16 +1122,369 @@ int resolve_crystal_layout(const RomData& rom, ExtractionProfile& profile, bool 
 }
 
 // ============================================================================
-// Layout constant resolvers — home-bank SM83 xrefs
+// Layout constant resolvers â€” home-bank SM83 xrefs
 // ============================================================================
+
+// ============================================================================
+// resolve_overworld_sprites
+//
+// OverworldSprites is accessed by three routines in the overworld engine â€”
+// GetSprite, _DoesSpriteHaveFacings, and _GetSpritePalette â€” each loading a
+// different struct field:
+//
+//   GetSprite:              ld hl, OverworldSprites + SPRITEDATA_ADDR    (+0)
+//   _DoesSpriteHaveFacings: ld hl, OverworldSprites + SPRITEDATA_TYPE    (+4)
+//   _GetSpritePalette:      ld hl, OverworldSprites + SPRITEDATA_PALETTE (+5)
+//
+// All three routines use the same dispatch sequence:
+//   ld hl, OverworldSprites + N   ; 21 lo hi
+//   dec a                         ; 3D
+//   ld c, a                       ; 4F
+//   ld b, 0                       ; 06 00
+//   ld a, NUM_SPRITEDATA_FIELDS   ; 3E 06  (stride = 6, a compile-time constant)
+//   call AddNTimes                ; CD|DF|E7
+//
+// Pattern: 21 lo hi 3D 4F 06 00 3E 06 (CD|DF|E7)
+//   offsets:  0  1  2  3  4  5  6  7  8   9
+//
+// Because the struct field offset is encoded directly into the ptr operand,
+// the three hits produce pointer values {base, base+4, base+5}, corresponding
+// to SPRITEDATA_ADDR(0), SPRITEDATA_TYPE(4), SPRITEDATA_PALETTE(5).
+// SPRITEDATA_ADDR is always offset 0 (the first field, rsreset â†’ rw), so
+// min(ptrs) = base.
+//
+// Validation: exactly 3 hits must be found, and they must form a consistent
+// {base, base+4, base+5} triplet.  Any other count or non-triplet is rejected.
+// The stride byte must be exactly 0x06 (NUM_SPRITEDATA_FIELDS = 6 in all
+// known Crystal-family ROMs from Gold through Crystal).
+//
+// Returns the flat address of OverworldSprites (base = min ptr, resolved to
+// its caller bank), or a null ResolvedAddress on failure.
+//
+// Confirmed: Crystal v1.1 â†’ 0x05:0x4736 = flat 0x14736
+//            Gold/Silver  â†’ 0x05:0x47DE = flat 0x147DE
+// ============================================================================
+
+ResolvedAddress resolve_overworld_sprites(
+    const RomData& rom,
+    uint32_t profile_address,
+    std::string* out_diagnostic)
+{
+    // Profile-address fast-path removed: resolve_overworld_sprites is classified as
+    // deterministic.  Always run the XREF scan so resolve_crystal_layout() can
+    // detect a genuine mismatch between profile metadata and ROM evidence.
+
+    // XREF scan: collect all matches of the 10-byte dispatch pattern.
+    // All three routines are in the same engine bank as OverworldSprites.
+    // Pattern: 21 lo hi 3D 4F 06 00 3E 06 (CD|DF|E7)
+    std::vector<uint32_t> ptrs;  // collect raw pointer values from each hit
+
+    const uint32_t limit = (rom.size() >= 10u)
+                         ? static_cast<uint32_t>(rom.size()) - 10u : 0u;
+    for (uint32_t i = 0; i < limit; ++i) {
+        if (rom.read_byte(i)   != 0x21u) continue;  // ld hl, nn
+        if (rom.read_byte(i+3) != 0x3Du) continue;  // dec a
+        if (rom.read_byte(i+4) != 0x4Fu) continue;  // ld c, a
+        if (rom.read_byte(i+5) != 0x06u) continue;  // ld b, n
+        if (rom.read_byte(i+6) != 0x00u) continue;  //   n = 0
+        if (rom.read_byte(i+7) != 0x3Eu) continue;  // ld a, n
+        if (rom.read_byte(i+8) != 0x06u) continue;  //   n = NUM_SPRITEDATA_FIELDS = 6
+        const uint8_t call_op = rom.read_byte(i+9);
+        if (call_op != 0xCDu && call_op != 0xDFu && call_op != 0xE7u) continue;
+        uint8_t  lo  = rom.read_byte(i+1);
+        uint8_t  hi  = rom.read_byte(i+2);
+        uint16_t ptr = static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
+        if (!valid_banked_ptr(ptr)) continue;
+        ptrs.push_back(static_cast<uint32_t>(ptr));
+    }
+
+    // Must have exactly 3 hits.
+    if (ptrs.size() != 3u) {
+        if (out_diagnostic) {
+            if (ptrs.empty()) {
+                *out_diagnostic = "OverworldSprites: dispatch pattern not found in ROM";
+            } else {
+                *out_diagnostic = std::format(
+                    "OverworldSprites: expected 3 pattern hits, found {} â€” "
+                    "cannot form a unique triplet",
+                    ptrs.size());
+            }
+        }
+        return ptrs.empty() ? ResolvedAddress{} : ResolvedAddress{ 0, "", true };
+    }
+
+    // Sort to find min (= base = SPRITEDATA_ADDR offset 0).
+    std::sort(ptrs.begin(), ptrs.end());
+    const uint32_t p0 = ptrs[0];  // candidate base (must be OverworldSprites+0)
+    const uint32_t p1 = ptrs[1];  // must be base+4 (SPRITEDATA_TYPE)
+    const uint32_t p2 = ptrs[2];  // must be base+5 (SPRITEDATA_PALETTE)
+
+    if (p1 != p0 + 4u || p2 != p0 + 5u) {
+        if (out_diagnostic) {
+            *out_diagnostic = std::format(
+                "OverworldSprites: 3 hits found but ptrs 0x{:04X}, 0x{:04X}, 0x{:04X} "
+                "do not form the required {{base, base+4, base+5}} triplet",
+                p0, p1, p2);
+        }
+        return { 0, "", true };
+    }
+
+    // All three hits must be in the same bank (they reference the same table).
+    // The caller bank for each site is the ROM bank of the instruction, and
+    // since they all load a bank-local ptr they must be in the same ROMX bank.
+    // Derive the flat address using the bank of the first hit found.
+    // Scan again to recover the bank of the pattern that produced ptr = p0.
+    uint8_t table_bank = 0;
+    for (uint32_t i = 0; i < limit; ++i) {
+        if (rom.read_byte(i)   != 0x21u) continue;
+        if (rom.read_byte(i+3) != 0x3Du) continue;
+        if (rom.read_byte(i+4) != 0x4Fu) continue;
+        if (rom.read_byte(i+5) != 0x06u) continue;
+        if (rom.read_byte(i+6) != 0x00u) continue;
+        if (rom.read_byte(i+7) != 0x3Eu) continue;
+        if (rom.read_byte(i+8) != 0x06u) continue;
+        const uint8_t call_op = rom.read_byte(i+9);
+        if (call_op != 0xCDu && call_op != 0xDFu && call_op != 0xE7u) continue;
+        uint8_t  lo  = rom.read_byte(i+1);
+        uint8_t  hi  = rom.read_byte(i+2);
+        uint16_t ptr = static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
+        if (!valid_banked_ptr(ptr)) continue;
+        if (static_cast<uint32_t>(ptr) == p0) {
+            table_bank = bank_of(i);
+            break;
+        }
+    }
+    if (table_bank == 0) {
+        if (out_diagnostic) {
+            *out_diagnostic = "OverworldSprites: could not recover bank for base pointer";
+        }
+        return {};
+    }
+
+    const uint32_t tbl_flat = flat_of(table_bank, static_cast<uint16_t>(p0));
+    if (tbl_flat >= rom.size()) {
+        if (out_diagnostic) {
+            *out_diagnostic = std::format(
+                "OverworldSprites: resolved flat 0x{:05X} is outside ROM", tbl_flat);
+        }
+        return {};
+    }
+
+    return { tbl_flat,
+             std::format("XREF triplet {{0x{:04X}, 0x{:04X}, 0x{:04X}}} bank=0x{:02X} â†’ 0x{:05X}",
+                         p0, p1, p2, table_bank, tbl_flat) };
+}
+
+// ============================================================================
+// resolve_special_pointers
+//
+// SpecialsPointers is loaded by the unique Special:: dispatcher in bank 3.
+// The dispatcher performs a 3-byte-stride table walk into SpecialsPointers
+// via the `de` register (holding the pre-computed index × 3), then executes
+// the found routine via FarCall.  The full structural pattern is:
+//
+//   ld hl, SpecialsPointers   ; 21 lo hi
+//   add hl, de                ; 19
+//   add hl, de                ; 19
+//   add hl, de                ; 19
+//   <load bank/ptr from [hl]> ; varies between Crystal (46 23 2A) and
+//                             ;   Polished (2A 47 2A) — skip 2 bytes
+//   ld a, [hl+]               ; 2A  (at offset +8)
+//   ld h, [hl]                ; 66  (at offset +9)
+//   ld l, a                   ; 6F  (at offset +10)
+//   ld a, b                   ; 78  (at offset +11)
+//   FarCall                   ; CF/C3/... (not checked — above is enough)
+//
+// Bytes fixed across all known Crystal-family variants:
+//   [0]=21, [3]=19, [4]=19, [5]=19, [8]=2A, [9]=66, [10]=6F, [11]=78
+//
+// This 12-byte structural pattern is specific enough to identify exactly ONE
+// site in Crystal, Gold, Silver, and Polished Crystal (each independently
+// verified).  No additional validation is performed after uniqueness is proven
+// — the single match IS the Special:: dispatcher.
+//
+// The table flat address is derived from the dispatcher site's bank (the bank
+// containing the instruction) and the bank-local pointer at bytes [1..2].
+//
+// Profile address is NOT used as a fallback when ROM resolves successfully.
+// If the profile supplies a nonzero address that contradicts the ROM-derived
+// address, the resolver sets out_mismatch = true and returns {} so the caller
+// can hard-fail rather than silently overwrite a correct ROM result with a
+// stale profile value.
+//
+// Confirmed:
+//   Crystal v1.1 → 03:4029 = flat 0x0C029
+//   Gold         → 03:4239 = flat 0x0C239
+//   Silver       → 03:4239 = flat 0x0C239
+//   Polished 3.2.3 → 03:402A = flat 0x0C02A
+// ============================================================================
+
+ResolvedAddress resolve_special_pointers(
+    const RomData& rom,
+    uint32_t profile_address,
+    bool* out_mismatch,
+    std::string* out_diagnostic)
+{
+    if (out_mismatch) *out_mismatch = false;
+
+    // Scan for the 12-byte dispatcher pattern.
+    // Fixed bytes (0-indexed within the 12-byte window):
+    //   [0]=0x21 (ld hl,nn)
+    //   [3]=0x19, [4]=0x19, [5]=0x19 (add hl,de × 3)
+    //   [8]=0x2A  (ld a,[hl+]   — first of the ptr-load sequence)
+    //   [9]=0x66  (ld h,[hl])
+    //   [10]=0x6F (ld l,a)
+    //   [11]=0x78 (ld a,b)
+    // Bytes [6..7] (bank/ptr load preamble) vary between vanilla and Polished
+    // and are not checked.
+    struct Hit { uint32_t flat; uint8_t bank; uint16_t ptr; };
+    std::vector<Hit> hits;
+
+    const uint32_t limit = (rom.size() >= 12u)
+                         ? static_cast<uint32_t>(rom.size()) - 12u : 0u;
+    for (uint32_t i = 0; i < limit; ++i) {
+        if (rom.read_byte(i)    != 0x21u) continue;
+        if (rom.read_byte(i+3)  != 0x19u) continue;
+        if (rom.read_byte(i+4)  != 0x19u) continue;
+        if (rom.read_byte(i+5)  != 0x19u) continue;
+        if (rom.read_byte(i+8)  != 0x2Au) continue;
+        if (rom.read_byte(i+9)  != 0x66u) continue;
+        if (rom.read_byte(i+10) != 0x6Fu) continue;
+        if (rom.read_byte(i+11) != 0x78u) continue;
+        uint8_t  lo  = rom.read_byte(i+1);
+        uint8_t  hi  = rom.read_byte(i+2);
+        uint16_t ptr = static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
+        if (!valid_banked_ptr(ptr)) continue;
+        uint8_t b = bank_of(i);
+        if (b == 0) continue;  // dispatcher must be in a switchable bank
+        hits.push_back({i, b, ptr});
+    }
+
+    if (hits.size() != 1u) {
+        if (out_diagnostic) {
+            if (hits.empty()) {
+                *out_diagnostic =
+                    "SpecialsPointers: Special:: dispatcher pattern not found in ROM";
+            } else {
+                *out_diagnostic = std::format(
+                    "SpecialsPointers: expected 1 dispatcher hit, found {} — ambiguous",
+                    hits.size());
+            }
+        }
+        return hits.empty() ? ResolvedAddress{} : ResolvedAddress{0, "", true};
+    }
+
+    const Hit& h = hits[0];
+    const uint32_t tbl_flat = flat_of(h.bank, h.ptr);
+    if (tbl_flat >= rom.size()) {
+        if (out_diagnostic) {
+            *out_diagnostic = std::format(
+                "SpecialsPointers: resolved flat 0x{:05X} is outside ROM", tbl_flat);
+        }
+        return {};
+    }
+
+    // Profile mismatch check: if an explicit nonzero profile address disagrees
+    // with the ROM-derived address, signal a hard mismatch.
+    if (profile_address != 0 && profile_address != tbl_flat) {
+        if (out_mismatch) *out_mismatch = true;
+        if (out_diagnostic) {
+            *out_diagnostic = std::format(
+                "SpecialsPointers: ROM-derived 0x{:05X} contradicts profile 0x{:05X} — "
+                "profile may be stale or built for a different ROM",
+                tbl_flat, profile_address);
+        }
+        return {};
+    }
+
+    return { tbl_flat,
+             std::format("Special:: dispatcher bank=0x{:02X} ptr=0x{:04X} â†' 0x{:05X}",
+                         h.bank, static_cast<unsigned>(h.ptr), tbl_flat) };
+}
+
+uint8_t resolve_palmap_consumer_bank(const RomData& rom, std::string* out_diagnostic) {
+    // Pattern in home bank (addresses 0x0000–0x3FFF):
+    //   F5 3E NN D7 CD 00 40 F1 D7 C9
+    //   [0]=F5 (push af)
+    //   [1]=3E (ld a, n)
+    //   [2]=NN (bank literal = palmap consumer bank)
+    //   [3]=D7 (rst $10 = Bankswitch)
+    //   [4]=CD, [5]=0x00, [6]=0x40 (call 0x4000 — target always at ROMX base)
+    //   [7]=F1 (pop af)
+    //   [8]=D7 (rst $10 = Bankswitch, restore)
+    //   [9]=C9 (ret)
+    //
+    // The pattern is restricted to the home bank (flat addresses < 0x4000).
+    // BANK must be in [1, 127] to be a valid ROMX bank.
+    //
+    // Confirmed: Crystal v1.1 hits at flat=0x0DB3, bank=0x13.
+    //            Gold at flat=0x0D5A, bank=0x02.
+    //            Silver at flat=0x0D5A, bank=0x02.
+    // Polished 3.2.3 produces 0 hits (function not at 0x4000 base).
+
+    constexpr uint32_t HOME_BANK_LIMIT = 0x4000u;
+    constexpr uint32_t PATTERN_LEN    = 10u;
+
+    std::vector<uint8_t> candidates;
+
+    const uint32_t limit = (rom.size() >= PATTERN_LEN && HOME_BANK_LIMIT >= PATTERN_LEN)
+                         ? HOME_BANK_LIMIT - PATTERN_LEN : 0u;
+    for (uint32_t i = 0; i < limit; ++i) {
+        if (rom.read_byte(i+0) != 0xF5u) continue;  // push af
+        if (rom.read_byte(i+1) != 0x3Eu) continue;  // ld a, n
+        // [2] = NN (the bank) — validated below
+        if (rom.read_byte(i+3) != 0xD7u) continue;  // rst $10 (Bankswitch)
+        if (rom.read_byte(i+4) != 0xCDu) continue;  // call nn
+        if (rom.read_byte(i+5) != 0x00u) continue;  // call target lo = 0x00
+        if (rom.read_byte(i+6) != 0x40u) continue;  // call target hi = 0x40
+        if (rom.read_byte(i+7) != 0xF1u) continue;  // pop af
+        if (rom.read_byte(i+8) != 0xD7u) continue;  // rst $10 (Bankswitch restore)
+        if (rom.read_byte(i+9) != 0xC9u) continue;  // ret
+        uint8_t nn = rom.read_byte(i+2);
+        if (nn < 1u || nn >= 128u) continue;         // must be valid ROMX bank
+        candidates.push_back(nn);
+    }
+
+    if (candidates.empty()) {
+        if (out_diagnostic) {
+            *out_diagnostic = "PalMapConsumerBank: homecall pattern not found in home bank";
+        }
+        return 0u;
+    }
+    if (candidates.size() > 1u) {
+        // Require exactly one structural candidate.
+        // Multiple matches — even with the same bank literal — indicate either a ROM
+        // with an unusual structure that we cannot distinguish from a false positive,
+        // or a ROM that calls multiple distinct functions at 0x4000 in the same bank
+        // (which would make the bank non-unique).
+        // Either way: no single authoritative answer → unresolved.
+        if (out_diagnostic) {
+            *out_diagnostic = std::format(
+                "PalMapConsumerBank: {} homecall candidates found — exactly 1 required; "
+                "ambiguous (banks: {})",
+                candidates.size(),
+                [&]() {
+                    std::string s;
+                    for (uint8_t v : candidates) {
+                        if (!s.empty()) s += ", ";
+                        s += std::format("0x{:02X}", v);
+                    }
+                    return s;
+                }());
+        }
+        return 0u;
+    }
+
+    return candidates[0];
+}
 
 uint16_t resolve_num_trainer_classes(const RomData& rom, std::string* out_diagnostic) {
     // Pattern: FA lo hi A7 C8 FE NN D0
     //   offsets: 0  1  2  3  4  5  6  7
     // Require FA (ld a,[nn]) at i-3 and A7 C8 FE NN D0 at i..i+4.
-    // NN plausibility: [0x30, 0x80] — generous for any reasonable ROM hack.
+    // NN plausibility: [0x30, 0x80] â€” generous for any reasonable ROM hack.
     //
-    // Proven: Crystal=0x44→67, Gold=0x43→66, Silver=0x43→66.
+    // Proven: Crystal=0x44â†’67, Gold=0x43â†’66, Silver=0x43â†’66.
     // Full pattern: ld a,[wTrainerClass] / and a / ret z / cp NN / ret nc
     // in GetTrainerPic (bounds check for trainer class index).
     constexpr uint8_t NN_MIN = 0x30u;
@@ -1071,14 +1510,14 @@ uint16_t resolve_num_trainer_classes(const RomData& rom, std::string* out_diagno
         }
         return 0;
     }
-    // Require exactly one structural match.  Multiple hits — even with the same NN —
+    // Require exactly one structural match.  Multiple hits â€” even with the same NN â€”
     // are ambiguous: the pattern exists at more than one location, which means it could
     // be a generic bounds-check function called from multiple places rather than the
     // unique GetTrainerPic instance.  A single hit is the only reliable authority.
     if (candidates.size() != 1u) {
         if (out_diagnostic) {
             *out_diagnostic = std::format(
-                "num_trainer_classes: {} candidates — exactly one match required (ambiguous)",
+                "num_trainer_classes: {} candidates â€” exactly one match required (ambiguous)",
                 candidates.size());
         }
         return 0;
@@ -1094,13 +1533,13 @@ uint8_t resolve_scene_script_size(const RomData& rom) {
     // Both follow the same template: lead / ld bc,SIZE / call|rst AddNTimes.
     //
     // Lead bytes differ between versions:
-    //   Vanilla Crystal: C8 (ret z) 01 NN 00 CD  — ret-z guarded ld bc
-    //   Polished Crystal: 2A (ld a,[hli]) 01 NN 00 DF  — inline ld a,[hli]
+    //   Vanilla Crystal: C8 (ret z) 01 NN 00 CD  â€” ret-z guarded ld bc
+    //   Polished Crystal: 2A (ld a,[hli]) 01 NN 00 DF  â€” inline ld a,[hli]
     //
     // Vanilla  (scene=4): C8 01 04 00 CD  at home bank ~0x023BB,
-    //          callback=3 at ~0x023D2 — 23 bytes after scene pattern.
+    //          callback=3 at ~0x023D2 â€” 23 bytes after scene pattern.
     // Polished (scene=2): 2A 01 02 00 DF  at home bank ~0x01E9C,
-    //          callback=3 at ~0x01EA4 — 8 bytes after scene pattern (2A 01 03 00 DF).
+    //          callback=3 at ~0x01EA4 â€” 8 bytes after scene pattern (2A 01 03 00 DF).
     //
     // Secondary validation: 01 03 00 (ld bc,3 for CALLBACK_SIZE) must appear within
     // 28 bytes after the scene pattern.  Window is 28 to cover vanilla's 23-byte gap.
@@ -1131,7 +1570,7 @@ uint8_t resolve_scene_script_size(const RomData& rom) {
 uint8_t resolve_map_entry_stride(const RomData& rom) {
     // MAP_LENGTH xref: GetAnyMapPointer in home bank.
     // Source: "dec c / ld b, 0 / ld a, MAP_LENGTH / rst|call AddNTimes / ret"
-    // Pattern: 0D 06 00 3E NN [DF|E7|D7|CD]   where NN = MAP_LENGTH ∈ [5,16]
+    // Pattern: 0D 06 00 3E NN [DF|E7|D7|CD]   where NN = MAP_LENGTH âˆˆ [5,16]
     //   Vanilla: NN=9, Polished: NN=7
     const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
                                              static_cast<uint32_t>(0x4000u));
@@ -1153,12 +1592,12 @@ uint8_t resolve_coord_event_size(const RomData& rom) {
     // COORD_EVENT_SIZE xref: map-events counting loop in home bank.
     //
     // The map-event-parsing code iterates each event type with:
-    //   ret z                       ; C8  — return if count is zero
+    //   ret z                       ; C8  â€” return if count is zero
     //   ld bc, EVENT_SIZE           ; 01 NN 00
     //   call|rst AddNTimes          ; CD|DF|E7|D7
     //
     // Vanilla Crystal (8 bytes per coord event):
-    //   → NN=8; warp=5 and bg=5 produce identical patterns with NN=5.
+    //   â†’ NN=8; warp=5 and bg=5 produce identical patterns with NN=5.
     //   To isolate the coord pattern, search first for NN >= 6 (larger than warp/bg).
     //
     // Polished Crystal (5 bytes per coord event):
@@ -1167,15 +1606,15 @@ uint8_t resolve_coord_event_size(const RomData& rom) {
     //   is a different loop that uses a similar ld bc,5 sequence).
     //
     // Two-pass strategy guarantees exactly one correct hit per ROM:
-    //   Pass 1: C8 01 NN 00 (call|rst)  where NN ∈ [6,12]  — vanilla coord (NN=8)
-    //   Pass 2: C8 01 NN 00 (call|rst)  where NN ∈ [4,6],
-    //           NOT preceded by [2A 66 6F 79]              — Polished coord (NN=5)
+    //   Pass 1: C8 01 NN 00 (call|rst)  where NN âˆˆ [6,12]  â€” vanilla coord (NN=8)
+    //   Pass 2: C8 01 NN 00 (call|rst)  where NN âˆˆ [4,6],
+    //           NOT preceded by [2A 66 6F 79]              â€” Polished coord (NN=5)
     const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
                                              static_cast<uint32_t>(0x4000u));
 
     // Pass 1: require NN >= 6 (unambiguous in vanilla; absent in Polished)
     for (uint32_t i = 0; i + 5u < home_bank_end; ++i) {
-        if (rom.read_byte(i) != 0xC8) continue;         // ret z — strict lead
+        if (rom.read_byte(i) != 0xC8) continue;         // ret z â€” strict lead
         if (rom.read_byte(i+1) != 0x01) continue;       // ld bc, nn
         uint8_t nn = rom.read_byte(i+2);
         if (nn < 6u || nn > 12u) continue;              // coord > warp/bg size
@@ -1185,7 +1624,7 @@ uint8_t resolve_coord_event_size(const RomData& rom) {
         return nn;
     }
 
-    // Pass 2: Polished fallback — C8 lead with NN in [4,6], excluding the
+    // Pass 2: Polished fallback â€” C8 lead with NN in [4,6], excluding the
     // scene/callback-loop false positive identified by the "2A 66 6F 79" prefix.
     for (uint32_t i = 0; i + 5u < home_bank_end; ++i) {
         if (rom.read_byte(i) != 0xC8) continue;
@@ -1195,7 +1634,7 @@ uint8_t resolve_coord_event_size(const RomData& rom) {
         if (rom.read_byte(i+3) != 0x00) continue;
         uint8_t next = rom.read_byte(i+4);
         if (next != 0xCD && next != 0xDF && next != 0xE7 && next != 0xD7) continue;
-        // Exclude "2A 66 6F 79" (ld a,[hli] / ld h,a / ld l,a / ld a,c) prefix —
+        // Exclude "2A 66 6F 79" (ld a,[hli] / ld h,a / ld l,a / ld a,c) prefix â€”
         // this marks the scene-skip loop, not the coord-event counting loop.
         if (i >= 4u &&
             rom.read_byte(i-4) == 0x2A && rom.read_byte(i-3) == 0x66 &&
@@ -1221,13 +1660,13 @@ uint8_t resolve_environment_domain(const RomData& rom) {
     //   call SomePrepRoutine ; CD lo hi   (same call target across all four)
     //   ret nz               ; C0
     //   ld a, [wCurEnvDir_N] ; FA lo hi   (one of four env-direction WRAM vars)
-    //   and ENV_MASK         ; E6 NN      ← NN is the authoritative domain maximum
+    //   and ENV_MASK         ; E6 NN      â† NN is the authoritative domain maximum
     //   cp ENV_CONST_N       ; FE zz
     //   ...
     //
-    // ENV_MASK (NN) is the operand of AND — values above NN wrap modularly at runtime,
+    // ENV_MASK (NN) is the operand of AND â€” values above NN wrap modularly at runtime,
     // so they are outside the valid domain.  For all known Crystal-family ROMs NN = 0x07,
-    // giving the effective domain [0, 7] (map entry env bytes 1–7 are the valid range).
+    // giving the effective domain [0, 7] (map entry env bytes 1â€“7 are the valid range).
     //
     // Pattern: CD ?? ?? C0 FA ?? ?? E6 NN FE
     //   - home bank only (always-mapped bank)
@@ -1255,7 +1694,7 @@ uint8_t resolve_environment_domain(const RomData& rom) {
         } else if (mask == found_mask) {
             ++hit_count;
         } else {
-            // Different mask values — ambiguous, cannot prove domain.
+            // Different mask values â€” ambiguous, cannot prove domain.
             return 0;
         }
     }
@@ -1270,26 +1709,26 @@ uint8_t resolve_environment_domain(const RomData& rom) {
 // ============================================================================
 
 MapFormatRules::BlockDataEncoding resolve_block_data_encoding(const RomData& rom) {
-    // Scan home bank (always-mapped 0x0000–0x3FFF) for one of two mutually
+    // Scan home bank (always-mapped 0x0000â€“0x3FFF) for one of two mutually
     // exclusive patterns that identify the ChangeMap block-data loader mode.
     //
     // Both patterns require three WRAM reads at consecutive addresses (hi byte
-    // the same, lo bytes sequential: W, W+1, W+2) with hi ∈ [0xC0, 0xDF].
+    // the same, lo bytes sequential: W, W+1, W+2) with hi âˆˆ [0xC0, 0xDF].
     //
     // Pattern RawBytes:
     //   FA W D7  FA W+1 5F  FA W+2 57
     //   ld a,[blockBank] / rst Bankswitch / ld a,[ptrLo]/ld e,a / ld a,[ptrHi]/ld d,a
-    //   → bank switch immediately; raw byte copy loop follows.
+    //   â†’ bank switch immediately; raw byte copy loop follows.
     //
     // Pattern LZCompressed:
     //   FA W 47  21 W+1  2A 66 6F
     //   ld a,[blockBank] / ld b,a / ld hl,[blockPtr] / read 2-byte ptr into HL
-    //   → bank stored in B (FarDecompressInB convention); decompressor call follows.
+    //   â†’ bank stored in B (FarDecompressInB convention); decompressor call follows.
     //
     // Rules:
-    //   - Exactly one pattern, exactly one match → authoritative classification.
-    //   - Both patterns match or multiple matches of same → Unknown (ambiguous).
-    //   - Neither matches → Unknown (not found).
+    //   - Exactly one pattern, exactly one match â†’ authoritative classification.
+    //   - Both patterns match or multiple matches of same â†’ Unknown (ambiguous).
+    //   - Neither matches â†’ Unknown (not found).
 
     const uint32_t home_bank_end = std::min(static_cast<uint32_t>(rom.size()),
                                              static_cast<uint32_t>(0x4000u));
@@ -1333,13 +1772,13 @@ MapFormatRules::BlockDataEncoding resolve_block_data_encoding(const RomData& rom
         }
     }
 
-    // Exactly one pattern, one match → authoritative.
+    // Exactly one pattern, one match â†’ authoritative.
     if (raw_hits == 1u && lzp_hits == 0u)
         return MapFormatRules::BlockDataEncoding::RawBytes;
     if (lzp_hits == 1u && raw_hits == 0u)
         return MapFormatRules::BlockDataEncoding::LZCompressed;
 
-    // Both matched, or neither → Unknown.
+    // Both matched, or neither â†’ Unknown.
     return MapFormatRules::BlockDataEncoding::Unknown;
 }
 
@@ -1358,7 +1797,7 @@ uint8_t resolve_map_attr_bank(const RomData& rom) {
     //   ld b, a               ; 47
     //   ld a, [wCurMapGroup]  ; FA lo hi
     //   ld c, a               ; 4F
-    //   ld a, ATTR_BANK       ; 3E NN   ← hardcoded bank literal
+    //   ld a, ATTR_BANK       ; 3E NN   â† hardcoded bank literal
     //   rst BankedCall        ; CF
     //   ret                   ; C9
     //
@@ -1389,9 +1828,9 @@ uint8_t resolve_map_attr_bank(const RomData& rom) {
             found_bank = bank;
             hit_count  = 1;
         } else if (bank == found_bank) {
-            ++hit_count;  // same bank repeated — still unique
+            ++hit_count;  // same bank repeated â€” still unique
         } else {
-            return 0xFF;  // different banks — ambiguous
+            return 0xFF;  // different banks â€” ambiguous
         }
     }
 
@@ -1450,7 +1889,7 @@ int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, boo
             uint32_t nflat = group_data_flat(static_cast<uint8_t>(grp + 1u));
             if (nflat == 0 || nflat <= gflat) continue;
             uint32_t diff = nflat - gflat;
-            if (diff % entry_stride != 0) continue;  // not exact — skip for max-ts derivation
+            if (diff % entry_stride != 0) continue;  // not exact â€” skip for max-ts derivation
             uint32_t ec = diff / entry_stride;
             for (uint32_t i = 0; i < ec; ++i) {
                 uint32_t ef = gflat + i * entry_stride;
@@ -1464,7 +1903,7 @@ int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, boo
     // no observed value could be derived.
     if (observed_max_ts == 0) observed_max_ts = static_cast<uint8_t>(
         std::min<uint32_t>(c.num_tilesets, 255u));
-    // Add a small headroom factor (×1.5) to tolerate additional tilesets in
+    // Add a small headroom factor (Ã—1.5) to tolerate additional tilesets in
     // extended groups without false negatives.
     {
         uint8_t ts_ceil = static_cast<uint8_t>(
@@ -1516,7 +1955,7 @@ int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, boo
         uint32_t flat = b * 0x4000u + (attr_ptr - 0x4000u);
         if (flat + fmt.header_size > rom_size) return false;
 
-        // 1. Height / width — zero dimensions are always invalid.
+        // 1. Height / width â€” zero dimensions are always invalid.
         uint8_t h  = rom.read_byte(flat + fmt.height_offset);
         uint8_t w  = rom.read_byte(flat + fmt.width_offset);
         if (h == 0 || w == 0) return false;
@@ -1527,7 +1966,7 @@ int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, boo
         uint16_t bp = static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset))
                     | (static_cast<uint16_t>(rom.read_byte(flat + fmt.blockdata_ptr_offset + 1u)) << 8);
         if (bb > 0 && (bp < 0x4000u || bp >= 0x8000u)) return false;
-        // Note: no h*w <= 0x8000-bp check — Polished Crystal has maps whose block data
+        // Note: no h*w <= 0x8000-bp check â€” Polished Crystal has maps whose block data
         // legitimately crosses bank boundaries (8 maps in 3.2.3).
 
         // 3. Script bank / ptr
@@ -1595,7 +2034,7 @@ int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, boo
                     tied       = false;
                 } else {
                     // Two banks both score perfect for all entries.
-                    // Cannot prove uniqueness — will be treated as ambiguous below.
+                    // Cannot prove uniqueness â€” will be treated as ambiguous below.
                     tied = true;
                 }
             }
@@ -1607,7 +2046,7 @@ int resolve_group_attr_banks(const RomData& rom, ExtractionProfile& profile, boo
             ++resolved;
             if (verbose) {
                 std::fprintf(stderr,
-                    "[layout] %-26s group %2u → bank 0x%02X (%u entries proven)\n",
+                    "[layout] %-26s group %2u â†’ bank 0x%02X (%u entries proven)\n",
                     "GroupAttrBanks", grp, best_bank, ec);
             }
         } else {

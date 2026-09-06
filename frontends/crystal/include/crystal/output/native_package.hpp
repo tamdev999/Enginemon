@@ -129,19 +129,52 @@ public:
     // Duplicate MoveId → throws.
     // Serialised as a flat array keyed by MoveId; runtime populates
     // Registries::moves from this chunk via PackageReader::load_move_registry().
+    //
+    // Wire format version: enginemon::MVDT_SCHEMA_VERSION (u8, written as first byte of chunk).
+    // Readers that see a different version must reject the package.
     struct MoveDataEntry {
         enginemon::MoveId id;
         uint8_t type_id;
         uint8_t power;
         uint8_t accuracy;
         uint8_t pp;
-        uint8_t effect_id;
+        uint8_t effect_id;      // SemEffect:: value for AI classification (serialized)
         uint8_t effect_chance;
         // Physical/Special/Status category — derived by the Crystal frontend from
         // the move's type (Gen 2 type-based split) or from a per-move ROM field
         // if the source game implements a custom Physical/Special split.
-        // Stored in the previously-reserved byte (wire format compatibility preserved).
         uint8_t category;  // 0=Physical, 1=Special, 2=Status (matches MoveCategory enum)
+        // Semantic effect description — stored as the same 43-byte wire layout used for
+        // MVDT chunk serialization.  Defined as a plain byte array to avoid pulling
+        // semantic_effect.hpp into every TU that includes native_package.hpp
+        // (which would push corpus_discovery.cpp and other large TUs over MSVC's C1060 limit).
+        //
+        // Layout matches SemanticEffectDescription serialization in native_package.cpp:
+        //  [0]  has_standard_damage    [1]  has_recoil           [2]  has_drain
+        //  [3]  drain_requires_sleep   [4]  user_faints          [5]  is_ohko
+        //  [6]  cannot_ko              [7]  sets_recharge        [8]  constant_damage_source
+        //  [9]  set_power_source       [10] conditional_double   [11] secondary_effect
+        //  [12] primary_status         [13] stat_change          [14] heal_source
+        //  [15] set_screen             [16] set_weather          [17] sets_spikes
+        //  [18] is_multi_hit           [19] is_charge            [20] is_future_sight
+        //  [21] is_rampage             [22] is_escalating_power  [23] is_trapping
+        //  [24] is_counter             [25] is_mirror_coat       [26] is_bide
+        //  [27] is_pursuit             [28] is_copy_move         [29] clears_hazards
+        //  [30] is_sleep_move          [31] needs_kingsrock      [32] needs_substitute
+        //  [33] needs_rage             [34] ai_classification    [35] is_supported
+        //  [36..42] reserved (0x00)
+        //
+        // Use set_effect_desc(SemanticEffectDescription) / get_effect_desc() defined in
+        // native_package.cpp to read/write this field with the full typed struct.
+        // Files that only build MoveDataEntry without reading effect_desc do not need
+        // to include semantic_effect.hpp.
+        static constexpr size_t EFFECT_DESC_BYTES = 43;
+        uint8_t effect_desc_raw[EFFECT_DESC_BYTES] = {};
+
+        // Compiler-side only — NOT serialized.
+        // The raw Crystal effect byte from the ROM move table, used by
+        // semanticize_move_entries() to index the EffectScriptCorpus.
+        uint8_t raw_crystal_effect = 0;
     };
     void add_move_data(const std::vector<MoveDataEntry>& entries);
 
@@ -149,6 +182,9 @@ public:
     // Serialises all ROM-derived battle tables extracted by BattleRulesExtractor.
     // Called once. Called more than once → throws.
     // rules.is_valid() must be true; invalid rules → throws.
+    //
+    // Wire format version: enginemon::BRLS_SCHEMA_VERSION (u8, written as first byte of chunk).
+    // Readers that see a different version must reject the package.
     void add_battle_rules(const enginemon::BattleRules& rules);
     
     // Set metadata

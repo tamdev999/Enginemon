@@ -3,6 +3,7 @@
 
 #include "crystal/compile/full_compiler.hpp"
 #include "crystal/compile/corpus_discovery.hpp"
+#include "crystal/compile/move_semanticizer.hpp"
 #include "crystal/rom/crystal_layout_resolver.hpp"
 #include "crystal/rom/symbol_map.hpp"
 #include "crystal/script/typed_decoder.hpp"
@@ -161,10 +162,25 @@ bool FullGameCompiler::compile(const std::filesystem::path& output_path,
     //=========================================================================
     // LAYOUT RESOLUTION
     // Runs before Phase 1.  Fills zero addresses in profile_ from SM83 xrefs.
+    // Returns: > 0 = N fields newly resolved,
+    //            0 = nothing new (all already set),
+    //           < 0 = proven profile/ROM contradiction → hard abort.
     //=========================================================================
     {
         ExtractionProfile mutable_profile = profile_;
         int n_resolved = crystal::resolve_crystal_layout(rom_, mutable_profile, /*verbose=*/true);
+        if (n_resolved < 0) {
+            // The resolver found structural evidence that the loaded profile
+            // contradicts this ROM (e.g. a hardcoded field disagrees with the
+            // ROM-derived value).  Continue past this point would extract data
+            // using a provably wrong address.  Abort now with a clear diagnostic.
+            std::cerr << "FATAL: Layout resolver detected a profile/ROM mismatch "
+                         "(see [layout] MISMATCH lines above).\n"
+                         "       The loaded profile was built for a different ROM or "
+                         "contains a stale address.\n"
+                         "       Compilation aborted.\n";
+            return false;
+        }
         if (n_resolved > 0) {
             auto& mp = const_cast<ExtractionProfile&>(profile_);
             mp.offsets = mutable_profile.offsets;
@@ -264,9 +280,18 @@ bool FullGameCompiler::compile(const std::filesystem::path& output_path,
     // Finalize registries (elevator, etc.) after all scripts processed
     finalize_registries();
     
-    // Build production game data from actual discovered content
-    build_production_game_data();
-    
+    // Build production game data from actual discovered content.
+    // build_production_game_data() throws std::runtime_error on extraction
+    // failure (e.g. species extraction bounds failure).  Convert to the
+    // established compile() bool contract so callers never receive an
+    // unhandled exception from what they expect to be a bool-returning call.
+    try {
+        build_production_game_data();
+    } catch (const std::exception& e) {
+        std::cerr << "FATAL: build_production_game_data failed: " << e.what() << "\n";
+        return false;
+    }
+
     // Link all scripts through SemanticLinker
     if (!link_scripts(address_to_map)) {
         std::cerr << "FATAL: Script linking failed\n";
@@ -1022,7 +1047,13 @@ void FullGameCompiler::build_production_game_data() {
     // definitions exist in species_defs. A species ID not in this map is
     // InvalidDomain at Stage 6.
     {
-        auto species_result = extract_all_species(rom_, profile_);
+        // Test seam: inject a species-extraction failure by supplying a profile
+        // copy with num_pokemon=0, which extract_all_species() rejects immediately.
+        ExtractionProfile species_profile = profile_;
+        if (test_fail_species_extraction_) {
+            species_profile.counts.num_pokemon = 0;
+        }
+        auto species_result = extract_all_species(rom_, species_profile);
         if (!species_result.success) {
             // Extraction failure is fatal — the species domain cannot be
             // established without valid BaseData records.
@@ -1614,6 +1645,7 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
             // Unknown effects log a diagnostic but still compile as SemEffect::Unknown.
             uint8_t raw_effect = rec[fmt.effect_offset];
             e.effect_id = crystal::to_semantic_effect(raw_effect);
+            e.raw_crystal_effect = raw_effect;  // preserved for semanticize_move_entries()
             if (e.effect_id == enginemon::SemEffect::Unknown && raw_effect != 0) {
                 // raw_effect 0 = NORMAL_HIT — legitimately maps to Unknown (no AI special case)
                 // Any other unmapped byte is a Polished/hack-specific effect the AI won't handle.
@@ -1641,7 +1673,20 @@ bool FullGameCompiler::link_results(PackageWriter& writer) {
                     crystal::crystal_move_category_from_type(e.type_id, e.power));
             }
 
+            // Semanticize the effect script for this move.
+            // Handled in bulk by semanticize_move_entries() after the loop.
+            // (Corpus decode is deferred to avoid C1060 in this large TU.)
+
             move_entries.push_back(e);
+        }
+
+        // Semanticize all move entries: decode effect scripts and populate effect_desc.
+        // Done in a separate TU (move_semanticizer.cpp) to avoid MSVC C1060 heap exhaustion
+        // from the heavy effect_script_decoder + effect_semanticizer headers in this TU.
+        // Fail-closed: if semanticization fails, the entire stage fails.
+        if (!semanticize_move_entries(rom_, profile_, move_entries)) {
+            std::cerr << "FATAL: Stage 9 — move semanticization failed\n";
+            return false;
         }
 
         writer.add_move_data(move_entries);

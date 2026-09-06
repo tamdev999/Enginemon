@@ -18,6 +18,9 @@ add_library(enginemon_crystal STATIC
     extract/species.cpp
     extract/battle_rules.cpp
     extract/sm83_lifter.cpp
+    extract/effect_script_decoder.cpp
+    # Battle semantics
+    battle/effect_semanticizer.cpp
     
     # Output/packaging
     output/native_package.cpp
@@ -25,6 +28,7 @@ add_library(enginemon_crystal STATIC
     # Compiler (ROM → EMON package)
     compile/full_compiler.cpp
     compile/corpus_discovery.cpp
+    compile/move_semanticizer.cpp
     
     # Script compilation (always enabled - does not require engine)
     script/decoder.cpp
@@ -69,9 +73,10 @@ endif()
 # MSVC /Ob0 on proven pathological TUs.
 # Measured peak: crystal_command.cpp 4.8 GB at /Ob2, 1.02 GB at /Ob0.
 # clang-cl does not need this — its /O2 peaks at 2.8 GB on the same TU.
+# /bigobj needed because the TU exceeds the COFF 65536-section limit.
 if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     set_source_files_properties(
         script/crystal_command.cpp
-        PROPERTIES COMPILE_OPTIONS "/Ob0"
+        PROPERTIES COMPILE_OPTIONS "/Ob0;/bigobj"
     )
 endif()

@@ -5,6 +5,7 @@
 // No frontend types (ExtractedMap, etc.) are used - this is the clean boundary.
 
 #include "engine/package/package_reader.hpp"
+#include "engine/battle/semantic_effect.hpp"
 #include <fstream>
 #include <sstream>
 #include <cstring>
@@ -878,22 +879,43 @@ PackageReader::load_move_registry() const {
             break;
         }
     }
-    if (!chunk || chunk->size < 4) return std::nullopt;
+    if (!chunk || chunk->size < 5) return std::nullopt;  // need at least version + count
 
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
     in.seekg(chunk->offset);
 
-    // Wire format: u32 count, then per-entry (9 bytes each):
-    //   u16 move_id, u8 type_id, power, accuracy, pp, effect_id, effect_chance, reserved
+    // Schema version byte — first byte of chunk.
+    // Reject any version that is not MVDT_SCHEMA_VERSION.
+    // Old packages (v1, no version byte) have a u32 count in the first 4 bytes.
+    // Their first byte would be a count low byte (0..N), never equal to MVDT_SCHEMA_VERSION=2
+    // unless the count happened to be exactly 2 (exceedingly unlikely for a full Crystal ROM
+    // with 251 moves, and caught by the entry-size check below even if it occurs).
+    // Rather than risk any ambiguity, we check the byte strictly and reject on mismatch.
+    uint8_t schema_ver = static_cast<uint8_t>(in.get());
+    if (!in.good()) return std::nullopt;
+    if (schema_ver != MVDT_SCHEMA_VERSION) {
+        std::cerr << "[PackageReader] MVDT chunk schema version " << (int)schema_ver
+                  << " != expected " << (int)MVDT_SCHEMA_VERSION
+                  << " — package requires recompile\n";
+        return std::nullopt;
+    }
+
+    // Wire format v2: u8 schema_version, u32 count LE, then per-entry (52 bytes each):
+    //   u16 move_id, u8 type_id, power, accuracy, pp, effect_id, effect_chance, category
+    //   + 43 bytes SemanticEffectDescription
     uint32_t count = read_le<uint32_t>(in);
     if (!in.good()) return std::nullopt;
 
-    constexpr uint32_t ENTRY_SIZE = 9;
-    if (static_cast<uint64_t>(count) * ENTRY_SIZE + 4 > chunk->size) {
+    constexpr uint32_t ENTRY_SIZE = 9 + 43;  // 52 bytes
+    if (static_cast<uint64_t>(count) * ENTRY_SIZE + 5 > chunk->size) {
         return std::nullopt;
     }
     if (count > 65535u) return std::nullopt;
+
+    // Helper: deserialize SemanticEffectDescription from 43 bytes.
+    auto read_bool = [&]() -> bool { return static_cast<uint8_t>(in.get()) != 0u; };
+    auto read_u8   = [&]() -> uint8_t { return static_cast<uint8_t>(in.get()); };
 
     Registry<MoveId, MoveData> reg;
     for (uint32_t i = 0; i < count; ++i) {
@@ -906,11 +928,52 @@ PackageReader::load_move_registry() const {
         uint8_t pp            = static_cast<uint8_t>(in.get());
         uint8_t effect_id     = static_cast<uint8_t>(in.get());
         uint8_t effect_chance = static_cast<uint8_t>(in.get());
-        uint8_t category_raw  = static_cast<uint8_t>(in.get());  // was reserved; now category
+        uint8_t category_raw  = static_cast<uint8_t>(in.get());
+        if (!in.good() && !in.eof()) return std::nullopt;
+
+        // SemanticEffectDescription — 43 bytes (layout matches write side)
+        SemanticEffectDescription desc;
+        desc.has_standard_damage   = read_bool();  // [0]
+        desc.has_recoil            = read_bool();  // [1]
+        desc.has_drain             = read_bool();  // [2]
+        desc.drain_requires_sleep  = read_bool();  // [3]
+        desc.user_faints           = read_bool();  // [4]
+        desc.is_ohko               = read_bool();  // [5]
+        desc.cannot_ko             = read_bool();  // [6]
+        desc.sets_recharge         = read_bool();  // [7]
+        desc.constant_damage_source = static_cast<ConstantDamageSource>(read_u8());  // [8]
+        desc.set_power_source       = static_cast<SetPowerSource>(read_u8());         // [9]
+        desc.conditional_double     = static_cast<ConditionalDoubleCondition>(read_u8()); // [10]
+        desc.secondary_effect       = static_cast<SecondaryEffectType>(read_u8());    // [11]
+        desc.primary_status         = static_cast<PrimaryStatusType>(read_u8());      // [12]
+        desc.stat_change            = static_cast<StatChangeTarget>(read_u8());       // [13]
+        desc.heal_source            = static_cast<HealSource>(read_u8());             // [14]
+        desc.set_screen             = static_cast<ScreenType>(read_u8());             // [15]
+        desc.set_weather            = static_cast<WeatherSetType>(read_u8());         // [16]
+        desc.sets_spikes           = read_bool();  // [17]
+        desc.is_multi_hit          = read_bool();  // [18]
+        desc.is_charge             = read_bool();  // [19]
+        desc.is_future_sight       = read_bool();  // [20]
+        desc.is_rampage            = read_bool();  // [21]
+        desc.is_escalating_power   = read_bool();  // [22]
+        desc.is_trapping           = read_bool();  // [23]
+        desc.is_counter            = read_bool();  // [24]
+        desc.is_mirror_coat        = read_bool();  // [25]
+        desc.is_bide               = read_bool();  // [26]
+        desc.is_pursuit            = read_bool();  // [27]
+        desc.is_copy_move          = read_bool();  // [28]
+        desc.clears_hazards        = read_bool();  // [29]
+        desc.is_sleep_move         = read_bool();  // [30]
+        desc.needs_kingsrock       = read_bool();  // [31]
+        desc.needs_substitute      = read_bool();  // [32]
+        desc.needs_rage            = read_bool();  // [33]
+        desc.ai_classification     = read_u8();    // [34]
+        desc.is_supported          = read_bool();  // [35]
+        // [36..42] reserved — consume but ignore
+        for (int r = 36; r <= 42; ++r) read_u8();
         if (!in.good() && !in.eof()) return std::nullopt;
 
         MoveId mid = static_cast<MoveId>(move_id_raw);
-
         if (reg.get(mid) != nullptr) {
             return std::nullopt;  // duplicate move id — corrupt chunk
         }
@@ -923,13 +986,12 @@ PackageReader::load_move_registry() const {
         md.pp             = pp;
         md.effect_id      = effect_id;
         md.effect_chance  = effect_chance;
-        // Restore MoveCategory from the serialized byte.
-        // 0=Physical, 1=Special, 2=Status — must match MoveCategory enum order.
         md.category = (category_raw <= 2u)
                     ? static_cast<enginemon::MoveCategory>(category_raw)
                     : enginemon::MoveCategory::Physical;
-        // Other fields default to zero: target, priority, makes_contact, is_sound_based,
-        // animation_id, name. These are not yet in the package wire format.
+        md.effect_desc    = desc;
+        // Other fields default: target, priority, makes_contact, is_sound_based,
+        // animation_id, name — not yet in package wire format.
 
         reg.register_entry(mid, std::move(md));
     }
@@ -955,7 +1017,21 @@ PackageReader::load_battle_rules() const {
     in.seekg(chunk->offset);
     if (!in) return std::nullopt;
 
-    BoundsReader r(in, chunk->size);
+    // Schema version byte — first byte of chunk (added in BRLS v2).
+    // Old packages (v1) start directly with stat_stage_mult (first byte is a numerator).
+    // Numerators are always > 0 (all stage multipliers have non-zero numerators) and
+    // would never be equal to BRLS_SCHEMA_VERSION=2 for the first stage entry (25/100).
+    // We check strictly and reject on mismatch.
+    uint8_t schema_ver = static_cast<uint8_t>(in.get());
+    if (!in.good()) return std::nullopt;
+    if (schema_ver != BRLS_SCHEMA_VERSION) {
+        std::cerr << "[PackageReader] BRLS chunk schema version " << (int)schema_ver
+                  << " != expected " << (int)BRLS_SCHEMA_VERSION
+                  << " — package requires recompile\n";
+        return std::nullopt;
+    }
+
+    BoundsReader r(in, chunk->size - 1u);  // -1 for the version byte already consumed
     BattleRules rules;
 
     // -----------------------------------------------------------------------
@@ -1123,66 +1199,94 @@ PackageReader::load_battle_rules() const {
     if (!rules.is_valid()) return std::nullopt;
 
     // =========================================================================
-    // SM83-lifted formula parameters — read if bytes remain in the chunk.
-    // These are appended after the existing fields and are optional:
-    // older packages without them retain the struct defaults (vanilla values).
-    // Each field is exactly 1 byte.
+    // SM83-lifted formula parameters — all mandatory in schema v2.
+    // The "has_bytes() optional" pattern is gone; missing fields → nullopt (reject).
     // =========================================================================
-    auto read_sm83_u8 = [&](uint8_t& out) -> bool {
-        if (!r.has_bytes(1)) return false;  // end of old package — keep default
-        return r.read_le(out);
-    };
+    auto read_u8_field = [&](uint8_t& out) -> bool { return r.read_le(out); };
 
     // sm83_damage_formula: 4 bytes
-    read_sm83_u8(rules.damage_formula.level_divisor);
-    read_sm83_u8(rules.damage_formula.level_addend);
-    read_sm83_u8(rules.damage_formula.damage_divisor);
-    read_sm83_u8(rules.damage_formula.min_damage);
+    if (!read_u8_field(rules.damage_formula.level_divisor))  return std::nullopt;
+    if (!read_u8_field(rules.damage_formula.level_addend))   return std::nullopt;
+    if (!read_u8_field(rules.damage_formula.damage_divisor)) return std::nullopt;
+    if (!read_u8_field(rules.damage_formula.min_damage))     return std::nullopt;
     // sm83_ai_scores: 2 bytes
-    read_sm83_u8(rules.ai_scores.init_score);
-    read_sm83_u8(rules.ai_scores.discourage_strong);
+    if (!read_u8_field(rules.ai_scores.init_score))          return std::nullopt;
+    if (!read_u8_field(rules.ai_scores.discourage_strong))   return std::nullopt;
     // sm83_stat_formula: 3 bytes
-    read_sm83_u8(rules.stat_formula.level_divisor);
-    read_sm83_u8(rules.stat_formula.non_hp_offset);
-    read_sm83_u8(rules.stat_formula.hp_offset);
+    if (!read_u8_field(rules.stat_formula.level_divisor))    return std::nullopt;
+    if (!read_u8_field(rules.stat_formula.non_hp_offset))    return std::nullopt;
+    if (!read_u8_field(rules.stat_formula.hp_offset))        return std::nullopt;
     // sm83_escape: 2 bytes
-    read_sm83_u8(rules.escape.speed_multiplier);
-    read_sm83_u8(rules.escape.attempt_addend);
+    if (!read_u8_field(rules.escape.speed_multiplier))       return std::nullopt;
+    if (!read_u8_field(rules.escape.attempt_addend))         return std::nullopt;
     // sm83_capture_status: 2 bytes
-    read_sm83_u8(rules.capture_status.slp_frz_bonus);
-    read_sm83_u8(rules.capture_status.brn_psn_par_bonus);
+    if (!read_u8_field(rules.capture_status.slp_frz_bonus))       return std::nullopt;
+    if (!read_u8_field(rules.capture_status.brn_psn_par_bonus))   return std::nullopt;
     // sm83_exp: 1 byte
-    read_sm83_u8(rules.exp_formula.base_divisor);
+    if (!read_u8_field(rules.exp_formula.base_divisor))      return std::nullopt;
     // sm83_residual: 2 bytes
-    read_sm83_u8(rules.residual.burn_poison_denom);
-    read_sm83_u8(rules.residual.toxic_denom);
+    if (!read_u8_field(rules.residual.burn_poison_denom))    return std::nullopt;
+    if (!read_u8_field(rules.residual.toxic_denom))          return std::nullopt;
     // sm83_crit_deltas: 3 bytes
-    read_sm83_u8(rules.crit_deltas.held_item_delta);
-    read_sm83_u8(rules.crit_deltas.scope_lens_delta);
-    read_sm83_u8(rules.crit_deltas.focus_energy_delta);
-    // sm83_damage_variation: 1 byte
-    read_sm83_u8(rules.damage_variation.lower_bound_byte);
+    if (!read_u8_field(rules.crit_deltas.held_item_delta))   return std::nullopt;
+    if (!read_u8_field(rules.crit_deltas.scope_lens_delta))  return std::nullopt;
+    if (!read_u8_field(rules.crit_deltas.focus_energy_delta)) return std::nullopt;
+    // sm83_damage_variation: 2 bytes
+    if (!read_u8_field(rules.damage_variation.lower_bound_byte)) return std::nullopt;
+    if (!read_u8_field(rules.damage_variation.divisor))          return std::nullopt;
+    // sm83_recoil / sm83_drain: 2 bytes
+    if (!read_u8_field(rules.recoil.shift_count)) return std::nullopt;
+    if (!read_u8_field(rules.drain.shift_count))  return std::nullopt;
 
-    // sm83_lifted_mask: 2 bytes LE — present only in packages written after this field was added.
-    // Old packages leave it at 0 (nothing lifted), which correctly signals "use struct defaults".
-    if (r.has_bytes(2)) {
-        uint16_t mask = 0;
-        if (r.read_le(mask)) {
-            rules.sm83_lifted_mask = mask;
+    // Extended battle params — single-turn tranche.  All mandatory in v2.
+    if (!read_u8_field(rules.selfdestruct.defense_shift))         return std::nullopt;
+    if (!read_u8_field(rules.ohko.level_diff_multiplier))         return std::nullopt;
+    for (uint8_t i = 0; i < enginemon::BattleRules::MAGNITUDE_TABLE_SIZE; ++i) {
+        if (!read_u8_field(rules.magnitude_table[i].rng_threshold))  return std::nullopt;
+        if (!read_u8_field(rules.magnitude_table[i].power))          return std::nullopt;
+        if (!read_u8_field(rules.magnitude_table[i].display_level))  return std::nullopt;
+    }
+    for (uint8_t i = 0; i < enginemon::BattleRules::PRESENT_TABLE_SIZE; ++i) {
+        uint8_t thr = 0, pow_or_ff = 0;
+        if (!read_u8_field(thr))       return std::nullopt;
+        if (!read_u8_field(pow_or_ff)) return std::nullopt;
+        if (pow_or_ff == 0xFF) {
+            rules.present_table[i].rng_threshold = thr;
+            rules.present_table[i].power  = 0;
+            rules.present_table[i].is_heal = true;
+        } else {
+            rules.present_table[i].rng_threshold = thr;
+            rules.present_table[i].power  = pow_or_ff;
+            rules.present_table[i].is_heal = false;
         }
     }
+    if (!read_u8_field(rules.present_heal_shift)) return std::nullopt;
+    for (uint8_t i = 0; i < enginemon::BattleRules::REVERSAL_TABLE_SIZE; ++i) {
+        if (!read_u8_field(rules.reversal_table[i].threshold_pixels)) return std::nullopt;
+        if (!read_u8_field(rules.reversal_table[i].power))            return std::nullopt;
+    }
+    if (!read_u8_field(rules.reversal_hp_bar_multiplier))  return std::nullopt;
+    if (!read_u8_field(rules.weather_heal.sun_divisor))    return std::nullopt;
+    if (!read_u8_field(rules.weather_heal.neutral_divisor)) return std::nullopt;
+    if (!read_u8_field(rules.weather_heal.other_divisor))   return std::nullopt;
 
-    // Frontend economy limits — 3 × int32_t LE, optional (old packages keep struct defaults).
-    auto read_i32 = [&](int32_t& out) -> bool {
-        if (!r.has_bytes(4)) return false;
+    // sm83_lifted_mask: 2 bytes LE — mandatory in v2.
+    {
+        uint16_t mask = 0;
+        if (!r.read_le(mask)) return std::nullopt;
+        rules.sm83_lifted_mask = mask;
+    }
+
+    // Frontend economy limits — 3 × int32_t LE — mandatory in v2.
+    {
         uint32_t raw = 0;
-        if (!r.read_le(raw)) return false;
-        out = static_cast<int32_t>(raw);
-        return true;
-    };
-    read_i32(rules.frontend_limits.money_max);
-    read_i32(rules.frontend_limits.coin_max);
-    read_i32(rules.frontend_limits.item_qty_max);
+        if (!r.read_le(raw)) return std::nullopt;
+        rules.frontend_limits.money_max = static_cast<int32_t>(raw);
+        if (!r.read_le(raw)) return std::nullopt;
+        rules.frontend_limits.coin_max = static_cast<int32_t>(raw);
+        if (!r.read_le(raw)) return std::nullopt;
+        rules.frontend_limits.item_qty_max = static_cast<int32_t>(raw);
+    }
 
     return rules;
 }

@@ -25,10 +25,12 @@
 
 #include "crystal/rom/loader.hpp"
 #include "crystal/rom/profile.hpp"
+#include "crystal/rom/crystal_layout_resolver.hpp"
 #include "crystal/compile/full_compiler.hpp"
 #include "crystal/extract/map_extractor.hpp"
 #include "crystal/extract/tileset_extractor.hpp"
 #include "engine/build/package_cache.hpp"
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -1007,278 +1009,806 @@ TEST(lz_valid_prefix_then_corruption_returns_failure) {
     std::cout << "  [LZ valid prefix then invalid back-reference → extract_tileset success=false ✓]\n";
 }
 
-//=============================================================================
-// PALMAP BANK DERIVATION TEST
-//
-// Proves that the PalMap bank is derived from profile_.offsets.tilesets / 0x4000
-// rather than hardcoded to 0x13.
-//
-// Scenario:
-//   - Tilesets table is placed in bank 0x20 (not 0x13)
-//   - A tileset entry with palmap_ptr=0x5000 is written at the table
-//   - A recognisable sentinel pattern (0xAB, 0xCD, ...) is placed at
-//     bank 0x20, ptr 0x5000 (the CORRECT palmap location)
-//   - Bank 0x13, ptr 0x5000 (the WRONG hardcoded location) is left all-zeros
-//   - A minimal but fully valid tileset is wired up so extraction succeeds
-//     past GFX / meta / collision far enough for the palmap bounds check to pass
-//
-// If PALMAP_BANK is correctly derived as bank_of(tilesets) = 0x20:
-//   palette_map entries come from the sentinel bytes → non-zero values present
-// If PALMAP_BANK were still hardcoded to 0x13:
-//   palette_map entries would be all-zero (bank 0x13 at that ptr is zeros)
-//
-// The test does not need the GFX / meta / collision extraction to produce
-// semantically correct tiles — it only needs the palmap read to be reached.
-// We achieve this by placing the GFX LZ_END immediately (empty decompression
-// fails the GFX step), which means the test exercises the palmap bank choice
-// by checking whether the bounds check selects the right address — OR by using
-// a profile with num_tilesets=0 guard disabled and observing the palmap_addr
-// calculation independently.
-//
-// Simpler approach: directly compute the palmap address in a profile with
-// tilesets at bank 0x20 and confirm bank_of(tilesets) == 0x20, then verify
-// that a full extraction (where GFX succeeds with a minimal valid LZ stream)
-// reads palette data from bank 0x20 and NOT from bank 0x13.
-//=============================================================================
-
 // Write a minimal valid LZ stream that decompresses to exactly `tile_count * 16`
 // non-zero bytes. Uses ITERATE commands to fill.
 static void write_minimal_lz_tiles(std::vector<uint8_t>& rom,
                                     uint32_t addr,
                                     size_t tile_count) {
-    // Each iteration: LZ_ITERATE cmd (0x20 | count-1) + value byte
-    // LZ_ITERATE = cmd 1 = bits [7:5]=001, bits [4:0]=count-1
-    // Max count per command = 32 (5-bit field, 0b11111+1=32)
     size_t total_bytes = tile_count * 16;
     uint32_t o = addr;
     size_t remaining = total_bytes;
     while (remaining > 0) {
         size_t chunk = std::min(remaining, size_t(32));
-        rom[o++] = static_cast<uint8_t>(0x20 | (chunk - 1));  // ITERATE, count=chunk
-        rom[o++] = 0x11;  // non-zero fill value
+        rom[o++] = static_cast<uint8_t>(0x20 | (chunk - 1));
+        rom[o++] = 0x11;
         remaining -= chunk;
     }
-    rom[o] = 0xFF;  // LZ_END
-}
-
-TEST(palmap_bank_derived_from_tilesets_table_bank) {
-    // ── ROM layout ──────────────────────────────────────────────────────────
-    //   bank 0x20 (flat 0x80000): Tilesets table (entry for tileset 1)
-    //   bank 0x20 + 0x1000 offset: GFX LZ data (minimal valid tiles)
-    //   bank 0x20 + 0x2000 offset: metatile data (128 × 16 bytes of zeros)
-    //   bank 0x20 + 0x3000 offset: collision data (128 × 4 bytes of zeros)
-    //   bank 0x20 + 0x5000 offset: CORRECT palmap location — sentinel bytes
-    //   bank 0x13 + 0x5000 offset: WRONG location (if hardcoded) — all zeros
-    // ────────────────────────────────────────────────────────────────────────
-    constexpr uint8_t  TILESETS_BANK  = 0x20;
-    constexpr uint32_t TILESETS_FLAT  = static_cast<uint32_t>(TILESETS_BANK) * 0x4000;
-
-    // Sub-offsets within the bank (all bank-local, in [0x4000, 0x8000))
-    constexpr uint16_t GFX_PTR   = 0x5000;
-    constexpr uint16_t META_PTR  = 0x6000;
-    constexpr uint16_t COLL_PTR  = 0x6800;  // after 128*16=2048 bytes of meta
-    constexpr uint16_t PALMAP_PTR = 0x7000;
-
-    constexpr uint32_t GFX_FLAT   = TILESETS_FLAT + (GFX_PTR   - 0x4000);
-    constexpr uint32_t META_FLAT  = TILESETS_FLAT + (META_PTR  - 0x4000);
-    constexpr uint32_t COLL_FLAT  = TILESETS_FLAT + (COLL_PTR  - 0x4000);
-    constexpr uint32_t PALMAP_FLAT_CORRECT = TILESETS_FLAT + (PALMAP_PTR - 0x4000);
-    constexpr uint32_t PALMAP_FLAT_WRONG   = static_cast<uint32_t>(0x13) * 0x4000
-                                             + (PALMAP_PTR - 0x4000);
-
-    auto rom_bytes = make_base_rom();  // 2 MB, all 0xFF
-
-    // ── Tileset entry at TILESETS_FLAT + 1 * 15 (index 1) ──
-    // Layout: gfx_bank(1) + gfx_ptr(2) + meta_bank(1) + meta_ptr(2)
-    //       + coll_bank(1) + coll_ptr(2) + anim_ptr(2) + null_ptr(2) + palmap_ptr(2)
-    {
-        uint32_t entry = TILESETS_FLAT + 1 * 15;
-        rom_bytes[entry +  0] = TILESETS_BANK;
-        rom_bytes[entry +  1] = GFX_PTR & 0xFF;
-        rom_bytes[entry +  2] = GFX_PTR >> 8;
-        rom_bytes[entry +  3] = TILESETS_BANK;
-        rom_bytes[entry +  4] = META_PTR & 0xFF;
-        rom_bytes[entry +  5] = META_PTR >> 8;
-        rom_bytes[entry +  6] = TILESETS_BANK;
-        rom_bytes[entry +  7] = COLL_PTR & 0xFF;
-        rom_bytes[entry +  8] = COLL_PTR >> 8;
-        rom_bytes[entry +  9] = 0x00;  // anim_ptr lo (null)
-        rom_bytes[entry + 10] = 0x40;  // anim_ptr hi (0x4000, valid banked)
-        rom_bytes[entry + 11] = 0x00;  // null_ptr lo
-        rom_bytes[entry + 12] = 0x40;  // null_ptr hi
-        rom_bytes[entry + 13] = PALMAP_PTR & 0xFF;
-        rom_bytes[entry + 14] = PALMAP_PTR >> 8;
-    }
-
-    // ── GFX: minimal valid LZ stream decompressing to 128 tiles (2048 bytes) ──
-    // LZ at GFX_FLAT: fill 128 × 16 = 2048 bytes using ITERATE commands
-    // Zero out this region first (it's currently 0xFF = LZ_END everywhere)
-    std::fill(rom_bytes.begin() + GFX_FLAT,
-              rom_bytes.begin() + GFX_FLAT + 200, 0x00);
-    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
-
-    // ── Metatile data: 128 × 16 bytes of zeros (tile index 0 everywhere) ──
-    // Already zero from the std::fill above, but META_FLAT is in a different range.
-    // Zero it explicitly.
-    std::fill(rom_bytes.begin() + META_FLAT,
-              rom_bytes.begin() + META_FLAT + 128 * 16, 0x00);
-
-    // ── Collision data: 128 × 4 bytes (4 quadrant values per metatile) ──
-    std::fill(rom_bytes.begin() + COLL_FLAT,
-              rom_bytes.begin() + COLL_FLAT + 128 * 4, 0x00);
-
-    // ── CORRECT palmap (bank 0x20): write sentinel non-zero bytes ──
-    // PalMap format: packed nibbles, each byte encodes 2 tile palette IDs.
-    // Full size = 48 + 16 (gap) + 48 = 112 bytes.
-    // Write non-zero palette IDs so we can detect the read happened.
-    constexpr size_t FULL_PALMAP_SIZE = 48 + 16 + 48;  // 112 bytes
-    std::fill(rom_bytes.begin() + PALMAP_FLAT_CORRECT,
-              rom_bytes.begin() + PALMAP_FLAT_CORRECT + FULL_PALMAP_SIZE, 0x00);
-    // Each packed byte: lo-nibble = palette 1 (GREEN), hi-nibble = palette 2 (WATER)
-    // Value = (2 << 4) | 1 = 0x21 — non-zero, valid (palette IDs 1 and 2)
-    for (size_t i = 0; i < FULL_PALMAP_SIZE; ++i) {
-        rom_bytes[PALMAP_FLAT_CORRECT + i] = 0x21;
-    }
-
-    // ── WRONG palmap (bank 0x13): leave all-zero ──
-    // PALMAP_FLAT_WRONG is within the ROM; it's already 0xFF (from make_base_rom).
-    // Explicitly zero it so "reads from here → palette_map all-zero" is clear.
-    if (PALMAP_FLAT_WRONG + FULL_PALMAP_SIZE <= rom_bytes.size()) {
-        std::fill(rom_bytes.begin() + PALMAP_FLAT_WRONG,
-                  rom_bytes.begin() + PALMAP_FLAT_WRONG + FULL_PALMAP_SIZE, 0x00);
-    }
-
-    // ── Profile ──
-    crystal::ExtractionProfile prof;
-    prof.counts.num_tilesets = 2;  // allow index 1
-    prof.format.tileset.tileset_size      = 15;
-    prof.format.tileset.metatile_size     = 16;
-    prof.format.tileset.metatile_count    = 128;
-    prof.format.tileset.gfx_bank_offset      = 0;
-    prof.format.tileset.gfx_ptr_offset       = 1;
-    prof.format.tileset.metatile_bank_offset  = 3;
-    prof.format.tileset.metatile_ptr_offset   = 4;
-    prof.format.tileset.coll_bank_offset      = 6;
-    prof.format.tileset.coll_ptr_offset       = 7;
-    prof.format.tileset.palmap_offset         = 13;
-    prof.offsets.tilesets = TILESETS_FLAT;                  // ← bank 0x20
-    prof.offsets.tileset_bg_palette = 0;                    // not tested here
-    prof.offsets.special_tileset_palette_count = 0;
-
-    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_bank_derived");
-    ASSERT_TRUE(rom_data != nullptr);
-
-    crystal::TilesetExtractor extractor(*rom_data, prof);
-    auto result = extractor.extract_tileset(1);
-
-    ASSERT_TRUE(result.success);
-
-    // The palette map should have been read from bank 0x20 (sentinel 0x21 bytes).
-    // Each 0x21 byte → lo-nibble=1 (palette 1), hi-nibble=2 (palette 2) after masking.
-    // Tile 0: palette_map[0] = 0x21 & 0x07 = 1
-    // Tile 1: palette_map[1] = (0x21 >> 4) & 0x07 = 2
-    ASSERT_TRUE(result.tileset.palette_map.size() == 256);
-    ASSERT_TRUE(result.tileset.palette_map[0] != 0);  // non-zero → read from bank 0x20
-
-    // Confirm the exact values: lo-nibble of 0x21 = 1, hi-nibble = 2
-    ASSERT_TRUE(result.tileset.palette_map[0] == 1);  // tile 0 → palette 1
-    ASSERT_TRUE(result.tileset.palette_map[1] == 2);  // tile 1 → palette 2
-
-    // If PALMAP_BANK were still 0x13, the read would land on all-zero data and
-    // every palette entry would be 0.  The non-zero check above proves bank 0x20
-    // was used.
-
-    // Verify bank derivation arithmetic directly.
-    // bank_of(TILESETS_FLAT) = TILESETS_FLAT / 0x4000 = 0x20
-    ASSERT_TRUE(TILESETS_FLAT / 0x4000u == TILESETS_BANK);
-
-    std::cout << "\n    [PALMAP bank derived from tilesets bank 0x"
-              << std::hex << static_cast<int>(TILESETS_BANK) << std::dec
-              << ": palette_map[0]=" << (int)result.tileset.palette_map[0]
-              << " palette_map[1]=" << (int)result.tileset.palette_map[1]
-              << " (expected 1 and 2 from sentinel; 0 if hardcoded 0x13)]\n";
-}
-
-// ── Negative: offsets.tilesets == 0 → extract_tileset must hard-fail ──────
-//
-// When profile_.offsets.tilesets is 0 the PalMap bank cannot be derived.
-// Silently falling back to bank 0 would read from ROM0 and produce garbage
-// palette data with no error signal.  The extractor must return an error
-// result instead.
-//
-// The test verifies the exact failure mode: extract_tileset returns !success
-// with a non-empty error string when offsets.tilesets is not set.
-TEST(palmap_unset_tilesets_address_is_hard_failure) {
-    // Build a ROM that would otherwise succeed (valid GFX, valid meta/coll, valid palmap)
-    // but profile_.offsets.tilesets is deliberately left at 0.
-    constexpr uint8_t  TILESETS_BANK  = 0x20;
-    constexpr uint32_t TILESETS_FLAT  = static_cast<uint32_t>(TILESETS_BANK) * 0x4000;
-    constexpr uint16_t GFX_PTR        = 0x5000;
-    constexpr uint16_t META_PTR       = 0x6000;
-    constexpr uint16_t COLL_PTR       = 0x6800;
-    constexpr uint16_t PALMAP_PTR     = 0x7000;
-
-    constexpr uint32_t GFX_FLAT   = TILESETS_FLAT + (GFX_PTR   - 0x4000);
-    constexpr uint32_t META_FLAT  = TILESETS_FLAT + (META_PTR  - 0x4000);
-    constexpr uint32_t COLL_FLAT  = TILESETS_FLAT + (COLL_PTR  - 0x4000);
-    constexpr uint32_t PALMAP_FLAT_CORRECT = TILESETS_FLAT + (PALMAP_PTR - 0x4000);
-
-    auto rom_bytes = make_base_rom();
-
-    // Tileset entry at TILESETS_FLAT + 1*15
-    {
-        uint32_t entry = TILESETS_FLAT + 1 * 15;
-        rom_bytes[entry +  0] = TILESETS_BANK; rom_bytes[entry +  1] = GFX_PTR  & 0xFF; rom_bytes[entry +  2] = GFX_PTR  >> 8;
-        rom_bytes[entry +  3] = TILESETS_BANK; rom_bytes[entry +  4] = META_PTR & 0xFF; rom_bytes[entry +  5] = META_PTR >> 8;
-        rom_bytes[entry +  6] = TILESETS_BANK; rom_bytes[entry +  7] = COLL_PTR & 0xFF; rom_bytes[entry +  8] = COLL_PTR >> 8;
-        rom_bytes[entry +  9] = 0x00; rom_bytes[entry + 10] = 0x40;
-        rom_bytes[entry + 11] = 0x00; rom_bytes[entry + 12] = 0x40;
-        rom_bytes[entry + 13] = PALMAP_PTR & 0xFF; rom_bytes[entry + 14] = PALMAP_PTR >> 8;
-    }
-    std::fill(rom_bytes.begin() + GFX_FLAT,  rom_bytes.begin() + GFX_FLAT  + 200, 0x00);
-    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
-    std::fill(rom_bytes.begin() + META_FLAT,  rom_bytes.begin() + META_FLAT  + 128 * 16, 0x00);
-    std::fill(rom_bytes.begin() + COLL_FLAT,  rom_bytes.begin() + COLL_FLAT  + 128 *  4, 0x00);
-    constexpr size_t FULL_PALMAP_SIZE = 48 + 16 + 48;
-    std::fill(rom_bytes.begin() + PALMAP_FLAT_CORRECT,
-              rom_bytes.begin() + PALMAP_FLAT_CORRECT + FULL_PALMAP_SIZE, 0x21);
-
-    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_unset_tilesets");
-    ASSERT_TRUE(rom_data != nullptr);
-
-    // Profile with offsets.tilesets deliberately set to 0 (not configured)
-    crystal::ExtractionProfile prof;
-    prof.counts.num_tilesets = 2;
-    prof.format.tileset.tileset_size      = 15;
-    prof.format.tileset.metatile_size     = 16;
-    prof.format.tileset.metatile_count    = 128;
-    prof.format.tileset.gfx_bank_offset      = 0;
-    prof.format.tileset.gfx_ptr_offset       = 1;
-    prof.format.tileset.metatile_bank_offset  = 3;
-    prof.format.tileset.metatile_ptr_offset   = 4;
-    prof.format.tileset.coll_bank_offset      = 6;
-    prof.format.tileset.coll_ptr_offset       = 7;
-    prof.format.tileset.palmap_offset         = 13;
-    prof.offsets.tilesets = 0;  // ← deliberately unset: cannot derive PalMap bank
-    prof.offsets.tileset_bg_palette = 0;
-    prof.offsets.special_tileset_palette_count = 0;
-
-    crystal::TilesetExtractor extractor(*rom_data, prof);
-    auto result = extractor.extract_tileset(1);
-
-    // Must fail — not silently succeed with wrong (bank 0) palette data
-    ASSERT_FALSE(result.success);
-    ASSERT_TRUE(!result.error.empty());
-    // The error must come from the early tilesets==0 guard, not a downstream
-    // accident.  Confirm the diagnostic references the tilesets address.
-    ASSERT_TRUE(result.error.find("profile.offsets.tilesets") != std::string::npos);
-
-    std::cout << "\n    [offsets.tilesets=0 → hard failure: \""
-              << result.error << "\"]\n";
+    rom[o] = 0xFF;
 }
 
 //=============================================================================
-// SCENE/CALLBACK ENTRY TRUNCATION TESTS
+// PALMAP BANK AUTHORITY TESTS
+//
+// The PalMap bank authority is BANK(_LoadOverworldAttrmapPals), stored in
+// profile_.offsets.palmap_consumer_bank.  The homecall call site in the home
+// bank encodes this bank as a literal: F5 3E NN D7 CD 00 40 F1 D7 C9.
+//
+// Key facts (from authoritative source + ROM evidence):
+//   Crystal v1.1: Tilesets=bank 0x13, _LoadOverworldAttrmapPals=bank 0x13 (coincide)
+//   Gold/Silver:  Tilesets=bank 0x05, _LoadOverworldAttrmapPals=bank 0x02 (differ)
+//
+// These tests prove:
+//   1. Real-ROM resolver: Crystal→0x13, Gold→0x02, Silver→0x02
+//   2. Relocation: when Tilesets bank ≠ PalMap consumer bank, extraction reads
+//      from the consumer bank, NOT the Tilesets bank.
+//   3. Negative: unresolved consumer bank → hard failure.
+//=============================================================================
+
+// ── Real-ROM resolver results ─────────────────────────────────────────────
+TEST(palmap_consumer_bank_real_roms) {
+    struct Spec { const char* env; const char* label; uint8_t expected; };
+    const Spec specs[] = {
+        { "ENGINEMON_TEST_ROM",   "Crystal v1.1", 0x13 },
+        { "ENGINEMON_GOLD_ROM",   "Gold",          0x02 },
+        { "ENGINEMON_SILVER_ROM", "Silver",         0x02 },
+    };
+    bool any_ran = false;
+    for (const auto& s : specs) {
+        const char* env = std::getenv(s.env);
+        if (!env) continue;
+        auto rom = crystal::RomData::load(std::filesystem::path(env));
+        if (!rom) continue;
+        any_ran = true;
+        std::string diag;
+        uint8_t bank = crystal::resolve_palmap_consumer_bank(*rom, &diag);
+        if (bank != s.expected) {
+            std::fprintf(stderr, "  FAIL: %s expected bank=0x%02X got 0x%02X diag=\"%s\"\n",
+                         s.label, s.expected, bank, diag.c_str());
+            g_tests_failed++;
+        } else {
+            std::cout << "\n    [" << s.label << ": palmap_consumer_bank=0x"
+                      << std::hex << (int)bank << std::dec << " ✓]";
+            g_tests_passed++;
+        }
+    }
+    if (!any_ran) { std::cout << "\n    [SKIP: no ROM env vars set]"; g_tests_passed++; }
+    else std::cout << "\n";
+}
+
+// ── Relocation test: Tilesets bank ≠ PalMap consumer bank ────────────────
+//
+// Scenario:
+//   Tilesets table in bank 0x20 (NOT the palmap consumer bank)
+//   palmap_consumer_bank = 0x1A (different from tilesets bank)
+//   CORRECT palmap at bank 0x1A ptr 0x7000 → sentinel bytes 0x21
+//   WRONG  palmap at bank 0x20 ptr 0x7000 → zeroed
+//
+// If extraction uses palmap_consumer_bank=0x1A: palette_map[0]=1, [1]=2 ✓
+// If extraction were still using bank(tilesets)=0x20: palette_map[0]=0 ✗
+TEST(palmap_consumer_bank_differs_from_tilesets_bank) {
+    constexpr uint8_t  TILESETS_BANK       = 0x20u;
+    constexpr uint8_t  PALMAP_CONSUMER_BANK = 0x1Au;  // deliberately different
+    static_assert(TILESETS_BANK != PALMAP_CONSUMER_BANK, "must differ to prove the point");
+
+    constexpr uint32_t TILESETS_FLAT       = static_cast<uint32_t>(TILESETS_BANK)        * 0x4000u;
+    constexpr uint32_t PALMAP_CORRECT_FLAT = static_cast<uint32_t>(PALMAP_CONSUMER_BANK) * 0x4000u;
+
+    constexpr uint16_t GFX_PTR    = 0x5000u;
+    constexpr uint16_t META_PTR   = 0x6000u;
+    constexpr uint16_t COLL_PTR   = 0x6800u;
+    constexpr uint16_t PALMAP_PTR = 0x7000u;
+
+    constexpr uint32_t GFX_FLAT   = TILESETS_FLAT + (GFX_PTR   - 0x4000u);
+    constexpr uint32_t META_FLAT  = TILESETS_FLAT + (META_PTR  - 0x4000u);
+    constexpr uint32_t COLL_FLAT  = TILESETS_FLAT + (COLL_PTR  - 0x4000u);
+    // Correct palmap: consumer bank + same ptr offset
+    constexpr uint32_t PALMAP_CORRECT = PALMAP_CORRECT_FLAT + (PALMAP_PTR - 0x4000u);
+    // Wrong palmap: tilesets bank + same ptr offset (what old code would use)
+    constexpr uint32_t PALMAP_WRONG   = TILESETS_FLAT       + (PALMAP_PTR - 0x4000u);
+    static_assert(PALMAP_CORRECT != PALMAP_WRONG, "must be at different addresses");
+
+    auto rom_bytes = make_base_rom();
+
+    // Tileset entry for index 1
+    {
+        uint32_t entry = TILESETS_FLAT + 1u * 15u;
+        rom_bytes[entry+0]  = TILESETS_BANK;
+        rom_bytes[entry+1]  = GFX_PTR   & 0xFFu; rom_bytes[entry+2]  = GFX_PTR   >> 8;
+        rom_bytes[entry+3]  = TILESETS_BANK;
+        rom_bytes[entry+4]  = META_PTR  & 0xFFu; rom_bytes[entry+5]  = META_PTR  >> 8;
+        rom_bytes[entry+6]  = TILESETS_BANK;
+        rom_bytes[entry+7]  = COLL_PTR  & 0xFFu; rom_bytes[entry+8]  = COLL_PTR  >> 8;
+        rom_bytes[entry+9]  = 0x00u; rom_bytes[entry+10] = 0x40u;  // anim_ptr
+        rom_bytes[entry+11] = 0x00u; rom_bytes[entry+12] = 0x40u;  // null_ptr
+        rom_bytes[entry+13] = PALMAP_PTR & 0xFFu;
+        rom_bytes[entry+14] = PALMAP_PTR >> 8;
+    }
+
+    // GFX: minimal valid LZ stream
+    std::fill(rom_bytes.begin() + GFX_FLAT, rom_bytes.begin() + GFX_FLAT + 200, 0x00u);
+    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
+    // Metatile and collision: zeros
+    std::fill(rom_bytes.begin() + META_FLAT, rom_bytes.begin() + META_FLAT + 128*16, 0x00u);
+    std::fill(rom_bytes.begin() + COLL_FLAT, rom_bytes.begin() + COLL_FLAT + 128*4,  0x00u);
+
+    // CORRECT palmap (consumer bank): sentinel 0x21 bytes
+    constexpr size_t FULL_PALMAP_SIZE = 48u + 16u + 48u;
+    std::fill(rom_bytes.begin() + PALMAP_CORRECT,
+              rom_bytes.begin() + PALMAP_CORRECT + FULL_PALMAP_SIZE, 0x21u);
+    // WRONG palmap (tilesets bank): zeroed
+    std::fill(rom_bytes.begin() + PALMAP_WRONG,
+              rom_bytes.begin() + PALMAP_WRONG + FULL_PALMAP_SIZE, 0x00u);
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_consumer_differs");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets                   = 2u;
+    prof.format.tileset.tileset_size           = 15u;
+    prof.format.tileset.metatile_size          = 16u;
+    prof.format.tileset.metatile_count         = 128u;
+    prof.format.tileset.gfx_bank_offset        = 0u;
+    prof.format.tileset.gfx_ptr_offset         = 1u;
+    prof.format.tileset.metatile_bank_offset   = 3u;
+    prof.format.tileset.metatile_ptr_offset    = 4u;
+    prof.format.tileset.coll_bank_offset       = 6u;
+    prof.format.tileset.coll_ptr_offset        = 7u;
+    prof.format.tileset.palmap_offset          = 13u;
+    prof.format.tileset.palmap_size            = 112u;  // Crystal 48+16+48 layout
+    prof.offsets.tilesets                      = TILESETS_FLAT;
+    prof.offsets.palmap_consumer_bank          = PALMAP_CONSUMER_BANK;  // ← correct authority
+    prof.offsets.tileset_bg_palette            = 0u;
+    prof.offsets.special_tileset_palette_count = 0u;
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_tileset(1u);
+
+    ASSERT_TRUE(result.success);
+    ASSERT_TRUE(result.tileset.palette_map.size() == 256u);
+    // Sentinel 0x21 → lo-nibble=1, hi-nibble=2
+    ASSERT_TRUE(result.tileset.palette_map[0] == 1u);  // read from consumer bank ✓
+    ASSERT_TRUE(result.tileset.palette_map[1] == 2u);
+    // Explicitly confirm NOT the wrong value: if wrong bank was used, entries would be 0
+    std::cout << "\n    [Tilesets=bank 0x" << std::hex << (int)TILESETS_BANK
+              << " PalMap consumer=bank 0x" << (int)PALMAP_CONSUMER_BANK
+              << ": palette_map[0]=" << std::dec << (int)result.tileset.palette_map[0]
+              << " (1=correct, 0=wrong-bank) ✓]\n";
+}
+
+// ── Negative: palmap_consumer_bank == 0 → hard failure ───────────────────
+TEST(palmap_consumer_bank_unset_is_hard_failure) {
+    constexpr uint8_t  TILESETS_BANK  = 0x20u;
+    constexpr uint32_t TILESETS_FLAT  = static_cast<uint32_t>(TILESETS_BANK) * 0x4000u;
+    constexpr uint16_t GFX_PTR  = 0x5000u, META_PTR = 0x6000u;
+    constexpr uint16_t COLL_PTR = 0x6800u, PALMAP_PTR = 0x7000u;
+    constexpr uint32_t GFX_FLAT  = TILESETS_FLAT + (GFX_PTR  - 0x4000u);
+    constexpr uint32_t META_FLAT = TILESETS_FLAT + (META_PTR - 0x4000u);
+    constexpr uint32_t COLL_FLAT = TILESETS_FLAT + (COLL_PTR - 0x4000u);
+
+    auto rom_bytes = make_base_rom();
+    {
+        uint32_t entry = TILESETS_FLAT + 1u * 15u;
+        rom_bytes[entry+0]=TILESETS_BANK; rom_bytes[entry+1]=GFX_PTR&0xFF;  rom_bytes[entry+2]=GFX_PTR>>8;
+        rom_bytes[entry+3]=TILESETS_BANK; rom_bytes[entry+4]=META_PTR&0xFF; rom_bytes[entry+5]=META_PTR>>8;
+        rom_bytes[entry+6]=TILESETS_BANK; rom_bytes[entry+7]=COLL_PTR&0xFF; rom_bytes[entry+8]=COLL_PTR>>8;
+        rom_bytes[entry+9]=0x00u; rom_bytes[entry+10]=0x40u;
+        rom_bytes[entry+11]=0x00u; rom_bytes[entry+12]=0x40u;
+        rom_bytes[entry+13]=PALMAP_PTR&0xFF; rom_bytes[entry+14]=PALMAP_PTR>>8;
+    }
+    std::fill(rom_bytes.begin() + GFX_FLAT,  rom_bytes.begin() + GFX_FLAT  + 200,    0x00u);
+    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
+    std::fill(rom_bytes.begin() + META_FLAT, rom_bytes.begin() + META_FLAT + 128*16, 0x00u);
+    std::fill(rom_bytes.begin() + COLL_FLAT, rom_bytes.begin() + COLL_FLAT + 128*4,  0x00u);
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_consumer_unset");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets                   = 2u;
+    prof.format.tileset.tileset_size           = 15u;
+    prof.format.tileset.metatile_size          = 16u;
+    prof.format.tileset.metatile_count         = 128u;
+    prof.format.tileset.gfx_bank_offset        = 0u;
+    prof.format.tileset.gfx_ptr_offset         = 1u;
+    prof.format.tileset.metatile_bank_offset   = 3u;
+    prof.format.tileset.metatile_ptr_offset    = 4u;
+    prof.format.tileset.coll_bank_offset       = 6u;
+    prof.format.tileset.coll_ptr_offset        = 7u;
+    prof.format.tileset.palmap_offset          = 13u;
+    prof.format.tileset.palmap_size            = 112u;  // set so palmap_size guard doesn't fire first
+    prof.offsets.tilesets                      = TILESETS_FLAT;
+    prof.offsets.palmap_consumer_bank          = 0u;  // ← deliberately unset
+    prof.offsets.tileset_bg_palette            = 0u;
+    prof.offsets.special_tileset_palette_count = 0u;
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_tileset(1u);
+
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(!result.error.empty());
+    ASSERT_TRUE(result.error.find("palmap_consumer_bank") != std::string::npos);
+    std::cout << "\n    [palmap_consumer_bank=0 → hard failure: \""
+              << result.error << "\"]\n";
+}
+//=============================================================================
+// PALMAP SIZE FORMAT RULE TESTS
+//
+// Proves the palmap_size format rule drives extraction:
+//   112 → Crystal layout (48+16+48)
+//    48 → Gold/Silver layout (48 only; does not overread sentinel)
+//     0 → hard failure before any read
+//=============================================================================
+
+// ── 112-byte Crystal layout (bank-0 + gap + bank-1) ─────────────────────
+TEST(palmap_size_crystal_112_reads_bank1) {
+    constexpr uint8_t  TILESETS_BANK = 0x20u;
+    constexpr uint32_t TILESETS_FLAT = static_cast<uint32_t>(TILESETS_BANK) * 0x4000u;
+    constexpr uint16_t GFX_PTR = 0x5000u, META_PTR = 0x6000u;
+    constexpr uint16_t COLL_PTR = 0x6800u, PALMAP_PTR = 0x7000u;
+    constexpr uint32_t GFX_FLAT  = TILESETS_FLAT + (GFX_PTR  - 0x4000u);
+    constexpr uint32_t META_FLAT = TILESETS_FLAT + (META_PTR - 0x4000u);
+    constexpr uint32_t COLL_FLAT = TILESETS_FLAT + (COLL_PTR - 0x4000u);
+    constexpr uint8_t  PAL_BANK  = TILESETS_BANK;
+    constexpr uint32_t PAL_FLAT  = static_cast<uint32_t>(PAL_BANK) * 0x4000u + (PALMAP_PTR - 0x4000u);
+
+    auto rom_bytes = make_base_rom();
+    { // tileset entry
+        uint32_t e = TILESETS_FLAT + 1u*15u;
+        rom_bytes[e+0]=TILESETS_BANK; rom_bytes[e+1]=GFX_PTR&0xFF;  rom_bytes[e+2]=GFX_PTR>>8;
+        rom_bytes[e+3]=TILESETS_BANK; rom_bytes[e+4]=META_PTR&0xFF; rom_bytes[e+5]=META_PTR>>8;
+        rom_bytes[e+6]=TILESETS_BANK; rom_bytes[e+7]=COLL_PTR&0xFF; rom_bytes[e+8]=COLL_PTR>>8;
+        rom_bytes[e+9]=0x00u; rom_bytes[e+10]=0x40u;
+        rom_bytes[e+11]=0x00u; rom_bytes[e+12]=0x40u;
+        rom_bytes[e+13]=PALMAP_PTR&0xFF; rom_bytes[e+14]=PALMAP_PTR>>8;
+    }
+    std::fill(rom_bytes.begin()+GFX_FLAT,  rom_bytes.begin()+GFX_FLAT+200,   0x00u);
+    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
+    std::fill(rom_bytes.begin()+META_FLAT, rom_bytes.begin()+META_FLAT+128*16, 0x00u);
+    std::fill(rom_bytes.begin()+COLL_FLAT, rom_bytes.begin()+COLL_FLAT+128*4,  0x00u);
+
+    // PalMap: 112 bytes.  Bank-0 (bytes 0..47): 0x11 (palettes 1,1).
+    //                     Gap    (bytes 48..63): 0xFF (filler).
+    //                     Bank-1 (bytes 64..111): 0x22 (palettes 2,2).
+    std::fill(rom_bytes.begin()+PAL_FLAT,     rom_bytes.begin()+PAL_FLAT+48,      0x11u);
+    std::fill(rom_bytes.begin()+PAL_FLAT+48,  rom_bytes.begin()+PAL_FLAT+64,      0xFFu);
+    std::fill(rom_bytes.begin()+PAL_FLAT+64,  rom_bytes.begin()+PAL_FLAT+112,     0x22u);
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_112");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets                    = 2u;
+    prof.format.tileset.tileset_size            = 15u;
+    prof.format.tileset.metatile_size           = 16u;
+    prof.format.tileset.metatile_count          = 128u;
+    prof.format.tileset.gfx_bank_offset         = 0u;
+    prof.format.tileset.gfx_ptr_offset          = 1u;
+    prof.format.tileset.metatile_bank_offset    = 3u;
+    prof.format.tileset.metatile_ptr_offset     = 4u;
+    prof.format.tileset.coll_bank_offset        = 6u;
+    prof.format.tileset.coll_ptr_offset         = 7u;
+    prof.format.tileset.palmap_offset           = 13u;
+    prof.format.tileset.palmap_size             = 112u;  // ← Crystal
+    prof.offsets.tilesets                       = TILESETS_FLAT;
+    prof.offsets.palmap_consumer_bank           = PAL_BANK;
+    prof.offsets.tileset_bg_palette             = 0u;
+    prof.offsets.special_tileset_palette_count  = 0u;
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_tileset(1u);
+
+    ASSERT_TRUE(result.success);
+    // Bank-0 byte 0x11: lo=1, hi=1 → tile 0=1, tile 1=1
+    ASSERT_TRUE(result.tileset.palette_map[0] == 1u);
+    ASSERT_TRUE(result.tileset.palette_map[1] == 1u);
+    // Bank-1 byte 0x22: lo=2, hi=2 → tile 96=2, tile 97=2
+    ASSERT_TRUE(result.tileset.palette_map[96] == 2u);
+    ASSERT_TRUE(result.tileset.palette_map[97] == 2u);
+    std::cout << "\n    [112-byte Crystal layout: bank0 palettes=1, bank1 palettes=2 ✓]\n";
+}
+
+// ── 48-byte Gold/Silver layout (bank-0 only; does NOT read beyond byte 47) ─
+TEST(palmap_size_48_no_overread) {
+    constexpr uint8_t  TILESETS_BANK = 0x20u;
+    constexpr uint32_t TILESETS_FLAT = static_cast<uint32_t>(TILESETS_BANK) * 0x4000u;
+    constexpr uint16_t GFX_PTR = 0x5000u, META_PTR = 0x6000u;
+    constexpr uint16_t COLL_PTR = 0x6800u, PALMAP_PTR = 0x7000u;
+    constexpr uint32_t GFX_FLAT  = TILESETS_FLAT + (GFX_PTR  - 0x4000u);
+    constexpr uint32_t META_FLAT = TILESETS_FLAT + (META_PTR - 0x4000u);
+    constexpr uint32_t COLL_FLAT = TILESETS_FLAT + (COLL_PTR - 0x4000u);
+    constexpr uint8_t  PAL_BANK  = TILESETS_BANK;
+    constexpr uint32_t PAL_FLAT  = static_cast<uint32_t>(PAL_BANK) * 0x4000u + (PALMAP_PTR - 0x4000u);
+
+    auto rom_bytes = make_base_rom();
+    { uint32_t e = TILESETS_FLAT + 1u*15u;
+      rom_bytes[e+0]=TILESETS_BANK; rom_bytes[e+1]=GFX_PTR&0xFF;  rom_bytes[e+2]=GFX_PTR>>8;
+      rom_bytes[e+3]=TILESETS_BANK; rom_bytes[e+4]=META_PTR&0xFF; rom_bytes[e+5]=META_PTR>>8;
+      rom_bytes[e+6]=TILESETS_BANK; rom_bytes[e+7]=COLL_PTR&0xFF; rom_bytes[e+8]=COLL_PTR>>8;
+      rom_bytes[e+9]=0x00u; rom_bytes[e+10]=0x40u;
+      rom_bytes[e+11]=0x00u; rom_bytes[e+12]=0x40u;
+      rom_bytes[e+13]=PALMAP_PTR&0xFF; rom_bytes[e+14]=PALMAP_PTR>>8; }
+    std::fill(rom_bytes.begin()+GFX_FLAT,  rom_bytes.begin()+GFX_FLAT+200,    0x00u);
+    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
+    std::fill(rom_bytes.begin()+META_FLAT, rom_bytes.begin()+META_FLAT+128*16, 0x00u);
+    std::fill(rom_bytes.begin()+COLL_FLAT, rom_bytes.begin()+COLL_FLAT+128*4,  0x00u);
+
+    // PalMap first 48 bytes: 0x33 (palettes 3,3).
+    // Bytes 48..111 (adjacent data that must NOT be read): sentinel 0x77.
+    std::fill(rom_bytes.begin()+PAL_FLAT,     rom_bytes.begin()+PAL_FLAT+48,  0x33u);
+    std::fill(rom_bytes.begin()+PAL_FLAT+48,  rom_bytes.begin()+PAL_FLAT+112, 0x77u);  // sentinel
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_48_noread");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets                    = 2u;
+    prof.format.tileset.tileset_size            = 15u;
+    prof.format.tileset.metatile_size           = 16u;
+    prof.format.tileset.metatile_count          = 128u;
+    prof.format.tileset.gfx_bank_offset         = 0u;
+    prof.format.tileset.gfx_ptr_offset          = 1u;
+    prof.format.tileset.metatile_bank_offset    = 3u;
+    prof.format.tileset.metatile_ptr_offset     = 4u;
+    prof.format.tileset.coll_bank_offset        = 6u;
+    prof.format.tileset.coll_ptr_offset         = 7u;
+    prof.format.tileset.palmap_offset           = 13u;
+    prof.format.tileset.palmap_size             = 48u;   // ← Gold/Silver
+    prof.offsets.tilesets                       = TILESETS_FLAT;
+    prof.offsets.palmap_consumer_bank           = PAL_BANK;
+    prof.offsets.tileset_bg_palette             = 0u;
+    prof.offsets.special_tileset_palette_count  = 0u;
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_tileset(1u);
+
+    ASSERT_TRUE(result.success);
+    // Bank-0 byte 0x33 → lo=3, hi=3
+    ASSERT_TRUE(result.tileset.palette_map[0] == 3u);
+    ASSERT_TRUE(result.tileset.palette_map[1] == 3u);
+    // Native tile indices 96..191 must be default 0, NOT the sentinel 0x77 value
+    // (which would give lo=7, hi=7 if the extractor had overread into bytes 48+).
+    ASSERT_TRUE(result.tileset.palette_map[96]  == 0u);  // NOT 7 from sentinel
+    ASSERT_TRUE(result.tileset.palette_map[97]  == 0u);
+    ASSERT_TRUE(result.tileset.palette_map[191] == 0u);
+    std::cout << "\n    [48-byte GS layout: bank0 palettes=3, tile96=0 (no overread of sentinel 0x77) ✓]\n";
+}
+
+// ── palmap_size == 0 → hard failure ──────────────────────────────────────
+TEST(palmap_size_zero_is_hard_failure) {
+    constexpr uint8_t  TILESETS_BANK = 0x20u;
+    constexpr uint32_t TILESETS_FLAT = static_cast<uint32_t>(TILESETS_BANK) * 0x4000u;
+    constexpr uint16_t GFX_PTR = 0x5000u, META_PTR = 0x6000u;
+    constexpr uint16_t COLL_PTR = 0x6800u, PALMAP_PTR = 0x7000u;
+    constexpr uint32_t GFX_FLAT  = TILESETS_FLAT + (GFX_PTR  - 0x4000u);
+    constexpr uint32_t META_FLAT = TILESETS_FLAT + (META_PTR - 0x4000u);
+    constexpr uint32_t COLL_FLAT = TILESETS_FLAT + (COLL_PTR - 0x4000u);
+
+    auto rom_bytes = make_base_rom();
+    { uint32_t e = TILESETS_FLAT + 1u*15u;
+      rom_bytes[e+0]=TILESETS_BANK; rom_bytes[e+1]=GFX_PTR&0xFF;  rom_bytes[e+2]=GFX_PTR>>8;
+      rom_bytes[e+3]=TILESETS_BANK; rom_bytes[e+4]=META_PTR&0xFF; rom_bytes[e+5]=META_PTR>>8;
+      rom_bytes[e+6]=TILESETS_BANK; rom_bytes[e+7]=COLL_PTR&0xFF; rom_bytes[e+8]=COLL_PTR>>8;
+      rom_bytes[e+9]=0x00u; rom_bytes[e+10]=0x40u;
+      rom_bytes[e+11]=0x00u; rom_bytes[e+12]=0x40u;
+      rom_bytes[e+13]=PALMAP_PTR&0xFF; rom_bytes[e+14]=PALMAP_PTR>>8; }
+    std::fill(rom_bytes.begin()+GFX_FLAT,  rom_bytes.begin()+GFX_FLAT+200,    0x00u);
+    write_minimal_lz_tiles(rom_bytes, GFX_FLAT, 128);
+    std::fill(rom_bytes.begin()+META_FLAT, rom_bytes.begin()+META_FLAT+128*16, 0x00u);
+    std::fill(rom_bytes.begin()+COLL_FLAT, rom_bytes.begin()+COLL_FLAT+128*4,  0x00u);
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "palmap_zero");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets                   = 2u;
+    prof.format.tileset.tileset_size           = 15u;
+    prof.format.tileset.metatile_size          = 16u;
+    prof.format.tileset.metatile_count         = 128u;
+    prof.format.tileset.gfx_bank_offset        = 0u;
+    prof.format.tileset.gfx_ptr_offset         = 1u;
+    prof.format.tileset.metatile_bank_offset   = 3u;
+    prof.format.tileset.metatile_ptr_offset    = 4u;
+    prof.format.tileset.coll_bank_offset       = 6u;
+    prof.format.tileset.coll_ptr_offset        = 7u;
+    prof.format.tileset.palmap_offset          = 13u;
+    prof.format.tileset.palmap_size            = 0u;   // ← not configured
+    prof.offsets.tilesets                      = TILESETS_FLAT;
+    prof.offsets.palmap_consumer_bank          = TILESETS_BANK;
+    prof.offsets.tileset_bg_palette            = 0u;
+    prof.offsets.special_tileset_palette_count = 0u;
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_tileset(1u);
+
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(!result.error.empty());
+    ASSERT_TRUE(result.error.find("palmap_size") != std::string::npos);
+    std::cout << "\n    [palmap_size=0 → hard failure: \"" << result.error << "\"]\n";
+}
+
+//=============================================================================
+// COMPILER LAYOUT MISMATCH ABORT TEST
+//
+// Proves that full_compiler.compile() returns false when resolve_crystal_layout()
+// reports a proven profile/ROM contradiction (n_resolved < 0).
+//
+// Scenario: build a minimal ROM containing the GetTrainerPic bounds-check pattern
+// encoding NN=68 (num_trainer_classes=67), then supply a profile that says
+// num_trainer_classes=42.  resolve_crystal_layout() returns -1 on the mismatch;
+// compile() must abort and return false without creating an output package.
+//
+// This uses the real FullGameCompiler pipeline (not just the resolver directly),
+// proving the abort is wired at the compiler level.
+//=============================================================================
+TEST(compiler_layout_mismatch_aborts_compile) {
+    if (!g_rom || !g_profile) {
+        std::cout << "\n    [SKIP: no ROM / profile available]\n";
+        g_tests_passed++;  // soft skip, not a failure
+        return;
+    }
+
+    // Make a writable copy of the vanilla profile and corrupt num_trainer_classes.
+    crystal::ExtractionProfile bad_profile = *g_profile;
+    bad_profile.counts.num_trainer_classes = 42u;  // contradicts ROM-derived 67
+
+    auto out = temp_emon_path("layout_mismatch_abort");
+    std::filesystem::remove(out);
+
+    FullGameCompiler compiler(*g_rom, bad_profile);
+    bool ok = compiler.compile(out, no_cache_config());
+
+    // compile() must return false — the mismatch is detected before extraction begins.
+    ASSERT_FALSE(ok);
+
+    // The output package must not have been written.
+    bool absent = !std::filesystem::exists(out) || std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(absent);
+
+    std::cout << "\n    [layout mismatch (NTC=42 vs ROM=67) → compile()=false, "
+                 "no package written ✓]\n";
+}
+
+//=============================================================================
+// ENVIRONMENT BOUND TESTS
+//
+// map_entry.environment must be validated against fmt.map.max_environment_value
+// (default 7, from resolve_environment_domain()).
+// env=7 must be accepted; env=8 must be rejected; max_env=0 must hard-reject.
+//=============================================================================
+
+TEST(map_environment_bound_uses_format_field) {
+    // A minimal profile with max_environment_value=7.
+    // The extractor must reject a map entry with environment=8 (> 7).
+    // It must accept environment=7.
+    //
+    // We test this directly via read_map_group_entry() behaviour:
+    // build a synthetic ROM with a map group entry where environment=8.
+    // extract_map() must fail (read_map_group_entry returns false for env > 7).
+    //
+    // Rather than driving the full compiler, we test the MapExtractor directly.
+    if (!g_rom || !g_profile) {
+        std::cout << "\n    [SKIP: no ROM / profile]\n";
+        g_tests_passed++;
+        return;
+    }
+
+    // Build a minimal in-memory ROM containing one map group entry
+    // with environment=8 (above max_environment_value=7).
+    constexpr uint8_t  MAP_BANK  = 0x25u;
+    constexpr uint32_t MGP_FLAT  = static_cast<uint32_t>(MAP_BANK) * 0x4000u;
+
+    auto rom_bytes = make_base_rom();
+
+    // MapGroupPointers[0] = dw 0x4010 (group 1 data starts here)
+    constexpr uint16_t GROUP_PTR = 0x4010u;
+    rom_bytes[MGP_FLAT + 0] = GROUP_PTR & 0xFF;
+    rom_bytes[MGP_FLAT + 1] = GROUP_PTR >> 8;
+
+    // Map entry at MGP_FLAT + (GROUP_PTR - 0x4000) = MGP_FLAT + 0x10
+    // Vanilla Crystal layout (9 bytes):
+    //   [0]=attr_bank [1]=tileset [2]=environment [3-4]=attr_ptr [5]=location
+    //   [6]=music [7]=phone_palette [8]=fishgroup
+    constexpr uint32_t ENTRY_FLAT = MGP_FLAT + 0x10u;
+    rom_bytes[ENTRY_FLAT + 0] = MAP_BANK;   // attr_bank
+    rom_bytes[ENTRY_FLAT + 1] = 1u;         // tileset = 1 (valid)
+    rom_bytes[ENTRY_FLAT + 2] = 8u;         // environment = 8 (> max_environment_value=7)
+    rom_bytes[ENTRY_FLAT + 3] = 0x00u;      // attr_ptr lo
+    rom_bytes[ENTRY_FLAT + 4] = 0x50u;      // attr_ptr hi = 0x5000 (banked)
+
+    // Place a plausible MapAttributes at MAP_BANK:0x5000
+    constexpr uint32_t ATTR_FLAT = MGP_FLAT + (0x5000u - 0x4000u);
+    rom_bytes[ATTR_FLAT + 0] = 0x00u;       // border_block
+    rom_bytes[ATTR_FLAT + 1] = 4u;          // height (non-zero, ≤ 200)
+    rom_bytes[ATTR_FLAT + 2] = 4u;          // width  (non-zero, ≤ 200)
+    rom_bytes[ATTR_FLAT + 3] = MAP_BANK;    // blockdata_bank
+    rom_bytes[ATTR_FLAT + 4] = 0x00u;       // blockdata_ptr lo
+    rom_bytes[ATTR_FLAT + 5] = 0x60u;       // blockdata_ptr hi = 0x6000
+    rom_bytes[ATTR_FLAT + 6] = MAP_BANK;    // script_bank
+    rom_bytes[ATTR_FLAT + 7] = 0x00u;       // script_ptr lo
+    rom_bytes[ATTR_FLAT + 8] = 0x70u;       // script_ptr hi = 0x7000
+    rom_bytes[ATTR_FLAT + 9] = 0x00u;       // events_ptr lo
+    rom_bytes[ATTR_FLAT +10] = 0x70u;       // events_ptr hi = 0x7000
+    rom_bytes[ATTR_FLAT +11] = 0x00u;       // connections
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "env8_reject");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof = *g_profile;
+    prof.offsets.map_group_pointers = MGP_FLAT;
+    prof.offsets.map_groups_bank    = MAP_BANK;
+    prof.counts.num_map_groups      = 1u;
+    prof.counts.num_tilesets        = 1u;  // tileset=1 accepted
+    // max_environment_value default = 7 (from profile struct default)
+    ASSERT_TRUE(prof.format.map.max_environment_value == 7u);
+
+    crystal::MapExtractor extractor(*rom_data, prof);
+    // extract_map(group=1, index=1) should fail because environment=8 > 7
+    auto result = extractor.extract_map(1u, 1u);
+    ASSERT_FALSE(result.success);
+    std::cout << "\n    [env=8 > max_env=7 → extraction failure ✓"
+              << " error=\"" << result.error << "\"]\n";
+}
+
+TEST(map_environment_bound_accepts_max_value) {
+    // Same setup but environment=7 (exactly max) must succeed extraction (up to attr bank probe).
+    if (!g_rom || !g_profile) {
+        std::cout << "\n    [SKIP: no ROM / profile]\n";
+        g_tests_passed++;
+        return;
+    }
+
+    constexpr uint8_t  MAP_BANK = 0x25u;
+    constexpr uint32_t MGP_FLAT = static_cast<uint32_t>(MAP_BANK) * 0x4000u;
+    auto rom_bytes = make_base_rom();
+
+    constexpr uint16_t GROUP_PTR = 0x4010u;
+    rom_bytes[MGP_FLAT + 0] = GROUP_PTR & 0xFF;
+    rom_bytes[MGP_FLAT + 1] = GROUP_PTR >> 8;
+
+    constexpr uint32_t ENTRY_FLAT = MGP_FLAT + 0x10u;
+    rom_bytes[ENTRY_FLAT + 0] = MAP_BANK;
+    rom_bytes[ENTRY_FLAT + 1] = 1u;
+    rom_bytes[ENTRY_FLAT + 2] = 7u;         // environment = 7 (== max_environment_value=7)
+    rom_bytes[ENTRY_FLAT + 3] = 0x00u;
+    rom_bytes[ENTRY_FLAT + 4] = 0x50u;
+
+    // MapAttributes at MAP_BANK:0x5000 — enough for header parse
+    constexpr uint32_t ATTR_FLAT = MGP_FLAT + (0x5000u - 0x4000u);
+    rom_bytes[ATTR_FLAT + 0] = 0x00u; rom_bytes[ATTR_FLAT + 1] = 4u;
+    rom_bytes[ATTR_FLAT + 2] = 4u;
+    rom_bytes[ATTR_FLAT + 3] = MAP_BANK; rom_bytes[ATTR_FLAT + 4] = 0x00u; rom_bytes[ATTR_FLAT + 5] = 0x60u;
+    rom_bytes[ATTR_FLAT + 6] = MAP_BANK; rom_bytes[ATTR_FLAT + 7] = 0x00u; rom_bytes[ATTR_FLAT + 8] = 0x70u;
+    rom_bytes[ATTR_FLAT + 9] = 0x00u; rom_bytes[ATTR_FLAT + 10] = 0x70u; rom_bytes[ATTR_FLAT + 11] = 0x00u;
+    // Place minimal events structure at 0x7000 (events_ptr)
+    constexpr uint32_t EVT_FLAT = MGP_FLAT + (0x7000u - 0x4000u);
+    rom_bytes[EVT_FLAT + 0] = 0u;   // warp_count=0
+    rom_bytes[EVT_FLAT + 1] = 0u;   // coord_count=0
+    rom_bytes[EVT_FLAT + 2] = 0u;   // bg_count=0
+    rom_bytes[EVT_FLAT + 3] = 0u;   // obj_count=0
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "env7_accept");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof = *g_profile;
+    prof.offsets.map_group_pointers = MGP_FLAT;
+    prof.offsets.map_groups_bank    = MAP_BANK;
+    prof.counts.num_map_groups      = 1u;
+    prof.counts.num_tilesets        = 1u;
+    ASSERT_TRUE(prof.format.map.max_environment_value == 7u);
+
+    crystal::MapExtractor extractor(*rom_data, prof);
+    // Must NOT fail at the environment check (may fail at block data, scripts, etc.)
+    auto result = extractor.extract_map(1u, 1u);
+    // The map may fail later (block data out-of-bounds, etc.) but NOT due to environment
+    // We verify the failure is NOT the environment guard by checking the error string.
+    if (!result.success) {
+        bool env_error = result.error.find("environment") != std::string::npos;
+        ASSERT_FALSE(env_error);
+        std::cout << "\n    [env=7 passes env check; fails later: \"" << result.error << "\" ✓]\n";
+    } else {
+        std::cout << "\n    [env=7 accepted ✓]\n";
+    }
+}
+
+TEST(map_environment_bound_zero_max_rejects) {
+    // If max_environment_value == 0 (unconfigured), extraction must fail rather than
+    // accepting any environment value.
+    if (!g_rom || !g_profile) {
+        std::cout << "\n    [SKIP: no ROM / profile]\n";
+        g_tests_passed++;
+        return;
+    }
+
+    constexpr uint8_t  MAP_BANK = 0x25u;
+    constexpr uint32_t MGP_FLAT = static_cast<uint32_t>(MAP_BANK) * 0x4000u;
+    auto rom_bytes = make_base_rom();
+
+    constexpr uint16_t GROUP_PTR = 0x4010u;
+    rom_bytes[MGP_FLAT + 0] = GROUP_PTR & 0xFF;
+    rom_bytes[MGP_FLAT + 1] = GROUP_PTR >> 8;
+
+    constexpr uint32_t ENTRY_FLAT = MGP_FLAT + 0x10u;
+    rom_bytes[ENTRY_FLAT + 0] = MAP_BANK;
+    rom_bytes[ENTRY_FLAT + 1] = 1u;
+    rom_bytes[ENTRY_FLAT + 2] = 1u;  // environment=1 (TOWN) — valid in any real profile
+    rom_bytes[ENTRY_FLAT + 3] = 0x00u; rom_bytes[ENTRY_FLAT + 4] = 0x50u;
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "env_max0_reject");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof = *g_profile;
+    prof.offsets.map_group_pointers = MGP_FLAT;
+    prof.offsets.map_groups_bank    = MAP_BANK;
+    prof.counts.num_map_groups      = 1u;
+    prof.counts.num_tilesets        = 1u;
+    prof.format.map.max_environment_value = 0u;  // ← unconfigured
+
+    crystal::MapExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_map(1u, 1u);
+    // Must fail: max_environment_value=0 means we cannot validate the environment field.
+    ASSERT_FALSE(result.success);
+    std::cout << "\n    [max_environment_value=0 → hard reject ✓]\n";
+}
+
+//=============================================================================
+// STDSCRIPTS VALIDATION STRIDE TESTS
+//=============================================================================
+
+TEST(validate_profile_layout_stdscripts_uses_entry_size) {
+    // Prove that validate_profile_layout() uses fmt.script.std_scripts_entry_size
+    // rather than the old hardcoded *3.
+    // Scenario:
+    //   - ROM has exactly 100 bytes of "free space" at a notional StdScripts address.
+    //   - Profile says std_scripts_count=50 with entry_size=2 → needs 100 bytes → fits.
+    //   - Profile says std_scripts_count=50 with entry_size=3 → needs 150 bytes → rejected.
+    //   - Profile says std_scripts_count=50 with entry_size=0 → invalid → rejected.
+
+    const size_t ROM_SZ = 0x200000u;  // 2 MB minimum
+    std::vector<uint8_t> rom_bytes(ROM_SZ, 0x00u);
+
+    // Minimal map group pointer for check 3 to pass
+    constexpr uint32_t MGP_FLAT = 0x94000u;
+    rom_bytes[MGP_FLAT + 0] = 0x00u;
+    rom_bytes[MGP_FLAT + 1] = 0x40u;  // first ptr = 0x4000 (valid banked)
+
+    // StdScripts at a known flat address with exactly 100 bytes "available"
+    constexpr uint32_t STD_FLAT = 0x80000u;  // arbitrary
+    constexpr uint16_t STD_COUNT = 50u;
+
+    auto make_prof = [&](uint16_t count, uint8_t esz) {
+        crystal::ExtractionProfile prof;
+        prof.offsets.map_group_pointers = MGP_FLAT;  // valid ptr planted above
+        prof.offsets.base_data          = 0u;         // skip base_data check
+        prof.offsets.std_scripts        = STD_FLAT;
+        prof.offsets.std_scripts_count  = count;
+        prof.format.script.std_scripts_entry_size = esz;
+        prof.counts.num_pokemon  = 1u;   // minimal
+        return prof;
+    };
+
+    auto& reg = crystal::ProfileRegistry::instance();
+
+    // Case 1: size=2, count=50 → 100 bytes needed, 100 bytes available → PASS
+    {
+        auto prof = make_prof(STD_COUNT, 2u);
+        std::string reason;
+        bool ok = reg.validate_profile_layout(prof, rom_bytes.data(), ROM_SZ, &reason);
+        // May fail on other checks (base_data etc.) but NOT on StdScripts bounds.
+        // If it does fail, the reason must not mention std_scripts.
+        bool std_fail = reason.find("std_scripts") != std::string::npos;
+        ASSERT_FALSE(std_fail);
+        std::cout << "\n    [size=2 count=50 (100 bytes) passes StdScripts check ✓]";
+    }
+
+    // Case 2: size=3, count=50 → 150 bytes needed, but ROM only has 100 usable at STD_FLAT
+    // Actually: ROM is 2MB so 150 bytes fit fine.
+    // We need a scenario where it actually exceeds ROM.
+    // Place std_scripts near the very end of the ROM.
+    {
+        constexpr uint32_t STD_NEAR_END = ROM_SZ - 100u;  // 100 bytes left
+        auto prof = make_prof(50u, 3u);
+        prof.offsets.std_scripts = STD_NEAR_END;
+        std::string reason;
+        bool ok = reg.validate_profile_layout(prof, rom_bytes.data(), ROM_SZ, &reason);
+        bool std_fail = !ok && reason.find("std_scripts") != std::string::npos;
+        ASSERT_TRUE(std_fail);
+        std::cout << "\n    [size=3 count=50 near ROM end → StdScripts bounds failure ✓"
+                  << " reason=\"" << reason << "\"]";
+    }
+
+    // Case 3: size=0 → must hard fail at entry_size=0 check
+    {
+        auto prof = make_prof(50u, 0u);
+        std::string reason;
+        bool ok = reg.validate_profile_layout(prof, rom_bytes.data(), ROM_SZ, &reason);
+        bool zero_fail = !ok && reason.find("entry_size") != std::string::npos;
+        ASSERT_TRUE(zero_fail);
+        std::cout << "\n    [size=0 → entry_size=0 hard failure ✓"
+                  << " reason=\"" << reason << "\"]\n";
+    }
+}
+
+//=============================================================================
+// NUM_TILESETS FORMAT RULE TESTS
+//=============================================================================
+
+// Default ProfileCounts has num_tilesets == 0 (not configured).
+TEST(num_tilesets_default_is_zero) {
+    crystal::ProfileCounts c;
+    ASSERT_TRUE(c.num_tilesets == 0u);
+    std::cout << "\n    [ProfileCounts default num_tilesets=0 ✓]\n";
+}
+
+// num_tilesets == 0 → extract_tileset hard-fails before reading anything.
+TEST(num_tilesets_zero_is_hard_failure) {
+    // Any ROM will do — the guard fires before any ROM access.
+    constexpr uint8_t  TILESETS_BANK = 0x20u;
+    constexpr uint32_t TILESETS_FLAT = static_cast<uint32_t>(TILESETS_BANK) * 0x4000u;
+
+    auto rom_bytes = make_base_rom();
+    // Write a plausible tileset entry at index 1 so the guard is definitely
+    // what fails (not ROM bounds).
+    { uint32_t e = TILESETS_FLAT + 1u * 15u;
+      rom_bytes[e+0] = TILESETS_BANK; rom_bytes[e+1] = 0x00u; rom_bytes[e+2] = 0x50u;
+      rom_bytes[e+3] = TILESETS_BANK; rom_bytes[e+4] = 0x00u; rom_bytes[e+5] = 0x60u;
+      rom_bytes[e+6] = TILESETS_BANK; rom_bytes[e+7] = 0x00u; rom_bytes[e+8] = 0x68u;
+      rom_bytes[e+9] = 0x00u; rom_bytes[e+10] = 0x40u;
+      rom_bytes[e+11]= 0x00u; rom_bytes[e+12] = 0x40u;
+      rom_bytes[e+13]= 0x00u; rom_bytes[e+14] = 0x70u; }
+
+    auto rom_data = load_rom_from_bytes(rom_bytes, "num_tilesets_zero");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets           = 0u;  // ← not configured
+    prof.format.tileset.tileset_size   = 15u;
+    prof.format.tileset.palmap_size    = 112u;
+    prof.offsets.tilesets              = TILESETS_FLAT;
+    prof.offsets.palmap_consumer_bank  = TILESETS_BANK;
+    prof.offsets.special_tileset_palette_count = 0u;
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    auto result = extractor.extract_tileset(1u);
+
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(!result.error.empty());
+    ASSERT_TRUE(result.error.find("num_tilesets") != std::string::npos);
+    std::cout << "\n    [num_tilesets=0 → hard failure: \"" << result.error << "\"]\n";
+}
+
+// Crystal explicit 36 still passes index validation (extract_all_tilesets stops at 36).
+TEST(num_tilesets_crystal_36_accepted) {
+    crystal::ProfileCounts c;
+    c.num_tilesets = 36u;
+    ASSERT_TRUE(c.num_tilesets == 36u);
+    // Also verify the extractor rejects out-of-range indices relative to 36.
+    constexpr uint8_t  TILESETS_BANK = 0x13u;
+    constexpr uint32_t TILESETS_FLAT = static_cast<uint32_t>(TILESETS_BANK) * 0x4000u;
+
+    auto rom_bytes = make_base_rom();
+    auto rom_data = load_rom_from_bytes(rom_bytes, "num_tilesets_36");
+    ASSERT_TRUE(rom_data != nullptr);
+
+    crystal::ExtractionProfile prof;
+    prof.counts.num_tilesets           = 36u;
+    prof.format.tileset.tileset_size   = 15u;
+    prof.format.tileset.palmap_size    = 112u;
+    prof.offsets.tilesets              = TILESETS_FLAT;
+    prof.offsets.palmap_consumer_bank  = TILESETS_BANK;
+    prof.offsets.special_tileset_palette_count = 0u;
+
+    crystal::TilesetExtractor extractor(*rom_data, prof);
+    // Index 37 must be rejected (out of range).
+    auto bad = extractor.extract_tileset(37u);
+    ASSERT_FALSE(bad.success);
+    ASSERT_TRUE(bad.error.find("valid range") != std::string::npos ||
+                bad.error.find("num_tilesets") != std::string::npos);
+    // Index 0 must also be rejected.
+    auto bad0 = extractor.extract_tileset(0u);
+    ASSERT_FALSE(bad0.success);
+    std::cout << "\n    [num_tilesets=36: index 37 rejected, index 0 rejected ✓]\n";
+}
 //
 // These tests verify that when a map's MapScripts header declares N scene or
 // callback entries but the ROM is truncated before all N entries are present,
@@ -1359,6 +1889,50 @@ TEST(callback_entry_truncation_throws_not_silent) {
     std::cout << "  [callback-bearing map failure → discovery throws → compile() false ✓]\n";
 }
 
+// =============================================================================
+// SPECIES EXTRACTION FAILURE — Phase 2 exception → compile() returns false
+//
+// Proves the confirmed P1 fix: build_production_game_data() throws
+// std::runtime_error when species extraction fails, and compile() must
+// convert that throw into a false return rather than letting the exception
+// escape to the caller.
+//
+// Injection: for_test_fail_species_extraction() sets num_pokemon=0 in the
+// profile copy passed to extract_all_species(), which returns !success
+// immediately (no bounds read, no ROM access) — deterministically triggering
+// the throw inside build_production_game_data().
+//
+// The test enters compile() fully (Phase 1 discovery and Phase 2 script
+// pipeline succeed) and fails at Phase 2's game-data build step, proving the
+// try/catch boundary that was added in the fix.
+// =============================================================================
+TEST(species_extraction_failure_fails_compile) {
+    auto out = temp_emon_path("species_extraction_fail");
+    std::filesystem::remove(out);
+
+    FullGameCompiler compiler(*g_rom, *g_profile);
+    compiler.for_test_fail_species_extraction();
+
+    // compile() must return false — not throw, not abort.
+    bool ok = false;
+    bool threw = false;
+    try {
+        ok = compiler.compile(out, no_cache_config());
+    } catch (...) {
+        threw = true;
+    }
+
+    ASSERT_FALSE(threw);   // exception must NOT escape compile()
+    ASSERT_FALSE(ok);      // compile() must return false
+
+    // No output package must be written (or it must be empty/absent).
+    bool absent = !std::filesystem::exists(out) || std::filesystem::file_size(out) == 0;
+    if (std::filesystem::exists(out)) std::filesystem::remove(out);
+    ASSERT_TRUE(absent);
+
+    std::cout << "  [species extraction failure → compile()=false, no throw, no package ✓]\n";
+}
+
 //=============================================================================
 // MAIN
 //=============================================================================
@@ -1437,13 +2011,36 @@ int main(int argc, char* argv[]) {
     RUN_TEST(lz_missing_terminator_returns_failure);
     RUN_TEST(lz_valid_prefix_then_corruption_returns_failure);
 
-    // PALMAP bank derivation: relocated tilesets table uses its own bank
-    RUN_TEST(palmap_bank_derived_from_tilesets_table_bank);
-    RUN_TEST(palmap_unset_tilesets_address_is_hard_failure);
+    // PALMAP consumer bank authority tests
+    RUN_TEST(palmap_consumer_bank_real_roms);
+    RUN_TEST(palmap_consumer_bank_differs_from_tilesets_bank);
+    RUN_TEST(palmap_consumer_bank_unset_is_hard_failure);
+
+    // Compiler-level layout mismatch abort test
+    RUN_TEST(compiler_layout_mismatch_aborts_compile);
+
+    // PALMAP size format rule tests
+    RUN_TEST(palmap_size_crystal_112_reads_bank1);
+    RUN_TEST(palmap_size_48_no_overread);
+    RUN_TEST(palmap_size_zero_is_hard_failure);
+
+    // num_tilesets format rule tests
+    RUN_TEST(num_tilesets_default_is_zero);
+    RUN_TEST(num_tilesets_zero_is_hard_failure);
+    RUN_TEST(num_tilesets_crystal_36_accepted);
+
+    // Environment bound and StdScripts stride tests
+    RUN_TEST(map_environment_bound_uses_format_field);
+    RUN_TEST(map_environment_bound_accepts_max_value);
+    RUN_TEST(map_environment_bound_zero_max_rejects);
+    RUN_TEST(validate_profile_layout_stdscripts_uses_entry_size);
 
     // Scene/callback entry truncation adversarial tests
     RUN_TEST(scene_entry_truncation_throws_not_silent);
     RUN_TEST(callback_entry_truncation_throws_not_silent);
+
+    // Phase 2 exception → compile() bool contract (P1 fix)
+    RUN_TEST(species_extraction_failure_fails_compile);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";

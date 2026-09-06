@@ -1,5 +1,5 @@
-// engine/battle/battle.cpp
-// Gen 2 battle system — turn-based Pokemon battles
+﻿// engine/battle/battle.cpp
+// Gen 2 battle system ΓÇö turn-based Pokemon battles
 //
 // Architecture note:
 //   Battle owns no renderer, no Lua, no ROM references.
@@ -8,7 +8,7 @@
 //   that does NOT touch GameState::rng.
 //
 // Turn flow (source: suiCune core.c):
-//   1. Determine turn order (priority → speed → random tie)
+//   1. Determine turn order (priority ΓåÆ speed ΓåÆ random tie)
 //   2. First actor executes action
 //   3. Check faint after first action
 //   4. If both still alive: second actor executes action
@@ -113,7 +113,7 @@ static BattlePokemon make_battle_pokemon(
 // Battle construction / destruction
 // ============================================================================
 
-// Production constructor — BattleRules required at construction.
+// Production constructor ΓÇö BattleRules required at construction.
 Battle::Battle(BattleType type, Party& player_party, const Registries& reg,
                const BattleRules& rules)
     : type_(type)
@@ -122,7 +122,7 @@ Battle::Battle(BattleType type, Party& player_party, const Registries& reg,
     , rules_(&rules)
 {}
 
-// Test constructor — no BattleRules; execute_turn() will throw in release.
+// Test constructor ΓÇö no BattleRules; execute_turn() will throw in release.
 Battle::Battle(BattleType type, Party& player_party, const Registries& reg)
     : type_(type)
     , player_party_(player_party)
@@ -160,7 +160,7 @@ void Battle::set_trainer(TrainerId trainer, const TrainerData& data) {
     trainer_class_index_ = data.trainer_class;
     // Crystal's ComputeTrainerReward uses wCurPartyLevel, which holds the level of the
     // LAST pokemon parsed from the trainer party stream (not the highest level).
-    // Source: read_trainer_party.asm — wCurPartyLevel set in the parsing loop;
+    // Source: read_trainer_party.asm ΓÇö wCurPartyLevel set in the parsing loop;
     // after the loop ends, it holds the last value set, which is the last party member.
     last_trainer_party_level_ = data.party.empty() ? 0
                               : data.party.back().level;
@@ -318,7 +318,7 @@ void Battle::execute_turn() {
         }
     } else if (type_ == BattleType::Wild) {
         // Wild: uniform random selection among usable moves.
-        // Source: Crystal AIChooseMove — wild uses Random() % num_usable_moves,
+        // Source: Crystal AIChooseMove ΓÇö wild uses Random() % num_usable_moves,
         // not per-slot biased selection.
         ActionFight af; af.target = 0; af.move_slot = 0;
         std::vector<size_t> usable;
@@ -411,176 +411,790 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
 
     message((user_is_player ? "Player used " : "Opponent used ") + md->name + "!");
 
-    if (md->category == MoveCategory::Status) {
-        // Status move effects are not implemented in this pass.
-        // PP NOT deducted. Return UnsupportedSemantic to halt turn continuation.
-        // Source: Crystal dispatches each status effect via BattleCommand handlers.
-        message(md->name + " — status effect not yet supported (deferred).");
+    // â”€â”€ Recharge gate (Hyper Beam) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (user.recharge_turns > 0) {
+        --user.recharge_turns;
+        message(md->name + " â€” must recharge!");
+        return MoveExecutionResult::UnsupportedSemantic;  // turn skipped, no halt
+    }
+
+    // -- Support gate - read from SemanticEffectDescription ------------------
+    // Execution dispatch is entirely driven by effect_desc.
+    // effect_id (SemEffect::X) is retained for AI classification only.
+    // There is no synthesis from effect_id at runtime: missing or unsupported
+    // descriptions fail closed with UnsupportedSemantic.
+    const auto& effective_desc = md->effect_desc;
+
+    // Hard fail for unsupported or missing descriptions.
+    // Production packages always carry a compiled SemanticEffectDescription.
+    // A zero-init desc (is_supported=false) means the move was never compiled
+    // through the semanticizer -- treat as unsupported, never synthesise.
+    if (!effective_desc.is_supported) {
+        message(md->name + " -- effect not yet implemented (deferred).");
         return MoveExecutionResult::UnsupportedSemantic;
     }
 
-    // Deduct PP (only for damaging moves where execution proceeds)
+    // â”€â”€ PP deduction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (move_slot < 4 && user.moves[move_slot].pp > 0)
         user.moves[move_slot].pp--;
 
-    // Accuracy check
-    // 0xFF = always hit (Crystal encoding for never-miss moves like Swift).
-    // 0    = missing/unset data — explicit invalid-data failure; undo PP deduct.
+    // â”€â”€ Safeguard check for status moves â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Source: BattleCommand_CheckSafeguard â€” returns fail if opponent has Safeguard.
+    const bool target_has_safeguard =
+        user_is_player ? (field_.safeguard_opponent > 0) : (field_.safeguard_player > 0);
+
+    // â”€â”€ OHKO special path â€” no standard pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.is_ohko) {
+        // Auto-fail if target level > user level (BattleCommand_OHKO).
+        if (target.level > user.level) {
+            message("The attack missed!");
+            return MoveExecutionResult::Miss;
+        }
+        // Accuracy: base_acc + (user_level - target_level) Ã— multiplier
+        const uint8_t mult = rules_ ? rules_->get_ohko_level_mult() : uint8_t{2};
+        const int32_t level_bonus = (static_cast<int32_t>(user.level) -
+                                     static_cast<int32_t>(target.level)) * mult;
+        const int32_t eff_acc = std::min(255, static_cast<int32_t>(md->accuracy) + level_bonus);
+        const bool hit = (rng_.next_byte() < eff_acc);
+        if (!hit) {
+            message("The attack missed!");
+            return MoveExecutionResult::Miss;
+        }
+        // OHKO always faints the target.
+        message("It's a one-hit KO!");
+        const int16_t old_hp = target.stats.hp;
+        target.stats.hp = 0;
+        hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
+        outcome_.damage_dealt += static_cast<uint16_t>(old_hp);
+        return MoveExecutionResult::Success;
+    }
+
+    // â”€â”€ Pure status-only path (no damage) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (md->category == MoveCategory::Status && !effective_desc.has_standard_damage
+        && effective_desc.constant_damage_source == ConstantDamageSource::None) {
+        // Healing â€” user heals itself.
+        if (effective_desc.heal_source != HealSource::None) {
+            int32_t heal_amt = 0;
+            if (effective_desc.heal_source == HealSource::HalfMaxHP) {
+                heal_amt = std::max(1, static_cast<int32_t>(user.stats.max_hp) / 2);
+            } else if (effective_desc.heal_source == HealSource::WeatherHealing) {
+                const uint8_t sun_div = rules_ ? rules_->weather_heal.sun_divisor      : 2;
+                const uint8_t neu_div = rules_ ? rules_->weather_heal.neutral_divisor  : 2;
+                const uint8_t oth_div = rules_ ? rules_->weather_heal.other_divisor    : 4;
+                const uint8_t divisor = (field_.weather == Weather::Sun)  ? sun_div :
+                                        (field_.weather == Weather::None) ? neu_div : oth_div;
+                heal_amt = std::max(1, static_cast<int32_t>(user.stats.max_hp) / divisor);
+            }
+            if (user.stats.hp >= user.stats.max_hp) {
+                message(md->name + " â€” HP is full!");
+            } else {
+                const int16_t old_hp = user.stats.hp;
+                user.stats.hp = static_cast<int16_t>(
+                    std::min(static_cast<int32_t>(user.stats.max_hp),
+                             static_cast<int32_t>(user.stats.hp) + heal_amt));
+                hp_change(user_is_player ? 0u : 1u, old_hp, user.stats.hp);
+                message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                        + " restored HP!");
+            }
+            return MoveExecutionResult::Success;
+        }
+
+        // Screen setup.
+        if (effective_desc.set_screen != ScreenType::None) {
+            uint8_t duration = 5;  // Crystal: Reflect/Light Screen last 5 turns
+            if (effective_desc.set_screen == ScreenType::Reflect) {
+                if (user_is_player) { field_.reflect_player   = duration; }
+                else                { field_.reflect_opponent = duration; }
+                message("Reflect raised the Defense of the team!");
+            } else {
+                if (user_is_player) { field_.light_screen_player   = duration; }
+                else                { field_.light_screen_opponent = duration; }
+                message("Light Screen raised the Sp. Def. of the team!");
+            }
+            return MoveExecutionResult::Success;
+        }
+
+        // Weather setup.
+        if (effective_desc.set_weather != WeatherSetType::None) {
+            const uint8_t weather_turns = 5;
+            switch (effective_desc.set_weather) {
+                case WeatherSetType::Rain:
+                    field_.weather = Weather::Rain;
+                    field_.weather_turns = weather_turns;
+                    message("Rain started to fall!");
+                    break;
+                case WeatherSetType::Sun:
+                    field_.weather = Weather::Sun;
+                    field_.weather_turns = weather_turns;
+                    message("The sun shone harshly!");
+                    break;
+                case WeatherSetType::Sandstorm:
+                    field_.weather = Weather::Sandstorm;
+                    field_.weather_turns = weather_turns;
+                    message("A sandstorm brewed!");
+                    break;
+                default: break;
+            }
+            return MoveExecutionResult::Success;
+        }
+
+        // Primary status application.
+        if (effective_desc.primary_status != PrimaryStatusType::None) {
+            if (target_has_safeguard) {
+                message("Safeguard protected the target!");
+                return MoveExecutionResult::Miss;
+            }
+            if (target.status != Status::None) {
+                message("It didn't workâ€¦");
+                return MoveExecutionResult::Miss;
+            }
+            // Accuracy check
+            if (md->accuracy != 0xFF) {
+                if (!roll_accuracy(md->accuracy, user.stages.accuracy,
+                                   target.stages.evasion, rng_.next_byte(),
+                                   *rules_)) {
+                    message("The attack missed!");
+                    return MoveExecutionResult::Miss;
+                }
+            }
+            switch (effective_desc.primary_status) {
+                case PrimaryStatusType::Sleep:    target.status = Status::Sleep;    target.status_turns = 0; break;
+                case PrimaryStatusType::Poison:   target.status = Status::Poison;   break;
+                case PrimaryStatusType::Toxic:    target.status = Status::BadPoison; target.status_turns = 0; break;
+                case PrimaryStatusType::Paralysis:target.status = Status::Paralysis; break;
+                case PrimaryStatusType::Confusion:
+                    target.set_volatile(VolatileStatus::Confusion);
+                    message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                            + " became confused!");
+                    return MoveExecutionResult::Success;
+                default: break;
+            }
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + " was inflicted with a status condition!");
+            return MoveExecutionResult::Success;
+        }
+
+        // Stat change (status move path).
+        if (effective_desc.stat_change != StatChangeTarget::None) {
+            apply_stat_change(user, target, effective_desc.stat_change, user_is_player);
+            return MoveExecutionResult::Success;
+        }
+
+        // Spikes.
+        if (effective_desc.sets_spikes) {
+            if (user_is_player) field_.spikes_opponent = true;
+            else                field_.spikes_player   = true;
+            message("Spikes were scattered!");
+            return MoveExecutionResult::Success;
+        }
+
+        // Unrecognised status-only move â€” fail closed.
+        message(md->name + " â€” effect not yet implemented (deferred).");
+        return MoveExecutionResult::UnsupportedSemantic;
+    }
+
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // DAMAGING PATH
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    // Accuracy check.
     if (md->accuracy == 0) {
-        // Undo PP deduction: this is a data error, not a gameplay action.
         if (move_slot < 4 && user.moves[move_slot].pp < 63)
-            user.moves[move_slot].pp++;
+            user.moves[move_slot].pp++;  // undo PP deduct â€” data error
         message("Move data error: accuracy not set for " + md->name);
         return MoveExecutionResult::InvalidData;
     }
     if (md->accuracy != 0xFF) {
-        const int8_t acc_stage = user.stages.accuracy;
-        const int8_t eva_stage = target.stages.evasion;
-        bool hit;
-        if (rules_) {
-            hit = roll_accuracy(md->accuracy, acc_stage, eva_stage, rng_.next_byte(), *rules_);
-        } else {
-            hit = roll_accuracy(md->accuracy, acc_stage, eva_stage, rng_.next_byte());
-        }
+        const bool hit = rules_
+            ? roll_accuracy(md->accuracy, user.stages.accuracy,
+                            target.stages.evasion, rng_.next_byte(), *rules_)
+            : roll_accuracy(md->accuracy, user.stages.accuracy,
+                            target.stages.evasion, rng_.next_byte());
         if (!hit) {
             message("The attack missed!");
             return MoveExecutionResult::Miss;
         }
     }
 
-    // Critical hit — build stage from BattleRules + volatile state
-    uint8_t crit_stage = 0;
-    if (rules_) {
-        crit_stage = build_crit_stage(user, *md, *rules_);
+    // Type effectiveness.
+    const uint16_t type_eff = get_combined_effectiveness(
+        md->type, target.type1, target.type2, registries_.type_chart);
+    if (type_eff == 0) {
+        message("It doesn't affect the opposing PokÃ©monâ€¦");
+        return MoveExecutionResult::Immune;
     }
+
+    // â”€â”€ Constant damage path (Super Fang, Dragon Rage, etc.) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.constant_damage_source != ConstantDamageSource::None) {
+        int32_t const_dmg = 0;
+        switch (effective_desc.constant_damage_source) {
+            case ConstantDamageSource::MoveFixed:
+                const_dmg = static_cast<int32_t>(md->power);
+                break;
+            case ConstantDamageSource::UserLevel:
+                const_dmg = static_cast<int32_t>(user.level);
+                break;
+            case ConstantDamageSource::HalfTargetHP:
+                // Super Fang: floor(target_hp / 2), minimum 1
+                const_dmg = std::max(1, static_cast<int32_t>(target.stats.hp) / 2);
+                break;
+            case ConstantDamageSource::Psywave: {
+                // BattleCommand_ConstantDamage Psywave path:
+                //   b = floor(user_level Ã— 1.5)
+                //   random non-zero in [1, b) 
+                const int32_t max_dmg = std::max(1,
+                    static_cast<int32_t>(user.level) * 3 / 2);
+                do {
+                    const_dmg = static_cast<int32_t>(rng_.next_byte() % max_dmg);
+                } while (const_dmg == 0);
+                break;
+            }
+            case ConstantDamageSource::ReversalFlail: {
+                // hp_bar_pixels = floor(current_hp Ã— HP_BAR_MULT / max_hp)
+                const uint8_t mult = rules_ ? rules_->get_reversal_hp_bar_mult() : uint8_t{48};
+                const int32_t hp_pixels = (target.stats.hp > 0)
+                    ? static_cast<int32_t>(target.stats.hp) * mult / target.stats.max_hp
+                    : 0;
+                const uint8_t hp_px = static_cast<uint8_t>(std::clamp(hp_pixels, 0, 255));
+                const uint8_t power = rules_ ? rules_->get_reversal_power(hp_px) : uint8_t{20};
+                // Run through the full damage formula with the derived power.
+                {
+                    const bool stab_r = (md->type == user.type1 || md->type == user.type2);
+                    uint8_t crit_stage = 0;
+                    if (rules_) crit_stage = build_crit_stage(user, *md, *rules_);
+                    const bool is_crit_r = rules_
+                        ? roll_critical(crit_stage, rng_.next_byte(), *rules_)
+                        : roll_critical(crit_stage, rng_.next_byte());
+                    const int8_t eff_atk_r = (is_crit_r && user.stages.attack < 0) ? 0 : user.stages.attack;
+                    const int8_t eff_def_r = (is_crit_r && target.stages.defense > 0) ? 0 : target.stages.defense;
+                    auto ss = [this](int32_t b, int8_t s) {
+                        return rules_ ? apply_stat_stage(b,s,*rules_) : apply_stat_stage(b,s);
+                    };
+                    int32_t atk_r = ss(user.base_stats.attack,   eff_atk_r);
+                    int32_t def_r = ss(target.base_stats.defense, eff_def_r);
+                    const bool burned_r = (user.status == Status::Burn);
+                    DamageParams dp_r{};
+                    dp_r.attacker_level = user.level; dp_r.attack_stat = atk_r;
+                    dp_r.defense_stat = def_r; dp_r.move_power = power;
+                    dp_r.type_effectiveness = 100; dp_r.stab = false;
+                    dp_r.critical = is_crit_r; dp_r.burned = burned_r;
+                    dp_r.weather = field_.weather; dp_r.move_type = md->type;
+                    int32_t dmg_r = rules_ ? enginemon::calculate_damage(dp_r, *rules_) : enginemon::calculate_damage(dp_r);
+                    if (stab_r) { dmg_r += dmg_r/2; dmg_r = std::clamp(dmg_r, 2, 999); }
+                    if (type_eff != 100) { dmg_r = dmg_r * type_eff / 100; dmg_r = std::clamp(dmg_r, 1, 999); }
+                    // Variation
+                    const uint8_t vt = rules_ ? rules_->get_damage_var_lower_bound() : uint8_t{0xD9};
+                    const int32_t vd = rules_ ? static_cast<int32_t>(rules_->get_damage_var_divisor()) : 255;
+                    uint8_t var_r;
+                    do { uint8_t rr=rng_.next_byte(); var_r=(rr>>1)|(rr<<7); } while(var_r < vt);
+                    dmg_r = dmg_r * var_r / (vd > 0 ? vd : 255);
+                    if (dmg_r < 2) dmg_r = 2;
+                    if (is_crit_r) message("A critical hit!");
+                    if (type_eff > 100) message("It's super effective!");
+                    else if (type_eff < 100) message("It's not very effectiveâ€¦");
+                    animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
+                    const int16_t old_hp_r = target.stats.hp;
+                    target.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(target.stats.hp) - dmg_r));
+                    hp_change(user_is_player ? 1u:0u, old_hp_r, target.stats.hp);
+                    outcome_.damage_dealt += static_cast<uint16_t>(dmg_r);
+                }
+                return MoveExecutionResult::Success;
+            }
+            default:
+                const_dmg = static_cast<int32_t>(md->power);
+                break;
+        }
+        // Apply constant damage (type matchup resets for most constant-damage moves).
+        const_dmg = std::max(1, const_dmg);
+        animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
+        const int16_t old_hp_c = target.stats.hp;
+        target.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(target.stats.hp) - const_dmg));
+        hp_change(user_is_player ? 1u:0u, old_hp_c, target.stats.hp);
+        outcome_.damage_dealt += static_cast<uint16_t>(const_dmg);
+        return MoveExecutionResult::Success;
+    }
+
+    // â”€â”€ Set-power computation (Magnitude, Present, Return, Frustration) â”€â”€â”€â”€â”€
+    uint8_t computed_power = md->power;  // default: use move's power field
+    bool present_is_heal = false;
+
+    if (effective_desc.set_power_source != SetPowerSource::None) {
+        switch (effective_desc.set_power_source) {
+            case SetPowerSource::MagnitudeTable: {
+                const uint8_t rng_byte = rng_.next_byte();
+                computed_power = rules_ ? rules_->get_magnitude_power(rng_byte) : uint8_t{70};
+                message("Magnitude " + std::to_string(computed_power) + "!");
+                break;
+            }
+            case SetPowerSource::PresentTable: {
+                const uint8_t rng_byte = rng_.next_byte();
+                if (rules_) {
+                    const auto& entry = rules_->get_present_outcome(rng_byte);
+                    if (entry.is_heal) {
+                        present_is_heal = true;
+                    } else {
+                        computed_power = entry.power;
+                    }
+                } else {
+                    // Fallback: 40% chance heal, 60% chance power 40
+                    if (rng_byte < 51) { present_is_heal = true; }
+                    else { computed_power = 40; }
+                }
+                if (present_is_heal) {
+                    // Present heal: max(1, max_hp >> present_heal_shift)
+                    const uint8_t shift = rules_ ? rules_->get_present_heal_shift() : uint8_t{2};
+                    const int32_t heal = std::max(1, static_cast<int32_t>(target.stats.max_hp) >> shift);
+                    const int16_t old_hp_p = target.stats.hp;
+                    target.stats.hp = static_cast<int16_t>(
+                        std::min(static_cast<int32_t>(target.stats.max_hp),
+                                 static_cast<int32_t>(target.stats.hp) + heal));
+                    if (target.stats.hp != old_hp_p) {
+                        hp_change(user_is_player ? 1u:0u, old_hp_p, target.stats.hp);
+                        message("Present healed the target!");
+                    }
+                    return MoveExecutionResult::Success;
+                }
+                break;
+            }
+            case SetPowerSource::HappinessReturn:
+                // floor(happiness Ã— 10 / 25), max 102
+                computed_power = static_cast<uint8_t>(std::min(102,
+                    static_cast<int32_t>(user.happiness) * 10 / 25));
+                if (computed_power == 0) computed_power = 1;
+                break;
+            case SetPowerSource::HappinessFrustration:
+                computed_power = static_cast<uint8_t>(std::min(102,
+                    static_cast<int32_t>(255 - user.happiness) * 10 / 25));
+                if (computed_power == 0) computed_power = 1;
+                break;
+            default:
+                break;
+        }
+    }
+
+    // â”€â”€ Dream Eater: requires target asleep â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.drain_requires_sleep && target.status != Status::Sleep) {
+        message(md->name + " â€” the target isn't asleep!");
+        return MoveExecutionResult::Miss;
+    }
+
+    // â”€â”€ Critical hit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    uint8_t crit_stage = 0;
+    if (rules_) crit_stage = build_crit_stage(user, *md, *rules_);
     const bool is_crit = rules_
         ? roll_critical(crit_stage, rng_.next_byte(), *rules_)
         : roll_critical(crit_stage, rng_.next_byte());
 
-    // Type effectiveness
-    const uint16_t type_eff = get_combined_effectiveness(
-        md->type, target.type1, target.type2, registries_.type_chart);
-    if (type_eff == 0) {
-        message("It doesn't affect the opposing Pokémon…");
-        return MoveExecutionResult::Immune;
-    }
-
-    // STAB
+    // â”€â”€ STAB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const bool stab = (md->type == user.type1 || md->type == user.type2);
 
-    // Attack / defense stats (crit ignores negative atk stages and positive def stages)
-    // Source: suiCune effect_commands.c CheckDamageStatsCritical
+    // â”€â”€ Stat selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const int8_t eff_atk_stage  = (is_crit && user.stages.attack < 0)            ? 0 : user.stages.attack;
     const int8_t eff_def_stage  = (is_crit && target.stages.defense > 0)          ? 0 : target.stages.defense;
     const int8_t eff_satk_stage = (is_crit && user.stages.special_attack < 0)    ? 0 : user.stages.special_attack;
     const int8_t eff_sdef_stage = (is_crit && target.stages.special_defense > 0) ? 0 : target.stages.special_defense;
 
-    int32_t atk_stat, def_stat;
     const bool physical = (md->category == MoveCategory::Physical);
-
-    // Helper lambda: applies stat stage using BattleRules if available
-    auto stat_stage = [this](int32_t base, int8_t stage) -> int32_t {
-        return rules_ ? apply_stat_stage(base, stage, *rules_)
-                      : apply_stat_stage(base, stage);
+    auto ss = [this](int32_t b, int8_t s) {
+        return rules_ ? apply_stat_stage(b, s, *rules_) : apply_stat_stage(b, s);
     };
 
+    int32_t atk_stat, def_stat;
     if (physical) {
-        atk_stat = stat_stage(user.base_stats.attack,    eff_atk_stage);
-        def_stat = stat_stage(target.base_stats.defense, eff_def_stage);
-        // Reflect doubles defender's defense
+        atk_stat = ss(user.base_stats.attack,    eff_atk_stage);
+        def_stat = ss(target.base_stats.defense, eff_def_stage);
         if ( user_is_player && field_.reflect_opponent > 0) def_stat *= 2;
         if (!user_is_player && field_.reflect_player   > 0) def_stat *= 2;
     } else {
-        atk_stat = stat_stage(user.base_stats.special_attack,   eff_satk_stage);
-        def_stat = stat_stage(target.base_stats.special_defense, eff_sdef_stage);
-        // Light Screen doubles defender's special defense
+        atk_stat = ss(user.base_stats.special_attack,   eff_satk_stage);
+        def_stat = ss(target.base_stats.special_defense, eff_sdef_stage);
         if ( user_is_player && field_.light_screen_opponent > 0) def_stat *= 2;
         if (!user_is_player && field_.light_screen_player   > 0) def_stat *= 2;
     }
-
-    // Burn penalty on physical moves
     const bool burned = physical && (user.status == Status::Burn);
 
-    // Crystal damage formula matching BattleCommand_DamageCalc + BattleCommand_Stab ordering:
-    //   DamageCalc: base = (level×2/5+2) × power × atk/def/50  → crit×2 → burn>>1 → +2 floor
-    //   BattleCommand_Stab: weather → STAB → type matchup loop
-    //
-    // Step 1: compute base damage (no type_eff, no STAB — those come after weather)
+    // â”€â”€ Selfdestruct defense halving â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Source: BattleCommand_DamageCalc â€” `srl c` halves defender's defense.
+    // defense_shift=1 â†’ def_stat = max(1, def_stat >> 1)
+    if (effective_desc.user_faints && rules_) {
+        const uint8_t ds = rules_->get_selfdestruct_def_shift();
+        if (ds > 0) def_stat = std::max(1, def_stat >> ds);
+    } else if (effective_desc.user_faints) {
+        def_stat = std::max(1, def_stat / 2);
+    }
+
+    // â”€â”€ Damage calculation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     DamageParams dp{};
     dp.attacker_level     = user.level;
     dp.attack_stat        = atk_stat;
     dp.defense_stat       = def_stat;
-    dp.move_power         = md->power;
-    dp.type_effectiveness = 100;  // Neutral — type applied manually after weather (see Step 4)
-    dp.stab               = false; // Applied manually after weather (see Step 3)
+    dp.move_power         = computed_power;
+    dp.type_effectiveness = 100;
+    dp.stab               = false;
     dp.critical           = is_crit;
     dp.burned             = burned;
     dp.weather            = field_.weather;
     dp.move_type          = md->type;
 
-    int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_)
-                            : enginemon::calculate_damage(dp);
+    int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_) : enginemon::calculate_damage(dp);
     if (damage == 0) return MoveExecutionResult::Immune;
 
-    // Step 2: apply weather modifier
-    // Source: DoWeatherModifiers runs FIRST in BattleCommand_Stab, before STAB and type loop.
+    // Weather modifier
+    // NOTE: apply_weather_modifier takes md->effect_id for the 'weather × move effect'
+    // table lookup (WeatherMoveModifiers). The one existing entry in that table is
+    // {weather=Rain, effect=SolarBeam_Crystal_raw=0x97, mult=0.5x}, which maps to
+    // ai_classification=SemEffect::Unknown=0.  The lookup effect_id==0x97 will never
+    // match SemEffect::Unknown, so the SolarBeam rain penalty is currently dead.
+    // MIGRATION DEBT: this table entry must be migrated to a semantic identity
+    // (e.g. a dedicated SemEffect::SolarBeam) before Solar Beam support is added.
+    // It cannot affect currently unsupported Solar Beam execution because Solar Beam
+    // has is_supported=false in the compiled package (charge mechanic is deferred).
     if (rules_ && field_.weather != Weather::None) {
-        const uint8_t weather_id = static_cast<uint8_t>(field_.weather);
-        const uint8_t type_id    = static_cast<uint8_t>(md->type);
-        const uint8_t effect_id  = md->effect_id;
-        damage = apply_weather_modifier(damage, weather_id, type_id, effect_id, *rules_);
+        damage = apply_weather_modifier(damage,
+            static_cast<uint8_t>(field_.weather),
+            static_cast<uint8_t>(md->type),
+            md->effect_id, *rules_);
     }
 
-    // Step 3: STAB — applied after weather, before type loop.
-    // Source: BattleCommand_Stab checks STAB before .TypesLoop.
+    // STAB
     if (stab) {
-        damage += damage / 2;   // +50% integer: floor(n × 3/2) via shift+add
+        damage += damage / 2;
         if (damage > 999) damage = 999;
         if (damage < 2)   damage = 2;
     }
 
-    // Step 4: type effectiveness multiplier.
-    // Source: BattleCommand_Stab .TypesLoop applies after STAB.
-    // type_eff is in per-100 notation (100=neutral, 200=2×, 50=0.5×, 0=immune).
-    // Immunity was already checked above and returned early.
+    // Type effectiveness
     if (type_eff != 100) {
         damage = damage * static_cast<int32_t>(type_eff) / 100;
         if (damage < 1) damage = 1;
         if (damage > 999) damage = 999;
     }
 
-    // Random variation — BattleCommand_DamageVariation (suiCune).
-    // Crystal: RRCA the random byte, loop while rotated value < cp_threshold.
-    // cp_threshold is lifted from the `cp N` immediate after RRCA in the ROM.
-    // lower_bound_byte = 0xD9 (217) in vanilla = "85% floor" after RRCA scaling.
-    // Runtime uses the ROM-extracted threshold directly in the same RRCA loop.
-    const uint8_t var_threshold = rules_
-        ? rules_->get_damage_var_lower_bound()
-        : uint8_t{0xD9};  // vanilla fallback
+    // â”€â”€ Conditional double damage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.conditional_double != ConditionalDoubleCondition::None) {
+        bool double_it = false;
+        switch (effective_desc.conditional_double) {
+            case ConditionalDoubleCondition::TargetFlying:
+                double_it = target.has_volatile(VolatileStatus::Trapped);  // placeholder: no Flying volatile yet
+                break;
+            case ConditionalDoubleCondition::TargetUnderground:
+                // No Underground volatile yet; leave as normal damage
+                double_it = false;
+                break;
+            case ConditionalDoubleCondition::TargetMinimized:
+                // No Minimized volatile yet; leave as normal damage
+                double_it = false;
+                break;
+            default: break;
+        }
+        if (double_it) {
+            damage = std::min(999, damage * 2);
+        }
+    }
+
+    // â”€â”€ Cannot KO (False Swipe) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.cannot_ko) {
+        const int32_t max_dmg = static_cast<int32_t>(target.stats.hp) - 1;
+        if (max_dmg < 1) {
+            // Target already at 1 HP â€” move fails to do damage.
+            message(md->name + " â€” the target barely hung on!");
+            return MoveExecutionResult::Miss;
+        }
+        damage = std::min(damage, max_dmg);
+    }
+
+    // Damage variation
+    const uint8_t var_threshold = rules_ ? rules_->get_damage_var_lower_bound() : uint8_t{0xD9};
+    const int32_t var_divisor   = rules_ ? static_cast<int32_t>(rules_->get_damage_var_divisor()) : int32_t{255};
     uint8_t variation;
     do {
         uint8_t r = rng_.next_byte();
-        variation = (r >> 1) | (r << 7);  // RRCA
+        variation = (r >> 1) | (r << 7);
     } while (variation < var_threshold);
-    damage = damage * variation / 100;
+    const int32_t safe_div = (var_divisor > 0) ? var_divisor : 255;
+    damage = damage * static_cast<int32_t>(variation) / safe_div;
     if (damage < 2) damage = 2;
 
-    // Messages
     if (is_crit)        message("A critical hit!");
     if (type_eff > 100) message("It's super effective!");
-    else if (type_eff < 100) message("It's not very effective…");
+    else if (type_eff < 100) message("It's not very effectiveâ€¦");
 
-    animate(md->animation_id,
-            user_is_player ? 0u : 1u,
-            user_is_player ? 1u : 0u);
+    animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
 
+    // â”€â”€ Apply damage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const int16_t old_hp = target.stats.hp;
     target.stats.hp = static_cast<int16_t>(
         std::max(0, static_cast<int32_t>(target.stats.hp) - damage));
     hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
-
     outcome_.damage_dealt += static_cast<uint16_t>(damage);
+
+    // â”€â”€ Recoil â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.has_recoil && !user.is_fainted()) {
+        const uint8_t shift = rules_ ? rules_->get_recoil_shift() : uint8_t{2};
+        const int32_t recoil_dmg = (shift > 0) ? std::max(1, damage >> shift) : 1;
+        const int16_t old_user_hp = user.stats.hp;
+        user.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(user.stats.hp) - recoil_dmg));
+        hp_change(user_is_player ? 0u : 1u, old_user_hp, user.stats.hp);
+        message((user_is_player ? std::string("Player") : std::string("Opponent")) + " is hurt by recoil!");
+    }
+
+    // â”€â”€ Drain / Dream Eater â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.has_drain && !user.is_fainted()) {
+        const uint8_t shift = rules_ ? rules_->get_drain_shift() : uint8_t{1};
+        const int32_t heal_amt = (shift > 0) ? std::max(1, damage >> shift) : 1;
+        const int16_t old_user_hp = user.stats.hp;
+        user.stats.hp = static_cast<int16_t>(
+            std::min(static_cast<int32_t>(user.stats.max_hp),
+                     static_cast<int32_t>(user.stats.hp) + heal_amt));
+        if (user.stats.hp != old_user_hp) {
+            hp_change(user_is_player ? 0u : 1u, old_user_hp, user.stats.hp);
+            message((user_is_player ? std::string("Player") : std::string("Opponent")) + " drained HP!");
+        }
+    }
+
+    // â”€â”€ Selfdestruct / Explosion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.user_faints && !user.is_fainted()) {
+        // Clear user status, remove Leech Seed and Destiny Bond substatuses.
+        user.status = Status::None;
+        user.status_turns = 0;
+        user.clear_volatile(VolatileStatus::Seeded);
+        // Faint user.
+        const int16_t old_user_hp2 = user.stats.hp;
+        user.stats.hp = 0;
+        if (old_user_hp2 != 0) {
+            hp_change(user_is_player ? 0u : 1u, old_user_hp2, user.stats.hp);
+        }
+        message((user_is_player ? std::string("Player") : std::string("Opponent")) + " fainted from its own attack!");
+    }
+
+    // â”€â”€ Hyper Beam recharge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.sets_recharge && !user.is_fainted()) {
+        user.recharge_turns = 1;
+        message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                + " must recharge!");
+    }
+
+    // â”€â”€ Secondary effect (effectchance roll) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.secondary_effect != SecondaryEffectType::None
+        && !target.is_fainted()
+        && md->effect_chance > 0) {
+        // Roll: random byte < floor(effect_chance Ã— 255 / 100) fires the effect.
+        // Crystal uses: random < floor(chance Ã— 255 / 100)
+        const int32_t threshold = static_cast<int32_t>(md->effect_chance) * 255 / 100;
+        const bool fires = (rng_.next_byte() < threshold);
+        if (fires) {
+            apply_secondary_effect(user, target, effective_desc.secondary_effect, user_is_player);
+        }
+    }
+
+    // â”€â”€ Stat change on hit (DefenseUpHit, AttackDownHit, etc.) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.stat_change != StatChangeTarget::None) {
+        // For hit-effect stat changes (applied to target unconditionally on hit).
+        apply_stat_change(user, target, effective_desc.stat_change, user_is_player);
+    }
+
+    // â”€â”€ Hazard clearing (Rapid Spin) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (effective_desc.clears_hazards) {
+        if (user_is_player) field_.spikes_player = false;
+        else                field_.spikes_opponent = false;
+    }
+
     return MoveExecutionResult::Success;
+}
+
+// ============================================================================
+// Helper: apply a secondary effect to the target
+// Source: BattleCommand_PoisonTarget/BurnTarget/etc. + effectchance framework
+// ============================================================================
+void Battle::apply_secondary_effect(BattlePokemon& user, BattlePokemon& target,
+                                    SecondaryEffectType effect, bool user_is_player) {
+    const bool target_has_safeguard =
+        user_is_player ? (field_.safeguard_opponent > 0) : (field_.safeguard_player > 0);
+
+    switch (effect) {
+        case SecondaryEffectType::Burn:
+            if (target.status == Status::None && !target_has_safeguard) {
+                target.status = Status::Burn;
+                message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                        + " was burned!");
+            }
+            break;
+        case SecondaryEffectType::Freeze:
+            if (target.status == Status::None && !target_has_safeguard) {
+                target.status = Status::Freeze;
+                message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                        + " was frozen!");
+            }
+            break;
+        case SecondaryEffectType::Paralysis:
+            if (target.status == Status::None && !target_has_safeguard) {
+                target.status = Status::Paralysis;
+                message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                        + " was paralyzed!");
+            }
+            break;
+        case SecondaryEffectType::Poison:
+            if (target.status == Status::None && !target_has_safeguard) {
+                target.status = Status::Poison;
+                message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                        + " was poisoned!");
+            }
+            break;
+        case SecondaryEffectType::Flinch:
+            // Flinch causes the target to miss its turn this turn.
+            target.set_volatile(VolatileStatus::Flinch);
+            break;
+        case SecondaryEffectType::Confusion:
+            if (!target.has_volatile(VolatileStatus::Confusion) && !target_has_safeguard) {
+                target.set_volatile(VolatileStatus::Confusion);
+                message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                        + " became confused!");
+            }
+            break;
+        case SecondaryEffectType::AttackDown:
+            apply_one_stage_change(target, 0, -1);
+            break;
+        case SecondaryEffectType::DefenseDown:
+            apply_one_stage_change(target, 1, -1);
+            break;
+        case SecondaryEffectType::SpeedDown:
+            apply_one_stage_change(target, 2, -1);
+            break;
+        case SecondaryEffectType::SpAtkDown:
+            apply_one_stage_change(target, 3, -1);
+            break;
+        case SecondaryEffectType::SpDefDown:
+            apply_one_stage_change(target, 4, -1);
+            break;
+        case SecondaryEffectType::AccuracyDown:
+            apply_one_stage_change(target, 5, -1);
+            break;
+        case SecondaryEffectType::EvasionDown:
+            apply_one_stage_change(target, 6, -1);
+            break;
+        case SecondaryEffectType::AttackUp:
+            apply_one_stage_change(user, 0, +1);
+            break;
+        case SecondaryEffectType::DefenseUp:
+            apply_one_stage_change(user, 1, +1);
+            break;
+        case SecondaryEffectType::AllStatsUp:
+            // All stats up by 1 â€” AncientPower, Silver Wind, Ominous Wind
+            for (int s = 0; s < 5; ++s) apply_one_stage_change(user, s, +1);
+            break;
+        case SecondaryEffectType::Defrost:
+            // FlameWheel / SacredFire: thaw user if frozen before burn proc
+            if (user.status == Status::Freeze) {
+                user.status = Status::None;
+                message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                        + " thawed out!");
+            }
+            break;
+        case SecondaryEffectType::TriAttack:
+            // TriAttack: 1/3 chance each burn/freeze/paralysis
+            if (target.status == Status::None && !target_has_safeguard) {
+                const uint8_t which = rng_.next_byte() % 3;
+                if (which == 0) { target.status = Status::Burn;     message("Burn!"); }
+                else if (which == 1) { target.status = Status::Freeze; message("Freeze!"); }
+                else { target.status = Status::Paralysis;           message("Paralysis!"); }
+            }
+            break;
+        default:
+            break;
+    }
+    (void)user;
+}
+
+// ============================================================================
+// Helper: apply a single stat stage change
+// ============================================================================
+void Battle::apply_one_stage_change(BattlePokemon& mon, int stat_idx, int8_t delta) {
+    auto clamp6 = [](int8_t v) { return static_cast<int8_t>(std::clamp(static_cast<int>(v), -6, 6)); };
+    switch (stat_idx) {
+        case 0: mon.stages.attack         = clamp6(mon.stages.attack         + delta); break;
+        case 1: mon.stages.defense        = clamp6(mon.stages.defense        + delta); break;
+        case 2: mon.stages.speed          = clamp6(mon.stages.speed          + delta); break;
+        case 3: mon.stages.special_attack = clamp6(mon.stages.special_attack + delta); break;
+        case 4: mon.stages.special_defense= clamp6(mon.stages.special_defense+ delta); break;
+        case 5: mon.stages.accuracy       = clamp6(mon.stages.accuracy       + delta); break;
+        case 6: mon.stages.evasion        = clamp6(mon.stages.evasion        + delta); break;
+    }
+    apply_stat_stages(mon);
+}
+
+// ============================================================================
+// Helper: apply a SemanticStatChangeTarget to the correct mon
+// ============================================================================
+void Battle::apply_stat_change(BattlePokemon& user, BattlePokemon& target,
+                               StatChangeTarget change, bool user_is_player) {
+    using SC = StatChangeTarget;
+    // Determine who is affected (user vs opponent) and by how much.
+    // Stat-up: affects user. Stat-down: affects target.
+    // Special cases: Reset, CopyOpponent, MaxAttack.
+    switch (change) {
+        case SC::AttackUp1:   apply_one_stage_change(user,  0, +1); break;
+        case SC::AttackUp2:   apply_one_stage_change(user,  0, +2); break;
+        case SC::DefenseUp1:  apply_one_stage_change(user,  1, +1); break;
+        case SC::DefenseUp2:  apply_one_stage_change(user,  1, +2); break;
+        case SC::SpeedUp1:    apply_one_stage_change(user,  2, +1); break;
+        case SC::SpeedUp2:    apply_one_stage_change(user,  2, +2); break;
+        case SC::SpAtkUp1:    apply_one_stage_change(user,  3, +1); break;
+        case SC::SpAtkUp2:    apply_one_stage_change(user,  3, +2); break;
+        case SC::SpDefUp1:    apply_one_stage_change(user,  4, +1); break;
+        case SC::SpDefUp2:    apply_one_stage_change(user,  4, +2); break;
+        case SC::AccuracyUp1: apply_one_stage_change(user,  5, +1); break;
+        case SC::AccuracyUp2: apply_one_stage_change(user,  5, +2); break;
+        case SC::EvasionUp1:  apply_one_stage_change(user,  6, +1); break;
+        case SC::EvasionUp2:  apply_one_stage_change(user,  6, +2); break;
+        case SC::AllUp1:
+            for (int s = 0; s < 5; ++s) apply_one_stage_change(user, s, +1);
+            break;
+        case SC::AttackDown1:   apply_one_stage_change(target, 0, -1); break;
+        case SC::AttackDown2:   apply_one_stage_change(target, 0, -2); break;
+        case SC::DefenseDown1:  apply_one_stage_change(target, 1, -1); break;
+        case SC::DefenseDown2:  apply_one_stage_change(target, 1, -2); break;
+        case SC::SpeedDown1:    apply_one_stage_change(target, 2, -1); break;
+        case SC::SpeedDown2:    apply_one_stage_change(target, 2, -2); break;
+        case SC::SpAtkDown1:    apply_one_stage_change(target, 3, -1); break;
+        case SC::SpAtkDown2:    apply_one_stage_change(target, 3, -2); break;
+        case SC::SpDefDown1:    apply_one_stage_change(target, 4, -1); break;
+        case SC::SpDefDown2:    apply_one_stage_change(target, 4, -2); break;
+        case SC::AccuracyDown1: apply_one_stage_change(target, 5, -1); break;
+        case SC::AccuracyDown2: apply_one_stage_change(target, 5, -2); break;
+        case SC::EvasionDown1:  apply_one_stage_change(target, 6, -1); break;
+        case SC::EvasionDown2:  apply_one_stage_change(target, 6, -2); break;
+        case SC::Reset:
+            // Haze: reset all stages on both PokÃ©mon.
+            user.stages   = {};
+            target.stages = {};
+            apply_stat_stages(user);
+            apply_stat_stages(target);
+            message("All stat changes were eliminated!");
+            break;
+        case SC::CopyOpponent:
+            // Psych Up: copy all opponent stat stages.
+            user.stages = target.stages;
+            apply_stat_stages(user);
+            message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                    + " copied stat changes!");
+            break;
+        case SC::MaxAttack:
+            // Belly Drum: set attack to +6, halve HP.
+            user.stages.attack = 6;
+            apply_stat_stages(user);
+            {
+                const int32_t cost = std::max(1, static_cast<int32_t>(user.stats.max_hp) / 2);
+                const int16_t old_hp_b = user.stats.hp;
+                user.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(user.stats.hp) - cost));
+                hp_change(user_is_player ? 0u : 1u, old_hp_b, user.stats.hp);
+                message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                        + " cut its own HP to max out its Attack!");
+            }
+            break;
+        default:
+            break;
+    }
+    (void)user_is_player;
 }
 
 // ============================================================================
@@ -686,7 +1300,7 @@ void Battle::finalize_outcome() {
     outcome_.result      = result_;
     outcome_.turns_taken = turn_number_;
     if (result_ == BattleResult::PlayerWin && type_ == BattleType::Trainer) {
-        // Crystal formula: ComputeTrainerReward = base_reward × wCurPartyLevel
+        // Crystal formula: ComputeTrainerReward = base_reward ├ù wCurPartyLevel
         // Source: engine/battle/read_trainer_party.asm ComputeTrainerReward
         // wCurPartyLevel holds the level of the LAST-PARSED pokemon in the party
         // (set sequentially in the parsing loop; last iteration wins).
@@ -768,7 +1382,7 @@ void Battle::force_switch_opponent(size_t party_slot) {
     opponent_pokemon_         = opponent_party_[party_slot];
     opponent_pokemon_.volatile_status = 0;  // Clear volatile on switch
     switched(1u, old_slot, party_slot);
-    message("Opponent sent out a new Pokémon!");
+    message("Opponent sent out a new Pok├⌐mon!");
 }
 
 // ============================================================================
@@ -825,13 +1439,13 @@ bool Battle::attempt_capture(ItemId ball) {
     if (roll_capture(cp, rng_.next_byte(), rng_.next_byte())) {
         const uint16_t final_rate = calculate_catch_value(cp);
         (void)(rules_ ? capture_wobble_chance(final_rate, *rules_)
-                      : capture_wobble_chance(final_rate));  // wobble count for animation — not yet rendered
+                      : capture_wobble_chance(final_rate));  // wobble count for animation ΓÇö not yet rendered
         result_ = BattleResult::Captured;
         outcome_.captured_species = opponent_pokemon_.species;
-        message("Gotcha! Pokémon was caught!");
+        message("Gotcha! Pok├⌐mon was caught!");
         return true;
     }
-    message("Oh no! The Pokémon broke free!");
+    message("Oh no! The Pok├⌐mon broke free!");
     return false;
 }
 
