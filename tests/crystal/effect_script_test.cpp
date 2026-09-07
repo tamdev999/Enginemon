@@ -957,10 +957,8 @@ TEST(rom_attackdown2_effect_58_stat_change) {
     ASSERT_EQ(static_cast<int>(desc.secondary_effect),
               static_cast<int>(enginemon::SecondaryEffectType::None));
     ASSERT_TRUE(desc.needs_substitute);  // informational flag — does NOT block support
-    ASSERT_FALSE(desc.is_supported);     // unsupported because stat_change dispatch not implemented
-    std::cout << "`n    [ROM effect 58 AttackDown2: stat_change=AttackDown2, needs_substitute=true (info only), is_supported=false (no stat_change dispatch) ]`n";
-
-    std::cout << "\n    [ROM effect 58 AttackDown2: stat_change=AttackDown2, needs_substitute=true, is_supported=false ✓]\n";
+    ASSERT_TRUE(desc.is_supported);      // stat_change=AttackDown2 is a status-only move; supported once stat_change dispatch exists — gate does not block
+    std::cout << "\n    [ROM effect 58 AttackDown2: stat_change=AttackDown2, needs_substitute=true (info), is_supported=true (gate does not block) ]\n";
 }
 
 // ============================================================================
