@@ -17,6 +17,7 @@
 
 #include "crystal/extract/tileset_extractor.hpp"
 #include "engine/battle/battle_rules.hpp"
+#include "engine/battle/semantic_program.hpp"
 #include "engine/package/package_format.hpp"   // canonical PackageHeader/ChunkType/TocEntry
 #include "engine/world/runtime_map.hpp"
 #include "engine/world/sprite_atlas.hpp"
@@ -162,19 +163,34 @@ public:
         //  [27] is_pursuit             [28] is_copy_move         [29] clears_hazards
         //  [30] is_sleep_move          [31] needs_kingsrock      [32] needs_substitute
         //  [33] needs_rage             [34] ai_classification    [35] is_supported
-        //  [36..42] reserved (0x00)
+        //  [36] has_payday             [37] sets_focus_energy    [38] sets_mist
+        //  [39] sets_safeguard         [40] changes_user_type    [41] changes_user_type_resist
+        //  [42] equalizes_hp           [43] requires_user_asleep [44] traps_opponent
+        //  [45] identifies_opponent    [46] reduces_pp           [47] has_thunder_accuracy
+        //  [48] ends_wild_battle       [49] swagger_stat_change  [50] is_splash
+        //  [51] is_leech_seed          [52] is_disable           [53] is_encore
+        //  [54] is_lock_on             [55] is_sleep_talk        [56] is_destiny_bond
+        //  [57] is_nightmare           [58] is_curse             [59] is_protect
+        //  [60] is_perish_song         [61] is_attract           [62] is_baton_pass
+        //  [63] is_heal_bell           (is_endure, is_rage packed in MVDT v4 extension — see below)
         //
         // Use set_effect_desc(SemanticEffectDescription) / get_effect_desc() defined in
         // native_package.cpp to read/write this field with the full typed struct.
         // Files that only build MoveDataEntry without reading effect_desc do not need
         // to include semantic_effect.hpp.
-        static constexpr size_t EFFECT_DESC_BYTES = 43;
+        static constexpr size_t EFFECT_DESC_BYTES = 64;
         uint8_t effect_desc_raw[EFFECT_DESC_BYTES] = {};
 
-        // Compiler-side only — NOT serialized.
+        // Compiler-side only — NOT serialized directly; serialized via MVDT v3 extension.
         // The raw Crystal effect byte from the ROM move table, used by
         // semanticize_move_entries() to index the EffectScriptCorpus.
         uint8_t raw_crystal_effect = 0;
+
+        // Architecture B: compiled SemanticEffectProgram.
+        // Set by semanticize_move_entries() when EffectProgramCompiler::needs_program()
+        // is true for this effect.  Serialized into the MVDT chunk (schema v3+).
+        bool has_program = false;
+        enginemon::SemanticEffectProgram effect_program;
     };
     void add_move_data(const std::vector<MoveDataEntry>& entries);
 

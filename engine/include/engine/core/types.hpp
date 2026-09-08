@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // engine/core/types.hpp
 // Native type definitions - no Game Boy concepts
 //
@@ -25,6 +25,7 @@
 // Included here so MoveData can embed it.  semantic_effect.hpp has no
 // back-include of types.hpp (uses only <cstdint>) so there is no cycle.
 #include "engine/battle/semantic_effect.hpp"
+#include "engine/battle/semantic_program.hpp"
 
 namespace enginemon {
 
@@ -265,7 +266,11 @@ struct MoveData {
     int8_t priority;        // Usually 0, positive = faster
     
     EffectId effect_id  = SemEffect::Unknown;  // Semantic effect identifier (EMON-stable)
-    uint8_t effect_chance;  // Percent chance of secondary effect (0–100)
+    uint8_t effect_chance;  // Raw Crystal MOVE_CHANCE byte (0–255).
+                            // Assembled from the source percentage by the percent RGBDS macro
+                            // (e.g. "20 percent" in moves.asm assembles to floor(20*255/100)=51).
+                            // Crystal BattleCommand_EffectChance fires iff BattleRandom < this byte.
+                            // Runtime must compare rng_byte directly against this value; no *255/100.
     
     bool makes_contact;
     bool is_sound_based;
@@ -278,6 +283,13 @@ struct MoveData {
     // Populated at package load time; zero-init gives "ordinary single-hit damage" defaults.
     // Defined in engine/include/engine/battle/semantic_effect.hpp.
     SemanticEffectDescription effect_desc;
+
+    // Architecture B — ordered semantic program for stateful/multi-turn effects.
+    // When has_program == true, execute_move() calls execute_program() instead of
+    // the Architecture A flat-dispatch path.
+    // effect_desc.is_supported remains false for B effects (Architecture A never executes them).
+    bool has_program = false;
+    SemanticEffectProgram effect_program;
 };
 
 // Item pocket types
@@ -364,20 +376,41 @@ enum class Status : uint8_t {
     // New status types register via StatusRegistry with handlers
 };
 
-// Volatile status (battle-only, multiple can stack)
-enum class VolatileStatus : uint16_t {
+// Volatile status (battle-only, multiple can stack).
+// Widened to uint32_t for Architecture B bits (10-18); existing bits 0-9 unchanged.
+enum class VolatileStatus : uint32_t {
     None         = 0,
-    Confusion    = 1 << 0,
-    Flinch       = 1 << 1,
-    Trapped      = 1 << 2,  // Mean Look, etc.
-    Seeded       = 1 << 3,  // Leech Seed
-    Cursed       = 1 << 4,  // Curse (Ghost)
-    Nightmare    = 1 << 5,
-    Infatuation  = 1 << 6,
-    FocusEnergy  = 1 << 7,
-    Substitute   = 1 << 8,
-    Recharge     = 1 << 9,   // Must recharge next turn (Hyper Beam)
-    // etc.
+    // -- Existing bits (0-9) -------------------------------------------
+    Confusion    = 1u << 0,
+    Flinch       = 1u << 1,
+    Trapped      = 1u << 2,   // Mean Look, etc.
+    Seeded       = 1u << 3,   // Leech Seed
+    Cursed       = 1u << 4,   // Curse (Ghost)
+    Nightmare    = 1u << 5,
+    Infatuation  = 1u << 6,
+    FocusEnergy  = 1u << 7,
+    Substitute   = 1u << 8,
+    Recharge     = 1u << 9,   // Must recharge next turn (Hyper Beam)
+    // -- Architecture B bits (10-18) ------------------------------------
+    // Set/cleared by SemanticEffectProgram ops and engine hooks only.
+    Bide         = 1u << 10,  // Storing energy for Bide release
+    Rampage      = 1u << 11,  // Locked into Rampage (Thrash/Petal Dance/Outrage)
+    Rollout      = 1u << 12,  // Active Rollout chain (SUBSTATUS_ROLLOUT)
+    Flying       = 1u << 13,  // Invulnerable in air (Fly, Sky Attack)
+    Underground  = 1u << 14,  // Invulnerable underground (Dig)
+    Rage         = 1u << 15,  // Rage volatile -- accumulates Attack on hit
+    Curled       = 1u << 16,  // Defense Curl -- doubles next Rollout power
+    Charging     = 1u << 17,  // Charge turn in progress (two-phase moves)
+    Transformed  = 1u << 18,  // Transform active
+    // -- New bits (19-28) added for new A/B mechanics -------------------
+    Mist         = 1u << 19,  // Mist -- protects from opponent stat drops (indefinite, clears on switch)
+    Identified   = 1u << 20,  // Foresight/Odor Sleuth -- removes Ghost immunities; clears on switch
+    CantRun      = 1u << 21,  // Mean Look / ArenaTrap -- prevents target from fleeing or switching
+    Protect      = 1u << 22,  // Protect -- blocks all damage this turn; cleared at turn start
+    Endure       = 1u << 23,  // Endure -- survive any hit with 1 HP; cleared at turn start
+    LockOn       = 1u << 24,  // Lock-On -- next move always hits; consumed on next hit check
+    DestinyBond  = 1u << 25,  // Destiny Bond -- if user faints from direct damage, opponent faints too
+    Perish       = 1u << 26,  // Perish Song countdown active
 };
 
 // Direction for movement

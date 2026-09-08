@@ -1,4 +1,4 @@
-﻿// engine/battle/battle.cpp
+// engine/battle/battle.cpp
 // Gen 2 battle system ΓÇö turn-based Pokemon battles
 //
 // Architecture note:
@@ -46,15 +46,15 @@ bool BattlePokemon::can_use_move(size_t slot) const {
 }
 
 bool BattlePokemon::has_volatile(VolatileStatus vs) const {
-    return (volatile_status & static_cast<uint16_t>(vs)) != 0;
+    return (volatile_status & static_cast<uint32_t>(vs)) != 0;
 }
 
 void BattlePokemon::set_volatile(VolatileStatus vs) {
-    volatile_status |= static_cast<uint16_t>(vs);
+    volatile_status |= static_cast<uint32_t>(vs);
 }
 
 void BattlePokemon::clear_volatile(VolatileStatus vs) {
-    volatile_status &= ~static_cast<uint16_t>(vs);
+    volatile_status &= ~static_cast<uint32_t>(vs);
 }
 
 // ============================================================================
@@ -335,6 +335,16 @@ void Battle::execute_turn() {
 
     determine_turn_order();
 
+    // Architecture B: Rampage lock.
+    auto enforce_rampage = [&](BattleAction& act, BattlePokemon& mon) {
+        if (!mon.has_volatile(VolatileStatus::Rampage) || mon.last_move_used == MOVE_NONE) return;
+        for (size_t s = 0; s < 4; ++s) {
+            if (mon.moves[s].move == mon.last_move_used) { act = ActionFight{s, 0}; return; }
+        }
+    };
+    enforce_rampage(player_action_,   player_pokemon_);
+    enforce_rampage(opponent_action_, opponent_pokemon_);
+
     BattlePokemon& first  = player_goes_first_ ? player_pokemon_  : opponent_pokemon_;
     BattlePokemon& second = player_goes_first_ ? opponent_pokemon_ : player_pokemon_;
     BattleAction& fa      = player_goes_first_ ? player_action_    : opponent_action_;
@@ -347,6 +357,15 @@ void Battle::execute_turn() {
     if (result_ != BattleResult::InProgress) { finalize_outcome(); return; }
 
     if (!turn_halted_ && !second.is_fainted()) {
+        // Architecture B: Pursuit interception.
+        // Crystal model: if the second actor is switching, check whether the first actor
+        // has Pursuit. If so, fire it (2x power) before the switch resolves.
+        if (std::holds_alternative<ActionSwitch>(sa) && !first.is_fainted()) {
+            hook_pursuit_check(first, second, first_is_player);
+            second.is_switching = false;
+            check_fainted();
+            if (result_ != BattleResult::InProgress) { finalize_outcome(); return; }
+        }
         execute_action(second, first, sa, !first_is_player);
         check_fainted();
         if (result_ != BattleResult::InProgress) { finalize_outcome(); return; }
@@ -372,12 +391,23 @@ void Battle::execute_action(BattlePokemon& user, BattlePokemon& target,
 
     if (std::holds_alternative<ActionFight>(action)) {
         const ActionFight& af = std::get<ActionFight>(action);
-        const MoveId mid = (af.move_slot < 4) ? user.moves[af.move_slot].move : MOVE_NONE;
+        // Architecture B: Encore override.
+        size_t effective_slot = af.move_slot;
+        if (user.encore_turns > 0 && user.encored_move != MOVE_NONE) {
+            for (size_t s = 0; s < 4; ++s) {
+                if (user.moves[s].move == user.encored_move) { effective_slot = s; break; }
+            }
+        }
+        const MoveId mid = (effective_slot < 4) ? user.moves[effective_slot].move : MOVE_NONE;
         if (mid == MOVE_NONE) {
             message(is_player ? "Player has no usable move!" : "Opponent has no usable move!");
             return;
         }
-        const auto res = execute_move(user, target, mid, af.move_slot, is_player);
+        // Architecture B: pre-move clear and check.
+        hook_pre_move_clear_protect(user);
+        hook_pre_move_clear_destiny_bond(user);
+        if (hook_pre_move_check(user, target, effective_slot, is_player)) return;
+        const auto res = execute_move(user, target, mid, effective_slot, is_player);
         // UnsupportedSemantic and InvalidData: no valid move execution; flag turn as
         // halted so the opponent does not act on this turn.  Battle state remains coherent.
         if (res == MoveExecutionResult::UnsupportedSemantic ||
@@ -425,6 +455,13 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     // descriptions fail closed with UnsupportedSemantic.
     const auto& effective_desc = md->effect_desc;
 
+    // -- B-dispatch: checked BEFORE is_supported because B-path moves intentionally
+    // have effect_desc.is_supported=false (Architecture A never executes them).
+    // execute_program handles its own PP deduction and recharge gate.
+    if (md->has_program && md->effect_program.is_compiled) {
+        return execute_program(user, target, *md, move_slot, user_is_player);
+    }
+
     // Hard fail for unsupported or missing descriptions.
     // Production packages always carry a compiled SemanticEffectDescription.
     // A zero-init desc (is_supported=false) means the move was never compiled
@@ -460,12 +497,21 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
             message("The attack missed!");
             return MoveExecutionResult::Miss;
         }
+        // P0-1: Protect check for OHKO (Crystal's ohko opcode calls CheckHit which checks Protect).
+        if (target.has_volatile(VolatileStatus::Protect)) {
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + " protected itself!");
+            return MoveExecutionResult::Miss;
+        }
         // OHKO always faints the target.
         message("It's a one-hit KO!");
         const int16_t old_hp = target.stats.hp;
         target.stats.hp = 0;
         hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
         outcome_.damage_dealt += static_cast<uint16_t>(old_hp);
+        // P0-4: Damage history for OHKO.
+        hook_on_damage_received(target, static_cast<int32_t>(old_hp),
+                                static_cast<uint8_t>(md->category));
         return MoveExecutionResult::Success;
     }
 
@@ -588,9 +634,99 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
             return MoveExecutionResult::Success;
         }
 
-        // Unrecognised status-only move â€” fail closed.
-        message(md->name + " â€” effect not yet implemented (deferred).");
-        return MoveExecutionResult::UnsupportedSemantic;
+        // New A semantics
+        if (effective_desc.requires_user_asleep && user.status != Status::Sleep) {
+            message(md->name + " -- failed!"); return MoveExecutionResult::Miss;
+        }
+        if (effective_desc.is_splash) { message("But nothing happened!"); return MoveExecutionResult::Success; }
+        if (effective_desc.sets_focus_energy) {
+            if (user.has_volatile(VolatileStatus::FocusEnergy)) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            user.set_volatile(VolatileStatus::FocusEnergy); message(md->name + " -- getting pumped!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.sets_mist) {
+            if (user.has_volatile(VolatileStatus::Mist)) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            user.set_volatile(VolatileStatus::Mist); message(md->name + " -- shrouded in mist!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.sets_safeguard) {
+            uint8_t& sg = user_is_player ? field_.safeguard_player : field_.safeguard_opponent;
+            if (sg > 0) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            sg = 5; message(md->name + " -- covered by a veil!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.changes_user_type) {
+            std::vector<uint8_t> cands;
+            for (size_t s = 0; s < 4; ++s) {
+                if (user.moves[s].move == MOVE_NONE) continue;
+                const MoveData* mm = registries_.moves.get(user.moves[s].move);
+                if (mm && static_cast<uint8_t>(mm->type) != 19u) cands.push_back(static_cast<uint8_t>(mm->type));
+            }
+            if (cands.empty()) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            user.type1 = user.type2 = static_cast<TypeId>(cands[rng_.next_byte() % cands.size()]);
+            message(md->name + " -- type changed!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.changes_user_type_resist) {
+            if (target.last_move_used == MOVE_NONE) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            const MoveData* lm = registries_.moves.get(target.last_move_used);
+            if (!lm) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            for (uint32_t tr = 0; tr < 500u; ++tr) {
+                const uint8_t c = rng_.next_byte() % 20u;
+                if (c == 19u) continue;
+                if (get_combined_effectiveness(lm->type, static_cast<TypeId>(c), static_cast<TypeId>(c), registries_.type_chart) < 100u) {
+                    user.type1 = user.type2 = static_cast<TypeId>(c);
+                    message(md->name + " -- type changed!"); return MoveExecutionResult::Success;
+                }
+            }
+            message(md->name + " -- failed!"); return MoveExecutionResult::Miss;
+        }
+        if (effective_desc.traps_opponent) {
+            if (target.has_volatile(VolatileStatus::Flying) || target.has_volatile(VolatileStatus::Underground) || target.has_volatile(VolatileStatus::CantRun)) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            target.set_volatile(VolatileStatus::CantRun); message(md->name + " -- can't escape!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.identifies_opponent) {
+            if (target.has_volatile(VolatileStatus::Flying) || target.has_volatile(VolatileStatus::Underground) || target.has_volatile(VolatileStatus::Identified)) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            target.set_volatile(VolatileStatus::Identified); message(md->name + " -- identified!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.reduces_pp) {
+            if (target.last_move_used == MOVE_NONE) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            uint8_t fs = 0xFF;
+            for (uint8_t s = 0; s < 4; ++s) { if (target.moves[s].move == target.last_move_used) { fs=s; break; } }
+            if (fs == 0xFF || target.moves[fs].pp == 0) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            const uint8_t red = static_cast<uint8_t>((rng_.next_byte() & 3u) + 2u);
+            target.moves[fs].pp = static_cast<uint8_t>(target.moves[fs].pp > red ? target.moves[fs].pp - red : 0u);
+            message(md->name + " -- reduced PP!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.equalizes_hp) {
+            if (target.has_volatile(VolatileStatus::Substitute)) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            const int32_t avg = (static_cast<int32_t>(user.stats.hp) + static_cast<int32_t>(target.stats.hp)) / 2;
+            const int16_t nu = static_cast<int16_t>(std::min(avg, static_cast<int32_t>(user.stats.max_hp)));
+            const int16_t nt = static_cast<int16_t>(std::min(avg, static_cast<int32_t>(target.stats.max_hp)));
+            const int16_t ou = user.stats.hp, ot = target.stats.hp;
+            user.stats.hp = nu; target.stats.hp = nt;
+            if (nu != ou) hp_change(user_is_player ? 0u : 1u, ou, nu);
+            if (nt != ot) hp_change(user_is_player ? 1u : 0u, ot, nt);
+            message(md->name + " -- HP shared!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.ends_wild_battle) {
+            if (type_ != BattleType::Wild || target.has_volatile(VolatileStatus::CantRun)) { message(md->name + " -- failed!"); return MoveExecutionResult::Miss; }
+            result_ = BattleResult::PlayerRan; message(md->name + " -- teleported!"); return MoveExecutionResult::Success;
+        }
+        if (effective_desc.swagger_stat_change) {
+            apply_stat_change(user, target, effective_desc.stat_change, user_is_player);
+            if (!target_has_safeguard && !target.has_volatile(VolatileStatus::Confusion)) {
+                target.set_volatile(VolatileStatus::Confusion);
+                message((user_is_player ? std::string("Opponent") : std::string("Player")) + " became confused!");
+            }
+            return MoveExecutionResult::Success;
+        }
+        if (effective_desc.has_payday) {
+            const uint32_t coins = static_cast<uint32_t>(user.level) * 2u;
+            if (user_is_player) player_payday_coins_ += coins; else opponent_payday_coins_ += coins;
+            message(md->name + " -- coins scattered!");
+            // Fall through to damaging path.
+        } else {
+            // Unrecognised status-only move -- fail closed.
+            message(md->name + " -- effect not implemented.");
+            return MoveExecutionResult::UnsupportedSemantic;
+        }
     }
 
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -693,10 +829,18 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                     if (type_eff > 100) message("It's super effective!");
                     else if (type_eff < 100) message("It's not very effectiveâ€¦");
                     animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
+                    // P0-1: Protect check for Reversal/Flail.
+                    if (target.has_volatile(VolatileStatus::Protect)) {
+                        message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                                + " protected itself!");
+                        return MoveExecutionResult::Miss;
+                    }
                     const int16_t old_hp_r = target.stats.hp;
                     target.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(target.stats.hp) - dmg_r));
                     hp_change(user_is_player ? 1u:0u, old_hp_r, target.stats.hp);
                     outcome_.damage_dealt += static_cast<uint16_t>(dmg_r);
+                    // P0-4: Damage history for Reversal/Flail.
+                    hook_on_damage_received(target, dmg_r, static_cast<uint8_t>(md->category));
                 }
                 return MoveExecutionResult::Success;
             }
@@ -706,11 +850,19 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         }
         // Apply constant damage (type matchup resets for most constant-damage moves).
         const_dmg = std::max(1, const_dmg);
+        // P0-1: Protect check (Crystal: constantdamage → checkhit which checks Protect).
+        if (target.has_volatile(VolatileStatus::Protect)) {
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + " protected itself!");
+            return MoveExecutionResult::Miss;
+        }
         animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
         const int16_t old_hp_c = target.stats.hp;
         target.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(target.stats.hp) - const_dmg));
         hp_change(user_is_player ? 1u:0u, old_hp_c, target.stats.hp);
         outcome_.damage_dealt += static_cast<uint16_t>(const_dmg);
+        // P0-4: Damage history for constant-damage moves.
+        hook_on_damage_received(target, const_dmg, static_cast<uint8_t>(md->category));
         return MoveExecutionResult::Success;
     }
 
@@ -922,11 +1074,54 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
 
     // â”€â”€ Apply damage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- P0-1: Protect interception (A-path) ----------------------------------
+    // Crystal: BattleCommand_CheckHit returns miss if target has Protect.
+    if (target.has_volatile(VolatileStatus::Protect)) {
+        message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                + " protected itself!");
+        return MoveExecutionResult::Miss;
+    }
+
+    // -- P0-3: Substitute routing (A-path) ------------------------------------
+    // Crystal: if target has Substitute, damage goes to substitute_hp, not HP.
+    if (target.has_volatile(VolatileStatus::Substitute) && target.substitute_hp > 0) {
+        if (damage >= static_cast<int32_t>(target.substitute_hp)) {
+            target.substitute_hp = 0;
+            target.clear_volatile(VolatileStatus::Substitute);
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + "'s substitute broke!");
+        } else {
+            target.substitute_hp = static_cast<uint16_t>(
+                target.substitute_hp - static_cast<uint16_t>(damage));
+        }
+        // Damage absorbed by Substitute -- real HP unchanged.
+        outcome_.damage_dealt += static_cast<uint16_t>(damage);
+        // Do NOT call hook_on_damage_received: Crystal skips accumulation for Substitute hits.
+        return MoveExecutionResult::Success;
+    }
+
+    // -- Apply damage ---------------------------------------------------------
     const int16_t old_hp = target.stats.hp;
     target.stats.hp = static_cast<int16_t>(
         std::max(0, static_cast<int32_t>(target.stats.hp) - damage));
+
+    // -- P0-2: Endure 1-HP floor (A-path) -------------------------------------
+    if (target.has_volatile(VolatileStatus::Endure) && target.stats.hp <= 0) {
+        target.stats.hp = 1;
+        message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                + " endured the hit!");
+    }
+
     hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
     outcome_.damage_dealt += static_cast<uint16_t>(damage);
+
+    // -- P0-4: Damage history (A-path) ----------------------------------------
+    hook_on_damage_received(target, damage, static_cast<uint8_t>(md->category));
+
+    // DestinyBond: if target just fainted from this A-path damage hit.
+    if (target.stats.hp <= 0 && target.has_volatile(VolatileStatus::DestinyBond)) {
+        hook_destiny_bond_check(target, user, !user_is_player);
+    }
 
     // â”€â”€ Recoil â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (effective_desc.has_recoil && !user.is_fainted()) {
@@ -974,19 +1169,19 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 + " must recharge!");
     }
 
-    // â”€â”€ Secondary effect (effectchance roll) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Secondary effect (effectchance roll) -------------------------------------------------
     if (effective_desc.secondary_effect != SecondaryEffectType::None
         && !target.is_fainted()
         && md->effect_chance > 0) {
-        // Roll: random byte < floor(effect_chance Ã— 255 / 100) fires the effect.
-        // Crystal uses: random < floor(chance Ã— 255 / 100)
-        const int32_t threshold = static_cast<int32_t>(md->effect_chance) * 255 / 100;
-        const bool fires = (rng_.next_byte() < threshold);
+        // Crystal: call BattleRandom; cp [hl] (MOVE_CHANCE); ret c
+        // fires iff BattleRandom < MOVE_CHANCE.
+        // effect_chance is the raw Crystal ROM byte (0-255), already pre-converted by the
+        // percent RGBDS macro (e.g. "20 percent" assembles to 51). Direct comparison; no scaling.
+        const bool fires = (rng_.next_byte() < static_cast<uint32_t>(md->effect_chance));
         if (fires) {
             apply_secondary_effect(user, target, effective_desc.secondary_effect, user_is_player);
         }
     }
-
     // â”€â”€ Stat change on hit (DefenseUpHit, AttackDownHit, etc.) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (effective_desc.stat_change != StatChangeTarget::None) {
         // For hit-effect stat changes (applied to target unconditionally on hit).
@@ -1216,6 +1411,16 @@ void Battle::apply_end_of_turn_effects() {
 
     apply_residual(player_pokemon_,   true);
     apply_residual(opponent_pokemon_, false);
+
+    // Architecture B: end-of-turn hooks.
+    hook_end_of_turn_leech_seed();
+    hook_end_of_turn_nightmare();
+    hook_end_of_turn_curse();
+    hook_end_of_turn_perish_song();
+    hook_future_sight_tick();
+    hook_trap_damage_tick();
+    hook_rampage_end_check(player_pokemon_,   true);
+    hook_rampage_end_check(opponent_pokemon_, false);
 }
 
 void Battle::apply_residual(BattlePokemon& bp, bool is_player) {

@@ -12,6 +12,7 @@
 #include "engine/core/types.hpp"
 #include "engine/core/registry.hpp"
 #include "engine/battle/battle_rules.hpp"
+#include "engine/battle/semantic_program.hpp"
 #include <memory>
 #include <vector>
 #include <optional>
@@ -79,12 +80,12 @@ struct BattlePokemon {
     // Status
     Status status = Status::None;
     uint8_t status_turns = 0;       // Sleep counter, toxic counter
-    uint16_t volatile_status = 0;   // Bitmask of VolatileStatus
+    uint32_t volatile_status = 0;   // Bitmask of VolatileStatus (widened for Architecture B)
     
     // Held item
     ItemId held_item = ITEM_NONE;
     
-    // Battle-specific state
+    // Battle-specific state (Architecture A)
     MoveId last_move_used = MOVE_NONE;
     uint8_t protect_counter = 0;
     uint8_t disable_turns = 0;
@@ -94,9 +95,82 @@ struct BattlePokemon {
     uint16_t substitute_hp = 0;
     uint8_t perish_count = 0;
     bool is_transformed = false;
-    uint8_t happiness = 255;    // Gen 2 friendship (0–255). Default=255 for NPC/wild Pokémon.
-                                // Used by Return (max power at 255) / Frustration (max at 0).
-    uint8_t recharge_turns = 0; // Hyper Beam recharge turns remaining (0 = no recharge needed)
+    uint8_t happiness = 255;    // Gen 2 friendship (0–255). Populated from Pokemon::friendship
+                                // at make_battle_pokemon time. Default=255 for wild Pokémon.
+                                // Used by Return (power = happiness×10/25) / Frustration.
+    uint8_t recharge_turns = 0; // Hyper Beam recharge turns remaining
+
+    // DVs — stored for Hidden Power type/power calculation and Transform backup.
+    // Populated from Pokemon::dvs at make_battle_pokemon / force_switch_player time.
+    // Wild Pokémon receive random DVs; trainer Pokémon use TrainerClassDVs.
+    uint8_t dv_atk = 9;
+    uint8_t dv_def = 8;
+    uint8_t dv_spd = 8;
+    uint8_t dv_spc = 8;
+
+    // ── Architecture B persistent per-combatant state ─────────────────────────
+    // These fields are set/read by execute_program() and the engine hooks.
+    // They do not affect Architecture A execution paths.
+
+    // Multi-turn counter — shared across Bide, Rampage (mutually exclusive via volatile bits).
+    // Trap uses trap_turns separately since Trap can coexist with Rampage/Bide on the victim.
+    uint8_t  turn_counter       = 0;
+
+    // Bide accumulated damage (incoming damage while SUBSTATUS_BIDE is set).
+    uint16_t bide_stored        = 0;
+
+    // Future Sight scheduled damage (stored at cast time, fired after 3 turns).
+    // Note: Future Sight state is per-side, not per-combatant — stored on Battle.
+    // This field is unused; see Battle::player_future_sight / opponent_future_sight.
+
+    // Escalating power chain counters (separate: both can coexist on same combatant
+    // if a ROM hack has a move using both; Crystal vanilla they are mutually exclusive,
+    // but sharing one field risks a ROM-hack regression).
+    uint8_t  rollout_count      = 0;   // Rollout: 1..5, resets on miss
+    uint8_t  fury_cutter_count  = 0;   // FuryCutter: 1..5, resets on miss
+
+    // Trapping state (on the victim).
+    // A Pokémon can be trapped while also rampaging (different combinats).
+    uint8_t  trap_turns         = 0;
+    MoveId   trapping_move      = MOVE_NONE;
+
+    // Damage received this turn — reset at turn start.
+    // Feeds Counter (Physical filter) and MirrorCoat (Special filter).
+    uint16_t damage_received_this_turn = 0;
+    uint8_t  damage_category_received  = 0;  // 0=Physical, 1=Special, 2=None
+
+    // Rage accumulator — incremented each time this combatant is hit while RAGE volatile.
+    // Drives ScalePower(BDamageSource::EscalatingChain) for Rage move.
+    uint8_t  rage_accumulator   = 0;
+
+    // Hit loop remaining count — set by InitCounter(HitLoop) at start of multi-hit loop.
+    uint8_t  hit_loop_remaining = 0;
+    uint8_t  beat_up_index      = 0;  // BeatUp: which party member is currently hitting
+
+    // Pursuit interception flag — set by ActionSwitch resolution, read by PursuitCheck hook.
+    bool     is_switching       = false;
+
+    // Transform backup DVs — stored when Transform fires, restored on switch-out.
+    uint16_t backup_dvs         = 0;  // packs {atk:4|def:4} in byte 0, {spd:4|spc:4} in byte 1
+
+    // Mimic: store the original move for the mimicked slot so it can be restored.
+    uint8_t  mimic_slot         = 0xFF;  // 0xFF = no active Mimic
+    MoveId   mimic_original_move = MOVE_NONE;
+    uint8_t  mimic_original_pp   = 0;
+
+    // Gender ratio — used by Attract to determine gender compatibility.
+    // Copied from SpeciesData::gender_ratio at make_battle_pokemon time.
+    // 255 = genderless; 0 = always male; 254 = always female; other = threshold.
+    // Female if gender_dv <= gender_ratio, where gender_dv = (dv_atk<<4)|dv_spd.
+    uint8_t  gender_ratio       = 255;  // default genderless
+
+    // Per-turn state for new A/B mechanics (not already in the existing fields above)
+    uint8_t  protect_consecutive = 0;   // consecutive Protect/Endure uses (halves success each time)
+    uint32_t payday_coins        = 0;   // Pay Day coins accumulated this battle (per-attacker side)
+
+    // Destiny Bond: cleared at start of user's NEXT turn (before any move executes).
+    // The VolatileStatus::DestinyBond bit on BattlePokemon IS the state.
+    // EndUserDestinyBond clears it at turn start; CheckFaint-path fires it on direct-damage KO.
     
     // Helpers
     bool is_fainted() const { return stats.hp <= 0; }
@@ -195,6 +269,16 @@ struct FieldState {
     // Safeguard
     uint8_t safeguard_player = 0;
     uint8_t safeguard_opponent = 0;
+
+    // Architecture B: Future Sight per-side state.
+    // In Crystal, wPlayerFutureSightCount/Damage are side-scoped, not mon-scoped.
+    // They persist when the caster switches or faints.
+    struct FutureSightState {
+        uint8_t  turns  = 0;   // Countdown: 3 → 2 → 1 → fire (0 = inactive)
+        uint16_t damage = 0;   // Pre-computed damage stored at cast time
+    };
+    FutureSightState player_future_sight;
+    FutureSightState opponent_future_sight;
 };
 
 // Result of executing a single move — allows callers to distinguish outcomes.
@@ -329,6 +413,10 @@ private:
     BattleAction opponent_action_;
     uint8_t run_attempts_ = 0;
     bool turn_halted_ = false;  // Set on UnsupportedSemantic to skip second actor
+
+    // Architecture B: transient battle-scoped state
+    uint32_t player_payday_coins_ = 0;   // accumulated Pay Day coins for player this battle
+    uint32_t opponent_payday_coins_ = 0; // accumulated Pay Day coins for opponent this battle
     
     // NOTE: When battle system is implemented, RNG must be consumed from
     // GameState::rng to maintain deterministic save/restore.
@@ -360,6 +448,44 @@ private:
     void apply_stat_change(BattlePokemon& user, BattlePokemon& target,
                            enginemon::StatChangeTarget change, bool user_is_player);
     // build_ai_context() is defined in battle.cpp (returns AIContext from trainer_ai.hpp)
+
+    // Architecture B: execute a SemanticEffectProgram (called from execute_move when
+    // MoveData::has_program is true).
+    MoveExecutionResult execute_program(BattlePokemon& user, BattlePokemon& target,
+                                        const MoveData& md, size_t move_slot,
+                                        bool user_is_player);
+
+    // Architecture B: engine hooks — called from execute_turn infrastructure.
+    void hook_on_damage_received(BattlePokemon& defender, int32_t damage,
+                                  uint8_t move_category);  // category: 0=Phys 1=Spec
+    void hook_future_sight_tick();
+    void hook_trap_damage_tick();
+    void hook_rampage_end_check(BattlePokemon& combatant, bool is_player);
+    bool hook_bide_gate(BattlePokemon& combatant, bool is_player);  // true = suppress move
+    void hook_chain_reset(BattlePokemon& combatant);
+    MoveExecutionResult hook_pursuit_check(BattlePokemon& pursuer, BattlePokemon& switcher,
+                                            bool pursuer_is_player);
+    // New hooks added for extended mechanics:
+    void hook_end_of_turn_leech_seed();   // drain 1/8 max_hp from Seeded mons
+    void hook_end_of_turn_nightmare();    // drain 1/4 max_hp from Nightmare mons while asleep
+    void hook_end_of_turn_curse();        // drain 1/4 max_hp from Cursed (Ghost) mons
+    void hook_end_of_turn_perish_song();  // decrement perish counts; faint at 0
+    void hook_pre_move_clear_protect(BattlePokemon& current_actor);  // clear Protect/Endure for current actor only
+    void hook_pre_move_clear_destiny_bond(BattlePokemon& user);     // clear DestinyBond for current actor only
+    // Check if PreMove hook blocks the combatant from acting (Disable, Encore, Attract 50%).
+    // Returns true if the move is blocked, false if execution should proceed.
+    bool hook_pre_move_check(BattlePokemon& user, BattlePokemon& target,
+                              size_t move_slot, bool user_is_player);
+    // DestinyBond CheckFaint path: if user has DestinyBond and target's HP just hit 0 from
+    // direct damage, faint the DestinyBond user too. Called from execute_program Damage case.
+    void hook_destiny_bond_check(BattlePokemon& destiny_bond_user, BattlePokemon& killer,
+                                  bool killer_is_player);
+
+    // SetVolatile handler extracted to keep execute_program within MSVC size limits.
+    // Returns 0 = continue executing ops; 1 = return MoveExecutionResult::Success (deferred);
+    // 2 = return MoveExecutionResult::Miss (failed).
+    int execute_program_set_volatile(const BOp& op, BattlePokemon& user, BattlePokemon& target,
+                                      const MoveData& md, bool user_is_player);
     
     // Damage calculation
     int32_t calculate_damage(const BattlePokemon& attacker, 

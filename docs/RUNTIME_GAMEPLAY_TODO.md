@@ -569,3 +569,46 @@ before mid-movement E2E checkpoint tests
 - `engine/include/engine/core/game_loop.hpp` — `PlayerState`
 - `engine/include/engine/core/game_state.hpp` — `PlayerSaveState`
 - `engine/world/world_manager.cpp` — `execute_warp()`, `remember_backup_warp()`
+
+---
+## P1 Battle — Skull Bash Defense Boost Reapplies on Fire Turn
+
+**Status**: Deferred — P1, do not fix until P0 is fully closed.
+
+**Defect**: Skull Bash applies Defense +1 on **both** the charge turn and the fire turn.
+Crystal applies Defense +1 only on the **charge turn** (`BattleCommand_Charge` calls
+`SkipToBattleCommand(endturn_command)` for `EFFECT_SKULL_BASH`, which causes the
+`defenseup` command to execute via the `endturn` → `defenseup` sequence on turn 1 only).
+
+**Root cause**: In `execute_program_set_volatile`, the `Charging + param8c=1` branch
+calls `apply_one_stage_change(affected, 1, +1)` inside `if (set_value)`. On the fire turn,
+`SetVolatile(Charging)` still executes with `set_value=true` (it re-sets Charging even
+though it was already set), so `param8c=1` fires again and reapplies Defense +1.
+
+**Fix**: Gate the `param8c=1` Defense boost on `!was_charging_before` — only apply it
+on the charge turn (when Charging was first set), not on the fire turn.
+
+**Scope**: P1. Do not fix alongside P0 work.
+
+---
+## P1 Battle — B-path 0xFF Accuracy Moves Ignore Stat Stages
+
+**Status**: Deferred — P1.
+
+**Defect**: In Enginemon's B-path `execute_program()`, both the outer and inner per-hit
+accuracy checks are gated by `md.accuracy != 0xFF`. When `md.accuracy == 0xFF`, neither
+check is entered and `roll_accuracy()` is never called, regardless of attacker accuracy
+stage or defender evasion stage. Twineedle (accuracy=0xFF) can never miss in Enginemon.
+
+In Crystal, `BattleCommand_CheckHit` applies `.StatModifiers` (accuracy/evasion stage
+multipliers) **before** the `cp -1; jr z .Hit` always-hit check. Therefore, sufficiently
+negative accuracy stages or positive evasion stages can cause even 0xFF-accuracy moves
+to miss in Crystal.
+
+**Required fix**: In `execute_program()`, always call `roll_accuracy()` with the
+effective stat-modified accuracy. Only treat the result as always-hit if the computed
+effective accuracy ≥ the "always hit" threshold after stage application.
+
+**Scope**: P1. The true Twineedle miss behavioral test (prove: Twineedle misses when
+accuracy stages reduce effective accuracy below guaranteed-hit, secondary does not fire)
+must accompany this fix.

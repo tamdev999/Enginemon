@@ -887,11 +887,8 @@ PackageReader::load_move_registry() const {
 
     // Schema version byte — first byte of chunk.
     // Reject any version that is not MVDT_SCHEMA_VERSION.
-    // Old packages (v1, no version byte) have a u32 count in the first 4 bytes.
-    // Their first byte would be a count low byte (0..N), never equal to MVDT_SCHEMA_VERSION=2
-    // unless the count happened to be exactly 2 (exceedingly unlikely for a full Crystal ROM
-    // with 251 moves, and caught by the entry-size check below even if it occurs).
-    // Rather than risk any ambiguity, we check the byte strictly and reject on mismatch.
+    // v2 packages (schema=2, fixed 52 bytes/entry) must be recompiled to v3.
+    // v1 packages (no version byte) had a u32 count low byte first — also rejected.
     uint8_t schema_ver = static_cast<uint8_t>(in.get());
     if (!in.good()) return std::nullopt;
     if (schema_ver != MVDT_SCHEMA_VERSION) {
@@ -901,16 +898,16 @@ PackageReader::load_move_registry() const {
         return std::nullopt;
     }
 
-    // Wire format v2: u8 schema_version, u32 count LE, then per-entry (52 bytes each):
+    // Wire format v4: u8 schema_version, u32 count LE, then per-entry (variable size):
     //   u16 move_id, u8 type_id, power, accuracy, pp, effect_id, effect_chance, category
-    //   + 43 bytes SemanticEffectDescription
+    //   + 64 bytes SemanticEffectDescription (expanded from 43 in v3)
+    //   + u8 has_program + u16 op_count LE + op_count × 9 bytes (BOp)
     uint32_t count = read_le<uint32_t>(in);
     if (!in.good()) return std::nullopt;
 
-    constexpr uint32_t ENTRY_SIZE = 9 + 43;  // 52 bytes
-    if (static_cast<uint64_t>(count) * ENTRY_SIZE + 5 > chunk->size) {
-        return std::nullopt;
-    }
+    // Minimum per-entry bytes in v3: 9 base + 43 desc + 3 program header = 55.
+    // We no longer do a single up-front size check (entries are variable length);
+    // per-entry stream validity is checked via in.good() after each read.
     if (count > 65535u) return std::nullopt;
 
     // Helper: deserialize SemanticEffectDescription from 43 bytes.
@@ -969,8 +966,42 @@ PackageReader::load_move_registry() const {
         desc.needs_rage            = read_bool();  // [33]
         desc.ai_classification     = read_u8();    // [34]
         desc.is_supported          = read_bool();  // [35]
-        // [36..42] reserved — consume but ignore
-        for (int r = 36; r <= 42; ++r) read_u8();
+        // [36..63] new fields added in MVDT schema v4
+        desc.has_payday            = read_bool();  // [36]
+        desc.sets_focus_energy     = read_bool();  // [37]
+        desc.sets_mist             = read_bool();  // [38]
+        desc.sets_safeguard        = read_bool();  // [39]
+        desc.changes_user_type     = read_bool();  // [40]
+        desc.changes_user_type_resist = read_bool(); // [41]
+        desc.equalizes_hp          = read_bool();  // [42]
+        desc.requires_user_asleep  = read_bool();  // [43]
+        desc.traps_opponent        = read_bool();  // [44]
+        desc.identifies_opponent   = read_bool();  // [45]
+        desc.reduces_pp            = read_bool();  // [46]
+        desc.has_thunder_accuracy  = read_bool();  // [47]
+        desc.ends_wild_battle      = read_bool();  // [48]
+        desc.swagger_stat_change   = read_bool();  // [49]
+        desc.is_splash             = read_bool();  // [50]
+        desc.is_leech_seed         = read_bool();  // [51]
+        desc.is_disable            = read_bool();  // [52]
+        desc.is_encore             = read_bool();  // [53]
+        desc.is_lock_on            = read_bool();  // [54]
+        desc.is_sleep_talk         = read_bool();  // [55]
+        desc.is_destiny_bond       = read_bool();  // [56]
+        desc.is_nightmare          = read_bool();  // [57]
+        desc.is_curse              = read_bool();  // [58]
+        desc.is_protect            = read_bool();  // [59]
+        desc.is_perish_song        = read_bool();  // [60]
+        desc.is_attract            = read_bool();  // [61]
+        desc.is_baton_pass         = read_bool();  // [62]
+        // [63] is a bitfield: bit0=is_heal_bell, bit1=is_endure, bit2=is_rage, bit3=has_effectchance_phase
+        {
+            const uint8_t b63 = read_u8();
+            desc.is_heal_bell            = (b63 & 0x01u) != 0;
+            desc.is_endure               = (b63 & 0x02u) != 0;
+            desc.is_rage                 = (b63 & 0x04u) != 0;
+            desc.has_effectchance_phase  = (b63 & 0x08u) != 0;
+        }
         if (!in.good() && !in.eof()) return std::nullopt;
 
         MoveId mid = static_cast<MoveId>(move_id_raw);
@@ -990,6 +1021,39 @@ PackageReader::load_move_registry() const {
                     ? static_cast<enginemon::MoveCategory>(category_raw)
                     : enginemon::MoveCategory::Physical;
         md.effect_desc    = desc;
+
+        // Architecture B: SemanticEffectProgram suffix (MVDT v3).
+        //   u8  has_program
+        //   u16 op_count LE
+        //   op_count × { u8 kind, u8 p8a, u8 p8b, u8 p8c, u8 p8d, u32 p32 LE }
+        {
+            const uint8_t has_prog = read_u8();
+            const uint8_t opc_lo   = read_u8();
+            const uint8_t opc_hi   = read_u8();
+            if (!in.good() && !in.eof()) return std::nullopt;
+            const uint16_t op_count = static_cast<uint16_t>(opc_lo | (opc_hi << 8));
+            if (has_prog && op_count > 0) {
+                md.has_program = true;
+                md.effect_program.is_compiled = true;
+                md.effect_program.ops.reserve(op_count);
+                for (uint16_t oi = 0; oi < op_count; ++oi) {
+                    BOp op;
+                    op.kind    = static_cast<BOpKind>(read_u8());
+                    op.param8a = read_u8();
+                    op.param8b = read_u8();
+                    op.param8c = read_u8();
+                    op.param8d = read_u8();
+                    // param32: 4 bytes LE
+                    uint32_t p32 = static_cast<uint32_t>(read_u8());
+                    p32 |= static_cast<uint32_t>(read_u8()) <<  8;
+                    p32 |= static_cast<uint32_t>(read_u8()) << 16;
+                    p32 |= static_cast<uint32_t>(read_u8()) << 24;
+                    op.param32 = p32;
+                    if (!in.good() && !in.eof()) return std::nullopt;
+                    md.effect_program.ops.push_back(op);
+                }
+            }
+        }
         // Other fields default: target, priority, makes_contact, is_sound_based,
         // animation_id, name — not yet in package wire format.
 
@@ -1286,6 +1350,19 @@ PackageReader::load_battle_rules() const {
         rules.frontend_limits.coin_max = static_cast<int32_t>(raw);
         if (!r.read_le(raw)) return std::nullopt;
         rules.frontend_limits.item_qty_max = static_cast<int32_t>(raw);
+    }
+
+    // Metronome exception list (BRLS v3): u8 count + count × u16 LE MoveId.
+    {
+        uint8_t met_count = 0;
+        if (!r.read_le(met_count)) return std::nullopt;
+        rules.metronome_excepts.clear();
+        rules.metronome_excepts.reserve(met_count);
+        for (uint8_t mi = 0; mi < met_count; ++mi) {
+            uint16_t move_id = 0;
+            if (!r.read_le(move_id)) return std::nullopt;
+            rules.metronome_excepts.push_back(static_cast<MoveId>(move_id));
+        }
     }
 
     return rules;

@@ -425,6 +425,14 @@ struct BattleRules {
     bool sm83_is_lifted(uint16_t bit) const { return (sm83_lifted_mask & bit) != 0; }
 
     // ========================================================================
+    // Architecture B: Metronome exclusion list.
+    // Source: pokecrystal/data/moves/metronome_exception_moves.asm
+    // Populated by the Crystal frontend at extraction time.
+    // Metronome cannot select any move in this list.
+    // Defaults to Crystal vanilla set when not populated from a package.
+    std::vector<MoveId> metronome_excepts;
+
+    // ========================================================================
 
     // Returns true if this BattleRules was loaded from a package and all
     // required tables are populated.

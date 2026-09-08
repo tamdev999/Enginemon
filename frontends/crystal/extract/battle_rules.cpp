@@ -852,6 +852,33 @@ BattleRulesExtractResult extract_battle_rules(
         rules.weather_heal = {2, 2, 4};  // sun /2, neutral /2, other /4
     }
 
+    // ------------------------------------------------------------------
+    // 20. MetronomeExceptionMoves — 1 byte/entry, 0xFF sentinel.
+    //     Source: pokecrystal/data/moves/metronome_exception_moves.asm
+    //     Crystal v1.1: 0d:4bd6  — 14 entries (Metronome + 13 others).
+    //     Stored as raw 1-byte move indices → converted to MoveId (uint16_t).
+    //     Non-fatal: if address is 0 or read fails, metronome_excepts stays empty
+    //     (Metronome still fires, but without Crystal's canonical exclusions).
+    // ------------------------------------------------------------------
+    if (o.metronome_exception_moves != 0) {
+        std::vector<uint8_t> raw_ids;
+        std::string met_err;
+        const bool ok = extract_byte_list(rom, o.metronome_exception_moves,
+                                          "MetronomeExceptionMoves",
+                                          raw_ids, met_err, 32);
+        if (ok) {
+            rules.metronome_excepts.clear();
+            rules.metronome_excepts.reserve(raw_ids.size());
+            for (uint8_t mid : raw_ids) {
+                rules.metronome_excepts.push_back(static_cast<enginemon::MoveId>(mid));
+            }
+        } else {
+            // Non-fatal — log and continue with empty list.
+            std::fprintf(stderr, "MetronomeExceptionMoves: %s (non-fatal, using empty list)\n",
+                         met_err.c_str());
+        }
+    }
+
     result.success = true;
     return result;
 }

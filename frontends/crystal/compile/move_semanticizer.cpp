@@ -14,6 +14,7 @@
 #include "crystal/compile/move_semanticizer.hpp"
 #include "crystal/extract/effect_script_decoder.hpp"
 #include "crystal/battle/effect_semanticizer.hpp"
+#include "crystal/battle/effect_program_compiler.hpp"
 #include "crystal/battle/crystal_effects.hpp"
 #include "engine/battle/semantic_effect.hpp"
 #include <iostream>
@@ -22,7 +23,7 @@
 
 namespace crystal {
 
-// Pack a SemanticEffectDescription into the 43-byte wire layout.
+// Pack a SemanticEffectDescription into the 64-byte wire layout (MVDT schema v4).
 // Must match the layout documented in native_package.hpp::MoveDataEntry::effect_desc_raw.
 static void pack_effect_desc(const enginemon::SemanticEffectDescription& d,
                               uint8_t (&raw)[PackageWriter::MoveDataEntry::EFFECT_DESC_BYTES])
@@ -31,6 +32,7 @@ static void pack_effect_desc(const enginemon::SemanticEffectDescription& d,
     auto pb = [&](bool v, size_t i) { raw[i] = v ? 1u : 0u; };
     auto pe = [&](auto v, size_t i) { raw[i] = static_cast<uint8_t>(v); };
 
+    // [0..35] — original fields (layout unchanged from v3)
     pb(d.has_standard_damage,   0);
     pb(d.has_recoil,             1);
     pb(d.has_drain,              2);
@@ -67,7 +69,48 @@ static void pack_effect_desc(const enginemon::SemanticEffectDescription& d,
     pb(d.needs_rage,            33);
     raw[34] = d.ai_classification;
     pb(d.is_supported,          35);
-    // [36..42] already zeroed
+
+    // [36..63] — new fields added in MVDT schema v4
+    pb(d.has_payday,            36);
+    pb(d.sets_focus_energy,     37);
+    pb(d.sets_mist,             38);
+    pb(d.sets_safeguard,        39);
+    pb(d.changes_user_type,     40);
+    pb(d.changes_user_type_resist, 41);
+    pb(d.equalizes_hp,          42);
+    pb(d.requires_user_asleep,  43);
+    pb(d.traps_opponent,        44);
+    pb(d.identifies_opponent,   45);
+    pb(d.reduces_pp,            46);
+    pb(d.has_thunder_accuracy,  47);
+    pb(d.ends_wild_battle,      48);
+    pb(d.swagger_stat_change,   49);
+    pb(d.is_splash,             50);
+    pb(d.is_leech_seed,         51);
+    pb(d.is_disable,            52);
+    pb(d.is_encore,             53);
+    pb(d.is_lock_on,            54);
+    pb(d.is_sleep_talk,         55);
+    pb(d.is_destiny_bond,       56);
+    pb(d.is_nightmare,          57);
+    pb(d.is_curse,              58);
+    pb(d.is_protect,            59);
+    pb(d.is_perish_song,        60);
+    pb(d.is_attract,            61);
+    pb(d.is_baton_pass,         62);
+    pb(d.is_heal_bell,          63);
+    // is_endure and is_rage: packed as bits in byte [63] high nibble
+    // to fit within 64 bytes without expanding the schema further.
+    // byte [63] bit layout: [7:4] = {is_endure, is_rage, 0, 0}, [3:0] = is_heal_bell value
+    // CORRECTION: store is_endure at [63] and is_rage in a separate encoding.
+    // Actually: 64 bytes gives us [0..63] = 64 slots. is_heal_bell is at [63].
+    // is_endure and is_rage need 2 more bytes. Use a bitfield in [63]:
+    // byte [63] bit layout: [0]=is_heal_bell, [1]=is_endure, [2]=is_rage, [3]=has_effectchance_phase
+    raw[63] = static_cast<uint8_t>(
+        (d.is_heal_bell           ? 0x01u : 0u) |
+        (d.is_endure              ? 0x02u : 0u) |
+        (d.is_rage                ? 0x04u : 0u) |
+        (d.has_effectchance_phase ? 0x08u : 0u));
 }
 
 bool semanticize_move_entries(
@@ -133,8 +176,46 @@ bool semanticize_move_entries(
                 }
             }
 
+            // ── Hard fail: unrecognized opcode in script ───────────────────────
+            // Every stock command byte must have an explicit case in apply_command().
+            // If unrecognized_opcode is set, the script contains a byte with no
+            // implemented semantic — this is a compiler bug, not a runtime fallback.
+            if (desc.unrecognized_opcode) {
+                std::fprintf(stderr,
+                    "FATAL: Stage 9 [move %u, effect 0x%02X]: "
+                    "script contains unrecognized command byte 0x%02X — "
+                    "no semantic mapping. Add a case in effect_semanticizer.cpp.\n",
+                    static_cast<unsigned>(e.id), e.raw_crystal_effect,
+                    desc.first_unrecognized);
+                return false;
+            }
+
             pack_effect_desc(desc, e.effect_desc_raw);
             if (!desc.is_supported) ++unsupported_count;
+
+            // ── Architecture B: compile SemanticEffectProgram if needed ───────
+            // After the A-gate packs the description, check whether this effect
+            // needs an Architecture B program.  The compiler is structural: it
+            // never uses raw effect IDs to decide — it reads the description flags.
+            if (EffectProgramCompiler::needs_program(desc)) {
+                auto prog_result = EffectProgramCompiler::compile(
+                    desc, *script, e.raw_crystal_effect, e.effect_id);
+                if (prog_result.success) {
+                    e.has_program    = true;
+                    e.effect_program = std::move(prog_result.program);
+                    // B program compiled — is_supported stays false (already set by gate).
+                } else {
+                    // B compile failure is a compiler bug — no fallback.
+                    // The semanticizer produced B flags for a script that the program
+                    // compiler cannot handle. Fix the compiler, not the classification.
+                    std::fprintf(stderr,
+                        "FATAL: Stage 9 [move %u, effect 0x%02X]: "
+                        "EffectProgramCompiler failed: %s\n",
+                        static_cast<unsigned>(e.id), e.raw_crystal_effect,
+                        prog_result.error.c_str());
+                    return false;
+                }
+            }
         } else {
             // Effect ID out of range for this ROM (e.g., hack-specific move).
             // Leave effect_desc_raw zeroed (is_supported=false) — fails closed.

@@ -28,6 +28,7 @@ add_library(enginemon_engine STATIC
     # Battle system (mechanics, AI)
     battle/calculator.cpp
     battle/battle.cpp
+    battle/battle_program.cpp
     battle/trainer_ai.cpp
 
     # Party/Pokemon management

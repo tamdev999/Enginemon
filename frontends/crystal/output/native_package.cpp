@@ -726,20 +726,22 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
         }
     }
 
-    // Wire format (v2):
-    //   u8  schema_version   = MVDT_SCHEMA_VERSION (currently 2)
+    // Wire format (v3):
+    //   u8  schema_version   = MVDT_SCHEMA_VERSION (currently 3)
     //   u32 count LE
-    //   per entry (9 base bytes + 43 effect_desc bytes = 52 bytes):
+    //   per entry (fixed 9+43=52 base bytes + variable program suffix):
     //     u16 move_id, u8 type_id, power, accuracy, pp, effect_id, effect_chance, category
-    //     43 bytes SemanticEffectDescription — see serialize_effect_desc() below
+    //     43 bytes SemanticEffectDescription
+    //     u8 has_program + u16 op_count LE + op_count × 9 bytes
     //
     // Readers that see schema_version != MVDT_SCHEMA_VERSION must reject.
     // This prevents old packages from being silently misread as new format.
 
     auto count32 = static_cast<uint32_t>(entries.size());
-    constexpr uint32_t DESC_SIZE = 43;  // SemanticEffectDescription serialized size
+    constexpr uint32_t DESC_SIZE = 64;  // SemanticEffectDescription serialized size (MVDT v4)
     std::vector<uint8_t> buf;
-    buf.reserve(1 + 4 + entries.size() * (9 + DESC_SIZE));
+    // Reserve for the fixed portion (9+43+3 bytes per entry); programs expand further.
+    buf.reserve(1 + 4 + entries.size() * (9 + DESC_SIZE + 3));
 
     // Schema version byte — reader rejects if this doesn't match MVDT_SCHEMA_VERSION.
     buf.push_back(enginemon::MVDT_SCHEMA_VERSION);
@@ -780,10 +782,36 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
 
         // SemanticEffectDescription — 43 bytes (layout matches write side)
         const auto& d = e.effect_desc_raw;
-        static_assert(PackageWriter::MoveDataEntry::EFFECT_DESC_BYTES == 43,
-                      "effect_desc_raw size mismatch");
-        // Write all 43 bytes directly from the raw array
-        buf.insert(buf.end(), d, d + 43);
+        static_assert(PackageWriter::MoveDataEntry::EFFECT_DESC_BYTES == 64,
+                      "effect_desc_raw size mismatch — update MVDT layout comment");
+        // Write all 64 bytes directly from the raw array
+        buf.insert(buf.end(), d, d + 64);
+
+        // SemanticEffectProgram (MVDT v3 suffix):
+        //   u8  has_program
+        //   u16 op_count LE
+        //   op_count × {u8 kind, u8 p8a, u8 p8b, u8 p8c, u8 p8d, u32 p32 LE} = op_count × 9 bytes
+        const uint8_t has_prog = e.has_program ? 1u : 0u;
+        buf.push_back(has_prog);
+        const uint16_t op_count = e.has_program
+            ? static_cast<uint16_t>(std::min<size_t>(e.effect_program.ops.size(), 0xFFFFu))
+            : 0u;
+        buf.push_back(static_cast<uint8_t>(op_count & 0xFF));
+        buf.push_back(static_cast<uint8_t>((op_count >> 8) & 0xFF));
+        if (has_prog) {
+            for (uint16_t oi = 0; oi < op_count; ++oi) {
+                const auto& op = e.effect_program.ops[oi];
+                buf.push_back(static_cast<uint8_t>(op.kind));
+                buf.push_back(op.param8a);
+                buf.push_back(op.param8b);
+                buf.push_back(op.param8c);
+                buf.push_back(op.param8d);
+                buf.push_back(static_cast<uint8_t>(op.param32 & 0xFF));
+                buf.push_back(static_cast<uint8_t>((op.param32 >>  8) & 0xFF));
+                buf.push_back(static_cast<uint8_t>((op.param32 >> 16) & 0xFF));
+                buf.push_back(static_cast<uint8_t>((op.param32 >> 24) & 0xFF));
+            }
+        }
     }
     move_data_data_ = std::move(buf);
 }
@@ -799,7 +827,7 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
 
     // Wire format (all little-endian where multi-byte):
     //
-    //  [schema_version]       u8 = BRLS_SCHEMA_VERSION       =  1 byte  ← NEW v2
+    //  [schema_version]       u8 = BRLS_SCHEMA_VERSION       =  1 byte  ← v3
     //  [stat_stage_mult]      13 × {u8 num, u8 den}          = 26 bytes
     //  [acc_stage_mult]       13 × {u8 num, u8 den}          = 26 bytes
     //  [crit_chances]         7  × u8                        =  7 bytes
@@ -1053,7 +1081,7 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
 
     // Frontend economy limits — 3 × int32_t LE.
     // Derived from source frontend's SRAM/BCD layout widths.
-    // All mandatory in BRLS schema v2; reader rejects if absent.
+    // All mandatory in BRLS schema v3; reader rejects if absent.
     auto push_i32 = [&](int32_t v) {
         buf.push_back(static_cast<uint8_t>(v & 0xFF));
         buf.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
@@ -1063,6 +1091,22 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     push_i32(rules.frontend_limits.money_max);
     push_i32(rules.frontend_limits.coin_max);
     push_i32(rules.frontend_limits.item_qty_max);
+
+    // Metronome exception move list (BRLS v3).
+    //   u8 count + count × u16 LE MoveId
+    // Source: pokecrystal/data/moves/metronome_exception_moves.asm
+    // Crystal v1.1 has 14 entries; any ROM hack that extends the list is supported
+    // as long as count fits in a u8 (max 255 entries — Crystal has ≤251 moves).
+    {
+        const uint8_t met_count = static_cast<uint8_t>(
+            std::min<size_t>(rules.metronome_excepts.size(), 255u));
+        push_u8(met_count);
+        for (uint8_t mi = 0; mi < met_count; ++mi) {
+            const uint16_t move_id = static_cast<uint16_t>(rules.metronome_excepts[mi]);
+            push_u8(static_cast<uint8_t>(move_id & 0xFF));
+            push_u8(static_cast<uint8_t>((move_id >> 8) & 0xFF));
+        }
+    }
 
     battle_rules_data_ = std::move(buf);
 }

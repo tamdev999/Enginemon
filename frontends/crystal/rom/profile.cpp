@@ -423,6 +423,7 @@ void ProfileRegistry::register_crystal_v11() {
     o.ai_sunny_day_moves         = flat_offset(0x0e, 0x5134); // 0e:5134 SunnyDayMoves
     o.trainer_class_attributes   = flat_offset(0x0e, 0x559c); // 0e:559c TrainerClassAttributes
     o.trainer_class_dvs          = flat_offset(0x09, 0x70d6); // 09:70d6 TrainerClassDVs
+    o.metronome_exception_moves  = flat_offset(0x0d, 0x4bd6); // 0d:4bd6 MetronomeExceptionMoves
     o.num_wobble_entries         = 24; // 24 entries in Crystal v1.1 WobbleProbabilities
 
     // SM83 routine addresses for static parameter lifting.
@@ -705,6 +706,7 @@ void ProfileRegistry::register_polished_crystal_3_2_3() {
     o.ai_sunny_day_moves         = 0;
     o.trainer_class_attributes   = 0;
     o.trainer_class_dvs          = 0;
+    o.metronome_exception_moves  = 0;
 
     // SM83 routine addresses — not yet located; scan will find them if needed
     // (The sm83_find_* structural scan in battle_rules.cpp handles address=0)

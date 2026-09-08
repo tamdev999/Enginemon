@@ -109,8 +109,12 @@ if(ENGINEMON_ENABLE_ENGINE)
     )
     target_link_libraries(battle_test PRIVATE
         enginemon_engine
+        enginemon_crystal
     )
-    target_include_directories(battle_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    target_include_directories(battle_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+        ${CMAKE_SOURCE_DIR}/frontends/crystal/include
+    )
     if(MSVC)
         target_compile_options(battle_test PRIVATE /bigobj)
     endif()

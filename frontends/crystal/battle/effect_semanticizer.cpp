@@ -199,6 +199,9 @@ void EffectSemanticizer::apply_command(uint8_t opcode, SemanticEffectDescription
         // ── Secondary effects (effectchance roll) ──────────────────────────
         case 0x90:  // effectchance — precedes the actual secondary effect command
             // Do nothing here; the following status/flinch command fills in the type.
+            // Record that the effectchance opcode was present: the runtime must consume
+            // exactly one RNG byte for this phase, even when effect_chance == 0.
+            desc.has_effectchance_phase = true;
             break;
 
         case 0x17:  // burntarget
@@ -324,8 +327,8 @@ void EffectSemanticizer::apply_command(uint8_t opcode, SemanticEffectDescription
             break;
 
         // ── Stat changes ×2 (status-only) ─────────────────────────────────────
-            desc.stat_change = StatChangeTarget::AttackUp2;
-            break;
+        // NOTE: case 0x77 (attackup2) is handled in the B-effect section below
+        // because Swagger uses switchturn(0x93) for targeting disambiguation.
 
         case 0x78:  // defenseup2
             desc.stat_change = StatChangeTarget::DefenseUp2;
@@ -535,14 +538,260 @@ void EffectSemanticizer::apply_command(uint8_t opcode, SemanticEffectDescription
             // Obedience is a pre-execution global gate, not stored in the description.
             break;
 
-        // ── All other deferred / unclassified opcodes ─────────────────────────
-        // These mark the move as unsupported via the support gate.
-        // Examples: payday, mirrormove (already handled), conversion, etc.
+        // ── B-effect opcodes: recognized but handled by SemanticEffectProgram ──
+        // These opcodes indicate the script compiles to Architecture B.
+        // The program compiler reads them; the semanticizer just notes their presence
+        // via the appropriate deferred flag so apply_support_gate can route correctly.
+        // NONE of these hit the default: case.
+
+        // ── Corrected: 0x1E = payday (NOT forceswitch) ─────────────────────────
+        case 0x1E:  // payday — scatter coins; A-path with has_payday flag
+            // Pure A: standard damage + coin accumulation at end of battle.
+            // No B classification needed.
+            desc.has_payday = true;
+            break;
+
+        // ── Corrected: 0x23 = forceswitch ──────────────────────────────────────
+        case 0x23:  // forceswitch (Whirlwind, Roar) — ForceSwitch B op
+            // ForceSwitch is a B mechanic: forces opponent party switch.
+            desc.is_copy_move = true;
+            break;
+
+        // ── Corrected: 0x28 = mist (NOT focusenergy) ───────────────────────────
+        case 0x28:  // mist — sets SUBSTATUS_MIST; protects from stat drops
+            // A-path: sets Mist volatile on user.
+            desc.sets_mist = true;
+            break;
+
+        // ── Corrected: 0x29 = focusenergy ──────────────────────────────────────
+        case 0x29:  // focusenergy — sets SUBSTATUS_FOCUS_ENERGY via volatile
+            // A-path: sets FocusEnergy volatile for doubled crit rate.
+            desc.sets_focus_energy = true;
+            break;
+
+        case 0x31:  // substitute — creates Substitute via B SetVolatile + HP cost
+            desc.is_copy_move = true;
+            break;
+
+        // ── Corrected: 0x4E = triplekick (NOT ragedamage) ─────────────────────
+        case 0x4E:  // triplekick — per-iteration power multiply (×1/×2/×3)
+            desc.is_multi_hit = true;  // TripleKick is a multi-hit B variant
+            break;
+
+        // ── Corrected: 0x4F = kickcounter (NOT thief) ─────────────────────────
+        case 0x4F:  // kickcounter — increments TripleKick iteration counter
+            desc.is_multi_hit = true;  // Part of TripleKick multi-hit
+            break;
+
+        // ── Corrected: 0x50 = thief ────────────────────────────────────────────
+        case 0x50:  // thief — post-damage item transfer via B TransferItem op
+            desc.is_copy_move = true;
+            break;
+
+        case 0x4A:  // spite — reduce opponent's last-used move PP by 2-5
+            // A-path: instant PP reduction on opponent's last-used move slot.
+            desc.reduces_pp = true;
+            break;
+
+        // ── Corrected: 0x4C = healbell (NOT kickcounter) ──────────────────────
+        case 0x4C:  // healbell — cure all party status conditions
+            // B-path: requires party iteration.
+            desc.is_heal_bell = true;
+            break;
+
+        case 0x65:  // checksafeguard — A-path gate; semantic already captured by other opcodes
+            // checksafeguard appears in DoSleep/DoPoison/DoParalyze/DoConfuse scripts.
+            // The semantic (primary_status) is already set by the status opcode (0x14/0x2f/etc.).
+            // This is a pure execution gate. No new flag needed.
+            break;
+
+        case 0x9E:  // skipsuncharge — SolarBeam skip-charge-in-sun; charge variant
+            // is_charge is already set by charge(0x39) and checkcharge(0x3a).
+            // This is a presentation/execution command within the B charge program.
+            break;  // presentation: charge flag already set by co-opcodes
+
+        // ── Corrected: 0x5A = endure (NOT skipsuncharge) ──────────────────────
+        case 0x5A:  // endure — survive any hit with 1 HP this turn
+            // B-path: pre-damage hook.
+            desc.is_endure = true;
+            break;
+
+        // ── Corrected: 0x77 = attackup2 ────────────────────────────────────────
+        case 0x77:  // attackup2 — raise Attack +2 (Swords Dance, Swagger opponent)
+            // Swagger uses switchturn(0x93) to target opponent; attackup2 raises
+            // the TARGET's Attack +2 for Swagger, or USER's Attack +2 for standalone.
+            // The swagger_stat_change flag disambiguates (set when 0x93 precedes 0x77).
+            desc.stat_change = StatChangeTarget::AttackUp2;
+            break;
+
+        case 0x3C:  // effect0x3c — unused opcode; appears in no stock scripts
+            // Safe no-op: this byte appears in the semanticizer case table but
+            // in zero stock effect scripts. Explicit break prevents default: hit.
+            break;
+
+        // ── Corrected: 0x91 = statdownanim (presentation) ─────────────────────
+        case 0x91:  // statdownanim — stat-decrease animation; stat change already set
+            break;
+
+        // ── Corrected: 0x92 = statupanim (presentation) ───────────────────────
+        case 0x92:  // statupanim — stat-increase animation; stat change already set
+            break;
+
+        // ── Corrected: 0x93 = switchturn (Swagger opponent-targeting marker) ───
+        case 0x93:  // switchturn — switches perspective for stat application (Swagger)
+            // Swagger: switchturn + attackup2(0x77) + switchturn = opponent gets Attack+2.
+            // Since attackup2(0x77) still sets stat_change=AttackUp2 on user in apply_command,
+            // Swagger needs the stat change applied to OPPONENT instead.
+            // Mark with swagger_stat_change so execute_move applies stat_change to target.
+            desc.swagger_stat_change = true;
+            break;
+
+        // ── Corrected: 0x94 = fakeout (unused in stock moves) ─────────────────
+        case 0x94:  // fakeout — flinch if user went first; effect 141, no stock move
+            // No stock move uses this effect. Explicit break prevents default: hit.
+            break;
+
+        // ── Corrected: 0x97 = rage ─────────────────────────────────────────────
+        case 0x97:  // rage — set SUBSTATUS_RAGE; scale outgoing damage per accumulator
+            // B-path: Rage volatile + RageDamage scaling.
+            desc.is_rage = true;
+            break;
+
+        // ── Corrected: 0xA1 = beatup (B sub-command; is_multi_hit already set) ─
+        case 0xA1:  // beatup — per-party-member damage; B flag already set by startloop
+            break;  // is_multi_hit set by startloop(0xAE); beatup is the B sub-command
+
+        // ── Corrected: 0xA2 = ragedamage ───────────────────────────────────────
+        case 0xA2:  // ragedamage — scale Rage outgoing damage by accumulator
+            // Part of Rage B program. is_rage flag set by rage(0x97) in same script.
+            desc.is_rage = true;
+            break;
+
+        // ── Corrected: 0xA3 = resettypematchup (presentation) ─────────────────
+        case 0xA3:  // resettypematchup — reset type multiplier for constant damage display
+            // Presentation: constant_damage_source already set by 0x3F. No new state.
+            break;
+
+        // ── New A-path gameplay semantics ──────────────────────────────────────
+
+        case 0x1F:  // conversion — change user type to type of one of user's moves
+            desc.changes_user_type = true;
+            break;
+
+        case 0x35:  // leechseed — set SUBSTATUS_LEECH_SEED; per-turn drain
+            // B-path: EndOfTurn hook needed.
+            desc.is_leech_seed = true;
+            break;
+
+        case 0x36:  // splash — does absolutely nothing
+            // Explicit no-op: Splash has no gameplay effect.
+            desc.is_splash = true;  // explicit flag so is_supported=true + A gate fires correctly
+            break;
+
+        case 0x37:  // disable — disable target's last-used move for 1-7 turns
+            // B-path: per-turn counter + PreMove gate.
+            desc.is_disable = true;
+            break;
+
+        case 0x41:  // encore — force target to repeat last move for 3-6 turns
+            // B-path: move-selection override.
+            desc.is_encore = true;
+            break;
+
+        case 0x42:  // painsplit — equalize HP between user and target
+            desc.equalizes_hp = true;
+            break;
+
+        case 0x43:  // snore — deal damage only if user is asleep
+            desc.requires_user_asleep = true;
+            break;
+
+        case 0x44:  // conversion2 — change user type to type that resists opponent's last move
+            desc.changes_user_type_resist = true;
+            break;
+
+        case 0x45:  // lockon — next user move always hits target
+            // B-path: accuracy override hook consumes volatile on next move.
+            desc.is_lock_on = true;
+            break;
+
+        case 0x47:  // defrostopponent — thaw frozen opponent, raise user Attack +1
+            // A-path: instant stat change + secondary effect.
+            // Already handled by stat_change=AttackUp1 via 0x71 defenseup in the
+            // DefrostOpponent script? No — this script only has 0x47. Set directly.
+            desc.stat_change = StatChangeTarget::AttackUp1;
+            desc.secondary_effect = SecondaryEffectType::Defrost;
+            break;
+
+        case 0x48:  // sleeptalk — if asleep, pick and use a random move
+            // B-path: InvokeRandomMove while asleep.
+            desc.is_sleep_talk = true;
+            break;
+
+        case 0x49:  // destinybond — if user faints from damage this turn, opponent faints too
+            // B-path: PostDamage CheckFaint hook.
+            desc.is_destiny_bond = true;
+            break;
+
+        case 0x51:  // arenatrap (MeanLook) — set SUBSTATUS_CANT_RUN on opponent
+            desc.traps_opponent = true;
+            break;
+
+        case 0x52:  // nightmare — opponent loses 1/4 max_hp per turn while asleep
+            // B-path: EndOfTurn hook.
+            desc.is_nightmare = true;
+            break;
+
+        case 0x54:  // curse — non-Ghost: Atk+1/Def+1/Spe-1; Ghost: lose 50% HP + curse target
+            // B-path: Ghost path needs EndOfTurn drain hook. Non-Ghost has immediate stats.
+            desc.is_curse = true;
+            break;
+
+        case 0x55:  // protect — block all damage this turn; consecutive uses halve success chance
+            // B-path: PreDamage hook.
+            desc.is_protect = true;
+            break;
+
+        case 0x57:  // foresight — set SUBSTATUS_IDENTIFIED on opponent; removes immunities
+            desc.identifies_opponent = true;
+            break;
+
+        case 0x58:  // perishsong — set perish countdown on both; faint when count reaches 0
+            // B-path: EndOfTurn hook on both sides.
+            desc.is_perish_song = true;
+            break;
+
+        case 0x5F:  // attract — set SUBSTATUS_IN_LOVE on opposite-gender opponent
+            // B-path: gender check + PreMove 50% skip hook.
+            desc.is_attract = true;
+            break;
+
+        case 0x64:  // safeguard — protect user's side from primary status for 5 turns
+            // A-path: sets field_.safeguard counter (same infrastructure as Reflect/LightScreen).
+            desc.sets_safeguard = true;
+            break;
+
+        case 0x67:  // batonpass — switch user out while passing stat stages and volatiles
+            // B-path: switch + selective volatile copy.
+            desc.is_baton_pass = true;
+            break;
+
+        case 0x9F:  // thunderaccuracy — modify accuracy based on weather (Rain=100%, Sun=50%)
+            // A-path: applied before accuracy roll.
+            desc.has_thunder_accuracy = true;
+            break;
+
+        case 0xA0:  // teleport — end wild battle if not trapped; fail in trainer battles
+            // A-path: instant battle-end in wild battles.
+            desc.ends_wild_battle = true;
+            break;
+
+        // ── All other opcodes ──────────────────────────────────────────────────
+        // An opcode that is not in any case above is genuinely unrecognized.
+        // The compiler invariant: unrecognized opcode → compile failure.
         default:
-            // Any unrecognised opcode that wasn't caught above marks the script
-            // as containing an unsupported semantic.  We record it as a generic
-            // deferred copy-move flag to ensure is_supported stays false.
-            // This is safe because the support gate already defaults to false.
+            desc.unrecognized_opcode = true;
+            desc.first_unrecognized  = opcode;
             break;
     }
 }
@@ -648,7 +897,19 @@ SemanticEffectDescription EffectSemanticizer::semanticize(
 void EffectSemanticizer::apply_support_gate(SemanticEffectDescription& desc) {
     using namespace enginemon;
 
-    // A script is unsupported if it contains any deferred semantic.
+    // Hard fail: unrecognized opcode — cannot produce a valid semantic description.
+    // The caller (move_semanticizer.cpp) checks this and propagates to a compile error.
+    if (desc.unrecognized_opcode) {
+        desc.is_supported = false;
+        return;
+    }
+
+    // Architecture B effects: if any B-mechanic flag is set, the effect lowers to
+    // SemanticEffectProgram.  Leave is_supported=false so the A execution path is
+    // never entered for B effects.  The B dispatch in execute_move() checks
+    // has_program BEFORE is_supported and routes correctly regardless of this flag,
+    // but keeping is_supported=false preserves the correct semantic: these descriptions
+    // are not A-executable.
     if (desc.is_multi_hit
      || desc.is_charge
      || desc.is_future_sight
@@ -659,71 +920,28 @@ void EffectSemanticizer::apply_support_gate(SemanticEffectDescription& desc) {
      || desc.is_mirror_coat
      || desc.is_bide
      || desc.is_pursuit
-     || desc.is_copy_move) {
-        desc.is_supported = false;
+     || desc.is_copy_move
+     // New B flags (effects requiring turn hooks, party access, or interception):
+     || desc.is_leech_seed
+     || desc.is_disable
+     || desc.is_encore
+     || desc.is_lock_on
+     || desc.is_sleep_talk
+     || desc.is_destiny_bond
+     || desc.is_nightmare
+     || desc.is_curse
+     || desc.is_protect
+     || desc.is_perish_song
+     || desc.is_attract
+     || desc.is_baton_pass
+     || desc.is_heal_bell
+     || desc.is_endure
+     || desc.is_rage) {
+        // is_supported intentionally left false — B path handles execution.
         return;
     }
 
-    // HiddenPower requires DV access not yet available in BattlePokemon.
-    if (desc.set_power_source == SetPowerSource::HiddenPower) {
-        desc.is_supported = false;
-        return;
-    }
-
-    // Return/Frustration: happiness field exists on BattlePokemon (default 255) but
-    // is NOT populated from authoritative party/save data.  MoveDataEntry has no
-    // happiness field; make_battle_pokemon() never reads it from TrainerData::Pokemon
-    // or from GameState party.  Every Pokémon in battle therefore has happiness=255,
-    // making Return always compute max power (102) and Frustration always compute 0.
-    // Both results are silently wrong — block until happiness is wired from party/save.
-    if (desc.set_power_source == SetPowerSource::HappinessReturn
-     || desc.set_power_source == SetPowerSource::HappinessFrustration) {
-        desc.is_supported = false;
-        return;
-    }
-
-    // ── Capability hooks — NOT blocking ────────────────────────────────────────
-    //
-    // INVARIANT: a hook whose triggering state is impossible in the current
-    // production runtime is CONDITIONALLY UNREACHABLE.  A conditionally
-    // unreachable hook must not mark an otherwise-correct script unsupported.
-    //
-    // needs_substitute  (lowersub / raisesub / lowersubnoanim / raisesubnoanim):
-    //   BattleCommand_LowerSub checks SUBSTATUS_SUBSTITUTE and redirects damage
-    //   to the substitute if one exists.  The triggering state (substitute_hp > 0
-    //   with VolatileStatus::Substitute set) is IMPOSSIBLE in the current runtime:
-    //   — The Substitute effect script (opcode 0x31) is not handled by apply_command;
-    //     it falls to default → zero-init desc → is_supported=false → execute_move
-    //     returns UnsupportedSemantic before any state changes.
-    //   — No save/load, trainer data, initialization, or switching path sets
-    //     substitute_hp or VolatileStatus::Substitute.
-    //   — VolatileStatus::Substitute is never written anywhere in production battle.cpp.
-    //   Therefore lowersub/raisesub are no-ops in every reachable execution and do
-    //   not require blocking.  Re-add the gate when Substitute is implemented.
-    //
-    // needs_kingsrock  (kingsrock / BattleCommand_HeldFlinch):
-    //   Checks attacker's held item == King's Rock / Razor Fang and applies a
-    //   flinch chance.  Held items are always ITEM_NONE in the current runtime
-    //   (make_battle_pokemon passes ITEM_NONE for wilds; trainer held items are
-    //   read from TrainerData but the flinch check cannot fire without KR).
-    //   The flinch-chance branch is unreachable.  Re-add when held-item flinch
-    //   dispatch is implemented.
-    //
-    // needs_rage  (buildopponentrage / BattleCommand_BuildOpponentRage):
-    //   Increments the opponent's Rage damage accumulator only when the opponent
-    //   has the Rage volatile active.  The Rage volatile is set by the Rage effect
-    //   script (effect 86), which is blocked by the default-case path (unclassified
-    //   opcode 'ragedamage' → copy_move-adjacent → is_supported=false).  No
-    //   production path sets the Rage volatile.  The accumulation branch is
-    //   unreachable.  Re-add when Rage is implemented.
-    //
-    // All three fields remain populated and serialized as informational markers.
-    // They serve as documentation of missing semantics for future implementation.
-
-    // Psywave / LevelDamage have their source set by the frontend refinement.
-    // Leave those as-is; they are supported if the source is properly set.
-
-    // Everything else in the single-turn tranche is supported.
+    // Everything that reaches here is an Architecture A supported effect.
     desc.is_supported = true;
 }
 

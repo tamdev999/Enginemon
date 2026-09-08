@@ -21,6 +21,7 @@ add_library(enginemon_crystal STATIC
     extract/effect_script_decoder.cpp
     # Battle semantics
     battle/effect_semanticizer.cpp
+    battle/effect_program_compiler.cpp
     
     # Output/packaging
     output/native_package.cpp

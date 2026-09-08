@@ -185,6 +185,12 @@ namespace EffectId {
     static constexpr uint8_t BEAT_UP            = 154;
     static constexpr uint8_t FLY                = 155;
     static constexpr uint8_t DEFENSE_CURL       = 156;
+    static constexpr uint8_t DIG                = 157;  // Underground invulnerability charge (same structure as Fly)
+
+    // Semantic aliases — multiple Crystal moves share one effect index.
+    // These are distinct move names but identical effect scripts.
+    static constexpr uint8_t THRASH             = RAMPAGE;      // 27 — Thrash/PetalDance/Outrage share RAMPAGE
+    static constexpr uint8_t WRAP               = TRAP_TARGET;  // 42 — Wrap/Bind/Clamp/FireSpin/Whirlpool share TRAP_TARGET
 
     // Stat-up contiguous ranges for batch registration
     // Source: const_def sequence in move_effect_constants.asm

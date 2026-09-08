@@ -183,7 +183,7 @@ namespace crystal {
 //   Fix 4: HeadlessGameLoop destructor and set_lua_runtime() clear deferred_script_fn
 //          from old LuaRuntime preventing stale callback UAF.
 //   Fix 5: Deferred script drain propagates start_script failure as script_error.
-constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-3.4.0";
+constexpr const char* CRYSTAL_COMPILER_VERSION = "crystal-3.5.0";
 // EMON_FORMAT_VERSION must match PackageHeader::VERSION in engine/package/package_format.hpp.
 // Used as part of BuildIdentity cache key — a stale cached package built against an
 // older format is rejected and recompiled from source.

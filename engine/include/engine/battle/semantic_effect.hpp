@@ -298,11 +298,12 @@ struct SemanticEffectDescription {
     bool is_sleep_move = false;
 
     // ────────────────────────────────────────────────────────────────────────
-    // CAPABILITY FLAGS
-    // These record whether the required runtime machinery currently exists.
-    // execute_move() checks the corresponding has_* flag before applying an effect.
-    // The Crystal frontend sets them based on the current engine capability set.
+    // COMPILER INVARIANT: unrecognized opcode → compile failure
+    // Set by apply_command() default: case when an opcode is not classified.
+    // If this is true, the compiler must reject the script with an error.
     // ────────────────────────────────────────────────────────────────────────
+    bool    unrecognized_opcode = false;
+    uint8_t first_unrecognized  = 0;    // first opcode byte that was not recognized
 
     // King's Rock flinch — requires held-item dispatch in execute_move.
     // Currently absent from execute_move; marked here as a named gap.
@@ -321,6 +322,89 @@ struct SemanticEffectDescription {
     // bool needs_obedience — not stored here; always global.
 
     // ────────────────────────────────────────────────────────────────────────
+    // NEW ARCHITECTURE A SEMANTIC FIELDS (wire bytes [36..55])
+    // These are new gameplay-semantic fields for effects that were previously
+    // reaching default: in the semanticizer. Each has a direct implementation
+    // in execute_move(). No new B infrastructure required for these.
+    // ────────────────────────────────────────────────────────────────────────
+
+    // Pay Day — scatter coins; accumulate level×2 in per-battle pending_coins counter.
+    bool has_payday = false;
+
+    // Focus Energy — set VolatileStatus::FocusEnergy (doubles crit stage in build_crit_stage).
+    bool sets_focus_energy = false;
+
+    // Mist — set VolatileStatus::Mist on user; blocks opponent-inflicted stat drops.
+    bool sets_mist = false;
+
+    // Safeguard — set field_.safeguard counter for 5 turns; blocks primary status.
+    bool sets_safeguard = false;
+
+    // Conversion — change user type to type of one of user's moves (random, non-CURSE).
+    bool changes_user_type = false;
+
+    // Conversion2 — change user type to a type that resists opponent's last move.
+    bool changes_user_type_resist = false;
+
+    // Pain Split — equalize HP between user and target: each = floor((u+t)/2).
+    bool equalizes_hp = false;
+
+    // Snore — deal standard damage only if user is asleep; fails otherwise.
+    bool requires_user_asleep = false;
+
+    // Mean Look / ArenaTrap — set VolatileStatus::CantRun on target.
+    bool traps_opponent = false;
+
+    // Foresight — set VolatileStatus::Identified on target; removes immunities.
+    bool identifies_opponent = false;
+
+    // Spite — reduce PP of target's last-used move by 2-5.
+    bool reduces_pp = false;
+
+    // Thunder accuracy — Rain=100%, Sun=50%, else base accuracy.
+    bool has_thunder_accuracy = false;
+
+    // Teleport — end wild battle; fails in trainer battles.
+    bool ends_wild_battle = false;
+
+    // Swagger disambiguation — AttackUp2 targets the OPPONENT (not user) when set.
+    // Set by switchturn(0x93) appearing before attackup2(0x77) in Swagger's script.
+    bool swagger_stat_change = false;
+
+    // Splash — explicit no-op (Splash does nothing; is_supported=true, immediate Success).
+    bool is_splash = false;
+
+    // ────────────────────────────────────────────────────────────────────────
+    // NEW ARCHITECTURE B FLAGS (wire bytes [56..71])
+    // These effects require cross-turn state, party access, move interception,
+    // or EndOfTurn/PreMove/PreDamage hooks. They compile to SemanticEffectProgram.
+    // ────────────────────────────────────────────────────────────────────────
+
+    bool is_leech_seed   = false;  // per-turn drain; EndOfTurn hook
+    bool is_disable      = false;  // disable target's last move; PreMove hook
+    bool is_encore       = false;  // force target to repeat last move; MoveSelection hook
+    bool is_lock_on      = false;  // next user move always hits; accuracy hook
+    bool is_sleep_talk   = false;  // invoke random move while asleep; InvokeMove
+    bool is_destiny_bond = false;  // if user faints from direct damage, opponent faints too
+    bool is_nightmare    = false;  // drain 1/4 max_hp/turn while target is asleep; EndOfTurn
+    bool is_curse        = false;  // Ghost: drain 1/4/turn + cost HP; non-Ghost: stat stages
+    bool is_protect      = false;  // block all damage this turn; PreDamage hook
+    bool is_perish_song  = false;  // set 4-turn countdown on both; EndOfTurn → faint
+    bool is_attract      = false;  // 50% skip-turn on opposite gender; PreMove hook
+    bool is_baton_pass   = false;  // switch out, passing stat stages and select volatiles
+    bool is_heal_bell    = false;  // cure status of all party members; party iteration
+    bool is_endure       = false;  // survive any hit with 1 HP; PreDamage hook
+    bool is_rage         = false;  // scale outgoing damage by rage_accumulator
+
+    // True when the Crystal effect script contains an explicit `effectchance` command (0x90).
+    // Distinct from effect_chance > 0: Sky Attack has effect_chance=0 but its script DOES
+    // contain effectchance, so Crystal always consumes one BattleRandom byte for it.
+    // The runtime must consume one RNG byte for the effectchance phase whenever this is true,
+    // regardless of whether effect_chance > 0.
+    // Wire byte [63] bit 3 (0x08) — packed alongside is_heal_bell/is_endure/is_rage.
+    bool has_effectchance_phase = false;
+
+    // ────────────────────────────────────────────────────────────────────────
     // AI CLASSIFICATION FIELDS
     // These carry the same information that was previously stored as a single
     // SemEffect::X enum value.  The AI reads them directly; no enum dispatch.
@@ -336,12 +420,6 @@ struct SemanticEffectDescription {
     // native implementation in execute_move().  Set by the Crystal frontend
     // at package build time.  execute_move() returns UnsupportedSemantic
     // immediately if this is false.
-    //
-    // Specifically: a script is unsupported if it contains any deferred semantic
-    // (is_multi_hit, is_charge, is_future_sight, is_rampage, is_escalating_power,
-    //  is_trapping, is_counter, is_mirror_coat, is_bide, is_pursuit, is_copy_move)
-    // OR if its set_power_source / constant_damage_source requires data not yet
-    // available (e.g. HiddenPower requires DV access).
     bool is_supported = false;
 
     // ────────────────────────────────────────────────────────────────────────

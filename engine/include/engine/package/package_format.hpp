@@ -147,13 +147,31 @@ enum class ChunkType : uint32_t {
 //                        effect_id, effect_chance, category).  No effect_desc.
 // v2: prepends 1 schema-version byte to the chunk; each entry grows by 43 bytes
 //     for the serialized SemanticEffectDescription.
-static constexpr uint8_t MVDT_SCHEMA_VERSION = 2;
+// v3: each entry grows by a variable-length SemanticEffectProgram suffix:
+//       u8  has_program        (0 or 1)
+//       u16 op_count LE        (number of BOp entries; 0 when has_program == 0)
+//       op_count × {
+//         u8  kind             (BOpKind)
+//         u8  param8a
+//         u8  param8b
+//         u8  param8c
+//         u8  param8d
+//         u32 param32 LE
+//       }                      = op_count × 9 bytes
+//     has_program == 0 entries emit only the 3-byte header (u8 has_program + u16 0).
+// v4: SemanticEffectDescription expanded from 43 to 64 bytes.
+//     Bytes [36..63] carry new A and B semantic fields (has_payday, sets_mist,
+//     is_leech_seed, is_protect, etc.). Packages compiled with v3 are rejected.
+static constexpr uint8_t MVDT_SCHEMA_VERSION = 4;
 
 // BRLS schema version.
 // v1 (no version byte): trailing optional bytes read with has_bytes() guards.
 // v2: prepends 1 schema-version byte to the chunk; all fields are mandatory.
 //     Old packages (no version byte or wrong version) are rejected.
-static constexpr uint8_t BRLS_SCHEMA_VERSION = 2;
+// v3: appends Metronome exception list after frontend_limits:
+//       u8  metronome_excepts_count
+//       count × u16 LE MoveId
+static constexpr uint8_t BRLS_SCHEMA_VERSION = 3;
 
 struct TocEntry {
     ChunkType type;

@@ -541,6 +541,7 @@ struct ProfileOffsets {
     uint32_t ai_sunny_day_moves;        // 0e:5134  SunnyDayMoves               — 1 byte/entry, 0xFF sentinel
     uint32_t trainer_class_attributes;  // 0e:559c  TrainerClassAttributes      — num_trainer_classes×7 bytes
     uint32_t trainer_class_dvs;         // 09:70d6  TrainerClassDVs             — num_trainer_classes×2 bytes
+    uint32_t metronome_exception_moves; // 0d:4bd6  MetronomeExceptionMoves     — 1 byte/entry, 0xFF sentinel
 
     // SM83 routine addresses for static-lifting parameter extraction.
     // Used by frontends/crystal/extract/sm83_lifter.cpp.
