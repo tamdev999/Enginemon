@@ -513,9 +513,12 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
             target.substitute_hp = 0;
             message((user_is_player ? std::string("Opponent") : std::string("Player"))
                     + "'s substitute faded!");
-            outcome_.damage_dealt += static_cast<uint16_t>(old_hp);
-            hook_on_damage_received(target, static_cast<int32_t>(old_hp),
-                                    static_cast<uint8_t>(md->category));
+            // ROOT_OHKO_BOOKKEEPING: when Substitute absorbs OHKO, real target HP is
+            // unchanged. Do NOT record target's old real HP as damage_dealt, and do NOT
+            // call hook_on_damage_received with the real-HP value. That would falsely
+            // populate Counter/Bide/Rage damage history for damage the target never took.
+            // Crystal source: OHKO that hits Substitute does not update wCurDamage for
+            // real-target accumulation — the sub just fades.
             return MoveExecutionResult::Success;
         }
         target.stats.hp = 0;
@@ -937,8 +940,29 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                                 + " protected itself!");
                         return MoveExecutionResult::Miss;
                     }
+                    // P0-3: Substitute routing for Reversal/Flail.
+                    if (target.has_volatile(VolatileStatus::Substitute) && target.substitute_hp > 0) {
+                        if (dmg_r >= static_cast<int32_t>(target.substitute_hp)) {
+                            target.substitute_hp = 0;
+                            target.clear_volatile(VolatileStatus::Substitute);
+                            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                                    + "'s substitute broke!");
+                        } else {
+                            target.substitute_hp = static_cast<uint16_t>(
+                                target.substitute_hp - static_cast<uint16_t>(dmg_r));
+                        }
+                        outcome_.damage_dealt += static_cast<uint16_t>(dmg_r);
+                        // No hook_on_damage_received: Crystal skips accumulation for Substitute hits.
+                        return MoveExecutionResult::Success;
+                    }
                     const int16_t old_hp_r = target.stats.hp;
                     target.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(target.stats.hp) - dmg_r));
+                    // P0-2: Endure 1-HP floor for Reversal/Flail.
+                    if (target.has_volatile(VolatileStatus::Endure) && target.stats.hp <= 0) {
+                        target.stats.hp = 1;
+                        message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                                + " endured the hit!");
+                    }
                     hp_change(user_is_player ? 1u:0u, old_hp_r, target.stats.hp);
                     outcome_.damage_dealt += static_cast<uint16_t>(dmg_r);
                     // P0-4: Damage history for Reversal/Flail.

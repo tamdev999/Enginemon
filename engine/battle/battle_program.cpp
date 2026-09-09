@@ -214,7 +214,11 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
             message(md.name + " — storing energy!");
             return MoveExecutionResult::Success;
         }
-        // turn_counter reached 0: release. Fall through to StoredEnergy release below.
+        // turn_counter reached 0: release.
+        // Crystal UnleashEnergy → checkhit → applydamage path.
+        // Must interact with Protect, Substitute, Endure, and damage history
+        // exactly as normal damage does.
+        // Source: suiCune bide.c BattleCommand_UnleashEnergy calls checkhit.
         const int32_t bide_dmg = std::min(65535,
             static_cast<int32_t>(user.bide_stored) * 2);
         user.clear_volatile(VolatileStatus::Bide);
@@ -225,11 +229,41 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
             return MoveExecutionResult::Miss;
         }
         message(md.name + " — unleashing stored energy!");
+        // Protect: checkhit blocks Bide release when target is protected.
+        if (target.has_volatile(VolatileStatus::Protect)) {
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + " protected itself!");
+            return MoveExecutionResult::Miss;
+        }
+        // Substitute: Bide release damage is routed into Substitute, not real HP.
+        if (target.has_volatile(VolatileStatus::Substitute) && target.substitute_hp > 0) {
+            if (bide_dmg >= static_cast<int32_t>(target.substitute_hp)) {
+                target.substitute_hp = 0;
+                target.clear_volatile(VolatileStatus::Substitute);
+                message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                        + "'s substitute broke!");
+            } else {
+                target.substitute_hp = static_cast<uint16_t>(
+                    target.substitute_hp - static_cast<uint16_t>(bide_dmg));
+            }
+            outcome_.damage_dealt += static_cast<uint16_t>(bide_dmg);
+            // No hook_on_damage_received: Crystal skips accumulation for Substitute hits.
+            return MoveExecutionResult::Success;
+        }
+        // Apply to real HP.
         const int16_t old_hp = target.stats.hp;
         target.stats.hp = static_cast<int16_t>(
             std::max(0, static_cast<int32_t>(target.stats.hp) - bide_dmg));
+        // Endure: Bide release floors target HP at 1 when Endure is active.
+        if (target.has_volatile(VolatileStatus::Endure) && target.stats.hp <= 0) {
+            target.stats.hp = 1;
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + " endured the hit!");
+        }
         hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
         outcome_.damage_dealt += static_cast<uint16_t>(bide_dmg);
+        // Damage history: hook must fire exactly as for normal damage.
+        hook_on_damage_received(target, bide_dmg, static_cast<uint8_t>(md.category));
         if (target.stats.hp <= 0 && target.has_volatile(VolatileStatus::DestinyBond)) {
             hook_destiny_bond_check(target, user, !user_is_player);
         }
@@ -254,6 +288,8 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
 
             if (src == BDamageSource::StoredEnergy) {
                 // Bide release: stored_damage × 2, bypasses defense/type.
+                // Crystal UnleashEnergy → checkhit → normal applydamage routing.
+                // Must interact with Protect, Substitute, Endure, and damage history.
                 const int32_t bide_dmg = std::min(65535,
                     static_cast<int32_t>(user.bide_stored) * 2);
                 user.clear_volatile(VolatileStatus::Bide);
@@ -263,11 +299,42 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                     message(md.name + " — no energy stored!");
                     return MoveExecutionResult::Miss;
                 }
+                message(md.name + " — unleashing stored energy!");
+                // Protect: checkhit blocks release when target is protected.
+                if (target.has_volatile(VolatileStatus::Protect)) {
+                    message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                            + " protected itself!");
+                    return MoveExecutionResult::Miss;
+                }
+                // Substitute: route damage into Substitute, not real HP.
+                if (target.has_volatile(VolatileStatus::Substitute) && target.substitute_hp > 0) {
+                    if (bide_dmg >= static_cast<int32_t>(target.substitute_hp)) {
+                        target.substitute_hp = 0;
+                        target.clear_volatile(VolatileStatus::Substitute);
+                        message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                                + "'s substitute broke!");
+                    } else {
+                        target.substitute_hp = static_cast<uint16_t>(
+                            target.substitute_hp - static_cast<uint16_t>(bide_dmg));
+                    }
+                    outcome_.damage_dealt += static_cast<uint16_t>(bide_dmg);
+                    // No hook_on_damage_received: Crystal skips accumulation for Substitute hits.
+                    break;
+                }
+                // Apply to real HP.
                 const int16_t old_hp = target.stats.hp;
                 target.stats.hp = static_cast<int16_t>(
                     std::max(0, static_cast<int32_t>(target.stats.hp) - bide_dmg));
+                // Endure: floor target HP at 1.
+                if (target.has_volatile(VolatileStatus::Endure) && target.stats.hp <= 0) {
+                    target.stats.hp = 1;
+                    message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                            + " endured the hit!");
+                }
                 hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
                 outcome_.damage_dealt += static_cast<uint16_t>(bide_dmg);
+                // Damage history: must fire exactly as for normal damage.
+                hook_on_damage_received(target, bide_dmg, static_cast<uint8_t>(md.category));
                 // Destiny Bond check on Bide release
                 if (target.stats.hp <= 0 && target.has_volatile(VolatileStatus::DestinyBond)) {
                     hook_destiny_bond_check(target, user, !user_is_player);
