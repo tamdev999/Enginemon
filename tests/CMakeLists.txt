@@ -1,4 +1,4 @@
-# Test suite
+﻿# Test suite
 
 # Golden tests (Crystal ROM extraction validation)
 # These run without GTest - they just need the ROM
@@ -266,7 +266,7 @@ endif()
 
 # Battle ROM propagation tests — true ROM→extractor→BRLS→runtime pipeline proof
 add_executable(battle_rom_test
-    crystal/battle_rom_test.cpp
+    crystal/battle_rom_test_FIXED.cpp
 )
 target_link_libraries(battle_rom_test PRIVATE
     enginemon_crystal
@@ -332,6 +332,8 @@ add_executable(oracle_test
     oracle/oracle_test_p1b_p2.cpp
     oracle/oracle_test_p3_p4.cpp
     oracle/oracle_test_p5_p55.cpp
+    oracle/oracle_test_moves.cpp
+    oracle/oracle_test_runtime.cpp
     oracle/oracle_test_main.cpp
 )
 target_link_libraries(oracle_test PRIVATE

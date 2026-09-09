@@ -391,11 +391,15 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
             const uint8_t hit_count = (user.hit_loop_remaining > 0)
                 ? user.hit_loop_remaining : uint8_t{1};
             uint8_t hits_landed = 0;
-            // Per-iteration effectchance tracking for B-path secondary effects.
-            // Crystal: effectchance rolls once per loop iteration (e.g., Twineedle); the
-            // LAST iteration's result (wEffectFailed) controls the post-loop secondary.
-            // We track whether the last completed hit iteration rolled a proc.
+            // B-path effectchance: Crystal fires effectchance ONCE, before critical, on pass 1.
+            // endloop rewinds to critical (not checkhit/effectchance), so pass 2+ never re-roll.
+            // Source: PoisonMultiHit script order: checkhit → effectchance → critical → ... → endloop
+            // loop_back_to_critical scans backward for the critical byte; effectchance is before it.
+            // Roll once here, before the hit loop, and use this single result for the post-loop secondary.
             bool last_secondary_fired = false;
+            if (md.effect_desc.has_effectchance_phase) {
+                last_secondary_fired = (rng_.next_byte() < static_cast<uint32_t>(md.effect_chance));
+            }
 
             for (uint8_t hit_i = 0; hit_i < hit_count; ++hit_i) {
                 if (target.is_fainted()) break;
@@ -630,17 +634,6 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                     hp_change(user_is_player ? 0u : 1u, old_u, 0);
                 }
 
-                // Per-iteration effectchance roll for secondary effects.
-                // Crystal: effectchance opcode fires inside the loop; BattleRandom compared
-                // directly against MOVE_CHANCE (raw ROM byte). Last iteration controls secondary.
-                // has_effectchance_phase: script contained effectchance opcode (0x90).
-                // When true, one RNG byte is consumed regardless of effect_chance value.
-                if (md.effect_desc.has_effectchance_phase) {
-                    // Direct comparison: fires iff rng_byte < effect_chance (raw ROM byte 0-255).
-                    // effect_chance=0 → threshold=0 → always fails, but byte IS consumed.
-                    last_secondary_fired = (rng_.next_byte() < static_cast<uint32_t>(md.effect_chance));
-                }
-
                 ++hits_landed;
             } // end hit_loop
 
@@ -650,12 +643,9 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
             }
 
             // -- P0-5: B-path secondary effects ----------------------------------
-            // Crystal (PoisonMultiHit/Twineedle): effectchance fires per-iteration INSIDE
-            // the loop. The LAST iteration's effectchance result determines whether
-            // poisontarget applies (poisontarget reads wEffectFailed outside the loop).
-            // has_effectchance_phase controls both RNG consumption and secondary eligibility.
-            // effect_chance=0 means last_secondary_fired will always be false, so
-            // apply_secondary_effect is never reached — but the RNG byte was still consumed.
+            // Crystal (PoisonMultiHit/Twineedle): effectchance fires ONCE (pass 1 only),
+            // before critical. endloop rewinds to critical, bypassing effectchance on pass 2+.
+            // The single pre-loop roll (last_secondary_fired) controls whether poisontarget applies.
             if (md.effect_desc.secondary_effect != SecondaryEffectType::None
                     && !target.is_fainted()
                     && md.effect_desc.has_effectchance_phase
@@ -675,12 +665,6 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                 ++user.fury_cutter_count;
             } else if (chain == BScaleChainKind::TripleKick) {
                 pending_scale_mult = op.param8b;
-            }
-            // TripleKick param8d=1: recheck accuracy for the next Damage op.
-            // Clear accuracy_checked so the Damage case rolls it fresh for this kick.
-            if (op.param8d == 1u) {
-                accuracy_checked = false;
-                move_hit = true;  // reset hit state; Damage will re-evaluate
             }
             break;
         }

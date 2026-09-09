@@ -74,12 +74,17 @@ EffectProgramResult EffectProgramCompiler::compile(
     auto oppVS    = [&](VolatileStatus vs, bool v){ setVS(vs, BVolatileTarget::Opponent,  v); };
 
     // ── Bide ─────────────────────────────────────────────────────────────────
-    // Crystal: UnleashEnergy sets counter = rand&1 + 2 = 2 or 3 turns.
-    // InitCounter(Bide, 2, 3) matches.
+    // Crystal: UnleashEnergy (turn 1) sets SUBSTATUS_BIDE and counter = rand&1+2 = 2 or 3.
+    // StoreEnergy runs on subsequent turns: decrements counter; when 0, releases 2× stored.
+    // Turn 1 program: InitCounter + SetVolatile only. NO Damage op on turn 1.
+    // Continuation turns 2+: the Bide gate at the top of execute_program handles storage
+    // (counter > 0 → store, return) and release (counter == 0 → fall through to Damage).
+    // The Damage(StoredEnergy) op is NOT in the compiled program because it is executed
+    // by the fall-through path of the Bide gate, not by the initial program ops.
     if (desc.is_bide) {
         ops.push_back(BOp::InitCounter(BCounterKind::Bide, 2, 3));
         userVS(VolatileStatus::Bide, true);
-        ops.push_back(BOp::Damage(BDamageSource::StoredEnergy));
+        // NO Damage op here — see execute_program Bide gate for release logic.
         result.success = true;
         prog.is_compiled = true;
         return result;
@@ -127,31 +132,32 @@ EffectProgramResult EffectProgramCompiler::compile(
             return result;
         }
 
+        // Double Hit (EFFECT_DOUBLE_HIT) and Twineedle (EFFECT_POISON_MULTI_HIT):
+        // Crystal BattleCommand_EndLoop .double_hit: sets loop counter = 1 (one more hit).
+        // Total = exactly 2 hits. Accuracy checked once before the loop.
+        // Source: pokecrystal engine/battle/effect_commands.asm BattleCommand_EndLoop.
+        if (raw_effect == crystal::EffectId::DOUBLE_HIT
+                || raw_effect == crystal::EffectId::POISON_MULTI_HIT) {
+            ops.push_back(BOp::InitCounter(BCounterKind::HitLoop, 2, 2));  // exactly 2 hits
+            ops.push_back(BOp::Damage(BDamageSource::Standard));
+            result.success = true;
+            prog.is_compiled = true;
+            return result;
+        }
+
         // TripleKick — 3 hits with independent accuracy per kick, power ×1/×2/×3.
-        // FIXED: do NOT use InitCounter(HitLoop,3,3). The 3 ScalePower+Damage pairs
-        // are explicit; accuracy is rechecked per Damage op.
+        // Crystal Triple Kick: accuracy is checked ONCE (checkhit fires on pass 1 only;
+        // endloop rewinds to critical, not checkhit). Three ScalePower+Damage pairs;
+        // NO param8d=1 — do not reset accuracy_checked between kicks.
         if (raw_effect == crystal::EffectId::TRIPLE_KICK) {
             // Three explicitly-ordered kicks; no InitCounter.
-            // execute_program will roll accuracy separately for each Damage op
-            // when hit_loop_remaining == 0 and accuracy_checked_per_hit == true.
-            // Pass param8d=1 on ScalePower to signal "per-kick accuracy recheck".
-            {
-                BOp sc1 = BOp::ScalePower(BScaleChainKind::TripleKick, 1);
-                sc1.param8d = 1u;  // 1 = recheck accuracy for this Damage op
-                ops.push_back(sc1);
-            }
+            // Accuracy is checked once by the outer accuracy_checked block in execute_program.
+            // ScalePower carries no param8d flag — accuracy_checked stays true after kick 1.
+            ops.push_back(BOp::ScalePower(BScaleChainKind::TripleKick, 1));
             ops.push_back(BOp::Damage(BDamageSource::Standard));
-            {
-                BOp sc2 = BOp::ScalePower(BScaleChainKind::TripleKick, 2);
-                sc2.param8d = 1u;
-                ops.push_back(sc2);
-            }
+            ops.push_back(BOp::ScalePower(BScaleChainKind::TripleKick, 2));
             ops.push_back(BOp::Damage(BDamageSource::Standard));
-            {
-                BOp sc3 = BOp::ScalePower(BScaleChainKind::TripleKick, 3);
-                sc3.param8d = 1u;
-                ops.push_back(sc3);
-            }
+            ops.push_back(BOp::ScalePower(BScaleChainKind::TripleKick, 3));
             ops.push_back(BOp::Damage(BDamageSource::Standard));
             result.success = true;
             prog.is_compiled = true;
