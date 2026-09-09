@@ -1,5 +1,5 @@
-// engine/battle/battle.cpp
-// Gen 2 battle system ΓÇö turn-based Pokemon battles
+﻿// engine/battle/battle.cpp
+// Gen 2 battle system Î“Ã‡Ã¶ turn-based Pokemon battles
 //
 // Architecture note:
 //   Battle owns no renderer, no Lua, no ROM references.
@@ -8,7 +8,7 @@
 //   that does NOT touch GameState::rng.
 //
 // Turn flow (source: suiCune core.c):
-//   1. Determine turn order (priority ΓåÆ speed ΓåÆ random tie)
+//   1. Determine turn order (priority Î“Ã¥Ã† speed Î“Ã¥Ã† random tie)
 //   2. First actor executes action
 //   3. Check faint after first action
 //   4. If both still alive: second actor executes action
@@ -113,7 +113,7 @@ static BattlePokemon make_battle_pokemon(
 // Battle construction / destruction
 // ============================================================================
 
-// Production constructor ΓÇö BattleRules required at construction.
+// Production constructor Î“Ã‡Ã¶ BattleRules required at construction.
 Battle::Battle(BattleType type, Party& player_party, const Registries& reg,
                const BattleRules& rules)
     : type_(type)
@@ -122,7 +122,7 @@ Battle::Battle(BattleType type, Party& player_party, const Registries& reg,
     , rules_(&rules)
 {}
 
-// Test constructor ΓÇö no BattleRules; execute_turn() will throw in release.
+// Test constructor Î“Ã‡Ã¶ no BattleRules; execute_turn() will throw in release.
 Battle::Battle(BattleType type, Party& player_party, const Registries& reg)
     : type_(type)
     , player_party_(player_party)
@@ -160,7 +160,7 @@ void Battle::set_trainer(TrainerId trainer, const TrainerData& data) {
     trainer_class_index_ = data.trainer_class;
     // Crystal's ComputeTrainerReward uses wCurPartyLevel, which holds the level of the
     // LAST pokemon parsed from the trainer party stream (not the highest level).
-    // Source: read_trainer_party.asm ΓÇö wCurPartyLevel set in the parsing loop;
+    // Source: read_trainer_party.asm Î“Ã‡Ã¶ wCurPartyLevel set in the parsing loop;
     // after the loop ends, it holds the last value set, which is the last party member.
     last_trainer_party_level_ = data.party.empty() ? 0
                               : data.party.back().level;
@@ -318,7 +318,7 @@ void Battle::execute_turn() {
         }
     } else if (type_ == BattleType::Wild) {
         // Wild: uniform random selection among usable moves.
-        // Source: Crystal AIChooseMove ΓÇö wild uses Random() % num_usable_moves,
+        // Source: Crystal AIChooseMove Î“Ã‡Ã¶ wild uses Random() % num_usable_moves,
         // not per-slot biased selection.
         ActionFight af; af.target = 0; af.move_slot = 0;
         std::vector<size_t> usable;
@@ -441,10 +441,10 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
 
     message((user_is_player ? "Player used " : "Opponent used ") + md->name + "!");
 
-    // â”€â”€ Recharge gate (Hyper Beam) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Recharge gate (Hyper Beam) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (user.recharge_turns > 0) {
         --user.recharge_turns;
-        message(md->name + " â€” must recharge!");
+        message(md->name + " Ã¢â‚¬â€ must recharge!");
         return MoveExecutionResult::UnsupportedSemantic;  // turn skipped, no halt
     }
 
@@ -471,23 +471,23 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         return MoveExecutionResult::UnsupportedSemantic;
     }
 
-    // â”€â”€ PP deduction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ PP deduction Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (move_slot < 4 && user.moves[move_slot].pp > 0)
         user.moves[move_slot].pp--;
 
-    // â”€â”€ Safeguard check for status moves â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Source: BattleCommand_CheckSafeguard â€” returns fail if opponent has Safeguard.
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Safeguard check for status moves Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // Source: BattleCommand_CheckSafeguard Ã¢â‚¬â€ returns fail if opponent has Safeguard.
     const bool target_has_safeguard =
         user_is_player ? (field_.safeguard_opponent > 0) : (field_.safeguard_player > 0);
 
-    // â”€â”€ OHKO special path â€” no standard pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ OHKO special path Ã¢â‚¬â€ no standard pipeline Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.is_ohko) {
         // Auto-fail if target level > user level (BattleCommand_OHKO).
         if (target.level > user.level) {
             message("The attack missed!");
             return MoveExecutionResult::Miss;
         }
-        // Accuracy: base_acc + (user_level - target_level) Ã— multiplier
+        // Accuracy: base_acc + (user_level - target_level) Ãƒâ€” multiplier
         const uint8_t mult = rules_ ? rules_->get_ohko_level_mult() : uint8_t{2};
         const int32_t level_bonus = (static_cast<int32_t>(user.level) -
                                      static_cast<int32_t>(target.level)) * mult;
@@ -533,10 +533,10 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         return MoveExecutionResult::Success;
     }
 
-    // â”€â”€ Pure status-only path (no damage) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Pure status-only path (no damage) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (md->category == MoveCategory::Status && !effective_desc.has_standard_damage
         && effective_desc.constant_damage_source == ConstantDamageSource::None) {
-        // Healing â€” user heals itself.
+        // Healing Ã¢â‚¬â€ user heals itself.
         if (effective_desc.heal_source != HealSource::None) {
             int32_t heal_amt = 0;
             if (effective_desc.heal_source == HealSource::HalfMaxHP) {
@@ -550,7 +550,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 heal_amt = std::max(1, static_cast<int32_t>(user.stats.max_hp) / divisor);
             }
             if (user.stats.hp >= user.stats.max_hp) {
-                message(md->name + " â€” HP is full!");
+                message(md->name + " Ã¢â‚¬â€ HP is full!");
             } else {
                 const int16_t old_hp = user.stats.hp;
                 user.stats.hp = static_cast<int16_t>(
@@ -609,7 +609,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 return MoveExecutionResult::Miss;
             }
             if (target.status != Status::None) {
-                message("It didn't workâ€¦");
+                message("It didn't workÃ¢â‚¬Â¦");
                 return MoveExecutionResult::Miss;
             }
             // Accuracy check
@@ -764,14 +764,14 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         }
     }
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // DAMAGING PATH
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     // Accuracy check.
     if (md->accuracy == 0) {
         if (move_slot < 4 && user.moves[move_slot].pp < 63)
-            user.moves[move_slot].pp++;  // undo PP deduct â€” data error
+            user.moves[move_slot].pp++;  // undo PP deduct Ã¢â‚¬â€ data error
         message("Move data error: accuracy not set for " + md->name);
         return MoveExecutionResult::InvalidData;
     }
@@ -788,39 +788,50 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 : roll_accuracy(md->accuracy, user.stages.accuracy,
                                 target.stages.evasion, rng_.next_byte());
             if (!hit) {
-                // Jump Kick / Hi Jump Kick: crash damage on accuracy miss (not on type immune).
-                // Source: pokecrystal GetFailureResultText EFFECT_JUMP_KICK path.
-                // crash = max(1, wCurDamage >> 3) applied to user.
+                // Jump Kick / Hi Jump Kick: crash damage on accuracy miss ONLY when target
+                // is not type-immune.
+                // Source: pokecrystal GetFailureResultText -- checks wTypeModifier != 0
+                // before crash. wTypeModifier is 0 on type immunity.
+                // We pre-check type_eff here to match Crystal's ordering.
                 if (effective_desc.crash_on_miss) {
-                    // Compute a reference damage value using current stats for crash formula.
-                    const bool physical = (md->category == MoveCategory::Physical);
-                    auto ss2 = [this](int32_t b, int8_t s) {
-                        return rules_ ? apply_stat_stage(b,s,*rules_) : apply_stat_stage(b,s);
-                    };
-                    const int32_t atk2 = physical
-                        ? ss2(user.base_stats.attack, user.stages.attack)
-                        : ss2(user.base_stats.special_attack, user.stages.special_attack);
-                    const int32_t def2 = physical
-                        ? ss2(target.base_stats.defense, target.stages.defense)
-                        : ss2(target.base_stats.special_defense, target.stages.special_defense);
-                    DamageParams crashdp{};
-                    crashdp.attacker_level = user.level;
-                    crashdp.attack_stat    = std::max(1, atk2);
-                    crashdp.defense_stat   = std::max(1, def2);
-                    crashdp.move_power     = md->power;
-                    crashdp.type_effectiveness = 100;
-                    crashdp.stab = false; crashdp.critical = false;
-                    crashdp.burned = false; crashdp.weather = Weather::None;
-                    crashdp.move_type = md->type;
-                    const int32_t ref_dmg = rules_
-                        ? enginemon::calculate_damage(crashdp, *rules_)
-                        : enginemon::calculate_damage(crashdp);
-                    const int32_t crash_dmg = std::max(1, ref_dmg >> 3);
-                    const int16_t old_user_hp = user.stats.hp;
-                    user.stats.hp = static_cast<int16_t>(
-                        std::max(0, static_cast<int32_t>(user.stats.hp) - crash_dmg));
-                    hp_change(user_is_player ? 0u : 1u, old_user_hp, user.stats.hp);
-                    message(md->name + " -- the user crashed!");
+                    // Compute type effectiveness now to gate crash (mirrors Crystal's
+                    // wTypeModifier check in GetFailureResultText).
+                    const uint16_t crash_type_eff = get_combined_effectiveness(
+                        md->type, target.type1, target.type2, registries_.type_chart);
+                    if (crash_type_eff != 0) {
+                        // Non-immune: crash fires.
+                        // crash = max(1, computed_hit_damage >> 3)
+                        // Source: pokecrystal effect_commands.asm -- srl/rr x3 on wCurDamage.
+                        const bool physical = (md->category == MoveCategory::Physical);
+                        auto ss2 = [this](int32_t b, int8_t s) {
+                            return rules_ ? apply_stat_stage(b,s,*rules_) : apply_stat_stage(b,s);
+                        };
+                        const int32_t atk2 = physical
+                            ? ss2(user.base_stats.attack, user.stages.attack)
+                            : ss2(user.base_stats.special_attack, user.stages.special_attack);
+                        const int32_t def2 = physical
+                            ? ss2(target.base_stats.defense, target.stages.defense)
+                            : ss2(target.base_stats.special_defense, target.stages.special_defense);
+                        DamageParams crashdp{};
+                        crashdp.attacker_level = user.level;
+                        crashdp.attack_stat    = std::max(1, atk2);
+                        crashdp.defense_stat   = std::max(1, def2);
+                        crashdp.move_power     = md->power;
+                        crashdp.type_effectiveness = 100;
+                        crashdp.stab = false; crashdp.critical = false;
+                        crashdp.burned = false; crashdp.weather = Weather::None;
+                        crashdp.move_type = md->type;
+                        const int32_t ref_dmg = rules_
+                            ? enginemon::calculate_damage(crashdp, *rules_)
+                            : enginemon::calculate_damage(crashdp);
+                        const int32_t crash_dmg = std::max(1, ref_dmg >> 3);
+                        const int16_t old_user_hp = user.stats.hp;
+                        user.stats.hp = static_cast<int16_t>(
+                            std::max(0, static_cast<int32_t>(user.stats.hp) - crash_dmg));
+                        hp_change(user_is_player ? 0u : 1u, old_user_hp, user.stats.hp);
+                        message(md->name + " -- the user crashed!");
+                    }
+                    // Immune target: no crash. Fall through to Miss return.
                 }
                 message("The attack missed!");
                 return MoveExecutionResult::Miss;
@@ -847,11 +858,11 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         }
     }
     if (type_eff == 0) {
-        message("It doesn't affect the opposing PokÃ©monâ€¦");
+        message("It doesn't affect the opposing PokÃƒÂ©monÃ¢â‚¬Â¦");
         return MoveExecutionResult::Immune;
     }
 
-    // â”€â”€ Constant damage path (Super Fang, Dragon Rage, etc.) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Constant damage path (Super Fang, Dragon Rage, etc.) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.constant_damage_source != ConstantDamageSource::None) {
         int32_t const_dmg = 0;
         switch (effective_desc.constant_damage_source) {
@@ -867,8 +878,8 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 break;
             case ConstantDamageSource::Psywave: {
                 // BattleCommand_ConstantDamage Psywave path:
-                //   b = floor(user_level Ã— 1.5)
-                //   random non-zero in [1, b) 
+                //   b = floor(user_level Ãƒâ€” 1.5)
+                //   random non-zero in [1, b)
                 const int32_t max_dmg = std::max(1,
                     static_cast<int32_t>(user.level) * 3 / 2);
                 do {
@@ -877,7 +888,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 break;
             }
             case ConstantDamageSource::ReversalFlail: {
-                // hp_bar_pixels = floor(current_hp Ã— HP_BAR_MULT / max_hp)
+                // hp_bar_pixels = floor(current_hp Ãƒâ€” HP_BAR_MULT / max_hp)
                 const uint8_t mult = rules_ ? rules_->get_reversal_hp_bar_mult() : uint8_t{48};
                 const int32_t hp_pixels = (target.stats.hp > 0)
                     ? static_cast<int32_t>(target.stats.hp) * mult / target.stats.max_hp
@@ -918,7 +929,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                     if (dmg_r < 2) dmg_r = 2;
                     if (is_crit_r) message("A critical hit!");
                     if (type_eff > 100) message("It's super effective!");
-                    else if (type_eff < 100) message("It's not very effectiveâ€¦");
+                    else if (type_eff < 100) message("It's not very effectiveÃ¢â‚¬Â¦");
                     animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
                     // P0-1: Protect check for Reversal/Flail.
                     if (target.has_volatile(VolatileStatus::Protect)) {
@@ -941,7 +952,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         }
         // Apply constant damage (type matchup resets for most constant-damage moves).
         const_dmg = std::max(1, const_dmg);
-        // P0-1: Protect check (Crystal: constantdamage → checkhit which checks Protect).
+        // P0-1: Protect check (Crystal: constantdamage â†’ checkhit which checks Protect).
         if (target.has_volatile(VolatileStatus::Protect)) {
             message((user_is_player ? std::string("Opponent") : std::string("Player"))
                     + " protected itself!");
@@ -977,7 +988,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         return MoveExecutionResult::Success;
     }
 
-    // â”€â”€ Set-power computation (Magnitude, Present, Return, Frustration) â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Set-power computation (Magnitude, Present, Return, Frustration) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     uint8_t computed_power = md->power;  // default: use move's power field
     bool present_is_heal = false;
 
@@ -1020,7 +1031,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 break;
             }
             case SetPowerSource::HappinessReturn:
-                // floor(happiness Ã— 10 / 25), max 102
+                // floor(happiness Ãƒâ€” 10 / 25), max 102
                 computed_power = static_cast<uint8_t>(std::min(102,
                     static_cast<int32_t>(user.happiness) * 10 / 25));
                 if (computed_power == 0) computed_power = 1;
@@ -1032,24 +1043,38 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 break;
             case SetPowerSource::HiddenPower: {
                 // Derive type and power from DVs.
-                // Source: Crystal BattleCommand_HiddenPower + HiddenPowerDamage.
-                // Type  = kHPTypes[(5 * t_bits) / 21]  where t_bits = low bit of each DV
-                // Power = (5 * p_bits) / 21 + 30        where p_bits = bit 1 of each DV
-                const uint8_t t_bits = static_cast<uint8_t>(
-                    (user.dv_atk & 1u) | ((user.dv_def & 1u) << 1) |
-                    ((user.dv_spd & 1u) << 2) | ((user.dv_spc & 1u) << 3));
-                const uint8_t p_bits = static_cast<uint8_t>(
-                    ((user.dv_atk >> 1) & 1u) | (((user.dv_def >> 1) & 1u) << 1) |
-                    (((user.dv_spd >> 1) & 1u) << 2) | (((user.dv_spc >> 1) & 1u) << 3));
-                // kHPTypes: Crystal HiddenPowerTypes table (17 entries).
-                // Source: pokecrystal engine/battle/hidden_power.asm HiddenPowerTypes.
-                static constexpr uint8_t kHPTypes[17] = {
-                    1, 2, 3, 4, 5, 9, 15, 16, 17, 8, 10, 11, 6, 12, 13, 14, 7
-                };
-                const uint8_t type_idx = static_cast<uint8_t>((5u * t_bits) / 21u);
-                effective_move_type = static_cast<TypeId>(
-                    kHPTypes[type_idx < 17 ? type_idx : 0]);
-                computed_power = static_cast<uint8_t>((5u * p_bits) / 21u + 30u);
+                // Source: suiCune engine/battle/hidden_power.c HiddenPowerDamage.
+                // Source: pokecrystal engine/battle/hidden_power.asm HiddenPowerDamage.
+                //
+                // TYPE:
+                //   type_raw = (def_dv & 3) | ((atk_dv & 3) << 2)  [4-bit, 0-15]
+                //   type = type_raw + 1       (skip Normal=0)
+                //   if type >= BIRD(6): type += 1      (skip Bird)
+                //   if type >= UNUSED_TYPES_START(10): type += 10   (skip unused 10-19)
+                //   Result sequence: 1,2,3,4,5,7,8,9,20,21,22,23,24,25,26,27
+                //
+                // POWER:
+                //   p_bits = (atk&8) | ((def&8)>>1) | ((spd&8)>>2) | ((spc&8)>>3)  [bit 3 of each DV]
+                //   power = ((p_bits * 5 + (spc_dv & 3)) >> 1) + 31   [range 31-70]
+                {
+                    // Type: uses low 2 bits of Attack and Defense only.
+                    uint8_t hp_type = static_cast<uint8_t>(
+                        (user.dv_def & 3u) | ((user.dv_atk & 3u) << 2u));
+                    hp_type += 1u;               // skip Normal (0)
+                    if (hp_type >= 6u)  hp_type += 1u;  // skip Bird (6)
+                    if (hp_type >= 10u) hp_type += 10u; // skip unused (10-19)
+                    effective_move_type = static_cast<TypeId>(hp_type);
+
+                    // Power: uses bit 3 of each DV.
+                    const uint8_t p_bits = static_cast<uint8_t>(
+                          (user.dv_atk & 8u)
+                        | ((user.dv_def & 8u) >> 1u)
+                        | ((user.dv_spd & 8u) >> 2u)
+                        | ((user.dv_spc & 8u) >> 3u));
+                    const uint8_t spc_low2 = static_cast<uint8_t>(user.dv_spc & 3u);
+                    computed_power = static_cast<uint8_t>(
+                        ((static_cast<uint32_t>(p_bits) * 5u + spc_low2) >> 1u) + 31u);
+                }
                 break;
             }
             default:
@@ -1100,23 +1125,23 @@ MoveExecutionResult Battle::execute_move_damaging(
     TypeId effective_move_type, uint16_t type_eff,
     uint8_t computed_power) {
 
-    // â”€â”€ Dream Eater: requires target asleep â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Dream Eater: requires target asleep Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.drain_requires_sleep && target.status != Status::Sleep) {
-        message(md->name + " â€” the target isn't asleep!");
+        message(md->name + " Ã¢â‚¬â€ the target isn't asleep!");
         return MoveExecutionResult::Miss;
     }
 
-    // â”€â”€ Critical hit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Critical hit Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     uint8_t crit_stage = 0;
     if (rules_) crit_stage = build_crit_stage(user, *md, *rules_);
     const bool is_crit = rules_
         ? roll_critical(crit_stage, rng_.next_byte(), *rules_)
         : roll_critical(crit_stage, rng_.next_byte());
 
-    // â”€â”€ STAB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ STAB Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     const bool stab = (effective_move_type == user.type1 || effective_move_type == user.type2);
 
-    // â”€â”€ Stat selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Stat selection Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     const int8_t eff_atk_stage  = (is_crit && user.stages.attack < 0)            ? 0 : user.stages.attack;
     const int8_t eff_def_stage  = (is_crit && target.stages.defense > 0)          ? 0 : target.stages.defense;
     const int8_t eff_satk_stage = (is_crit && user.stages.special_attack < 0)    ? 0 : user.stages.special_attack;
@@ -1141,9 +1166,9 @@ MoveExecutionResult Battle::execute_move_damaging(
     }
     const bool burned = physical && (user.status == Status::Burn);
 
-    // â”€â”€ Selfdestruct defense halving â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Source: BattleCommand_DamageCalc â€” `srl c` halves defender's defense.
-    // defense_shift=1 â†’ def_stat = max(1, def_stat >> 1)
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Selfdestruct defense halving Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // Source: BattleCommand_DamageCalc Ã¢â‚¬â€ `srl c` halves defender's defense.
+    // defense_shift=1 Ã¢â€ â€™ def_stat = max(1, def_stat >> 1)
     if (effective_desc.user_faints && rules_) {
         const uint8_t ds = rules_->get_selfdestruct_def_shift();
         if (ds > 0) def_stat = std::max(1, def_stat >> ds);
@@ -1151,7 +1176,7 @@ MoveExecutionResult Battle::execute_move_damaging(
         def_stat = std::max(1, def_stat / 2);
     }
 
-    // â”€â”€ Damage calculation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Damage calculation Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     DamageParams dp{};
     dp.attacker_level     = user.level;
     dp.attack_stat        = atk_stat;
@@ -1168,7 +1193,7 @@ MoveExecutionResult Battle::execute_move_damaging(
     if (damage == 0) return MoveExecutionResult::Immune;
 
     // Weather modifier
-    // NOTE: apply_weather_modifier takes md->effect_id for the 'weather × move effect'
+    // NOTE: apply_weather_modifier takes md->effect_id for the 'weather Ã— move effect'
     // table lookup (WeatherMoveModifiers). The one existing entry in that table is
     // {weather=Rain, effect=SolarBeam_Crystal_raw=0x97, mult=0.5x}, which maps to
     // ai_classification=SemEffect::Unknown=0.  The lookup effect_id==0x97 will never
@@ -1198,7 +1223,7 @@ MoveExecutionResult Battle::execute_move_damaging(
         if (damage > 999) damage = 999;
     }
 
-    // â”€â”€ Conditional double damage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Conditional double damage Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.conditional_double != ConditionalDoubleCondition::None) {
         bool double_it = false;
         switch (effective_desc.conditional_double) {
@@ -1220,12 +1245,12 @@ MoveExecutionResult Battle::execute_move_damaging(
         }
     }
 
-    // â”€â”€ Cannot KO (False Swipe) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Cannot KO (False Swipe) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.cannot_ko) {
         const int32_t max_dmg = static_cast<int32_t>(target.stats.hp) - 1;
         if (max_dmg < 1) {
-            // Target already at 1 HP â€” move fails to do damage.
-            message(md->name + " â€” the target barely hung on!");
+            // Target already at 1 HP Ã¢â‚¬â€ move fails to do damage.
+            message(md->name + " Ã¢â‚¬â€ the target barely hung on!");
             return MoveExecutionResult::Miss;
         }
         damage = std::min(damage, max_dmg);
@@ -1245,11 +1270,11 @@ MoveExecutionResult Battle::execute_move_damaging(
 
     if (is_crit)        message("A critical hit!");
     if (type_eff > 100) message("It's super effective!");
-    else if (type_eff < 100) message("It's not very effectiveâ€¦");
+    else if (type_eff < 100) message("It's not very effectiveÃ¢â‚¬Â¦");
 
     animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
 
-    // â”€â”€ Apply damage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Apply damage Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // -- P0-1: Protect interception (A-path) ----------------------------------
     // Crystal: BattleCommand_CheckHit returns miss if target has Protect.
     if (target.has_volatile(VolatileStatus::Protect)) {
@@ -1307,7 +1332,7 @@ MoveExecutionResult Battle::execute_move_damaging(
         hook_destiny_bond_check(target, user, !user_is_player);
     }
 
-    // â”€â”€ Recoil â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Recoil Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.has_recoil && !user.is_fainted()) {
         const uint8_t shift = rules_ ? rules_->get_recoil_shift() : uint8_t{2};
         const int32_t recoil_dmg = (shift > 0) ? std::max(1, damage >> shift) : 1;
@@ -1317,7 +1342,7 @@ MoveExecutionResult Battle::execute_move_damaging(
         message((user_is_player ? std::string("Player") : std::string("Opponent")) + " is hurt by recoil!");
     }
 
-    // â”€â”€ Drain / Dream Eater â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Drain / Dream Eater Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.has_drain && !user.is_fainted()) {
         const uint8_t shift = rules_ ? rules_->get_drain_shift() : uint8_t{1};
         const int32_t heal_amt = (shift > 0) ? std::max(1, damage >> shift) : 1;
@@ -1331,7 +1356,7 @@ MoveExecutionResult Battle::execute_move_damaging(
         }
     }
 
-    // â”€â”€ Selfdestruct / Explosion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Selfdestruct / Explosion Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.user_faints && !user.is_fainted()) {
         // Clear user status, remove Leech Seed and Destiny Bond substatuses.
         user.status = Status::None;
@@ -1346,7 +1371,7 @@ MoveExecutionResult Battle::execute_move_damaging(
         message((user_is_player ? std::string("Player") : std::string("Opponent")) + " fainted from its own attack!");
     }
 
-    // â”€â”€ Hyper Beam recharge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Hyper Beam recharge Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.sets_recharge && !user.is_fainted()) {
         user.recharge_turns = 1;
         message((user_is_player ? std::string("Player") : std::string("Opponent"))
@@ -1366,13 +1391,13 @@ MoveExecutionResult Battle::execute_move_damaging(
             apply_secondary_effect(user, target, effective_desc.secondary_effect, user_is_player);
         }
     }
-    // â”€â”€ Stat change on hit (DefenseUpHit, AttackDownHit, etc.) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Stat change on hit (DefenseUpHit, AttackDownHit, etc.) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.stat_change != StatChangeTarget::None) {
         // For hit-effect stat changes (applied to target unconditionally on hit).
         apply_stat_change(user, target, effective_desc.stat_change, user_is_player);
     }
 
-    // â”€â”€ Hazard clearing (Rapid Spin) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Hazard clearing (Rapid Spin) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.clears_hazards) {
         if (user_is_player) field_.spikes_player = false;
         else                field_.spikes_opponent = false;
@@ -1458,7 +1483,7 @@ void Battle::apply_secondary_effect(BattlePokemon& user, BattlePokemon& target,
             apply_one_stage_change(user, 1, +1);
             break;
         case SecondaryEffectType::AllStatsUp:
-            // All stats up by 1 â€” AncientPower, Silver Wind, Ominous Wind
+            // All stats up by 1 Ã¢â‚¬â€ AncientPower, Silver Wind, Ominous Wind
             for (int s = 0; s < 5; ++s) apply_one_stage_change(user, s, +1);
             break;
         case SecondaryEffectType::Defrost:
@@ -1549,7 +1574,7 @@ void Battle::apply_stat_change(BattlePokemon& user, BattlePokemon& target,
         case SC::EvasionDown1:  apply_one_stage_change(target, 6, -1); break;
         case SC::EvasionDown2:  apply_one_stage_change(target, 6, -2); break;
         case SC::Reset:
-            // Haze: reset all stages on both PokÃ©mon.
+            // Haze: reset all stages on both PokÃƒÂ©mon.
             user.stages   = {};
             target.stages = {};
             apply_stat_stages(user);
@@ -1564,7 +1589,7 @@ void Battle::apply_stat_change(BattlePokemon& user, BattlePokemon& target,
                     + " copied stat changes!");
             break;
         case SC::MaxAttack:
-            // Belly Drum: Crystal vanilla bug — AttackUp2 fires BEFORE the HP check.
+            // Belly Drum: Crystal vanilla bug â€” AttackUp2 fires BEFORE the HP check.
             // Source: pokecrystal engine/battle/effect_commands.asm BattleCommand_BellyDrum.
             // Step 1: Raise Attack to +6 unconditionally.
             user.stages.attack = 6;
@@ -1731,7 +1756,7 @@ void Battle::finalize_outcome() {
     outcome_.result      = result_;
     outcome_.turns_taken = turn_number_;
     if (result_ == BattleResult::PlayerWin && type_ == BattleType::Trainer) {
-        // Crystal formula: ComputeTrainerReward = base_reward ├ù wCurPartyLevel
+        // Crystal formula: ComputeTrainerReward = base_reward â”œÃ¹ wCurPartyLevel
         // Source: engine/battle/read_trainer_party.asm ComputeTrainerReward
         // wCurPartyLevel holds the level of the LAST-PARSED pokemon in the party
         // (set sequentially in the parsing loop; last iteration wins).
@@ -1841,7 +1866,7 @@ void Battle::force_switch_opponent(size_t party_slot) {
     opponent_pokemon_         = opponent_party_[party_slot];
     opponent_pokemon_.volatile_status = 0;  // Clear volatile on switch
     switched(1u, old_slot, party_slot);
-    message("Opponent sent out a new Pokmon!");
+    message("Opponent sent out a new Pok\u00e9mon!");
 
     // Spikes entry damage (Gen 2: one layer only, 1/8 max HP, Flying immune).
     // Source: Crystal CheckEntryHazards -- SUBSTATUS_SPIKES check.
@@ -1915,13 +1940,13 @@ bool Battle::attempt_capture(ItemId ball) {
     if (roll_capture(cp, rng_.next_byte(), rng_.next_byte())) {
         const uint16_t final_rate = calculate_catch_value(cp);
         (void)(rules_ ? capture_wobble_chance(final_rate, *rules_)
-                      : capture_wobble_chance(final_rate));  // wobble count for animation ΓÇö not yet rendered
+                      : capture_wobble_chance(final_rate));  // wobble count for animation Î“Ã‡Ã¶ not yet rendered
         result_ = BattleResult::Captured;
         outcome_.captured_species = opponent_pokemon_.species;
-        message("Gotcha! Pok├⌐mon was caught!");
+        message("Gotcha! Pokâ”œâŒmon was caught!");
         return true;
     }
-    message("Oh no! The Pok├⌐mon broke free!");
+    message("Oh no! The Pokâ”œâŒmon broke free!");
     return false;
 }
 

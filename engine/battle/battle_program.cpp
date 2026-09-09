@@ -31,48 +31,41 @@ int32_t apply_stat_stage(int32_t base_stat, int8_t stage, const BattleRules& rul
 
 // ============================================================================
 // Hidden Power: DV-based type and power computation.
-// Source: Crystal BattleCommand_HiddenPower + HiddenPowerDamage.
-//   Type  = (5 * (bit0(atk) + 2*bit0(def) + 4*bit0(spd) + 8*bit0(spc))) / 21
-//   Power = (5 * (bit1(atk) + 2*bit1(def) + 4*bit1(spd) + 8*bit1(spc))) / 21 + 30
+// Source: suiCune engine/battle/hidden_power.c HiddenPowerDamage.
+// Source: pokecrystal engine/battle/hidden_power.asm HiddenPowerDamage.
+//
+// TYPE:
+//   type_raw = (def_dv & 3) | ((atk_dv & 3) << 2)  [4-bit, 0-15]
+//   type = type_raw + 1       (skip Normal=0)
+//   if type >= BIRD(6): type += 1      (skip Bird)
+//   if type >= UNUSED_TYPES_START(10): type += 10   (skip unused 10-19)
+//   Result sequence: 1,2,3,4,5,7,8,9,20,21,22,23,24,25,26,27
+//
+// POWER:
+//   p_bits = (atk&8) | ((def&8)>>1) | ((spd&8)>>2) | ((spc&8)>>3)  [bit 3 of each DV]
+//   power = ((p_bits * 5 + (spc_dv & 3)) >> 1) + 31   [range 31-70]
+//
 // Returns {type_id, power}.
 // ============================================================================
 static std::pair<uint8_t, uint8_t> calc_hidden_power(uint8_t dv_atk, uint8_t dv_def,
                                                        uint8_t dv_spd, uint8_t dv_spc) {
-    // Type bits: low bit of each DV.
-    const uint8_t t_bits = static_cast<uint8_t>(
-        (dv_atk & 1u) | ((dv_def & 1u) << 1) | ((dv_spd & 1u) << 2) | ((dv_spc & 1u) << 3));
-    // Power bits: bit 1 of each DV.
-    const uint8_t p_bits = static_cast<uint8_t>(
-        ((dv_atk >> 1) & 1u) | (((dv_def >> 1) & 1u) << 1) |
-        (((dv_spd >> 1) & 1u) << 2) | (((dv_spc >> 1) & 1u) << 3));
+    // Type: low 2 bits of Attack and Defense only.
+    uint8_t hp_type = static_cast<uint8_t>((dv_def & 3u) | ((dv_atk & 3u) << 2u));
+    hp_type += 1u;               // skip Normal (0)
+    if (hp_type >= 6u)  hp_type += 1u;  // skip Bird (6)
+    if (hp_type >= 10u) hp_type += 10u; // skip unused (10-19)
 
-    // Type index 0–16 mapped to type IDs (Crystal's HiddenPowerTypes table).
-    // Source: engine/battle/hidden_power.asm — type order follows HiddenPowerTypes.
-    // Crystal stores: Fighting Fire Water Grass Electric Psychic Ice Dragon
-    //   Dark Steel (then the remaining 6 less-common types in order)
-    static constexpr uint8_t kHPTypes[17] = {
-        1,  // FIGHTING   type id 1
-        2,  // FIRE       type id 2 (approx — exact Crystal type IDs from type_constants.asm)
-        3,  // WATER
-        4,  // GRASS
-        5,  // ELECTRIC
-        8,  // PSYCHIC
-        6,  // ICE
-        9,  // DRAGON
-        10, // DARK
-        11, // STEEL
-        2,  // FIRE (repeat for type indices 10-16; exact mapping from HiddenPowerTypes)
-        1,  // FIGHTING
-        3,  // WATER
-        7,  // POISON
-        12, // ROCK
-        13, // GROUND
-        14, // BUG
-    };
-    const uint8_t type_index = (5u * t_bits) / 21u;
-    const uint8_t type_id    = kHPTypes[std::min<uint8_t>(type_index, 16)];
-    const uint8_t power      = static_cast<uint8_t>(5u * p_bits / 21u + 30u);
-    return {type_id, power};
+    // Power: bit 3 of each DV.
+    const uint8_t p_bits = static_cast<uint8_t>(
+          (dv_atk & 8u)
+        | ((dv_def & 8u) >> 1u)
+        | ((dv_spd & 8u) >> 2u)
+        | ((dv_spc & 8u) >> 3u));
+    const uint8_t spc_low2 = static_cast<uint8_t>(dv_spc & 3u);
+    const uint8_t power = static_cast<uint8_t>(
+        ((static_cast<uint32_t>(p_bits) * 5u + spc_low2) >> 1u) + 31u);
+
+    return {hp_type, power};
 }
 
 // ============================================================================
@@ -99,16 +92,148 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
     if (move_slot < 4 && user.moves[move_slot].pp > 0)
         user.moves[move_slot].pp--;
 
-    // ── Bide gate ─────────────────────────────────────────────────────────────
-    // If Bide is active (counter > 0), suppress normal move and accumulate damage.
-    // The Bide release fires on counter == 0 (handled below in the B ops).
+    // ── Rampage gate (continuation turns) ────────────────────────────────────
+    // Crystal: BattleCommand_CheckRampage runs at the START of moves on turns 2+.
+    // It decrements the counter and, when 0, clears SUBSTATUS_RAMPAGE + applies confusion.
+    // On ALL continuation turns (counter > 0 or == 0 after decrement): damage fires.
+    // Source: suiCune CheckRampage / .continue_rampage always jumps to rampage_command.
+    //
+    // Turn 1: Rampage NOT yet set → gate skipped → program ops set volatile + counter + damage.
+    // Turns 2+: Rampage IS set → gate fires: decrement, possibly clear+confuse, then damage.
+    if (user.has_volatile(VolatileStatus::Rampage)) {
+        if (user.turn_counter > 0) {
+            --user.turn_counter;
+            if (user.turn_counter == 0) {
+                // Last attack turn: clear Rampage, apply confusion (unless Safeguard).
+                user.clear_volatile(VolatileStatus::Rampage);
+                const bool safeguarded = user_is_player
+                    ? (field_.safeguard_player > 0)
+                    : (field_.safeguard_opponent > 0);
+                if (!safeguarded && !user.has_volatile(VolatileStatus::Confusion)) {
+                    user.set_volatile(VolatileStatus::Confusion);
+                    // P1-Confusion: BattleRandom & 1 + 2 = 2 or 3 turns.
+                    // Source: BattleCommand_CheckRampage asm: and %00000001; inc a; inc a.
+                    user.confusion_turns = static_cast<uint8_t>((rng_.next_byte() & 0x01u) + 2u);
+                    message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                            + " became confused from the rampage!");
+                }
+            }
+        }
+        // Regardless of counter value: deal damage this continuation turn.
+        // Skip to the Damage op only (don't re-run SetVolatile + InitCounter).
+        // Inline standard damage calculation here, reusing execute_program's Damage path.
+        // We do this by falling through to the ops loop, but the Rampage program's ops
+        // include a SetVolatile + InitCounter before Damage. To avoid resetting the counter,
+        // we skip those ops and execute only the Damage.
+        // IMPLEMENTATION: set a flag so the ops loop skips non-Damage ops.
+        // Simplest: execute the damage via a direct inline standard damage.
+        // Type effectiveness.
+        const uint16_t ramp_type_raw = get_combined_effectiveness(
+            md.type, target.type1, target.type2, registries_.type_chart);
+        const uint16_t ramp_type_eff = (ramp_type_raw == 0
+                                         && target.has_volatile(VolatileStatus::Identified)
+                                         && (static_cast<uint8_t>(md.type) == 0u
+                                             || static_cast<uint8_t>(md.type) == 1u))
+                                        ? uint16_t{100} : ramp_type_raw;
+        if (ramp_type_eff == 0) {
+            message("It doesn't affect the opposing Pokémon…");
+            return MoveExecutionResult::Immune;
+        }
+        // Accuracy: rampage never misses on continuation (no checkhit in continuation).
+        // Crit + damage.
+        uint8_t ramp_crit_stage = 0;
+        if (rules_) ramp_crit_stage = build_crit_stage(user, md, *rules_);
+        const bool ramp_crit = rules_
+            ? roll_critical(ramp_crit_stage, rng_.next_byte(), *rules_)
+            : roll_critical(ramp_crit_stage, rng_.next_byte());
+        const int8_t eff_atk_r = (ramp_crit && user.stages.attack < 0) ? 0 : user.stages.attack;
+        const int8_t eff_def_r = (ramp_crit && target.stages.defense > 0) ? 0 : target.stages.defense;
+        const bool physical = (md.category == MoveCategory::Physical);
+        auto rss = [this](int32_t b, int8_t s) {
+            return rules_ ? apply_stat_stage(b,s,*rules_) : apply_stat_stage(b,s);
+        };
+        int32_t ramp_atk = physical ? rss(user.base_stats.attack, eff_atk_r)
+                                     : rss(user.base_stats.special_attack, user.stages.special_attack);
+        int32_t ramp_def = physical ? rss(target.base_stats.defense, eff_def_r)
+                                     : rss(target.base_stats.special_defense, target.stages.special_defense);
+        if (physical && user_is_player  && field_.reflect_opponent > 0) ramp_def *= 2;
+        if (physical && !user_is_player && field_.reflect_player   > 0) ramp_def *= 2;
+        if (!physical && user_is_player  && field_.light_screen_opponent > 0) ramp_def *= 2;
+        if (!physical && !user_is_player && field_.light_screen_player   > 0) ramp_def *= 2;
+        if (ramp_atk < 1) ramp_atk = 1;
+        if (ramp_def < 1) ramp_def = 1;
+        DamageParams rdp{};
+        rdp.attacker_level = user.level; rdp.attack_stat = ramp_atk;
+        rdp.defense_stat = ramp_def; rdp.move_power = md.power;
+        rdp.type_effectiveness = 100; rdp.stab = (md.type == user.type1 || md.type == user.type2);
+        rdp.critical = ramp_crit; rdp.burned = (physical && user.status == Status::Burn);
+        rdp.weather = field_.weather; rdp.move_type = md.type;
+        int32_t ramp_dmg = rules_ ? enginemon::calculate_damage(rdp, *rules_)
+                                  : enginemon::calculate_damage(rdp);
+        if (ramp_dmg == 0) return MoveExecutionResult::Immune;
+        if (rules_ && field_.weather != Weather::None)
+            ramp_dmg = apply_weather_modifier(ramp_dmg,
+                static_cast<uint8_t>(field_.weather),
+                static_cast<uint8_t>(md.type), md.effect_id, *rules_);
+        if (rdp.stab) { ramp_dmg += ramp_dmg/2; ramp_dmg = std::clamp(ramp_dmg, 2, 999); }
+        if (ramp_type_eff != 100) {
+            ramp_dmg = ramp_dmg * static_cast<int32_t>(ramp_type_eff) / 100;
+            ramp_dmg = std::clamp(ramp_dmg, 1, 999);
+        }
+        // Variation.
+        const uint8_t vt2 = rules_ ? rules_->get_damage_var_lower_bound() : uint8_t{0xD9};
+        const int32_t vd2 = rules_ ? static_cast<int32_t>(rules_->get_damage_var_divisor()) : 255;
+        uint8_t rvar; do { uint8_t rr=rng_.next_byte(); rvar=(rr>>1)|(rr<<7); } while(rvar<vt2);
+        ramp_dmg = ramp_dmg * static_cast<int32_t>(rvar) / (vd2>0?vd2:255);
+        if (ramp_dmg < 2) ramp_dmg = 2;
+        if (ramp_crit) message("A critical hit!");
+        if (ramp_type_eff > 100) message("It's super effective!");
+        else if (ramp_type_eff < 100) message("It's not very effective…");
+        // Apply damage.
+        const int16_t old_ramp_hp = target.stats.hp;
+        target.stats.hp = static_cast<int16_t>(std::max(0,
+            static_cast<int32_t>(target.stats.hp) - ramp_dmg));
+        if (target.has_volatile(VolatileStatus::Endure) && target.stats.hp <= 0)
+            target.stats.hp = 1;
+        hp_change(user_is_player ? 1u : 0u, old_ramp_hp, target.stats.hp);
+        outcome_.damage_dealt += static_cast<uint16_t>(ramp_dmg);
+        hook_on_damage_received(target, ramp_dmg, static_cast<uint8_t>(md.category));
+        if (target.stats.hp <= 0 && target.has_volatile(VolatileStatus::DestinyBond))
+            hook_destiny_bond_check(target, user, !user_is_player);
+        return MoveExecutionResult::Success;
+    }
+
+
+    // When counter reaches 0: release stored_damage × 2.
+    // Source: suiCune bide.c BattleCommand_StoreEnergy / BattleCommand_UnleashEnergy.
+    // Turn 1: Bide volatile NOT yet set → gate skipped → program ops set volatile+counter.
+    // Turns 2+: Bide IS set → gate fires.
     if (user.has_volatile(VolatileStatus::Bide)) {
         if (user.turn_counter > 0) {
             --user.turn_counter;
             message(md.name + " — storing energy!");
             return MoveExecutionResult::Success;
         }
-        // turn_counter reached 0 — fall through to execute the program (UseStoredDamage).
+        // turn_counter reached 0: release. Fall through to StoredEnergy release below.
+        const int32_t bide_dmg = std::min(65535,
+            static_cast<int32_t>(user.bide_stored) * 2);
+        user.clear_volatile(VolatileStatus::Bide);
+        user.bide_stored  = 0;
+        user.turn_counter = 0;
+        if (bide_dmg == 0) {
+            message(md.name + " — no energy stored!");
+            return MoveExecutionResult::Miss;
+        }
+        message(md.name + " — unleashing stored energy!");
+        const int16_t old_hp = target.stats.hp;
+        target.stats.hp = static_cast<int16_t>(
+            std::max(0, static_cast<int32_t>(target.stats.hp) - bide_dmg));
+        hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
+        outcome_.damage_dealt += static_cast<uint16_t>(bide_dmg);
+        if (target.stats.hp <= 0 && target.has_volatile(VolatileStatus::DestinyBond)) {
+            hook_destiny_bond_check(target, user, !user_is_player);
+        }
+        return MoveExecutionResult::Success;
     }
 
     // ── Execute ordered ops ───────────────────────────────────────────────────
@@ -170,30 +295,74 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
             // For standard cases: accuracy_checked fires once per execute_program call.
             if (!accuracy_checked) {
                 accuracy_checked = true;
-                if (md.accuracy != 0xFF && md.accuracy != 0) {
-                    uint8_t effective_accuracy = md.accuracy;
+                // -- Lock-On / Mind Reader accuracy bypass (B-path) ---------------
+                // Source: suiCune lock_on.c — always-hit next move when LockOn active.
+                // LockOn is set on the target. Consume it here on the first accuracy check.
+                if (target.has_volatile(VolatileStatus::LockOn)) {
+                    target.clear_volatile(VolatileStatus::LockOn);
+                    // Accuracy roll skipped — guaranteed hit.
+                } else if (md.accuracy != 0) {
+                    uint8_t base_accuracy = md.accuracy;
                     // Thunder accuracy: Rain=always hit, Sun=50%.
                     if (md.effect_desc.has_thunder_accuracy) {
                         if (field_.weather == Weather::Rain) {
-                            effective_accuracy = 0xFF;  // always hit
+                            base_accuracy = 0xFF;  // always hit
                         } else if (field_.weather == Weather::Sun) {
-                            effective_accuracy = 50;
+                            base_accuracy = 50;
                         }
                     }
-                    if (effective_accuracy != 0xFF) {
-                        move_hit = rules_
-                            ? roll_accuracy(effective_accuracy, user.stages.accuracy,
-                                            target.stages.evasion, rng_.next_byte(), *rules_)
-                            : roll_accuracy(effective_accuracy, user.stages.accuracy,
-                                            target.stages.evasion, rng_.next_byte());
-                        if (!move_hit) {
-                            if (user.hit_loop_remaining > 0) {
-                                // MultiHit/TripleKick: miss = 0 damage, loop continues.
-                                // (fall through with move_hit=false; damage=0 handled below)
-                            } else {
-                                message(md.name + " missed!");
-                                hook_chain_reset(user);
-                                return MoveExecutionResult::Miss;
+                    // P1-21: Always apply accuracy/evasion stage modifiers before the
+                    // always-hit (0xFF) check. Crystal's BattleCommand_CheckHit runs
+                    // .StatModifiers before "cp -1; jr z .Hit", so sufficiently bad
+                    // stages can cause 0xFF-accuracy moves to miss.
+                    // If base_accuracy is 0xFF and stages are both 0, eff_acc will
+                    // be clamped to 255 = 0xFF → guaranteed hit (no RNG consumed).
+                    // If stages reduce eff_acc below 255, a miss becomes possible.
+                    uint32_t eff_acc;
+                    if (base_accuracy == 0xFF) {
+                        // Apply stages to 255; if still 255 → always-hit, skip roll.
+                        if (rules_) {
+                            const auto e1 = rules_->get_acc_mult(user.stages.accuracy);
+                            uint32_t acc = static_cast<uint32_t>(base_accuracy) * e1.numerator / e1.denominator;
+                            const auto e2 = rules_->get_acc_mult(static_cast<int8_t>(-target.stages.evasion));
+                            acc = acc * e2.numerator / e2.denominator;
+                            eff_acc = std::min(acc, uint32_t{255});
+                        } else {
+                            eff_acc = 255u;
+                        }
+                        if (eff_acc >= 255u) {
+                            // Still guaranteed-hit: no RNG consumed.
+                            // (move_hit stays true)
+                        } else {
+                            // Stages reduced effective accuracy — roll needed.
+                            move_hit = (rng_.next_byte() < eff_acc);
+                            if (!move_hit) {
+                                if (user.hit_loop_remaining > 0) {
+                                    // multi-hit: loop continues with 0 damage
+                                } else {
+                                    message(md.name + " missed!");
+                                    hook_chain_reset(user);
+                                    return MoveExecutionResult::Miss;
+                                }
+                            }
+                        }
+                    } else {
+                        uint8_t effective_accuracy = base_accuracy;
+                        if (effective_accuracy != 0xFF) {
+                            move_hit = rules_
+                                ? roll_accuracy(effective_accuracy, user.stages.accuracy,
+                                                target.stages.evasion, rng_.next_byte(), *rules_)
+                                : roll_accuracy(effective_accuracy, user.stages.accuracy,
+                                                target.stages.evasion, rng_.next_byte());
+                            if (!move_hit) {
+                                if (user.hit_loop_remaining > 0) {
+                                    // MultiHit/TripleKick: miss = 0 damage, loop continues.
+                                    // (fall through with move_hit=false; damage=0 handled below)
+                                } else {
+                                    message(md.name + " missed!");
+                                    hook_chain_reset(user);
+                                    return MoveExecutionResult::Miss;
+                                }
                             }
                         }
                     }
@@ -203,8 +372,16 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
             if (!move_hit && user.hit_loop_remaining == 0) break;
 
             // Type effectiveness.
-            const uint16_t type_eff = get_combined_effectiveness(
+            const uint16_t type_eff_raw = get_combined_effectiveness(
                 md.type, target.type1, target.type2, registries_.type_chart);
+            // ── Foresight / Identified: Normal and Fighting hit Identified Ghost ──
+            // Source: suiCune foresight.c — same bypass as A-path.
+            const uint16_t type_eff = (type_eff_raw == 0
+                                        && target.has_volatile(VolatileStatus::Identified)
+                                        && (static_cast<uint8_t>(md.type) == 0u
+                                            || static_cast<uint8_t>(md.type) == 1u))
+                                       ? uint16_t{100}
+                                       : type_eff_raw;
             if (type_eff == 0 && user.hit_loop_remaining == 0) {
                 message("It doesn't affect the opposing Pokémon…");
                 return MoveExecutionResult::Immune;
@@ -223,26 +400,13 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
             for (uint8_t hit_i = 0; hit_i < hit_count; ++hit_i) {
                 if (target.is_fainted()) break;
 
-                // Per-hit accuracy for MultiHit (Crystal: checkhit is inside startloop/endloop).
-                bool this_hit_lands = true;
-                if (user.hit_loop_remaining > 0 && md.accuracy != 0xFF && md.accuracy != 0) {
-                    // Roll accuracy independently for each hit inside the multi-hit loop.
-                    // A miss means 0 damage for that hit but the loop CONTINUES.
-                    uint8_t eff_acc = md.accuracy;
-                    this_hit_lands = rules_
-                        ? roll_accuracy(eff_acc, user.stages.accuracy,
-                                        target.stages.evasion, rng_.next_byte(), *rules_)
-                        : roll_accuracy(eff_acc, user.stages.accuracy,
-                                        target.stages.evasion, rng_.next_byte());
-                }
+                // Crystal: checkhit is ABOVE critical in the script; endloop rewinds to
+                // critical, NOT to checkhit. Therefore accuracy is rolled exactly once
+                // (by the outer accuracy_checked block above) and never re-rolled per
+                // hit iteration. The outer check already handled the miss case.
+                // This_hit_lands is always true here; all hits proceed if the move hit.
 
                 int32_t damage = 0;
-
-                if (!this_hit_lands) {
-                    // Miss inside multi-hit loop: 0 damage, loop continues.
-                    // Do NOT increment hits_landed: a miss is not a landed hit.
-                    continue;
-                }
 
                 if (src == BDamageSource::BeatUpMember) {
                     bool found_member = false;
@@ -934,38 +1098,51 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
         // ────────────────────────────────────────────────────────────────────
         case BOpKind::ForceSwitch: {
             if (op.param8d == 6u) {
-                // BatonPass: switch out player, passing stat stages + select volatiles.
-                // Volatiles NOT passed (per Crystal ResetBatonPassStatus): Nightmare,
-                // Disable, Attraction, Transform, Encore, LastMove, WrapCount.
-                // Volatiles PASSED: stat stages, FocusEnergy, Seeded, Cursed, Substitute, Rollout.
+                // BatonPass: switch out user, passing stat stages + select volatiles.
+                // Source: pokecrystal/suiCune baton_pass.asm ResetBatonPassStatus.
+                // NOT passed: Nightmare, Disable, Attraction, Transform, Encore, LastMove, Wrap.
+                // PASSED: stat stages, FocusEnergy, Seeded, Cursed, Substitute, Rollout.
+                const uint32_t pass_mask = static_cast<uint32_t>(VolatileStatus::FocusEnergy)
+                                         | static_cast<uint32_t>(VolatileStatus::Seeded)
+                                         | static_cast<uint32_t>(VolatileStatus::Cursed)
+                                         | static_cast<uint32_t>(VolatileStatus::Substitute)
+                                         | static_cast<uint32_t>(VolatileStatus::Rollout);
                 if (user_is_player) {
                     const auto switches = available_switches_player();
                     if (switches.empty()) {
-                        message(md.name + " — no Pokémon to switch to!");
+                        message(md.name + " — no Pokemon to switch to!");
                         return MoveExecutionResult::Miss;
                     }
-                    // Pick first available (AI/player choice deferred to caller).
                     const size_t pick = switches[0];
-                    // Save stages and passed volatiles on the new BattlePokemon.
-                    // force_switch_player creates a fresh BP from party; we need to
-                    // inject the passed stats into it afterward.
                     const auto saved_stages  = user.stages;
-                    const uint32_t pass_mask = static_cast<uint32_t>(VolatileStatus::FocusEnergy)
-                                             | static_cast<uint32_t>(VolatileStatus::Seeded)
-                                             | static_cast<uint32_t>(VolatileStatus::Cursed)
-                                             | static_cast<uint32_t>(VolatileStatus::Substitute)
-                                             | static_cast<uint32_t>(VolatileStatus::Rollout);
                     const uint32_t passed_vs = user.volatile_status & pass_mask;
                     const uint16_t saved_sub_hp = user.substitute_hp;
                     force_switch_player(pick);
-                    // Apply passed state to the new active Pokémon.
-                    player_pokemon_.stages        = saved_stages;
+                    player_pokemon_.stages         = saved_stages;
                     player_pokemon_.volatile_status |= passed_vs;
-                    player_pokemon_.substitute_hp  = saved_sub_hp;
+                    player_pokemon_.substitute_hp   = saved_sub_hp;
                     message(md.name + " — passed the baton!");
+                } else {
+                    // Opponent Baton Pass: pick first available opponent party member.
+                    std::vector<size_t> opp_sw;
+                    for (size_t i = 0; i < opponent_party_.size(); ++i)
+                        if (i != opponent_active_index_ && !opponent_party_[i].is_fainted())
+                            opp_sw.push_back(i);
+                    if (opp_sw.empty()) {
+                        message(md.name + " — failed!");
+                        return MoveExecutionResult::Miss;
+                    }
+                    const size_t opick = opp_sw[0];
+                    const auto saved_stages  = user.stages;
+                    const uint32_t passed_vs = user.volatile_status & pass_mask;
+                    const uint16_t saved_sub_hp = user.substitute_hp;
+                    force_switch_opponent(opick);
+                    opponent_pokemon_.stages         = saved_stages;
+                    opponent_pokemon_.volatile_status |= passed_vs;
+                    opponent_pokemon_.substitute_hp   = saved_sub_hp;
+                    message(md.name + " — opponent passed the baton!");
                 }
-                // Opponent BatonPass not yet implemented (would need party selection).
-                break;
+                return MoveExecutionResult::Success;
             }
 
             // Standard ForceSwitch: force opponent to a random live party member.
@@ -1103,7 +1280,11 @@ int Battle::execute_program_set_volatile(const BOp& op, BattlePokemon& user,
                                 + "'s Defense rose!");
                     }
                     // ── Charging + param8c=1: SkullBash Defense +1. ────────────
-                    if (vs == VolatileStatus::Charging && op.param8c == 1u) {
+                    // P1-22: Gate on !was_charging_before so the boost fires only on
+                    // the charge turn (turn 1), not again on the fire turn (turn 2).
+                    // Crystal: BattleCommand_SkullBash calls DefenseUp1 only when
+                    // wVolatileFlags does NOT already have the Charging bit set.
+                    if (vs == VolatileStatus::Charging && op.param8c == 1u && !was_charging_before) {
                         apply_one_stage_change(affected, 1, +1);
                     }
                     // ── Charging + param8d=1: SolarBeam skip-sun-check. ────────
@@ -1118,7 +1299,10 @@ int Battle::execute_program_set_volatile(const BOp& op, BattlePokemon& user,
                     }
                     // ── Seeded (LeechSeed): fail if target is Grass type. ──────
                     if (vs == VolatileStatus::Seeded) {
-                        const bool target_is_grass = (target.type1 == 12 || target.type2 == 12); // 12=GRASS
+                        // Crystal type_constants.h: GRASS = 22 (not 12 which is ROCK).
+                        // Source: suiCune/constants/type_constants.h enum order:
+                        //   NORMAL=0...STEEL=9, CURSE_TYPE=19, FIRE=20, WATER=21, GRASS=22.
+                        const bool target_is_grass = (target.type1 == 22 || target.type2 == 22); // 22=GRASS
                         if (target_is_grass) {
                             target.clear_volatile(VolatileStatus::Seeded);
                             message(md.name + " — it doesn't affect Grass types!");
@@ -1387,8 +1571,9 @@ void Battle::hook_rampage_end_check(BattlePokemon& combatant, bool is_player) {
                 : (field_.safeguard_opponent > 0);
             if (!safeguarded && !combatant.has_volatile(VolatileStatus::Confusion)) {
                 combatant.set_volatile(VolatileStatus::Confusion);
-                // Confusion duration: (rand&1)+2 = 2 or 3 turns.
-                combatant.status_turns = static_cast<uint8_t>((rng_.next_byte() & 1u) + 2u);
+                // P1-Confusion: duration 2–5 turns. Source: BattleCommand_FinishConfusingTarget.
+                // Rampage uses the same confusion init as a regular confusion move.
+                combatant.confusion_turns = (rng_.next_byte() & 0x03u) + 2u;
                 message((is_player ? std::string("Player") : std::string("Opponent"))
                         + " became confused from the rampage!");
             }
@@ -1516,7 +1701,138 @@ void Battle::hook_pre_move_clear_destiny_bond(BattlePokemon& user) {
 }
 bool Battle::hook_pre_move_check(BattlePokemon& user, BattlePokemon& target,
                                    size_t move_slot, bool user_is_player) {
-    // Disable: if the move in move_slot is the disabled move, block it.
+    // Source: BattleCommand_CheckTurn / CheckEnemyTurn in effect_commands.asm.
+    // All status conditions are checked in this exact order (Crystal order preserved).
+
+    // ── Flinch ────────────────────────────────────────────────────────────────
+    // P1-Flinch: Flinch was already cleared at execute_turn() start for both sides.
+    // Any flinch that survived to here means the user was flinched after the turn-start
+    // clear (i.e. this is the second actor who hasn't moved yet). Consume and block.
+    // Source: effect_commands.asm lines ~213-221 / ~439-448.
+    if (user.has_volatile(VolatileStatus::Flinch)) {
+        user.clear_volatile(VolatileStatus::Flinch);  // res SUBSTATUS_FLINCHED
+        message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                + " flinched and couldn't move!");
+        return true;
+    }
+
+    // ── Sleep ─────────────────────────────────────────────────────────────────
+    // P1-Sleep: Decrement counter at start of acting turn. If counter reaches 0 = woke up.
+    // P1-Sleep: Crystal wake-up behavior (effect_commands.asm .woke_up path):
+    //   dec a; ld [wBattleMonStatus], a; and SLP_MASK; jr z, .woke_up
+    //   .woke_up: StdBattleTextbox, CantMove (clears volatiles), UpdateParty, clear Nightmare
+    //             jr .not_asleep  ← FALLS THROUGH, does NOT call EndTurn
+    // The mon DOES act on the wake turn — it continues through freeze/flinch/confusion/
+    // paralysis checks and then executes its move.
+    // Source: effect_commands.asm lines 148-195 (player) / 378-424 (enemy).
+    if (user.status == Status::Sleep) {
+        if (user.status_turns > 0) {
+            --user.status_turns;
+        }
+        if (user.status_turns == 0) {
+            // Woke up — clear Sleep and Nightmare, then FALL THROUGH to remaining checks.
+            // Crystal: jr .not_asleep after CantMove housekeeping; EndTurn is NOT called.
+            // The mon proceeds through freeze/flinch/confusion/paralysis and may act.
+            user.status = Status::None;
+            message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                    + " woke up!");
+            user.clear_volatile(VolatileStatus::Nightmare);
+            // Do NOT return true here — fall through to remaining pre-move checks.
+        } else {
+            // Still asleep. Snore and Sleep Talk bypass sleep.
+            const MoveId mid = (move_slot < 4) ? user.moves[move_slot].move : MOVE_NONE;
+            const MoveData* md_ptr = registries_.moves.get(mid);
+            if (md_ptr && (md_ptr->effect_desc.requires_user_asleep || md_ptr->effect_desc.is_sleep_talk)) {
+                // Snore / Sleep Talk: bypass sleep, proceed to execute_move.
+                return false;
+            }
+            message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                    + " is fast asleep!");
+            return true;  // CantMove
+        }
+    }
+
+    // ── Freeze ────────────────────────────────────────────────────────────────
+    // P1-Freeze: Frozen mon cannot act UNLESS it uses Flame Wheel or Sacred Fire
+    // (they self-thaw by being allowed to proceed to execute_move).
+    // Source: effect_commands.asm lines ~199-221 / ~426-448.
+    if (user.status == Status::Freeze) {
+        const MoveId mid = (move_slot < 4) ? user.moves[move_slot].move : MOVE_NONE;
+        const MoveData* md_ptr = registries_.moves.get(mid);
+        if (md_ptr && md_ptr->effect_desc.secondary_effect == SecondaryEffectType::Defrost) {
+            // Flame Wheel / Sacred Fire — let through; the Defrost secondary will clear freeze.
+            // Clear freeze here exactly as Crystal does (the check is bypassed entirely).
+            user.status = Status::None;
+            user.freeze_guard = false;
+            return false;
+        }
+        message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                + " is frozen solid!");
+        return true;  // CantMove
+    }
+
+    // ── Confusion ─────────────────────────────────────────────────────────────
+    // P1-Confusion: Decrement counter. If counter reaches 0 = confusion ends (mon acts).
+    // Otherwise: 50% self-hit (BattleRandom < 129). Self-hit uses power=40, own atk/def/level.
+    // Source: effect_commands.asm lines ~242-279 (player) / ~494-556 (enemy).
+    if (user.has_volatile(VolatileStatus::Confusion)) {
+        if (user.confusion_turns > 0) --user.confusion_turns;
+        if (user.confusion_turns == 0) {
+            user.clear_volatile(VolatileStatus::Confusion);
+            message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                    + " snapped out of confusion!");
+            // Falls through to .not_confused — mon acts normally.
+        } else {
+            message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                    + " is confused!");
+            // 50% self-hit: BattleRandom < 129 (cp 50 percent + 1 = 129).
+            if (rng_.next_byte() < 129u) {
+                // Self-hit: power=40, user's own attack vs own defense, user's level.
+                // Source: HitSelfInConfusion + BattleCommand_DamageCalc.
+                // Type is typeless (no STAB, no type chart); Reflect doubles defense.
+                // Formula: ((2*level/5 + 2) * power * atk / def) / 50 + 2, then variation.
+                const int32_t level   = static_cast<int32_t>(user.level);
+                int32_t atk  = static_cast<int32_t>(user.stats.attack);
+                int32_t def  = static_cast<int32_t>(user.stats.defense);
+                // Reflect on the user's own side doubles defense for self-hit.
+                const bool reflect_up = user_is_player
+                    ? (field_.reflect_player > 0)
+                    : (field_.reflect_opponent > 0);
+                if (reflect_up) def *= 2;
+                if (def < 1) def = 1;
+                if (atk < 1) atk = 1;
+                int32_t dmg = (2 * level / 5 + 2) * 40 * atk / def / 50 + 2;
+                // Damage variation: rotation byte, must be >= 0xD9.
+                const uint8_t vt = rules_ ? rules_->get_damage_var_lower_bound() : uint8_t{0xD9};
+                const int32_t vd = rules_ ? static_cast<int32_t>(rules_->get_damage_var_divisor()) : 255;
+                uint8_t var;
+                do { uint8_t r = rng_.next_byte(); var = (r >> 1) | (r << 7); } while (var < vt);
+                dmg = dmg * static_cast<int32_t>(var) / (vd > 0 ? vd : 255);
+                if (dmg < 1) dmg = 1;
+                message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                        + " hurt itself in its confusion!");
+                const int16_t old_hp = user.stats.hp;
+                user.stats.hp = static_cast<int16_t>(
+                    std::max(0, static_cast<int32_t>(user.stats.hp) - dmg));
+                hp_change(user_is_player ? 0u : 1u, old_hp, user.stats.hp);
+                return true;  // CantMove after self-hit
+            }
+            // Didn't self-hit — falls through to .not_confused (mon acts).
+        }
+    }
+
+    // ── Paralysis ─────────────────────────────────────────────────────────────
+    // P1-Paralysis: 25% chance of full immobilization (BattleRandom < 64 = 25 percent).
+    // Source: effect_commands.asm lines ~320-332 (player) / ~569-582 (enemy).
+    if (user.status == Status::Paralysis) {
+        if (rng_.next_byte() < 64u) {  // cp 25 percent = cp 64 = 0x40
+            message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                    + " is fully paralyzed!");
+            return true;  // CantMove
+        }
+    }
+
+    // ── Disable: if the move in move_slot is the disabled move, block it ──────
     if (user.disable_turns > 0) {
         if (move_slot < 4 && user.moves[move_slot].move == user.disabled_move) {
             message("The move is disabled!");
@@ -1528,13 +1844,13 @@ bool Battle::hook_pre_move_check(BattlePokemon& user, BattlePokemon& target,
         if (user.disable_turns == 0) user.disabled_move = MOVE_NONE;
     }
 
-    // Encore: decrement counter.
+    // ── Encore: decrement counter ─────────────────────────────────────────────
     if (user.encore_turns > 0) {
         --user.encore_turns;
         if (user.encore_turns == 0) user.encored_move = MOVE_NONE;
     }
 
-    // Attract: 50% chance user skips its move.
+    // ── Attract: 50% chance user skips its move ───────────────────────────────
     if (user.has_volatile(VolatileStatus::Infatuation)) {
         message((user_is_player ? std::string("Player") : std::string("Opponent"))
                 + " is immobilized by love!");
@@ -1562,6 +1878,27 @@ void Battle::hook_destiny_bond_check(BattlePokemon& destiny_bond_user, BattlePok
         hp_change(killer_is_player ? 0u : 1u, old_killer, 0);
     }
     destiny_bond_user.clear_volatile(VolatileStatus::DestinyBond);
+}
+
+bool Battle::hook_end_of_turn_natural_thaw(BattlePokemon& bp, bool is_player) {
+    // P1-Freeze: Natural thaw. Source: HandleDefrost in core.asm.
+    // Crystal: runs after every turn. Thaw condition: BattleRandom < 10 percent = 25 (0x19).
+    // Same-turn-freeze guard (freeze_guard) prevents thaw on the turn freeze was applied.
+    // Guard is consumed (cleared) here regardless of whether a thaw roll occurs.
+    if (bp.freeze_guard) {
+        bp.freeze_guard = false;
+        return false;  // guard consumed; no thaw roll this turn
+    }
+    if (bp.status != Status::Freeze) return false;
+
+    // Thaw if BattleRandom < 25 (~9.8% per turn).
+    if (rng_.next_byte() < 25u) {
+        bp.status = Status::None;
+        message((is_player ? std::string("Player") : std::string("Opponent"))
+                + " thawed out!");
+        return true;
+    }
+    return false;
 }
 
 } // namespace enginemon
