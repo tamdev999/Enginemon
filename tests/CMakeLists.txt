@@ -266,7 +266,7 @@ endif()
 
 # Battle ROM propagation tests — true ROM→extractor→BRLS→runtime pipeline proof
 add_executable(battle_rom_test
-    crystal/battle_rom_test_FIXED.cpp
+    crystal/battle_rom_test.cpp
 )
 target_link_libraries(battle_rom_test PRIVATE
     enginemon_crystal

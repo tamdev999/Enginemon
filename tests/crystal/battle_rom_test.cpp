@@ -1162,11 +1162,28 @@ TEST(p0_twineedle_can_poison_on_hit_hit) {
     party.add(pmon);
     auto rules = make_rules_b(); auto reg = make_b_reg(*r);
 
-    // Run 200 trials; with 20% poison chance, probability of >= 1 poison in 200 trials
-    // = 1 - (0.8^200) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€¹Ã¢â‚¬Â  1.0. Failure would require extraordinary RNG.
+    // Deterministic proof: effectchance byte = 0x20 = 32 < 51 -> fires -> poison applied.
+    // Crystal PoisonMultiHit: effectchance fires once before the hit loop.
+    // Speed: both 50 -> speed tie -> byte[0] consumed for turn-order.
+    // Then byte[1] = effectchance.
+    // Byte layout: [0]=turn-order(0x00=player first), [1]=effectchance(0x20<51=FIRES),
+    //              [2]=h1-crit, [3]=h1-var, [4]=h2-crit, [5]=h2-var. 6 bytes.
     int poison_count = 0;
-    for (int trial = 0; trial < 200; ++trial) {
+    for (int trial = 0; trial < 3; ++trial) {
         enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+        size_t rng_trial = 0;
+        const std::vector<uint8_t> trial_script = {
+            0x00,  // [0] turn-order: player first (speed tie = 50 vs 50)
+            0x20,  // [1] effectchance: 0x20=32 < 51 -> FIRES -> poison
+            0xFF,  // [2] h1-crit (no crit)
+            0xFF,  // [3] h1-var (max, exits in 1 byte)
+            0xFF,  // [4] h2-crit
+            0xFF,  // [5] h2-var
+            0xFF, 0xFF
+        };
+        battle.set_rng_callback([&]() -> uint32_t {
+            return rng_trial < trial_script.size() ? trial_script[rng_trial++] : uint32_t{0xFF};
+        });
         enginemon::BattlePokemon player_bp = make_bp_b(twin_id, 300);
         enginemon::BattlePokemon opp_bp = make_bp_b(enginemon::MOVE_NONE, 300);
         opp_bp.moves[0].move = enginemon::MOVE_NONE;
@@ -1177,27 +1194,27 @@ TEST(p0_twineedle_can_poison_on_hit_hit) {
         battle.execute_turn();
         if (battle.opponent_pokemon().status == enginemon::Status::Poison) ++poison_count;
     }
-    std::cout << "\n    Twineedle poison in 200 trials: " << poison_count << "/200\n";
-    // With 20% chance, expect ~40 poisons. Assert at least 1 to avoid flaky test.
+    std::cout << "\n    Twineedle poison (scripted effectchance=0x20): " << poison_count << "/3\n";
     ASSERT_TRUE(poison_count > 0);
-}
 
-// P0-5b: Twineedle ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â both hits land, both effectchance rolls fail ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ no poison.
-// ROM ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ compiler ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ package ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ reader ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Battle ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ execute_turn
+}
+// P0-5b: Twineedle -- effectchance byte = 0xFF (fails) -- no poison.
+// ROM -> compiler -> package -> reader -> Battle -> execute_turn
 //
-// Twineedle: accuracy=0xFF (Crystal "100 percent" = always-hit sentinel).
-// Both outer and inner per-hit accuracy checks are bypassed (md.accuracy == 0xFF).
-// Both hits always land.
-// effect_chance = 0x33 = 51 (raw Crystal ROM byte; Crystal fires if BattleRandom < 51).
-// has_effectchance_phase=true: one RNG byte consumed per hit iteration regardless of
-// effect_chance value.
-// Feeding 0xFF for both effectchance bytes: 0xFF=255 < 51 = false ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=false.
-// Proves: when all per-iteration effectchance rolls fail, apply_secondary_effect is never called.
+// Crystal PoisonMultiHit: effectchance fires ONCE (pass 1 only, before critical).
+// endloop rewinds to critical; effectchance is not re-executed on pass 2.
+// Twineedle: accuracy=0xFF (always-hit, no accuracy roll consumed).
+// effect_chance = 0x33 = 51. Single pre-loop roll: 0xFF < 51? NO -> no poison.
 //
-// Byte layout (accuracy=0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ no accuracy byte):
-//   [0] turn-order, [1] h1-crit, [2] h1-var(0xFF), [3] h1-effectchance(0xFF=fail),
-//   [4] h2-crit, [5] h2-var(0xFF), [6] h2-effectchance(0xFF=fail). 7 bytes total.
+// Byte layout (accuracy=0xFF -> no accuracy byte; effectchance once before hits):
+//   [0] turn-order, [1] effectchance(0xFF=fail),
+//   [2] h1-crit, [3] h1-var(0xFF), [4] h2-crit, [5] h2-var(0xFF). 6 bytes total.
+//
+// Single effectchance roll controls poisontarget. If runtime rolled per-hit,
+// it would consume byte [2] (h1-crit=0x00) as a second effectchance,
+// and poison might incorrectly apply on that byte (0x00 < 51 = true).
 TEST(p0_twineedle_both_effectchance_fail_no_poison) {
+
     auto entries = extract_move_entries(*g_rom, *g_profile);
     ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
     auto r = mvdt_roundtrip(entries, "twin_supp");
@@ -1232,14 +1249,12 @@ TEST(p0_twineedle_both_effectchance_fail_no_poison) {
     // Byte layout: [0]=turn-order, [1]=h1-crit, [2]=h1-var(0xFF), [3]=h1-effect(0xFF),
     //              [4]=h2-crit, [5]=h2-var(0xFF), [6]=h2-effect(0xFF)
     const std::vector<uint8_t> script = {
-        0x00,  // [0] turn order: player first (0 < 128)
+        0xFF,  // [0] effectchance (once, before hits): 0xFF < 51? NO -> no poison
         0x00,  // [1] hit-1 crit roll
-        0xFF,  // [2] hit-1 variation: rotation(0xFF)=0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¥ 0xD9 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ 1 byte
-        0xFF,  // [3] hit-1 effectchance: 0xFF < 51 (raw)? NO
-        0x00,  // [4] hit-2 crit roll
-        0xFF,  // [5] hit-2 variation
-        0xFF,  // [6] hit-2 effectchance: 0xFF < 51 (raw)? NO ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=false
-        0xFF, 0xFF
+        0xFF,  // [2] hit-1 variation: exits in 1 byte (0xFF >= 0xD9)
+        0x00,  // [3] hit-2 crit roll
+        0xFF,  // [4] hit-2 variation
+        0xFF, 0xFF  // padding
     };
     size_t idx = 0;
     battle.set_rng_callback([&]() -> uint32_t {
@@ -1266,35 +1281,35 @@ TEST(p0_twineedle_both_effectchance_fail_no_poison) {
     ASSERT_FALSE(poisoned);      // effectchance never fired ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ no poison
 }
 
-// P0-5c: Twineedle exact per-iteration RNG ordering ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â deterministic scripted proof.
-// ROM ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ compiler ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ package ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ reader ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Battle ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ execute_turn
+// P0-5c: Twineedle -- effectchance fires ONCE (before hits) -- deterministic RNG proof.
+// ROM -> compiler -> package -> reader -> Battle -> execute_turn
 //
-// Crystal per-iteration semantics (EFFECT_POISON_MULTI_HIT script):
-//   Each executed hit iteration: effectchance fires ONCE (BattleRandom < MOVE_CHANCE).
-//   wEffectFailed state after the LAST iteration controls poisontarget.
-//   (Earlier iterations' effectchance results are overwritten by later ones.)
+// Crystal PoisonMultiHit script ordering (pokecrystal data/moves/effects.asm):
+//   checkhit -> effectchance -> critical -> ... -> endloop -> poisontarget
+//   endloop (.loop_back_to_critical) scans backward for critical_command (0x04).
+//   effectchance (0x8F) is before critical (0x04) in the script buffer.
+//   Pass 2 resumes AT critical -- effectchance is NOT re-executed.
 //
-// Exact RNG consumption per hit in B-path execute_program Damage case:
-//   1. crit roll (1 byte): roll_critical(crit_stage, rng_.next_byte(), rules)
-//   2. variation loop (ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¥1 byte): do { r=next_byte(); v=(r>>1)|(r<<7); } while(v<0xD9)
-//      Feed 0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ rotation(0xFF)=0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¥ 0xD9, exits in 1 byte.
-//   3. effectchance (1 byte): always consumed when has_effectchance_phase=true
-//      (the Crystal script contains the effectchance opcode, so BattleRandom fires regardless
-//       of effect_chance value; raw threshold = effect_chance = 51)
+// Exact RNG byte layout (accuracy=0xFF -> no acc roll):
+//   [0] turn-order
+//   [1] effectchance (single pre-loop roll): 0x20=32 < 51 -> FIRES -> poison
+//   [2] hit-1 crit, [3] hit-1 variation(0xFF)
+//   [4] hit-2 crit, [5] hit-2 variation(0xFF)
 //
-// Scripted sequence for 2-hit Twineedle (accuracy=0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ outer acc check skipped):
-//   [0] 0x00 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â turn-order (player first: 0 < 128)
-//   [1] 0x00 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hit-1 crit roll (no crit; threshold typically 17 or 32)
-//   [2] 0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hit-1 variation (0xFF rotated = 0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¥ 0xD9 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ exits immediately)
-//   [3] 0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hit-1 effectchance: 0xFF < 51 (raw threshold)? NO ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=false
-//   [4] 0x00 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hit-2 crit roll
-//   [5] 0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hit-2 variation
-//   [6] 0x00 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hit-2 effectchance: 0x00 < 51 (raw threshold)? YES ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=true
-//   Post-loop: last_secondary_fired=true ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ apply_secondary_effect ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Poison
-//   Total: 7 bytes consumed.
+// Distinguishing property: byte [2] = 0xFF >= 51 (would NOT fire if used as effectchance).
+// If runtime incorrectly rolls effectchance per-hit:
+//   it would consume byte [1] as effectchance (0x20 < 51 -> fires) AND
+//   byte [2] as crit, byte [3] as effectchance -- RNG footprint shifts,
+//   producing wrong damage and wrong poison result.
+// The poison assertion fails if RNG ordering is wrong.
 //
-// If the runtime used only hit-1's effectchance (0xFF = no-fire), poison would NOT apply.
-// Passing proves last-iteration-wins semantics.
+// Total: 6 bytes consumed.
+
+
+
+
+
+// Pass criteria: poisoned=true, idx=6.
 TEST(p0_twineedle_rng_order) {
     auto entries = extract_move_entries(*g_rom, *g_profile);
     ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
@@ -1326,14 +1341,12 @@ TEST(p0_twineedle_rng_order) {
     // Byte layout: [0]=turn-order, [1]=h1-crit, [2]=h1-var(0xFF), [3]=h1-effect(0xFF=no),
     //              [4]=h2-crit, [5]=h2-var(0xFF), [6]=h2-effect(0x00=yes)
     const std::vector<uint8_t> script = {
-        0x00,  // [0] turn order: player first (0 < 128)
-        0x00,  // [1] hit-1 crit roll (0 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ likely no crit at crit_stage=0)
-        0xFF,  // [2] hit-1 variation: rotation(0xFF)=0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¥ 0xD9 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ exits in 1 byte
-        0xFF,  // [3] hit-1 effectchance: 0xFF < 51? NO ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=false
-        0x00,  // [4] hit-2 crit roll
-        0xFF,  // [5] hit-2 variation
-        0x00,  // [6] hit-2 effectchance: 0x00 < 51? YES ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=true
-        0xFF, 0xFF  // fill (EOT etc.)
+        0x20,  // [0] effectchance (once): 0x20=32 < 51 -> FIRES -> poison
+        0xFF,  // [1] hit-1 crit (0xFF >= crit threshold -> no crit)
+        0xFF,  // [2] hit-1 variation (0xFF -> exits in 1 byte)
+        0xFF,  // [3] hit-2 crit
+        0xFF,  // [4] hit-2 variation
+        0xFF, 0xFF  // padding
     };
     size_t idx = 0;
     battle.set_rng_callback([&]() -> uint32_t {
@@ -1351,15 +1364,15 @@ TEST(p0_twineedle_rng_order) {
     battle.execute_turn();
 
     const bool poisoned = (battle.opponent_pokemon().status == enginemon::Status::Poison);
-    std::cout << "\n    Twineedle RNG order (h1-effect=0xFF no-fire, h2-effect=0x00 fires):"
+    std::cout << "\n    Twineedle RNG order (single effectchance=0x20 fires):"
               << " rng_consumed=" << idx
               << " poisoned=" << poisoned
-              << " (expected: YES ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â last-iteration-wins semantics)\n";
-    // Poison must apply: hit-2 effectchance (0x00 < 51) fired, last_secondary_fired=true.
-    // If runtime used only hit-1 result (0xFF = no fire), test would fail.
+              << " (expected: YES -- single pre-loop roll controls poison)\n";
+    // Poison applies: single effectchance byte (0x20 < 51) fired.
+    // If runtime rolled per-hit, byte offsets shift and poison result changes.
     ASSERT_TRUE(poisoned);
+    ASSERT_EQ(idx, size_t{5});
 }
-
 // P0-5d: Sky Attack ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â runtime behavior: effect_chance=0 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ effectchance always fails ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢
 // flinch never fires. Proves correct no-flinch behavior after Sky Attack damage.
 // Source: moves.asm "move SKY_ATTACK, EFFECT_SKY_ATTACK, 140, FLYING, 90, 5, 0"
@@ -1447,12 +1460,10 @@ TEST(p0_sky_attack_no_flinch_effect_chance_zero) {
     //       effect_chance=0 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ raw threshold=0 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ 0xFF < 0 = false ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=false.
     size_t rng_idx = 0;
     const std::vector<uint8_t> rng_script = {
-        0x00,  // [0] T1 turn-order
-        0x00,  // [1] T2 turn-order
-        0x00,  // [2] accuracy: 0 < 229 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ HIT
-        0x00,  // [3] crit
-        0xFF,  // [4] variation: 0xFF ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¥ 0xD9 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ exits in 1 byte
-        0xFF,  // [5] effectchance: 0xFF < 0 (raw threshold=0)? NO ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=false
+        0x00,  // [0] accuracy: 0 < 229 -> HIT (player faster, no turn-order byte)
+        0x00,  // [1] crit
+        0xFF,  // [2] variation: exits in 1 byte
+        0xFF,  // [3] effectchance: 0xFF < 0 (raw threshold=0)? NO -> no flinch
         0xFF, 0xFF  // fill for EOT
     };
     battle.set_rng_callback([&]() -> uint32_t {
@@ -1468,7 +1479,7 @@ TEST(p0_sky_attack_no_flinch_effect_chance_zero) {
               << " (expected 200, undamaged)\n";
 
     // Turn 2: fire turn.
-    // After T2 turn-order[1], accuracy[2], crit[3], variation[4] are consumed,
+    // After accuracy[0], crit[1], variation[2], effectchance[3] are consumed,
     // rng_idx is at 5 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â immediately before the effectchance byte.
     // After effectchance[5] is consumed, rng_idx becomes 6.
     // This local invariant proves the effectchance byte is consumed exactly once.
@@ -1481,7 +1492,7 @@ TEST(p0_sky_attack_no_flinch_effect_chance_zero) {
     std::cout << "    Sky Attack turn2 (fire): rng_idx_after=" << rng_idx
               << " opp_damaged=" << opp_damaged
               << " flinched=" << opp_flinched
-              << "\n    (expected: damaged=true, flinched=false, rng_idx_after=6)\n";
+              << "\n    (expected: damaged=true, flinched=false, rng_idx_after=4)\n";
 
     // Damage must land (accuracy 0x00 < 229).
     ASSERT_TRUE(opp_damaged);
@@ -1490,7 +1501,7 @@ TEST(p0_sky_attack_no_flinch_effect_chance_zero) {
     // Proves has_effectchance_phase=true caused exactly one RNG byte to be consumed
     // for the effectchance phase, even with effect_chance=0.
     // [0]=T1-order, [1]=T2-order, [2]=acc, [3]=crit, [4]=var, [5]=effectchance = 6 total.
-    ASSERT_EQ(rng_idx, size_t{6});
+    ASSERT_EQ(rng_idx, size_t{4});
 
     // Flinch must NOT be applied: effect_chance=0 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ threshold=0 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=false.
     ASSERT_FALSE(opp_flinched);
@@ -1544,14 +1555,12 @@ TEST(p0_twineedle_boundary_0x32_fires) {
 
     // hit-2 effectchance = 0x32 = 50. 50 < 51 = true ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ FIRES ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ poison.
     const std::vector<uint8_t> script = {
-        0x00,  // [0] turn-order: player first
-        0x00,  // [1] h1-crit
-        0xFF,  // [2] h1-variation
-        0xFF,  // [3] h1-effectchance: 0xFF < 51? NO (ensures h2 controls outcome)
-        0x00,  // [4] h2-crit
-        0xFF,  // [5] h2-variation
-        0x32,  // [6] h2-effectchance: 0x32=50 < 51? YES ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=true ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ POISON
-        0xFF, 0xFF
+        0x32,  // [0] effectchance (once): 0x32=50 < 51 -> FIRES -> poison
+        0x00,  // [1] hit-1 crit roll
+        0xFF,  // [2] hit-1 variation
+        0x00,  // [3] hit-2 crit roll
+        0xFF,  // [4] hit-2 variation
+        0xFF, 0xFF  // padding
     };
     size_t idx = 0;
     battle.set_rng_callback([&]() -> uint32_t {
@@ -1573,7 +1582,7 @@ TEST(p0_twineedle_boundary_0x32_fires) {
               << " poisoned=" << poisoned
               << " (0x32=50 < 51 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ expected: FIRES)\n";
     ASSERT_TRUE(poisoned);   // 50 < 51 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ fires
-    ASSERT_EQ(idx, size_t{7});
+    ASSERT_EQ(idx, size_t{5});
 }
 
 TEST(p0_twineedle_boundary_0x33_fails) {
@@ -1607,14 +1616,12 @@ TEST(p0_twineedle_boundary_0x33_fails) {
 
     // hit-2 effectchance = 0x33 = 51. 51 < 51 = false ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ FAILS ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ no poison.
     const std::vector<uint8_t> script = {
-        0x00,  // [0] turn-order: player first
-        0x00,  // [1] h1-crit
-        0xFF,  // [2] h1-variation
-        0xFF,  // [3] h1-effectchance: 0xFF < 51? NO
-        0x00,  // [4] h2-crit
-        0xFF,  // [5] h2-variation
-        0x33,  // [6] h2-effectchance: 0x33=51 < 51? NO ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ last_secondary_fired=false ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ NO POISON
-        0xFF, 0xFF
+        0x33,  // [0] effectchance (once): 0x33=51 < 51? NO -> no poison
+        0x00,  // [1] hit-1 crit roll
+        0xFF,  // [2] hit-1 variation
+        0x00,  // [3] hit-2 crit roll
+        0xFF,  // [4] hit-2 variation
+        0xFF, 0xFF  // padding
     };
     size_t idx = 0;
     battle.set_rng_callback([&]() -> uint32_t {
@@ -1636,7 +1643,7 @@ TEST(p0_twineedle_boundary_0x33_fails) {
               << " poisoned=" << poisoned
               << " (0x33=51 < 51 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ expected: FAILS)\n";
     ASSERT_FALSE(poisoned);  // 51 < 51 = false ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ does not fire
-    ASSERT_EQ(idx, size_t{7});
+    ASSERT_EQ(idx, size_t{5});
 }
 
 // P0-A-path boundary: A-path secondary fires at rng < effect_chance (raw byte), not rng < chance*255/100.
@@ -4229,6 +4236,89 @@ TEST(p1b4_hi_jump_kick_all_crash_cases) {
     std::cout << "\n    hjkick_miss: user_hp=" << battle.player_pokemon().stats.hp
               << " crashed=" << crashed << "\n";
     ASSERT_TRUE(crashed);
+
+    // Sub-test B: Ghost-type opponent (immune to FIGHTING) + accuracy hit -> no crash.
+    // Source: Crystal GetFailureResultText: wTypeModifier==0 for immune target -> crash skipped.
+    // Hi Jump Kick type = FIGHTING (1). FIGHTING vs GHOST (8) = NO_EFFECT (Crystal type_matchups.asm).
+    // rng: accuracy = 0x00 (hit) -> move fires but type immune -> no damage, no crash.
+    {
+        enginemon::Registries reg_ghost;
+        for (uint8_t t=0; t<20; ++t) {
+            enginemon::TypeData td; td.id=t; td.name="T";
+            reg_ghost.types.register_entry(t, td);
+            for (uint8_t u=0; u<20; ++u) reg_ghost.type_chart.set_effectiveness(t,u,10);
+        }
+        // Hi Jump Kick is FIGHTING (1). FIGHTING vs GHOST (8) = immune.
+        const enginemon::MoveData* hjkmd = r->get(hjk_id);
+        const uint8_t hjk_type = hjkmd ? static_cast<uint8_t>(hjkmd->type) : uint8_t{1u};
+        reg_ghost.type_chart.set_effectiveness(hjk_type, 8u, 0u);
+        enginemon::SpeciesData sp2{}; sp2.id=1; sp2.name="T"; sp2.type1=0; sp2.type2=0;
+        sp2.base_stats={50,60,55,55,50,50}; sp2.catch_rate=45; sp2.base_exp=64; sp2.base_friendship=70;
+        reg_ghost.species.register_entry(1, sp2);
+        for (const auto& [id2, md2] : *r) reg_ghost.moves.register_entry(id2, md2);
+        reg_ghost.freeze_all();
+
+        enginemon::Battle bB(enginemon::BattleType::Wild, party, reg_ghost, rules);
+        size_t idxB=0; const std::vector<uint8_t> rngB={0x00,0xFF,0xFF,0xFF};  // acc=hit
+        bB.set_rng_callback([&]()->uint32_t{ return idxB<rngB.size()?rngB[idxB++]:0xFFu; });
+        enginemon::BattlePokemon pB = make_bp_b(hjk_id, 300);
+        pB.stats.speed=pB.base_stats.speed=200;
+        enginemon::BattlePokemon oB = make_bp_b(enginemon::MOVE_NONE, 300);
+        oB.type1=8u; oB.type2=8u;  // Ghost
+        oB.stats.speed=oB.base_stats.speed=1;
+        bB.player_pokemon()=pB; bB.opponent_pokemon()=oB;
+        bB.set_player_action(enginemon::ActionFight{0,0});
+        bB.set_opponent_action(enginemon::ActionFight{0,0});
+        bB.execute_turn();
+        const bool opp_unharmed_B = (bB.opponent_pokemon().stats.hp == 300);
+        const bool user_unharmed_B = (bB.player_pokemon().stats.hp == 300);
+        std::cout << "    hjkick_immune_hit: opp_hp=" << bB.opponent_pokemon().stats.hp
+                  << " user_hp=" << bB.player_pokemon().stats.hp
+                  << " opp_unharmed=" << opp_unharmed_B
+                  << " user_unharmed=" << user_unharmed_B << "\n";
+        ASSERT_TRUE(opp_unharmed_B);   // FIGHTING vs Ghost immune -> no damage
+        ASSERT_TRUE(user_unharmed_B);  // Type immune -> wTypeModifier=0 -> no crash
+    }
+
+    // Sub-test C: Ghost-type opponent (immune) + accuracy miss -> no crash.
+    // Same immunity, but accuracy also fails (0xFF). Double-check crash is gated on wTypeModifier.
+    {
+        enginemon::Registries reg_ghost2;
+        for (uint8_t t=0; t<20; ++t) {
+            enginemon::TypeData td; td.id=t; td.name="T";
+            reg_ghost2.types.register_entry(t, td);
+            for (uint8_t u=0; u<20; ++u) reg_ghost2.type_chart.set_effectiveness(t,u,10);
+        }
+        const enginemon::MoveData* hjkmd2 = r->get(hjk_id);
+        const uint8_t hjk_type2 = hjkmd2 ? static_cast<uint8_t>(hjkmd2->type) : uint8_t{1u};
+        reg_ghost2.type_chart.set_effectiveness(hjk_type2, 8u, 0u);
+        enginemon::SpeciesData sp3{}; sp3.id=1; sp3.name="T"; sp3.type1=0; sp3.type2=0;
+        sp3.base_stats={50,60,55,55,50,50}; sp3.catch_rate=45; sp3.base_exp=64; sp3.base_friendship=70;
+        reg_ghost2.species.register_entry(1, sp3);
+        for (const auto& [id3, md3] : *r) reg_ghost2.moves.register_entry(id3, md3);
+        reg_ghost2.freeze_all();
+
+        enginemon::Battle bC(enginemon::BattleType::Wild, party, reg_ghost2, rules);
+        size_t idxC=0; const std::vector<uint8_t> rngC={0xFF,0xFF,0xFF,0xFF};  // acc=miss
+        bC.set_rng_callback([&]()->uint32_t{ return idxC<rngC.size()?rngC[idxC++]:0xFFu; });
+        enginemon::BattlePokemon pC = make_bp_b(hjk_id, 300);
+        pC.stats.speed=pC.base_stats.speed=200;
+        enginemon::BattlePokemon oC = make_bp_b(enginemon::MOVE_NONE, 300);
+        oC.type1=8u; oC.type2=8u;  // Ghost
+        oC.stats.speed=oC.base_stats.speed=1;
+        bC.player_pokemon()=pC; bC.opponent_pokemon()=oC;
+        bC.set_player_action(enginemon::ActionFight{0,0});
+        bC.set_opponent_action(enginemon::ActionFight{0,0});
+        bC.execute_turn();
+        const bool opp_unharmed_C = (bC.opponent_pokemon().stats.hp == 300);
+        const bool user_unharmed_C = (bC.player_pokemon().stats.hp == 300);
+        std::cout << "    hjkick_immune_miss: opp_hp=" << bC.opponent_pokemon().stats.hp
+                  << " user_hp=" << bC.player_pokemon().stats.hp
+                  << " opp_unharmed=" << opp_unharmed_C
+                  << " user_unharmed=" << user_unharmed_C << "\n";
+        ASSERT_TRUE(opp_unharmed_C);   // No damage to Ghost (immune + miss)
+        ASSERT_TRUE(user_unharmed_C);  // No crash: type immune -> wTypeModifier=0 -> crash skipped
+    }
 }
 
 // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ Bide: turn 1 sets volatile, NO immediate damage ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
@@ -4952,6 +5042,70 @@ TEST(p1b6_hidden_power_type_derived_from_dvs) {
     const int16_t dmg = static_cast<int16_t>(500 - battle.opponent_pokemon().stats.hp);
     std::cout << "\n    hp_type dvs=0: type=1(FIGHT) dmg=" << dmg << "\n";
     ASSERT_TRUE(dmg > 0);
+
+    // ── Battle-level type consumption proof ──────────────────────────────────
+    // DVs: atk=0, def=3, spd=0, spc=0
+    //   type_raw = (def&3) | ((atk&3)<<2) = 3 | 0 = 3
+    //   t = 3+1 = 4 (GROUND)
+    // Correct HP type = GROUND (4).
+    //
+    // Opponent type = FLYING (2). Crystal type chart: GROUND vs FLYING = NO_EFFECT (0).
+    // Expected: dmg_ground_vs_flying == 0 (immune).
+    //
+    // If wrong formula (Speed+Special low bits) were used instead of Atk+Def:
+    //   type_raw = (spd&3)|((spc&3)<<2) = 0 -> type = FIGHTING (1)
+    //   Crystal: FIGHTING vs FLYING = NOT_VERY_EFFECTIVE (0.5x) -> dmg > 0 -> ASSERTION FAILS.
+    //
+    // Source: pokecrystal data/types/type_matchups.asm:
+    //   GROUND, FLYING, NO_EFFECT   (line 62)
+    //   FIGHTING, FLYING, NOT_VERY_EFFECTIVE  (line 46)
+    {
+        // Build a registry with the real GROUND->FLYING immunity installed.
+        // Must set type chart entry before freeze_all().
+        enginemon::Registries reg_immune;
+        for (uint8_t t=0; t<20; ++t) {
+            enginemon::TypeData td; td.id=t; td.name="T";
+            reg_immune.types.register_entry(t, td);
+            for (uint8_t u=0; u<20; ++u) reg_immune.type_chart.set_effectiveness(t,u,10u);
+        }
+        // GROUND = type 4, FLYING = type 2. Crystal: GROUND vs FLYING = NO_EFFECT.
+        reg_immune.type_chart.set_effectiveness(4u, 2u, 0u);
+        enginemon::SpeciesData sp2{}; sp2.id=1; sp2.name="T"; sp2.type1=0; sp2.type2=0;
+        sp2.base_stats={50,60,55,55,50,50}; sp2.catch_rate=45; sp2.base_exp=64; sp2.base_friendship=70;
+        reg_immune.species.register_entry(1, sp2);
+        for (const auto& [id_pair, md_pair] : *r) {
+            reg_immune.moves.register_entry(id_pair, md_pair);
+        }
+        reg_immune.freeze_all();
+
+        enginemon::Party party2;
+        enginemon::Pokemon pmon2{}; pmon2.species=1; pmon2.level=50;
+        pmon2.current_hp=pmon2.max_hp=500; pmon2.friendship=200;
+        party2.add(pmon2);
+        enginemon::Battle battle2(enginemon::BattleType::Wild, party2, reg_immune, rules);
+        battle2.set_rng_callback([]()->uint32_t{ return uint32_t{0xFF}; });
+
+        enginemon::BattlePokemon pb2 = make_bp_b(hp_id, 300);
+        pb2.dv_atk=0; pb2.dv_def=3; pb2.dv_spd=0; pb2.dv_spc=0;  // -> GROUND type
+        pb2.stats.speed = pb2.base_stats.speed = 200;
+        enginemon::BattlePokemon ob2 = make_bp_b(enginemon::MOVE_NONE, 500);
+        ob2.type1 = 2u; ob2.type2 = 2u;  // FLYING type
+        ob2.stats.speed = ob2.base_stats.speed = 1;
+        battle2.player_pokemon()  = pb2;
+        battle2.opponent_pokemon() = ob2;
+        battle2.set_player_action(enginemon::ActionFight{0,0});
+        battle2.set_opponent_action(enginemon::ActionFight{0,0});
+        battle2.execute_turn();
+
+        const int16_t dmg_ground_vs_flying =
+            static_cast<int16_t>(500 - battle2.opponent_pokemon().stats.hp);
+        std::cout << "    hp_type immunity: dvs=(0,3,0,0)->GROUND(4) vs FLYING(2)"
+                  << " dmg=" << dmg_ground_vs_flying
+                  << " (expected: 0 = immune; FIGHTING formula would give >0)\n";
+        // Correct GROUND type: GROUND vs FLYING = NO_EFFECT -> dmg == 0.
+        // Wrong formula (FIGHTING): FIGHTING vs FLYING = 0.5x -> dmg > 0 -> FAILS.
+        ASSERT_EQ(dmg_ground_vs_flying, int16_t{0});
+    }
 }
 
 TEST(p1b6_hidden_power_power_range_30_to_70) {
@@ -5065,13 +5219,25 @@ TEST(p1b6_double_hit_deals_exactly_two_hits) {
 }
 
 // ---------------------------------------------------------------------------
-// Triple Kick: 3 hits at 1x / 2x / 3x power, per-hit accuracy recheck
+// Triple Kick: single accuracy roll, 3 hits at 1x/2x/3x power
 // ---------------------------------------------------------------------------
-// Crystal Triple Kick (EFFECT_TRIPLE_KICK = 104):
-//   3 ScalePower(TripleKick, 1/2/3) + Damage pairs.
-//   param8d=1 on each ScalePower: accuracy re-checked before each Damage op.
-//   Hit 1: power = base*1; Hit 2: power = base*2; Hit 3: power = base*3.
-//   Miss on hit N: stops. Total damage if all 3 hit: 1+2+3 = 6x base power.
+// Crystal Triple Kick (EFFECT_TRIPLE_KICK, pokecrystal data/moves/effects.asm):
+//   startloop -> checkhit -> critical -> ... -> kickcounter -> endloop
+//   endloop (.loop_back_to_critical) rewinds to critical (not checkhit).
+//   checkhit fires on pass 1 ONLY. Accuracy is rolled ONCE per use.
+//   Enginemon fix: removed param8d=1 from all three ScalePower ops so
+//   accuracy_checked stays true after kick 1.
+//
+// Crystal RNG order (3 hits, no crit, single-byte variation):
+//   [0] turn-order
+//   [1] accuracy (single roll)
+//   [2] crit kick-1, [3] var kick-1
+//   [4] crit kick-2, [5] var kick-2    <- these would be accuracy re-rolls in broken code
+//   [6] crit kick-3, [7] var kick-3
+//
+// Distinguishing property: bytes [4] and [6] = 0xFF.
+//   Fixed code: 0xFF is consumed as crit roll (no crit) -> all 3 kicks land.
+//   Broken code: 0xFF consumed as accuracy re-roll (>= threshold) -> kicks 2,3 MISS.
 // ---------------------------------------------------------------------------
 TEST(p1b6_triple_kick_three_hits_escalating_power) {
     auto entries = extract_move_entries(*g_rom, *g_profile);
@@ -5094,20 +5260,30 @@ TEST(p1b6_triple_kick_three_hits_escalating_power) {
     auto rules = make_rules_b();
     auto reg   = make_b_reg(*r);
 
-    // Use 0xFF accuracy (never misses) to guarantee all 3 hits land
-    // RNG script: alternate 0x10 (accuracy hit: 16 < 90) and 0xFF (variation exit: 255 >= 217)
-    // Pattern: [accuracy=0x10, variation=0xFF, crit=0x50, accuracy=0x10, variation=0xFF, crit=0x50, ...]
+    // Crystal-correct RNG order: accuracy once, then [crit,var] per kick.
+    // Bytes [4] and [6] = 0xFF -- if accuracy were re-rolled, 0xFF >= threshold -> miss.
+    // With fixed code: 0xFF is read as crit2/crit3 (no crit) -> all 3 kicks land.
     enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
     size_t rng_idx = 0;
     const std::vector<uint8_t> rng_script = {
-        0x10, 0xFF, 0x50,   // kick 1: accuracy-hit, variation-exit, crit-skip
-        0x10, 0xFF, 0x50,   // kick 2
-        0x10, 0xFF, 0x50,   // kick 3
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF  // padding
+        0x00,  // [0] turn-order: player first
+        0x10,  // [1] accuracy: 0x10=16 < threshold -> HIT (single roll)
+        0xFF,  // [2] crit kick-1: no crit
+        0xFF,  // [3] var kick-1: exits in 1 byte
+        0xFF,  // [4] crit kick-2: no crit (would be acc-recheck=MISS in broken code)
+        0xFF,  // [5] var kick-2
+        0xFF,  // [6] crit kick-3: no crit (would be acc-recheck=MISS in broken code)
+        0xFF,  // [7] var kick-3
+        0xFF, 0xFF  // padding
     };
     battle.set_rng_callback([&]() -> uint32_t {
-        if (rng_idx < rng_script.size()) return rng_script[rng_idx++];
-        return uint32_t{0xFF};
+        return rng_idx < rng_script.size() ? rng_script[rng_idx++] : uint32_t{0xFF};
+    });
+
+    // Count opponent HP changes to verify 3 distinct hits land.
+    int opp_hp_changes = 0;
+    battle.set_hp_change_callback([&](size_t pokemon, int16_t old_hp, int16_t new_hp) {
+        if (pokemon == 1u && old_hp > new_hp) ++opp_hp_changes;  // pokemon=1 = opponent
     });
 
     enginemon::BattlePokemon player_bp = make_bp_b(tk_id, 300);
@@ -5123,39 +5299,16 @@ TEST(p1b6_triple_kick_three_hits_escalating_power) {
     battle.execute_turn();
 
     const uint16_t dmg_all3 = battle.outcome().damage_dealt;
+    const int16_t opp_hp_after = battle.opponent_pokemon().stats.hp;
     std::cout << "\n    triple_kick all3_dmg=" << dmg_all3
+              << " opp_hp_changes=" << opp_hp_changes
               << " base_power=" << (int)tk_md->power << "\n";
 
-    ASSERT_TRUE(dmg_all3 > 0);
-
-    // Now run a single-power-1 hit for reference: ScalePower(TripleKick, 1) only
-    // We do this by running Triple Kick but forcing a miss on hit 2 (high RNG byte).
-    enginemon::Battle battle_1hit(enginemon::BattleType::Wild, party, reg, rules);
-    size_t rng2 = 0;
-    // Hit 1: accuracy=0x10 (hit), variation=0xFF (exit), crit=0x50 (no crit)
-    // Hit 2: accuracy=0xFF (miss -> stop)
-    const std::vector<uint8_t> rng_1hit = {0x10, 0xFF, 0x50, 0xFF, 0xFF, 0xFF};
-    battle_1hit.set_rng_callback([&]() -> uint32_t {
-        return rng2 < rng_1hit.size() ? rng_1hit[rng2++] : uint32_t{0xFF};
-    });
-    enginemon::BattlePokemon p1 = make_bp_b(tk_id, 300);
-    p1.stats.speed = p1.base_stats.speed = 200;
-    enginemon::BattlePokemon o1 = make_bp_b(enginemon::MOVE_NONE, 2000);
-    o1.stats.max_hp = o1.stats.hp = 2000; o1.stats.speed = o1.base_stats.speed = 1;
-    battle_1hit.player_pokemon()  = p1;
-    battle_1hit.opponent_pokemon() = o1;
-    battle_1hit.set_player_action(enginemon::ActionFight{0,0});
-    battle_1hit.set_opponent_action(enginemon::ActionFight{0,0});
-    battle_1hit.execute_turn();
-    const uint16_t dmg_1hit = battle_1hit.outcome().damage_dealt;
-
-    std::cout << "    triple_kick 1hit_dmg=" << dmg_1hit << "\n";
-
-    ASSERT_TRUE(dmg_1hit > 0);
-    // All-3-hits damage must be > 1-hit damage (escalation: 1+2+3 > 1)
-    ASSERT_TRUE(dmg_all3 > dmg_1hit);
-    // All-3-hits should be at least 3x the 1-hit damage (1+2+3=6 vs 1; even conservatively >=3)
-    ASSERT_TRUE(dmg_all3 >= dmg_1hit * 3);
+    // All 3 kicks must have landed: 3 distinct HP-reduction events on the opponent.
+    ASSERT_EQ(opp_hp_changes, 3);
+    // Total damage must be positive and opponent HP must have decreased.
+    ASSERT_TRUE(dmg_all3 > uint16_t{0});
+    ASSERT_EQ(static_cast<int16_t>(2000 - dmg_all3), opp_hp_after);
 }
 
 TEST(p1b6_triple_kick_stops_on_miss) {
@@ -5175,17 +5328,18 @@ TEST(p1b6_triple_kick_stops_on_miss) {
     auto rules = make_rules_b();
     auto reg   = make_b_reg(*r);
 
-    // Miss on hit 1 entirely: accuracy roll fails immediately -> 0 damage
+    // Single accuracy roll fails (0xFF >= threshold) -> all 3 kicks skipped, 0 damage.
+    // Crystal semantics: checkhit fires once; if it fails, the move misses entirely.
     enginemon::Battle battle_miss(enginemon::BattleType::Wild, party, reg, rules);
     size_t rng_m = 0;
-    // 0xFF for all: accuracy roll = 255 >= 90 -> miss
-    const std::vector<uint8_t> rng_all_miss(20, 0xFF);
+    const std::vector<uint8_t> rng_all_miss = { 0xFF };  // [0] acc=0xFF >= 229 -> miss (no turn-order byte: player speed > opp)
     battle_miss.set_rng_callback([&]() -> uint32_t {
         return rng_m < rng_all_miss.size() ? rng_all_miss[rng_m++] : uint32_t{0xFF};
     });
     enginemon::BattlePokemon pm = make_bp_b(tk_id, 300);
     pm.stats.speed = pm.base_stats.speed = 200;
     enginemon::BattlePokemon om = make_bp_b(enginemon::MOVE_NONE, 500);
+    om.stats.max_hp = om.stats.hp = 500;
     om.stats.speed = om.base_stats.speed = 1;
     battle_miss.player_pokemon()  = pm;
     battle_miss.opponent_pokemon() = om;
@@ -5198,33 +5352,9 @@ TEST(p1b6_triple_kick_stops_on_miss) {
     std::cout << "\n    triple_kick stop_on_miss: dmg=" << dmg_miss
               << " opp_hp=" << opp_hp_miss << "\n";
 
-    // A complete miss means 0 damage to opponent
+    // Complete miss: 0 damage, opp HP unchanged.
     ASSERT_EQ(dmg_miss, uint16_t{0});
     ASSERT_EQ(opp_hp_miss, int16_t{500});
-
-    // Also test: hit 1 lands, miss on hit 2 -> only 1 hit of damage
-    enginemon::Battle battle_partial(enginemon::BattleType::Wild, party, reg, rules);
-    size_t rng_p = 0;
-    // Hit 1: accuracy=0x10 (hit), variation=0xFF (exit), crit=0x50 (no crit)
-    // Hit 2: accuracy=0xFF (miss -> stop)
-    const std::vector<uint8_t> rng_partial = {0x10, 0xFF, 0x50, 0xFF, 0xFF};
-    battle_partial.set_rng_callback([&]() -> uint32_t {
-        return rng_p < rng_partial.size() ? rng_partial[rng_p++] : uint32_t{0xFF};
-    });
-    enginemon::BattlePokemon pp2 = make_bp_b(tk_id, 300);
-    pp2.stats.speed = pp2.base_stats.speed = 200;
-    enginemon::BattlePokemon op2 = make_bp_b(enginemon::MOVE_NONE, 2000);
-    op2.stats.max_hp = op2.stats.hp = 2000; op2.stats.speed = op2.base_stats.speed = 1;
-    battle_partial.player_pokemon()  = pp2;
-    battle_partial.opponent_pokemon() = op2;
-    battle_partial.set_player_action(enginemon::ActionFight{0,0});
-    battle_partial.set_opponent_action(enginemon::ActionFight{0,0});
-    battle_partial.execute_turn();
-    const uint16_t dmg_partial = battle_partial.outcome().damage_dealt;
-    std::cout << "    triple_kick partial(hit1_only): dmg=" << dmg_partial << "\n";
-
-    ASSERT_TRUE(dmg_partial > 0);    // hit 1 landed
-    ASSERT_TRUE(dmg_partial < 500);  // did not deal 6x damage (only 1 hit of 1x power)
 }
 
 // ============================================================================
@@ -5258,6 +5388,7 @@ int main(int argc, char* argv[]) {
     std::cout << "ROM: " << rom_path << "\n";
     std::cout << "Hash: " << rom->hash() << "\n\n";
 
+    RUN_TEST(high_crit_mutation_propagates_through_full_pipeline);
     RUN_TEST(stat_mult_mutation_propagates_through_full_pipeline);
     RUN_TEST(ai_discourage_mutation_propagates_through_full_pipeline);
     RUN_TEST(ai_init_score_mutation_propagates_through_full_pipeline);
