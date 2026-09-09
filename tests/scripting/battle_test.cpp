@@ -1,4 +1,4 @@
-﻿// battle_test.cpp
+// battle_test.cpp
 // Battle calculator adversarial tests.
 // Links only against enginemon_engine (NOT enginemon_crystal).
 //
@@ -3853,6 +3853,327 @@ TEST(b_destiny_bond_a_path_kill_faints_attacker) {
     std::cout << "  [B DestinyBond: volatile set and persists through opponent action]\n";
 }
 
+// =============================================================================
+// ROOT_BIDE_ROUTING regression tests
+// Bide release must route through Protect / Substitute / Endure / damage-history
+// exactly like normal damage, not bypass those layers.
+// Source: Crystal UnleashEnergy → checkhit → applydamage path.
+// =============================================================================
+
+// Helper: build a Bide MoveData using EffectProgramCompiler.
+static MoveData make_bide_move() {
+    using namespace enginemon; using namespace crystal;
+    SemanticEffectDescription desc; desc.is_bide = true;
+    DecodedEffectScript sc; sc.effect_id = 26;
+    EffectCommandByte sb; sb.value = 0xFF; sc.bytes.push_back(sb);
+    auto pr = EffectProgramCompiler::compile(desc, sc, 26, 0);
+    MoveData mv; mv.id = 200; mv.name = "Bide"; mv.type = 1;
+    mv.power = 0; mv.accuracy = 0xFF; mv.pp = 10;
+    mv.category = MoveCategory::Physical;
+    mv.effect_desc = desc; mv.has_program = true;
+    mv.effect_program = std::move(pr.program);
+    return mv;
+}
+
+TEST(bide_release_blocked_by_protect) {
+    using namespace enginemon; using namespace crystal;
+    // Bide release must be blocked when target has Protect.
+    // Protect is checked via checkhit in Crystal UnleashEnergy.
+    auto reg   = make_b_registries(make_bide_move());
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(200, 200, 200);
+    BattlePokemon opp  = make_b_pokemon(1, 150, 150);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    user.set_volatile(VolatileStatus::Bide);
+    user.turn_counter = 0;
+    user.bide_stored  = 100;
+    opp.set_volatile(VolatileStatus::Protect);
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    const int16_t opp_hp_before = battle.opponent_pokemon().stats.hp;
+    battle.execute_turn();
+    // Protect should have blocked Bide release — target HP unchanged.
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, opp_hp_before);
+    // Bide volatile should be cleared (release was attempted).
+    ASSERT_FALSE(battle.player_pokemon().has_volatile(VolatileStatus::Bide));
+    std::cout << "  [Bide release blocked by Protect: target HP=" << opp_hp_before << " unchanged ok]\n";
+}
+
+TEST(bide_release_into_substitute) {
+    using namespace enginemon; using namespace crystal;
+    // Bide release into Substitute: real HP must be protected.
+    // Use stored=30 so bide_dmg=60 > sub_hp=40 → Substitute breaks but real HP survives.
+    auto reg   = make_b_registries(make_bide_move());
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(200, 200, 200);
+    BattlePokemon opp  = make_b_pokemon(1, 150, 150);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    user.set_volatile(VolatileStatus::Bide);
+    user.turn_counter = 0;
+    user.bide_stored  = 30;   // bide_dmg = 60
+    opp.set_volatile(VolatileStatus::Substitute);
+    opp.substitute_hp = 40;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    // Real HP must be unchanged.
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, int16_t{150});
+    // Substitute must be broken (bide_dmg 60 > sub_hp 40).
+    ASSERT_FALSE(battle.opponent_pokemon().has_volatile(VolatileStatus::Substitute));
+    ASSERT_EQ(battle.opponent_pokemon().substitute_hp, uint16_t{0});
+    std::cout << "  [Bide release into Substitute: real_hp=150 unchanged, sub broken ok]\n";
+}
+
+TEST(bide_release_into_endure) {
+    using namespace enginemon; using namespace crystal;
+    // Bide release with Endure active: target HP must floor at 1.
+    // Use stored=1000 so bide_dmg=2000, which would normally KO any target.
+    auto reg   = make_b_registries(make_bide_move());
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(200, 200, 200);
+    BattlePokemon opp  = make_b_pokemon(1, 80, 80);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    user.set_volatile(VolatileStatus::Bide);
+    user.turn_counter = 0;
+    user.bide_stored  = 1000;  // bide_dmg = 2000 >> opp HP
+    opp.set_volatile(VolatileStatus::Endure);
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    // Endure should have kept target at 1 HP.
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, int16_t{1});
+    std::cout << "  [Bide release into Endure: target survived at 1 HP ok]\n";
+}
+
+TEST(bide_release_updates_damage_history) {
+    using namespace enginemon; using namespace crystal;
+    // Successful Bide release (real HP damaged) must call hook_on_damage_received.
+    // damage_received_this_turn accumulates what hook_on_damage_received records.
+    // No Substitute, no Endure — full bide_dmg hits real HP.
+    auto reg   = make_b_registries(make_bide_move());
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(200, 200, 200);
+    BattlePokemon opp  = make_b_pokemon(1, 200, 200);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    user.set_volatile(VolatileStatus::Bide);
+    user.turn_counter = 0;
+    user.bide_stored  = 20;   // bide_dmg = 40
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    // Target real HP must be reduced.
+    ASSERT_TRUE(battle.opponent_pokemon().stats.hp < int16_t{200});
+    // damage_received_this_turn must be non-zero (hook fired).
+    ASSERT_TRUE(battle.opponent_pokemon().damage_received_this_turn > 0);
+    std::cout << "  [Bide release damage history: dmg_received="
+              << battle.opponent_pokemon().damage_received_this_turn << " ok]\n";
+}
+
+// =============================================================================
+// ROOT_REVERSAL_ROUTING regression tests
+// Reversal/Flail must route Substitute and Endure identically to normal damage.
+// =============================================================================
+
+// Helper: build a Reversal MoveData (constant_damage_source = ReversalFlail).
+static MoveData make_reversal_move() {
+    using namespace enginemon;
+    MoveData md{}; md.id = 179; md.name = "Reversal"; md.type = 1;
+    md.power = 1; md.accuracy = 0xFF; md.pp = 15;
+    md.category = MoveCategory::Physical;
+    md.effect_desc.constant_damage_source = ConstantDamageSource::ReversalFlail;
+    md.effect_desc.is_supported = true;
+    return md;
+}
+
+// Helper: build a Flail MoveData (same effect, user is at low HP).
+static MoveData make_flail_move() {
+    using namespace enginemon;
+    MoveData md{}; md.id = 175; md.name = "Flail"; md.type = 1;
+    md.power = 1; md.accuracy = 0xFF; md.pp = 15;
+    md.category = MoveCategory::Physical;
+    md.effect_desc.constant_damage_source = ConstantDamageSource::ReversalFlail;
+    md.effect_desc.is_supported = true;
+    return md;
+}
+
+TEST(reversal_into_substitute) {
+    using namespace enginemon;
+    // Reversal: real HP must be untouched when target has a Substitute.
+    // The computed damage goes into the Substitute, not real HP.
+    MoveData md = make_reversal_move();
+    auto reg   = make_b_registries(md);
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    // Add a custom reversal table so damage is predictable.
+    rules.reversal_table[0] = {1, 200};   // hp_px=0 → power=200 (very high at low HP)
+    rules.reversal_table[5] = {48, 20};   // hp_px≥48 → power=20 (full HP)
+    Battle battle(BattleType::Wild, party, reg, rules);
+    // User at 1/500 HP (very low) to guarantee high Reversal power.
+    BattlePokemon user = make_b_pokemon(179, 1, 500);
+    BattlePokemon opp  = make_b_pokemon(1, 200, 200);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    // Give target a Substitute with 10 HP.
+    opp.set_volatile(VolatileStatus::Substitute);
+    opp.substitute_hp = 10;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    // Real HP must be unchanged.
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, int16_t{200});
+    // Substitute must have taken the hit (broken, since power=200 >> sub_hp=10).
+    ASSERT_FALSE(battle.opponent_pokemon().has_volatile(VolatileStatus::Substitute));
+    std::cout << "  [Reversal into Substitute: real_hp=200 unchanged, sub broken ok]\n";
+}
+
+TEST(reversal_into_endure) {
+    using namespace enginemon;
+    // Reversal: Endure must floor target HP at 1 when damage would KO.
+    MoveData md = make_reversal_move();
+    auto reg   = make_b_registries(md);
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    rules.reversal_table[0] = {1, 200};   // hp_px=0 -> power=200 (lethal)
+    rules.reversal_table[5] = {48, 20};
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(179, 200, 200);
+    BattlePokemon opp  = make_b_pokemon(1, 1, 50);   // 1/50 HP -> hp_px=0 -> power=200
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    opp.set_volatile(VolatileStatus::Endure);
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    // Endure floors at 1.
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, int16_t{1});
+    std::cout << "  [Reversal into Endure: target survived at 1 HP ok]\n";
+}
+
+TEST(flail_into_substitute) {
+    using namespace enginemon;
+    // Flail (same effect 99 as Reversal): real HP untouched when Substitute is present.
+    MoveData md = make_flail_move();
+    auto reg   = make_b_registries(md);
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    rules.reversal_table[0] = {1, 200};
+    rules.reversal_table[5] = {48, 20};
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(175, 1, 500);  // very low HP → max Flail power
+    BattlePokemon opp  = make_b_pokemon(1, 200, 200);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    opp.set_volatile(VolatileStatus::Substitute);
+    opp.substitute_hp = 10;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, int16_t{200});
+    ASSERT_FALSE(battle.opponent_pokemon().has_volatile(VolatileStatus::Substitute));
+    std::cout << "  [Flail into Substitute: real_hp=200 unchanged, sub broken ok]\n";
+}
+
+TEST(flail_into_endure) {
+    using namespace enginemon;
+    // Flail: Endure must floor target HP at 1 when damage would KO.
+    MoveData md = make_flail_move();
+    auto reg   = make_b_registries(md);
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    rules.reversal_table[0] = {1, 200};
+    rules.reversal_table[5] = {48, 20};
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(175, 200, 200);
+    BattlePokemon opp  = make_b_pokemon(1, 1, 50);   // 1/50 HP -> hp_px=0 -> power=200
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    opp.set_volatile(VolatileStatus::Endure);
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, int16_t{1});
+    std::cout << "  [Flail into Endure: target survived at 1 HP ok]\n";
+}
+
+// =============================================================================
+// ROOT_OHKO_BOOKKEEPING regression test
+// When Substitute absorbs an OHKO, real target HP must be unchanged,
+// damage_received_this_turn must remain 0, and outcome_.damage_dealt must not
+// be set to target's old real HP.
+// =============================================================================
+
+TEST(ohko_sub_absorb_real_hp_unchanged_history_zero) {
+    using namespace enginemon;
+    // OHKO move (Fissure-style): is_ohko=true.
+    // User level=50 >= target level=40 → level check passes.
+    // Target has Substitute → sub absorbs OHKO, real HP unchanged.
+    MoveData md{}; md.id = 201; md.name = "Fissure_test"; md.type = 1; // Normal type (registered in make_b_registries)
+    md.power = 0; md.accuracy = 30; md.pp = 5;
+    md.category = MoveCategory::Physical; md.effect_id = 0;
+    md.effect_desc.is_ohko = true;
+    md.effect_desc.is_supported = true;
+    auto reg   = make_b_registries(md);
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(201, 200, 200);
+    user.level = 50;
+    BattlePokemon opp  = make_b_pokemon(1, 100, 100);
+    opp.level  = 40;  // lower level → OHKO level check passes
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    // Give target a Substitute so OHKO is absorbed.
+    opp.set_volatile(VolatileStatus::Substitute);
+    opp.substitute_hp = 50;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+
+    // We do not fix the RNG seed. eff_acc = 30 + (50-40)*2 = 50 so the OHKO has
+    // a ~20% chance of hitting per roll. The invariants hold regardless of hit/miss:
+    //   hit  → Substitute absorbs OHKO, real HP unchanged, damage history 0
+    //   miss → nothing changes, real HP unchanged, damage history 0
+    // The Substitute state afterwards tells us which branch executed.
+
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+
+    // Real target HP must always be unchanged (regardless of hit/miss).
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, int16_t{100});
+    // damage_received_this_turn must be 0 — no real-target damage history.
+    ASSERT_EQ(battle.opponent_pokemon().damage_received_this_turn, uint16_t{0});
+
+    // If the OHKO hit (Substitute was broken), we can additionally verify sub state.
+    const bool sub_broken = !battle.opponent_pokemon().has_volatile(VolatileStatus::Substitute);
+    if (sub_broken) {
+        // Substitute absorbed the OHKO — real HP still 100, history still 0.
+        ASSERT_EQ(battle.opponent_pokemon().substitute_hp, uint16_t{0});
+        std::cout << "  [OHKO+Sub: OHKO hit, sub broken, real_hp=100, dmg_history=0 ok]\n";
+    } else {
+        // OHKO missed — both HP and sub unchanged, history 0 — also correct.
+        std::cout << "  [OHKO+Sub: OHKO missed, real_hp=100, dmg_history=0 ok]\n";
+    }
+}
+
 int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << "=== Battle Calculator + AI Tests ===\n";
 
@@ -4111,6 +4432,22 @@ int main(int /*argc*/, char* /*argv*/[]) {
     RUN(b_encore_sets_encored_move);
     RUN(b_rampage_volatile_set_after_use);
     RUN(b_destiny_bond_a_path_kill_faints_attacker);
+
+
+    // ROOT_BIDE_ROUTING regression
+    RUN(bide_release_blocked_by_protect);
+    RUN(bide_release_into_substitute);
+    RUN(bide_release_into_endure);
+    RUN(bide_release_updates_damage_history);
+
+    // ROOT_REVERSAL_ROUTING regression
+    RUN(reversal_into_substitute);
+    RUN(reversal_into_endure);
+    RUN(flail_into_substitute);
+    RUN(flail_into_endure);
+
+    // ROOT_OHKO_BOOKKEEPING regression
+    RUN(ohko_sub_absorb_real_hp_unchanged_history_zero);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Failed: " << g_failed << "\n";

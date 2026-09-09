@@ -105,7 +105,7 @@ if(ENGINEMON_ENABLE_ENGINE)
     # No variant-heavy compiler IR headers.  All future battle tests go here.
     # =========================================================================
     add_executable(battle_test
-        scripting/battle_test_tmp.cpp
+        scripting/battle_test.cpp
     )
     target_link_libraries(battle_test PRIVATE
         enginemon_engine
