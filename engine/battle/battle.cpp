@@ -506,7 +506,25 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         // OHKO always faints the target.
         message("It's a one-hit KO!");
         const int16_t old_hp = target.stats.hp;
+        // P0-1: Substitute absorbs OHKO (Substitute has HP, OHKO fades against it).
+        if (target.has_volatile(VolatileStatus::Substitute)) {
+            // OHKO: destroy the Substitute entirely (damage exceeds any sub HP).
+            target.clear_volatile(VolatileStatus::Substitute);
+            target.substitute_hp = 0;
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + "'s substitute faded!");
+            outcome_.damage_dealt += static_cast<uint16_t>(old_hp);
+            hook_on_damage_received(target, static_cast<int32_t>(old_hp),
+                                    static_cast<uint8_t>(md->category));
+            return MoveExecutionResult::Success;
+        }
         target.stats.hp = 0;
+        // P0-2: Endure 1-HP floor for OHKO.
+        if (target.has_volatile(VolatileStatus::Endure)) {
+            target.stats.hp = 1;
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + " endured the hit!");
+        }
         hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
         outcome_.damage_dealt += static_cast<uint16_t>(old_hp);
         // P0-4: Damage history for OHKO.
@@ -604,7 +622,15 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 }
             }
             switch (effective_desc.primary_status) {
-                case PrimaryStatusType::Sleep:    target.status = Status::Sleep;    target.status_turns = 0; break;
+                case PrimaryStatusType::Sleep:
+                    target.status = Status::Sleep;
+                    // Crystal SleepEffect: status_turns = (BattleRandom & 6) + 1 = 1..7.
+                    // Source: pokecrystal engine/battle/effect_commands.asm SleepEffect.
+                    {
+                        const uint8_t raw = rng_.next_byte();
+                        target.status_turns = static_cast<uint8_t>((raw & 6u) + 1u);
+                    }
+                    break;
                 case PrimaryStatusType::Poison:   target.status = Status::Poison;   break;
                 case PrimaryStatusType::Toxic:    target.status = Status::BadPoison; target.status_turns = 0; break;
                 case PrimaryStatusType::Paralysis:target.status = Status::Paralysis; break;
@@ -621,13 +647,21 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         }
 
         // Stat change (status move path).
-        if (effective_desc.stat_change != StatChangeTarget::None) {
+        // NOTE: swagger_stat_change is handled separately below; skip here if set.
+        if (effective_desc.stat_change != StatChangeTarget::None
+                && !effective_desc.swagger_stat_change) {
             apply_stat_change(user, target, effective_desc.stat_change, user_is_player);
             return MoveExecutionResult::Success;
         }
 
         // Spikes.
         if (effective_desc.sets_spikes) {
+            // Second use fails if spikes already active on that side (Gen 2: single layer only).
+            const bool already_set = user_is_player ? field_.spikes_opponent : field_.spikes_player;
+            if (already_set) {
+                message(md->name + " -- failed!");
+                return MoveExecutionResult::Miss;
+            }
             if (user_is_player) field_.spikes_opponent = true;
             else                field_.spikes_player   = true;
             message("Spikes were scattered!");
@@ -710,18 +744,19 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
             result_ = BattleResult::PlayerRan; message(md->name + " -- teleported!"); return MoveExecutionResult::Success;
         }
         if (effective_desc.swagger_stat_change) {
-            apply_stat_change(user, target, effective_desc.stat_change, user_is_player);
+            // Swagger: raise TARGET's Attack +2 (not user's), then confuse target.
+            // Source: Crystal -- switchturn makes attackup2 apply to opponent.
+            apply_one_stage_change(target, 0, +2);
             if (!target_has_safeguard && !target.has_volatile(VolatileStatus::Confusion)) {
                 target.set_volatile(VolatileStatus::Confusion);
+                target.confusion_turns = static_cast<uint8_t>((rng_.next_byte() & 3u) + 2u);
                 message((user_is_player ? std::string("Opponent") : std::string("Player")) + " became confused!");
             }
             return MoveExecutionResult::Success;
         }
         if (effective_desc.has_payday) {
-            const uint32_t coins = static_cast<uint32_t>(user.level) * 2u;
-            if (user_is_player) player_payday_coins_ += coins; else opponent_payday_coins_ += coins;
-            message(md->name + " -- coins scattered!");
-            // Fall through to damaging path.
+            // Pay Day coins are accumulated in the damaging path (after damage is dealt).
+            // Fall through to the damaging path.
         } else {
             // Unrecognised status-only move -- fail closed.
             message(md->name + " -- effect not implemented.");
@@ -741,20 +776,76 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         return MoveExecutionResult::InvalidData;
     }
     if (md->accuracy != 0xFF) {
-        const bool hit = rules_
-            ? roll_accuracy(md->accuracy, user.stages.accuracy,
-                            target.stages.evasion, rng_.next_byte(), *rules_)
-            : roll_accuracy(md->accuracy, user.stages.accuracy,
-                            target.stages.evasion, rng_.next_byte());
-        if (!hit) {
-            message("The attack missed!");
-            return MoveExecutionResult::Miss;
+        // Lock-On / Mind Reader: bypass accuracy entirely.
+        // Source: Crystal BattleCommand_CheckHit -- always-hit when LockOn volatile set on target.
+        const bool lock_on_active = target.has_volatile(VolatileStatus::LockOn);
+        if (lock_on_active) {
+            target.clear_volatile(VolatileStatus::LockOn);
+        } else {
+            const bool hit = rules_
+                ? roll_accuracy(md->accuracy, user.stages.accuracy,
+                                target.stages.evasion, rng_.next_byte(), *rules_)
+                : roll_accuracy(md->accuracy, user.stages.accuracy,
+                                target.stages.evasion, rng_.next_byte());
+            if (!hit) {
+                // Jump Kick / Hi Jump Kick: crash damage on accuracy miss (not on type immune).
+                // Source: pokecrystal GetFailureResultText EFFECT_JUMP_KICK path.
+                // crash = max(1, wCurDamage >> 3) applied to user.
+                if (effective_desc.crash_on_miss) {
+                    // Compute a reference damage value using current stats for crash formula.
+                    const bool physical = (md->category == MoveCategory::Physical);
+                    auto ss2 = [this](int32_t b, int8_t s) {
+                        return rules_ ? apply_stat_stage(b,s,*rules_) : apply_stat_stage(b,s);
+                    };
+                    const int32_t atk2 = physical
+                        ? ss2(user.base_stats.attack, user.stages.attack)
+                        : ss2(user.base_stats.special_attack, user.stages.special_attack);
+                    const int32_t def2 = physical
+                        ? ss2(target.base_stats.defense, target.stages.defense)
+                        : ss2(target.base_stats.special_defense, target.stages.special_defense);
+                    DamageParams crashdp{};
+                    crashdp.attacker_level = user.level;
+                    crashdp.attack_stat    = std::max(1, atk2);
+                    crashdp.defense_stat   = std::max(1, def2);
+                    crashdp.move_power     = md->power;
+                    crashdp.type_effectiveness = 100;
+                    crashdp.stab = false; crashdp.critical = false;
+                    crashdp.burned = false; crashdp.weather = Weather::None;
+                    crashdp.move_type = md->type;
+                    const int32_t ref_dmg = rules_
+                        ? enginemon::calculate_damage(crashdp, *rules_)
+                        : enginemon::calculate_damage(crashdp);
+                    const int32_t crash_dmg = std::max(1, ref_dmg >> 3);
+                    const int16_t old_user_hp = user.stats.hp;
+                    user.stats.hp = static_cast<int16_t>(
+                        std::max(0, static_cast<int32_t>(user.stats.hp) - crash_dmg));
+                    hp_change(user_is_player ? 0u : 1u, old_user_hp, user.stats.hp);
+                    message(md->name + " -- the user crashed!");
+                }
+                message("The attack missed!");
+                return MoveExecutionResult::Miss;
+            }
         }
     }
 
     // Type effectiveness.
-    const uint16_t type_eff = get_combined_effectiveness(
-        md->type, target.type1, target.type2, registries_.type_chart);
+    // Foresight (Identified): Normal and Fighting moves bypass Ghost immunity.
+    // Source: Crystal BattleCommand_CheckTypeMatchup -- skip type_chart for Identified target.
+    TypeId effective_move_type = md->type;
+    uint16_t type_eff;
+    {
+        const bool identified = target.has_volatile(VolatileStatus::Identified);
+        const uint8_t mt = static_cast<uint8_t>(effective_move_type);
+        if (identified && (mt == 0u || mt == 1u)) {
+            // Normal(0) or Fighting(1) vs Identified Ghost: treat as neutral, not immune.
+            type_eff = get_combined_effectiveness(
+                effective_move_type, target.type1, target.type2, registries_.type_chart);
+            if (type_eff == 0) type_eff = 100;  // Foresight removes immunity
+        } else {
+            type_eff = get_combined_effectiveness(
+                effective_move_type, target.type1, target.type2, registries_.type_chart);
+        }
+    }
     if (type_eff == 0) {
         message("It doesn't affect the opposing PokÃ©monâ€¦");
         return MoveExecutionResult::Immune;
@@ -858,7 +949,27 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         }
         animate(md->animation_id, user_is_player ? 0u:1u, user_is_player ? 1u:0u);
         const int16_t old_hp_c = target.stats.hp;
+        // P0-1: Substitute absorbs constant-damage moves.
+        if (target.has_volatile(VolatileStatus::Substitute)) {
+            const uint16_t sub_dmg = std::min(
+                static_cast<uint16_t>(const_dmg),
+                static_cast<uint16_t>(target.substitute_hp));
+            target.substitute_hp = static_cast<uint16_t>(target.substitute_hp - sub_dmg);
+            if (target.substitute_hp == 0) {
+                target.clear_volatile(VolatileStatus::Substitute);
+                message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                        + "'s substitute faded!");
+            }
+            outcome_.damage_dealt += static_cast<uint16_t>(const_dmg);
+            return MoveExecutionResult::Success;
+        }
         target.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(target.stats.hp) - const_dmg));
+        // P0-2: Endure 1-HP floor for constant-damage moves.
+        if (target.has_volatile(VolatileStatus::Endure) && target.stats.hp <= 0) {
+            target.stats.hp = 1;
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + " endured the hit!");
+        }
         hp_change(user_is_player ? 1u:0u, old_hp_c, target.stats.hp);
         outcome_.damage_dealt += static_cast<uint16_t>(const_dmg);
         // P0-4: Damage history for constant-damage moves.
@@ -919,10 +1030,75 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                     static_cast<int32_t>(255 - user.happiness) * 10 / 25));
                 if (computed_power == 0) computed_power = 1;
                 break;
+            case SetPowerSource::HiddenPower: {
+                // Derive type and power from DVs.
+                // Source: Crystal BattleCommand_HiddenPower + HiddenPowerDamage.
+                // Type  = kHPTypes[(5 * t_bits) / 21]  where t_bits = low bit of each DV
+                // Power = (5 * p_bits) / 21 + 30        where p_bits = bit 1 of each DV
+                const uint8_t t_bits = static_cast<uint8_t>(
+                    (user.dv_atk & 1u) | ((user.dv_def & 1u) << 1) |
+                    ((user.dv_spd & 1u) << 2) | ((user.dv_spc & 1u) << 3));
+                const uint8_t p_bits = static_cast<uint8_t>(
+                    ((user.dv_atk >> 1) & 1u) | (((user.dv_def >> 1) & 1u) << 1) |
+                    (((user.dv_spd >> 1) & 1u) << 2) | (((user.dv_spc >> 1) & 1u) << 3));
+                // kHPTypes: Crystal HiddenPowerTypes table (17 entries).
+                // Source: pokecrystal engine/battle/hidden_power.asm HiddenPowerTypes.
+                static constexpr uint8_t kHPTypes[17] = {
+                    1, 2, 3, 4, 5, 9, 15, 16, 17, 8, 10, 11, 6, 12, 13, 14, 7
+                };
+                const uint8_t type_idx = static_cast<uint8_t>((5u * t_bits) / 21u);
+                effective_move_type = static_cast<TypeId>(
+                    kHPTypes[type_idx < 17 ? type_idx : 0]);
+                computed_power = static_cast<uint8_t>((5u * p_bits) / 21u + 30u);
+                break;
+            }
             default:
                 break;
         }
     }
+
+    // After set_power_source: recompute type_eff if effective_move_type changed (Hidden Power).
+    if (effective_move_type != md->type) {
+        const bool identified = target.has_volatile(VolatileStatus::Identified);
+        const uint8_t mt = static_cast<uint8_t>(effective_move_type);
+        if (identified && (mt == 0u || mt == 1u)) {
+            type_eff = get_combined_effectiveness(
+                effective_move_type, target.type1, target.type2, registries_.type_chart);
+            if (type_eff == 0) type_eff = 100;
+        } else {
+            type_eff = get_combined_effectiveness(
+                effective_move_type, target.type1, target.type2, registries_.type_chart);
+        }
+        if (type_eff == 0) {
+            message("It doesn't affect the opposing Pokemon...");
+            return MoveExecutionResult::Immune;
+        }
+    }
+
+    // Snore: fails when user is not asleep (requires_user_asleep).
+    // Must be checked in the damaging path (Snore has has_standard_damage=true, not Status-only).
+    // Source: Crystal BattleCommand_Snore -- fail if user != asleep.
+    if (effective_desc.requires_user_asleep && user.status != Status::Sleep) {
+        message(md->name + " -- failed! User isn't asleep.");
+        return MoveExecutionResult::Miss;
+    }
+
+    // Delegate the damaging path to execute_move_damaging to keep execute_move within
+    // MSVC function-size limits (avoids ICE on large functions).
+    return execute_move_damaging(user, target, md, move_slot, user_is_player,
+                                 effective_desc, effective_move_type, type_eff,
+                                 computed_power);
+}
+
+// ============================================================================
+// execute_move_damaging: the standard damaging path after type and power setup
+// ============================================================================
+MoveExecutionResult Battle::execute_move_damaging(
+    BattlePokemon& user, BattlePokemon& target,
+    const MoveData* md, size_t move_slot, bool user_is_player,
+    const SemanticEffectDescription& effective_desc,
+    TypeId effective_move_type, uint16_t type_eff,
+    uint8_t computed_power) {
 
     // â”€â”€ Dream Eater: requires target asleep â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (effective_desc.drain_requires_sleep && target.status != Status::Sleep) {
@@ -938,7 +1114,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         : roll_critical(crit_stage, rng_.next_byte());
 
     // â”€â”€ STAB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const bool stab = (md->type == user.type1 || md->type == user.type2);
+    const bool stab = (effective_move_type == user.type1 || effective_move_type == user.type2);
 
     // â”€â”€ Stat selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const int8_t eff_atk_stage  = (is_crit && user.stages.attack < 0)            ? 0 : user.stages.attack;
@@ -986,7 +1162,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     dp.critical           = is_crit;
     dp.burned             = burned;
     dp.weather            = field_.weather;
-    dp.move_type          = md->type;
+    dp.move_type          = effective_move_type;
 
     int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_) : enginemon::calculate_damage(dp);
     if (damage == 0) return MoveExecutionResult::Immune;
@@ -1004,7 +1180,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     if (rules_ && field_.weather != Weather::None) {
         damage = apply_weather_modifier(damage,
             static_cast<uint8_t>(field_.weather),
-            static_cast<uint8_t>(md->type),
+            static_cast<uint8_t>(effective_move_type),
             md->effect_id, *rules_);
     }
 
@@ -1114,6 +1290,14 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
 
     hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
     outcome_.damage_dealt += static_cast<uint16_t>(damage);
+
+    // -- Pay Day coin scatter (A-path) -----------------------------------------
+    // Crystal BattleCommand_PayDay: coins = user_level * 2, added to running total.
+    if (effective_desc.has_payday) {
+        const uint32_t coins = static_cast<uint32_t>(user.level) * 2u;
+        if (user_is_player) player_payday_coins_ += coins; else opponent_payday_coins_ += coins;
+        user.payday_coins += coins;
+    }
 
     // -- P0-4: Damage history (A-path) ----------------------------------------
     hook_on_damage_received(target, damage, static_cast<uint8_t>(md->category));
@@ -1304,6 +1488,12 @@ void Battle::apply_secondary_effect(BattlePokemon& user, BattlePokemon& target,
 // Helper: apply a single stat stage change
 // ============================================================================
 void Battle::apply_one_stage_change(BattlePokemon& mon, int stat_idx, int8_t delta) {
+    // Mist: blocks opponent-inflicted stat drops (negative delta).
+    // Source: Crystal BattleCommand_LowerStat -- checks SUBSTATUS_MIST before applying.
+    if (delta < 0 && mon.has_volatile(VolatileStatus::Mist)) {
+        message("Mist protected the Pokemon from stat changes!");
+        return;
+    }
     auto clamp6 = [](int8_t v) { return static_cast<int8_t>(std::clamp(static_cast<int>(v), -6, 6)); };
     switch (stat_idx) {
         case 0: mon.stages.attack         = clamp6(mon.stages.attack         + delta); break;
@@ -1374,16 +1564,25 @@ void Battle::apply_stat_change(BattlePokemon& user, BattlePokemon& target,
                     + " copied stat changes!");
             break;
         case SC::MaxAttack:
-            // Belly Drum: set attack to +6, halve HP.
+            // Belly Drum: Crystal vanilla bug — AttackUp2 fires BEFORE the HP check.
+            // Source: pokecrystal engine/battle/effect_commands.asm BattleCommand_BellyDrum.
+            // Step 1: Raise Attack to +6 unconditionally.
             user.stages.attack = 6;
             apply_stat_stages(user);
+            // Step 2: HP cost -- only if HP > half max (the check comes AFTER the raise).
             {
                 const int32_t cost = std::max(1, static_cast<int32_t>(user.stats.max_hp) / 2);
-                const int16_t old_hp_b = user.stats.hp;
-                user.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(user.stats.hp) - cost));
-                hp_change(user_is_player ? 0u : 1u, old_hp_b, user.stats.hp);
-                message((user_is_player ? std::string("Player") : std::string("Opponent"))
-                        + " cut its own HP to max out its Attack!");
+                if (user.stats.hp > cost) {
+                    const int16_t old_hp_b = user.stats.hp;
+                    user.stats.hp = static_cast<int16_t>(user.stats.hp - cost);
+                    hp_change(user_is_player ? 0u : 1u, old_hp_b, user.stats.hp);
+                    message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                            + " cut its own HP to max out its Attack!");
+                } else {
+                    // HP <= half: attack was already raised (vanilla bug), HP not deducted.
+                    message((user_is_player ? std::string("Player") : std::string("Opponent"))
+                            + " maxed out its Attack!");
+                }
             }
             break;
         default:
@@ -1412,6 +1611,11 @@ void Battle::apply_end_of_turn_effects() {
     apply_residual(player_pokemon_,   true);
     apply_residual(opponent_pokemon_, false);
 
+    // Natural thaw: P1-Freeze. 25/256 chance per turn (after freeze_guard is consumed).
+    // Source: Crystal HandleDefrost in core.asm.
+    hook_end_of_turn_natural_thaw(player_pokemon_,   true);
+    hook_end_of_turn_natural_thaw(opponent_pokemon_, false);
+
     // Architecture B: end-of-turn hooks.
     hook_end_of_turn_leech_seed();
     hook_end_of_turn_nightmare();
@@ -1419,8 +1623,10 @@ void Battle::apply_end_of_turn_effects() {
     hook_end_of_turn_perish_song();
     hook_future_sight_tick();
     hook_trap_damage_tick();
-    hook_rampage_end_check(player_pokemon_,   true);
-    hook_rampage_end_check(opponent_pokemon_, false);
+    // NOTE: hook_rampage_end_check is NOT called here.
+    // Rampage counter decrement and volatile clearing are handled by the Rampage gate
+    // at the start of execute_program() on continuation turns. Calling the hook here
+    // would double-decrement and clear Rampage one turn too early.
 }
 
 void Battle::apply_residual(BattlePokemon& bp, bool is_player) {
@@ -1448,6 +1654,26 @@ void Battle::apply_residual(BattlePokemon& bp, bool is_player) {
             ? (bp.stats.max_hp * bp.status_turns / toxic_denom) : 1;
         dmg = static_cast<int16_t>(std::max(1, d));
         message(std::string(side) + " is badly poisoned!");
+    }
+
+    // Sandstorm residual: 1/8 max HP to non-Rock, non-Ground, non-Steel types.
+    // Source: Crystal HandleSandstorm -- checks type matchup.
+    // Rock=5, Ground=4, Steel=9 are immune (Crystal type_constants.asm).
+    if (field_.weather == Weather::Sandstorm && !bp.is_fainted()) {
+        const TypeId t1 = bp.type1, t2 = bp.type2;
+        const bool immune = (t1 == 4 || t1 == 5 || t1 == 9 ||
+                             t2 == 4 || t2 == 5 || t2 == 9);
+        if (!immune) {
+            const int32_t sand_denom = 8;
+            const int16_t sand_dmg = static_cast<int16_t>(
+                std::max(1, static_cast<int32_t>(bp.stats.max_hp) / sand_denom));
+            const int16_t old_hp_s = bp.stats.hp;
+            bp.stats.hp = static_cast<int16_t>(
+                std::max(0, static_cast<int32_t>(bp.stats.hp) - sand_dmg));
+            hp_change(is_player ? 0u : 1u, old_hp_s, bp.stats.hp);
+            message(std::string(side) + " is buffeted by the sandstorm!");
+            return;  // Sandstorm damage replaces / occurs independently of status damage
+        }
     }
 
     if (dmg > 0) {
@@ -1549,6 +1775,18 @@ void Battle::force_switch_player(size_t party_slot) {
 
     const size_t old_slot = player_pokemon_.party_index;
 
+    // Write back outgoing Pokemon's battle state to the party slot before switching.
+    // Source: Crystal SavePlayerMon / WritebackPlayerMon -- HP/PP/status written back.
+    Pokemon* outgoing = player_party_.get(old_slot);
+    if (outgoing) {
+        outgoing->current_hp  = static_cast<uint16_t>(std::max(0, static_cast<int32_t>(player_pokemon_.stats.hp)));
+        outgoing->status      = player_pokemon_.status;
+        outgoing->held_item   = player_pokemon_.held_item;
+        for (size_t i = 0; i < 4; ++i) {
+            outgoing->moves[i].pp = player_pokemon_.moves[i].pp;
+        }
+    }
+
     BattlePokemon bp{};
     bp.party_index = party_slot;
     bp.species     = mon->species;
@@ -1577,6 +1815,22 @@ void Battle::force_switch_player(size_t party_slot) {
 
     player_pokemon_ = bp;
     switched(0u, old_slot, party_slot);
+
+    // Spikes entry damage for player switching in.
+    // Source: Crystal CheckEntryHazards.
+    if (field_.spikes_player && !player_pokemon_.is_fainted()) {
+        const TypeId t1 = player_pokemon_.type1, t2 = player_pokemon_.type2;
+        const bool flying = (t1 == 2 || t2 == 2);
+        if (!flying) {
+            const int16_t old_hp_spk = player_pokemon_.stats.hp;
+            const int16_t spike_dmg  = static_cast<int16_t>(
+                std::max(1, static_cast<int32_t>(player_pokemon_.stats.max_hp) / 8));
+            player_pokemon_.stats.hp = static_cast<int16_t>(
+                std::max(0, static_cast<int32_t>(player_pokemon_.stats.hp) - spike_dmg));
+            hp_change(0u, old_hp_spk, player_pokemon_.stats.hp);
+            message("Player was hurt by Spikes!");
+        }
+    }
 }
 
 void Battle::force_switch_opponent(size_t party_slot) {
@@ -1587,7 +1841,24 @@ void Battle::force_switch_opponent(size_t party_slot) {
     opponent_pokemon_         = opponent_party_[party_slot];
     opponent_pokemon_.volatile_status = 0;  // Clear volatile on switch
     switched(1u, old_slot, party_slot);
-    message("Opponent sent out a new Pok├⌐mon!");
+    message("Opponent sent out a new Pokmon!");
+
+    // Spikes entry damage (Gen 2: one layer only, 1/8 max HP, Flying immune).
+    // Source: Crystal CheckEntryHazards -- SUBSTATUS_SPIKES check.
+    // Flying type (type ID 2) is immune.
+    if (field_.spikes_opponent && !opponent_pokemon_.is_fainted()) {
+        const TypeId t1 = opponent_pokemon_.type1, t2 = opponent_pokemon_.type2;
+        const bool flying = (t1 == 2 || t2 == 2);
+        if (!flying) {
+            const int16_t old_hp_spk = opponent_pokemon_.stats.hp;
+            const int16_t spike_dmg  = static_cast<int16_t>(
+                std::max(1, static_cast<int32_t>(opponent_pokemon_.stats.max_hp) / 8));
+            opponent_pokemon_.stats.hp = static_cast<int16_t>(
+                std::max(0, static_cast<int32_t>(opponent_pokemon_.stats.hp) - spike_dmg));
+            hp_change(1u, old_hp_spk, opponent_pokemon_.stats.hp);
+            message("Opponent was hurt by Spikes!");
+        }
+    }
 }
 
 // ============================================================================

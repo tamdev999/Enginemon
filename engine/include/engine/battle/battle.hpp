@@ -168,6 +168,17 @@ struct BattlePokemon {
     uint8_t  protect_consecutive = 0;   // consecutive Protect/Endure uses (halves success each time)
     uint32_t payday_coins        = 0;   // Pay Day coins accumulated this battle (per-attacker side)
 
+    // Confusion turn counter — counts down from initial value each turn the mon is confused.
+    // Initialized to (BattleRandom & 3) + 2 = 2–5 when confusion is applied.
+    // Decremented at the start of the confused mon's turn; cleared when it reaches 0.
+    uint8_t  confusion_turns     = 0;
+
+    // Freeze guard: set to true when this mon is frozen this turn (same-turn freeze).
+    // Prevents natural thaw (HandleDefrost) from triggering on the same turn the freeze was
+    // applied. Cleared at the start of apply_end_of_turn_effects (HandleDefrost runs there).
+    // Source: wPlayerJustGotFrozen / wEnemyJustGotFrozen in Crystal core.asm.
+    bool     freeze_guard        = false;
+
     // Destiny Bond: cleared at start of user's NEXT turn (before any move executes).
     // The VolatileStatus::DestinyBond bit on BattlePokemon IS the state.
     // EndUserDestinyBond clears it at turn start; CheckFaint-path fires it on direct-damage KO.
@@ -374,8 +385,25 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
     // Without a callback, a fallback seeded mt19937 is used (unit tests only).
     void set_rng_callback(std::function<uint32_t()> rng_fn);
 
-    // Draw one byte from the battle RNG — used by AI for tie-breaking.
+    // Draw one byte from the battle RNG — used by AI and test harnesses.
     uint8_t rng_byte() { return rng_.next_byte(); }
+
+    // ── Test helpers ─────────────────────────────────────────────────────────
+    // These are used only in battle_rom_test.cpp and oracle tests.
+    // They are NOT part of the runtime API.
+
+    // Push a BattlePokemon as an additional slot in the opponent party.
+    // Used to set up multi-mon opponent parties for Spikes/switch tests.
+    void push_opponent_party_slot(const BattlePokemon& bp) {
+        opponent_party_.push_back(bp);
+    }
+
+    // Set the entry hazard (Spikes) flags directly.
+    // Used to test entry-hazard application without executing a full battle setup.
+    void set_field_spikes(bool player_side, bool opponent_side) {
+        field_.spikes_player   = player_side;
+        field_.spikes_opponent = opponent_side;
+    }
 
     // Registry access for AI and other consumers
     const Registries& registries() const { return registries_; }
@@ -436,6 +464,13 @@ private:
                        const BattleAction& action, bool is_player);
     MoveExecutionResult execute_move(BattlePokemon& user, BattlePokemon& target, MoveId move,
                       size_t move_slot, bool user_is_player);
+    // Continuation of execute_move: handles all logic after type-immunity check.
+    // Split out to avoid MSVC ICE on large functions.
+    MoveExecutionResult execute_move_damaging(BattlePokemon& user, BattlePokemon& target,
+                      const MoveData* md, size_t move_slot, bool user_is_player,
+                      const SemanticEffectDescription& effective_desc,
+                      TypeId initial_effective_move_type, uint16_t type_eff,
+                      uint8_t computed_power);
     void apply_end_of_turn_effects();
     void apply_residual(BattlePokemon& bp, bool is_player);
     void check_fainted();
@@ -476,6 +511,8 @@ private:
     // Returns true if the move is blocked, false if execution should proceed.
     bool hook_pre_move_check(BattlePokemon& user, BattlePokemon& target,
                               size_t move_slot, bool user_is_player);
+    // Natural thaw: called from apply_end_of_turn_effects. Returns true if the combatant thawed.
+    bool hook_end_of_turn_natural_thaw(BattlePokemon& bp, bool is_player);
     // DestinyBond CheckFaint path: if user has DestinyBond and target's HP just hit 0 from
     // direct damage, faint the DestinyBond user too. Called from execute_program Damage case.
     void hook_destiny_bond_check(BattlePokemon& destiny_bond_user, BattlePokemon& killer,
