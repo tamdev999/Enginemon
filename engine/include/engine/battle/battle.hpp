@@ -531,9 +531,13 @@ private:
     // Target faint does NOT suppress the roll (outside hit loops in Crystal scripts).
     void apply_kings_rock(const SemanticEffectDescription& move_desc,
                           BattlePokemon& user, BattlePokemon& target);
-    // End-of-turn held item effects (Leftovers, berries, status cures, Mysteryberry).
-    // Source: Crystal HandleBetweenTurnEffects ordering -- after residual, before natural thaw.
-    void apply_held_item_end_of_turn(BattlePokemon& bp, bool is_player);
+    // End-of-turn held item effects, split per Crystal HandleBetweenTurnEffects ordering.
+    // Pre-thaw: Leftovers (EndTurnHealFraction), Mysteryberry (EndTurnRestorePP).
+    // Runs before HandleDefrost (natural thaw).
+    void apply_held_item_pre_thaw(BattlePokemon& bp, bool is_player);
+    // Post-thaw: HP berries, status-cure berries, MiracleBerry, Bitter Berry.
+    // Runs after HandleDefrost (natural thaw).
+    void apply_held_item_post_thaw(BattlePokemon& bp, bool is_player);
     // Damage calculation
     int32_t calculate_damage(const BattlePokemon& attacker,
                              const BattlePokemon& defender,

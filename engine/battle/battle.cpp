@@ -1234,9 +1234,9 @@ MoveExecutionResult Battle::execute_move_damaging(
     const bool burned = physical && (user.status == Status::Burn);
 
     // Metal Powder (SpeciesDefenseBoost): x1.5 defense for Ditto (both physical and special).
-    // Source: DittoMetalPowder in effect_commands.asm -- called after TruncateHL_BC for both
-    // physical and special defense. Crystal BUG: boosts special defense too, increasing damage
-    // taken rather than reducing it on special hits. We reproduce the bug faithfully.
+    // Source: DittoMetalPowder in effect_commands.asm -- Crystal applies the x1.5 defense
+    // modifier on both physical and special defensive stat paths (DittoMetalPowder runs
+    // unconditionally for both wPlayerDefense and wPlayerSpecialDefense).
     // Applied after Reflect/LightScreen, before Selfdestruct halving.
     if (target.held_item != ITEM_NONE) {
         const ItemData* mp_item = registries_.items.get(target.held_item);
@@ -1806,19 +1806,36 @@ void Battle::apply_end_of_turn_effects() {
     apply_residual(player_pokemon_,   true);
     apply_residual(opponent_pokemon_, false);
 
-    // Held item end-of-turn effects: Leftovers, Mysteryberry, HP berries, status cures.
-    // Source: Crystal HandleBetweenTurnEffects -- HandleLeftovers then HandleMysteryberry
-    // then (later) HandleHealingItems, all after residual and before natural thaw.
-    apply_held_item_end_of_turn(player_pokemon_,   true);
-    apply_held_item_end_of_turn(opponent_pokemon_, false);
+    // Crystal HandleBetweenTurnEffects exact ordering (core.asm):
+    //   weather/poison/burn  (apply_residual above)
+    //   Wrap/Leech Seed drain  <- before Leftovers
+    //   Perish Song
+    //   Leftovers              <- pre-thaw held items
+    //   Mysteryberry           <- pre-thaw held items
+    //   HandleDefrost (natural thaw)
+    //   HP berry               <- post-thaw held items
+    //   major-status berries   <- post-thaw held items
+    //   confusion berry        <- post-thaw held items
+
+    // Leech Seed / Wrap drain: before Leftovers.
+    hook_end_of_turn_leech_seed();
+
+    // Pre-thaw held items: Leftovers, Mysteryberry.
+    // Source: Crystal HandleLeftovers -> HandleMysteryberry (before HandleDefrost).
+    apply_held_item_pre_thaw(player_pokemon_,   true);
+    apply_held_item_pre_thaw(opponent_pokemon_, false);
 
     // Natural thaw: P1-Freeze. 25/256 chance per turn (after freeze_guard is consumed).
     // Source: Crystal HandleDefrost in core.asm.
     hook_end_of_turn_natural_thaw(player_pokemon_,   true);
     hook_end_of_turn_natural_thaw(opponent_pokemon_, false);
 
-    // Architecture B: end-of-turn hooks.
-    hook_end_of_turn_leech_seed();
+    // Post-thaw held items: HP berries, status-cure berries, confusion berry.
+    // Source: Crystal HandleHealingItems (after HandleDefrost).
+    apply_held_item_post_thaw(player_pokemon_,   true);
+    apply_held_item_post_thaw(opponent_pokemon_, false);
+
+    // Architecture B: remaining end-of-turn hooks.
     hook_end_of_turn_nightmare();
     hook_end_of_turn_curse();
     hook_end_of_turn_perish_song();
@@ -1888,14 +1905,13 @@ void Battle::apply_residual(BattlePokemon& bp, bool is_player) {
 // Held item end-of-turn effects
 // Source: Crystal HandleBetweenTurnEffects ordering (core.asm):
 //   HandleLeftovers -> HandleMysteryberry -> HandleDefrost -> HandleHealingItems
-// Leftovers: EndTurnHealFraction (param=16 -> max_hp/16, minimum 1, only if not full HP, not consumed)
-// Mysteryberry: EndTurnRestorePP (restore 5 PP to first depleted move, consumed)
-// Berry/GoldBerry/BerryJuice: EndTurnHealBelowHalf (strict hp < floor(max_hp/2), flat heal, consumed)
-// StatusCure berries: StatusCure (cure matching Status, consumed)
-// MiracleBerry: AnyStatusCure (cure any major status + confusion, consumed)
-// Bitter Berry: ConfusionCure (cure confusion + clear confusion_turns, consumed)
+//
+// apply_held_item_pre_thaw:  Leftovers (EndTurnHealFraction), Mysteryberry (EndTurnRestorePP)
+// apply_held_item_post_thaw: HP berry (EndTurnHealBelowHalf), status-cure berries (StatusCure),
+//                            MiracleBerry (AnyStatusCure), Bitter Berry (ConfusionCure)
 // ============================================================================
-void Battle::apply_held_item_end_of_turn(BattlePokemon& bp, bool is_player) {
+
+void Battle::apply_held_item_pre_thaw(BattlePokemon& bp, bool is_player) {
     if (bp.is_fainted()) return;
     if (bp.held_item == ITEM_NONE) return;
 
@@ -1904,7 +1920,6 @@ void Battle::apply_held_item_end_of_turn(BattlePokemon& bp, bool is_player) {
 
     const char* side = is_player ? "Player" : "Opponent";
 
-    // Helper: consume item -- clears held_item on BattlePokemon and writes back to party.
     auto consume_item = [&]() {
         bp.held_item = ITEM_NONE;
         if (is_player) {
@@ -1964,6 +1979,35 @@ void Battle::apply_held_item_end_of_turn(BattlePokemon& bp, bool is_player) {
         if (restored) consume_item();
         break;
     }
+
+    default:
+        // Post-thaw items (HP berry, status cure, confusion cure) are handled in
+        // apply_held_item_post_thaw, which runs after HandleDefrost.
+        break;
+    }
+}
+
+void Battle::apply_held_item_post_thaw(BattlePokemon& bp, bool is_player) {
+    if (bp.is_fainted()) return;
+    if (bp.held_item == ITEM_NONE) return;
+
+    const ItemData* item = registries_.items.get(bp.held_item);
+    if (!item || item->held_effect_type == HeldItemEffectType::None) return;
+
+    const char* side = is_player ? "Player" : "Opponent";
+
+    auto consume_item = [&]() {
+        bp.held_item = ITEM_NONE;
+        if (is_player) {
+            Pokemon* pmon = player_party_.get(bp.party_index);
+            if (pmon) pmon->held_item = ITEM_NONE;
+        } else {
+            if (opponent_active_index_ < opponent_party_.size())
+                opponent_party_[opponent_active_index_].held_item = ITEM_NONE;
+        }
+    };
+
+    switch (item->held_effect_type) {
 
     // ── HP berry (Berry, Gold Berry, Berry Juice): HandleHPHealingItem ────────
     // Activate when current HP < floor(max_hp / 2) (strict less-than).
@@ -2033,7 +2077,7 @@ void Battle::apply_held_item_end_of_turn(BattlePokemon& bp, bool is_player) {
     }
 
     default:
-        // Other HeldItemEffectType values are handled outside end-of-turn (damage, accuracy, etc.)
+        // Pre-thaw items (Leftovers, Mysteryberry) were handled in apply_held_item_pre_thaw.
         break;
     }
 }

@@ -7488,6 +7488,103 @@ TEST(p_held_item_metal_powder_non_ditto_no_benefit) {
     std::cout << "\n    metal_powder/non_ditto: equal damage, no boost\n";
 }
 
+// Metal Powder on Ditto: Special-category move also gets x1.5 special defense.
+// Crystal applies the modifier on both the physical and special defensive stat paths.
+TEST(p_held_item_metal_powder_ditto_special_def_boosted) {
+    // Build a registry with a Special-category attacker move (id=253, Normal type).
+    auto item_result = crystal::extract_all_items(*g_rom, *g_profile);
+    ASSERT_TRUE(item_result.success); if (!item_result.success) return;
+    crystal::PackageWriter w;
+    w.set_source_rom(std::string(40, 'a'), "test");
+    w.add_item_data(item_result.items);
+    auto pkg = std::filesystem::temp_directory_path() / "mp_spec_reg.emon";
+    ASSERT_TRUE(w.write(pkg));
+    auto rdr = enginemon::PackageReader::open(pkg);
+    ASSERT_TRUE(rdr != nullptr); if (!rdr) { std::filesystem::remove(pkg); return; }
+    auto item_reg = rdr->load_item_registry();
+    std::filesystem::remove(pkg);
+
+    enginemon::Registries reg;
+    for (uint8_t t = 0; t < 28; ++t) {
+        enginemon::TypeData td; td.id = t; td.name = "T";
+        reg.types.register_entry(t, td);
+        for (uint8_t u = 0; u < 28; ++u)
+            reg.type_chart.set_effectiveness(t, u, 10);
+    }
+    {
+        enginemon::SpeciesData sp{};
+        sp.id = 1; sp.name = "A"; sp.type1 = 0; sp.type2 = 0;
+        sp.base_stats = {50,60,55,55,50,50}; sp.catch_rate=45; sp.base_exp=64; sp.base_friendship=70;
+        reg.species.register_entry(1, sp);
+    }
+    {
+        enginemon::SpeciesData sp{};
+        sp.id = CrystalSpecies::DITTO; sp.name = "Ditto"; sp.type1 = 0; sp.type2 = 0;
+        sp.base_stats = {48,48,48,48,48,48}; sp.catch_rate=35; sp.base_exp=161; sp.base_friendship=70;
+        reg.species.register_entry(CrystalSpecies::DITTO, sp);
+    }
+    {
+        enginemon::MoveData md{};
+        md.id       = static_cast<enginemon::MoveId>(253);
+        md.name     = "SpecialAtk";
+        md.type     = static_cast<enginemon::TypeId>(0u);  // Normal
+        md.power    = 40;
+        md.accuracy = 0xFF;
+        md.pp       = 10;
+        md.category = enginemon::MoveCategory::Special;  // <-- Special category
+        md.effect_id = 0;
+        md.has_program = false;
+        md.effect_desc.has_standard_damage = true;
+        md.effect_desc.is_supported        = true;
+        reg.moves.register_entry(static_cast<enginemon::MoveId>(253), md);
+    }
+    for (const auto& [id, data] : *item_reg) reg.items.register_entry(id, data);
+    reg.freeze_all();
+
+    enginemon::BattleRules rules = make_item_rules();
+
+    auto run = [&](enginemon::ItemId item) -> int16_t {
+        enginemon::Party party;
+        enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+        pmon.current_hp=pmon.max_hp=500; pmon.friendship=200;
+        party.add(pmon);
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+        auto pbp = make_item_bp(1, 0, 0, 300, 200);
+        enginemon::BattlePokemon ditto{};
+        ditto.species = CrystalSpecies::DITTO;
+        ditto.type1 = ditto.type2 = 0;
+        ditto.level = 50;
+        ditto.stats.hp = ditto.stats.max_hp = 500;
+        ditto.stats.defense          = ditto.base_stats.defense          = 48;
+        ditto.stats.special_defense  = ditto.base_stats.special_defense  = 48;
+        ditto.stats.attack           = ditto.base_stats.attack           = 48;
+        ditto.stats.special_attack   = ditto.base_stats.special_attack   = 48;
+        ditto.stats.speed = ditto.base_stats.speed = 1;
+        ditto.happiness = 200;
+        ditto.held_item = item;
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = ditto;
+        const std::vector<uint8_t> sc = {0xFF, 0xFF};
+        size_t idx = 0;
+        battle.set_rng_callback([&]() -> uint32_t {
+            return idx < sc.size() ? sc[idx++] : uint32_t{0xFF};
+        });
+        const int16_t before = battle.opponent_pokemon().stats.hp;
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+        return static_cast<int16_t>(before - battle.opponent_pokemon().stats.hp);
+    };
+
+    const int16_t dmg_no_item = run(enginemon::ITEM_NONE);
+    const int16_t dmg_with_mp = run(ItemId::METAL_POWDER);
+    ASSERT_TRUE(dmg_no_item > 0);
+    ASSERT_TRUE(dmg_with_mp > 0);
+    ASSERT_TRUE(dmg_with_mp < dmg_no_item);  // special defense boosted -> less damage taken
+    std::cout << "\n    metal_powder/ditto_special: no_item=" << dmg_no_item
+              << " with_mp=" << dmg_with_mp << "\n";
+}
+
 // ── Leftovers (EndTurnHealFraction) ──────────────────────────────────────────
 
 TEST(p_held_item_leftovers_heals_exactly_one_sixteenth) {
@@ -7905,10 +8002,13 @@ TEST(p_held_item_consumption_persists_to_party_status_berry) {
     battle.set_player_action(enginemon::ActionFight{0,0});
     battle.set_opponent_action(enginemon::ActionFight{0,0});
     battle.execute_turn();
+    // Prove the cure happened AND the item was consumed on both BattlePokemon and party.
+    ASSERT_EQ(battle.player_pokemon().status,    enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
     const enginemon::Pokemon* pmon = es.party.get(0);
     ASSERT_TRUE(pmon != nullptr);
     if (pmon) ASSERT_EQ(pmon->held_item, enginemon::ITEM_NONE);
-    std::cout << "\n    psncureberry/party_persist\n";
+    std::cout << "\n    psncureberry/party_persist: cured+consumed\n";
 }
 
 TEST(p_held_item_consumption_persists_to_party_mysteryberry) {
@@ -7929,6 +8029,91 @@ TEST(p_held_item_consumption_persists_to_party_mysteryberry) {
         ASSERT_EQ(pmon->moves[0].pp, uint8_t{5});
     }
     std::cout << "\n    mysteryberry/party_persist: held_item+PP written\n";
+}
+
+// ── Natural thaw ordering: BurntBerry must fire AFTER HandleDefrost ──────────
+
+// When natural thaw succeeds (RNG < 25), the pokemon thaws before BurntBerry checks.
+// BurntBerry sees status=None (already cleared by thaw), so it does NOT activate.
+// Result: status==None, held_item==BURNT_BERRY, party.held_item==BURNT_BERRY.
+TEST(p_ordering_thaw_first_burnt_berry_retained) {
+    // Frozen player, holds Burnt Berry (StatusCure for Freeze), freeze_guard=false so thaw can fire.
+    auto es = make_eot_setup(ItemId::BURNT_BERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Freeze);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    // Sync party status so the party Pokemon is also frozen.
+    if (auto* pm = es.party.get(0)) pm->status = enginemon::Status::Freeze;
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    // freeze_guard = false (default): natural thaw roll will happen.
+    // RNG = 0 < 25 -> thaw fires. Burnt Berry then checks status == None -> does NOT activate.
+    battle.set_rng_callback([]() -> uint32_t { return uint32_t{0}; });
+    battle.set_player_action(enginemon::ActionFight{0, 0});
+    battle.set_opponent_action(enginemon::ActionFight{0, 0});
+    battle.execute_turn();
+    // Natural thaw cleared Freeze. Burnt Berry saw None, did nothing.
+    ASSERT_EQ(battle.player_pokemon().status,    enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, ItemId::BURNT_BERRY);  // NOT consumed
+    const enginemon::Pokemon* pmon = es.party.get(0);
+    ASSERT_TRUE(pmon != nullptr);
+    if (pmon) ASSERT_EQ(pmon->held_item, ItemId::BURNT_BERRY);          // party also retained
+    std::cout << "\n    ordering/thaw_first: thaw cleared Freeze, BurntBerry retained\n";
+}
+
+// Complement: when natural thaw fails (RNG >= 25), pokemon stays Frozen.
+// BurntBerry fires after the failed thaw attempt and cures Freeze, item consumed.
+// Result: status==None, held_item==ITEM_NONE.
+TEST(p_ordering_thaw_fails_burnt_berry_consumed) {
+    // Frozen player, holds Burnt Berry, freeze_guard=false.
+    auto es = make_eot_setup(ItemId::BURNT_BERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Freeze);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    // freeze_guard = false (default): natural thaw roll will happen.
+    // RNG = 0xFF = 255 >= 25 -> thaw does NOT fire. Burnt Berry then sees Freeze -> cures it.
+    battle.set_rng_callback([]() -> uint32_t { return uint32_t{0xFF}; });
+    battle.set_player_action(enginemon::ActionFight{0, 0});
+    battle.set_opponent_action(enginemon::ActionFight{0, 0});
+    battle.execute_turn();
+    // Thaw failed. Burnt Berry cured Freeze.
+    ASSERT_EQ(battle.player_pokemon().status,    enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);  // consumed
+    std::cout << "\n    ordering/thaw_fails: thaw failed, BurntBerry cured and consumed\n";
+}
+
+// ── Leech Seed + Leftovers ordering: Leech Seed drain fires before Leftovers heal ──
+//
+// Setup: player hp=155, max_hp=160, holds Leftovers, is Seeded.
+// Crystal order (drain then heal):
+//   Leech Seed: 155 - floor(160/8)=20  -> 135
+//   Leftovers:  135 + floor(160/16)=10 -> 145
+// Wrong order (heal then drain):
+//   Leftovers:  min(160, 155+10)=160   -> 160
+//   Leech Seed: 160 - 20               -> 140
+// Correct result must be 145, not 140.
+TEST(p_ordering_leech_seed_before_leftovers) {
+    auto es = make_eot_setup(ItemId::LEFTOVERS, 155, 160,
+                              enginemon::ITEM_NONE, 500, 500);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    // Set Seeded volatile on player pokemon.
+    battle.player_pokemon().set_volatile(enginemon::VolatileStatus::Seeded);
+    battle.set_player_action(enginemon::ActionFight{0, 0});
+    battle.set_opponent_action(enginemon::ActionFight{0, 0});
+    battle.execute_turn();
+
+    // Crystal order: drain(20) then heal(10) -> 145.
+    // Wrong order would give 140. Assert 145.
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{145});
+    ASSERT_EQ(battle.player_pokemon().held_item, ItemId::LEFTOVERS);  // not consumed
+    std::cout << "\n    ordering/leech_seed_before_leftovers: 155-20+10=145\n";
 }
 
 // ── MAIN section ─────────────────────────────────────────────────────────────
@@ -9783,6 +9968,12 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p_held_item_consumption_persists_to_party_berry);
     RUN_TEST(p_held_item_consumption_persists_to_party_status_berry);
     RUN_TEST(p_held_item_consumption_persists_to_party_mysteryberry);
+    // Ordering regressions
+    RUN_TEST(p_ordering_thaw_first_burnt_berry_retained);
+    RUN_TEST(p_ordering_thaw_fails_burnt_berry_consumed);
+    RUN_TEST(p_ordering_leech_seed_before_leftovers);
+    // Metal Powder special path
+    RUN_TEST(p_held_item_metal_powder_ditto_special_def_boosted);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";
