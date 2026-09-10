@@ -785,66 +785,82 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         message("Move data error: accuracy not set for " + md->name);
         return MoveExecutionResult::InvalidData;
     }
-    if (md->accuracy != 0xFF) {
+    {
         // Lock-On / Mind Reader: bypass accuracy entirely.
         // Source: Crystal BattleCommand_CheckHit -- always-hit when LockOn volatile set on target.
         const bool lock_on_active = target.has_volatile(VolatileStatus::LockOn);
         if (lock_on_active) {
             target.clear_volatile(VolatileStatus::LockOn);
         } else {
-            const bool hit = rules_
-                ? roll_accuracy(md->accuracy, user.stages.accuracy,
-                                target.stages.evasion, rng_.next_byte(), *rules_)
-                : roll_accuracy(md->accuracy, user.stages.accuracy,
-                                target.stages.evasion, rng_.next_byte());
-            if (!hit) {
-                // Jump Kick / Hi Jump Kick: crash damage on accuracy miss ONLY when target
-                // is not type-immune.
-                // Source: pokecrystal GetFailureResultText -- checks wTypeModifier != 0
-                // before crash. wTypeModifier is 0 on type immunity.
-                // We pre-check type_eff here to match Crystal's ordering.
-                if (effective_desc.crash_on_miss) {
-                    // Compute type effectiveness now to gate crash (mirrors Crystal's
-                    // wTypeModifier check in GetFailureResultText).
-                    const uint16_t crash_type_eff = get_combined_effectiveness(
-                        md->type, target.type1, target.type2, registries_.type_chart);
-                    if (crash_type_eff != 0) {
-                        // Non-immune: crash fires.
-                        // crash = max(1, computed_hit_damage >> 3)
-                        // Source: pokecrystal effect_commands.asm -- srl/rr x3 on wCurDamage.
-                        const bool physical = (md->category == MoveCategory::Physical);
-                        auto ss2 = [this](int32_t b, int8_t s) {
-                            return rules_ ? apply_stat_stage(b,s,*rules_) : apply_stat_stage(b,s);
-                        };
-                        const int32_t atk2 = physical
-                            ? ss2(user.base_stats.attack, user.stages.attack)
-                            : ss2(user.base_stats.special_attack, user.stages.special_attack);
-                        const int32_t def2 = physical
-                            ? ss2(target.base_stats.defense, target.stages.defense)
-                            : ss2(target.base_stats.special_defense, target.stages.special_defense);
-                        DamageParams crashdp{};
-                        crashdp.attacker_level = user.level;
-                        crashdp.attack_stat    = std::max(1, atk2);
-                        crashdp.defense_stat   = std::max(1, def2);
-                        crashdp.move_power     = md->power;
-                        crashdp.type_effectiveness = 100;
-                        crashdp.stab = false; crashdp.critical = false;
-                        crashdp.burned = false; crashdp.weather = Weather::None;
-                        crashdp.move_type = md->type;
-                        const int32_t ref_dmg = rules_
-                            ? enginemon::calculate_damage(crashdp, *rules_)
-                            : enginemon::calculate_damage(crashdp);
-                        const int32_t crash_dmg = std::max(1, ref_dmg >> 3);
-                        const int16_t old_user_hp = user.stats.hp;
-                        user.stats.hp = static_cast<int16_t>(
-                            std::max(0, static_cast<int32_t>(user.stats.hp) - crash_dmg));
-                        hp_change(user_is_player ? 0u : 1u, old_user_hp, user.stats.hp);
-                        message(md->name + " -- the user crashed!");
-                    }
-                    // Immune target: no crash. Fall through to Miss return.
+            // BrightPowder (AccuracyReduction): subtract param from move accuracy before
+            // any accuracy check. Applied after LockOn check (LockOn bypasses it).
+            // Source: Crystal BattleCommand_CheckHit .BrightPowder — b -= c (b=acc, c=param),
+            // floor at 0. Applies to ALL moves including 0xFF (ordinary never-miss moves).
+            uint8_t eff_accuracy = md->accuracy;
+            if (target.held_item != ITEM_NONE) {
+                const ItemData* ti = registries_.items.get(target.held_item);
+                if (ti && ti->held_effect_type == HeldItemEffectType::AccuracyReduction) {
+                    eff_accuracy = (eff_accuracy > ti->held_param)
+                                   ? static_cast<uint8_t>(eff_accuracy - ti->held_param)
+                                   : 0u;
                 }
-                message("The attack missed!");
-                return MoveExecutionResult::Miss;
+            }
+            // 0xFF shortcut: after BrightPowder, if acc still 0xFF → always hit (no RNG).
+            if (eff_accuracy != 0xFF) {
+                const bool hit = rules_
+                    ? roll_accuracy(eff_accuracy, user.stages.accuracy,
+                                    target.stages.evasion, rng_.next_byte(), *rules_)
+                    : roll_accuracy(eff_accuracy, user.stages.accuracy,
+                                    target.stages.evasion, rng_.next_byte());
+                if (!hit) {
+                    // Jump Kick / Hi Jump Kick: crash damage on accuracy miss ONLY when target
+                    // is not type-immune.
+                    // Source: pokecrystal GetFailureResultText -- checks wTypeModifier != 0
+                    // before crash. wTypeModifier is 0 on type immunity.
+                    // We pre-check type_eff here to match Crystal's ordering.
+                    if (effective_desc.crash_on_miss) {
+                        // Compute type effectiveness now to gate crash (mirrors Crystal's
+                        // wTypeModifier check in GetFailureResultText).
+                        const uint16_t crash_type_eff = get_combined_effectiveness(
+                            md->type, target.type1, target.type2, registries_.type_chart);
+                        if (crash_type_eff != 0) {
+                            // Non-immune: crash fires.
+                            // crash = max(1, computed_hit_damage >> 3)
+                            // Source: pokecrystal effect_commands.asm -- srl/rr x3 on wCurDamage.
+                            const bool physical = (md->category == MoveCategory::Physical);
+                            auto ss2 = [this](int32_t b, int8_t s) {
+                                return rules_ ? apply_stat_stage(b,s,*rules_) : apply_stat_stage(b,s);
+                            };
+                            const int32_t atk2 = physical
+                                ? ss2(user.base_stats.attack, user.stages.attack)
+                                : ss2(user.base_stats.special_attack, user.stages.special_attack);
+                            const int32_t def2 = physical
+                                ? ss2(target.base_stats.defense, target.stages.defense)
+                                : ss2(target.base_stats.special_defense, target.stages.special_defense);
+                            DamageParams crashdp{};
+                            crashdp.attacker_level = user.level;
+                            crashdp.attack_stat    = std::max(1, atk2);
+                            crashdp.defense_stat   = std::max(1, def2);
+                            crashdp.move_power     = md->power;
+                            crashdp.type_effectiveness = 100;
+                            crashdp.stab = false; crashdp.critical = false;
+                            crashdp.burned = false; crashdp.weather = Weather::None;
+                            crashdp.move_type = md->type;
+                            const int32_t ref_dmg = rules_
+                                ? enginemon::calculate_damage(crashdp, *rules_)
+                                : enginemon::calculate_damage(crashdp);
+                            const int32_t crash_dmg = std::max(1, ref_dmg >> 3);
+                            const int16_t old_user_hp = user.stats.hp;
+                            user.stats.hp = static_cast<int16_t>(
+                                std::max(0, static_cast<int32_t>(user.stats.hp) - crash_dmg));
+                            hp_change(user_is_player ? 0u : 1u, old_user_hp, user.stats.hp);
+                            message(md->name + " -- the user crashed!");
+                        }
+                        // Immune target: no crash. Fall through to Miss return.
+                    }
+                    message("The attack missed!");
+                    return MoveExecutionResult::Miss;
+                }
             }
         }
     }
@@ -1184,7 +1200,7 @@ MoveExecutionResult Battle::execute_move_damaging(
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Critical hit Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     uint8_t crit_stage = 0;
-    if (rules_) crit_stage = build_crit_stage(user, *md, *rules_);
+    if (rules_) crit_stage = build_crit_stage(user, *md, *rules_, &registries_);
     const bool is_crit = rules_
         ? roll_critical(crit_stage, rng_.next_byte(), *rules_)
         : roll_critical(crit_stage, rng_.next_byte());
@@ -1274,6 +1290,21 @@ MoveExecutionResult Battle::execute_move_damaging(
         if (damage > 999) damage = 999;
     }
 
+    // Type-booster held item (Charcoal, Mystic Water, etc.)
+    // Crystal: GetUserItem / TypeBoostItems loop in BattleCommand_DamageCalc.
+    // Applies after STAB and type effectiveness, before crit multiplier.
+    // Arithmetic: floor(damage * (100 + param) / 100), e.g. param=10 -> +10%.
+    // Source: data/types/type_boost_items.asm + BattleCommand_Stab dispatch.
+    if (user.held_item != ITEM_NONE) {
+        const ItemData* ti = registries_.items.get(user.held_item);
+        if (ti && ti->held_effect_type == HeldItemEffectType::TypeDamageBoost
+                && ti->boosted_type == effective_move_type) {
+            damage = damage * (100 + static_cast<int32_t>(ti->held_param)) / 100;
+            if (damage < 1)   damage = 1;
+            if (damage > 999) damage = 999;
+        }
+    }
+
     // Ã¢â€â‚¬Ã¢â€â‚¬ Conditional double damage Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.conditional_double != ConditionalDoubleCondition::None) {
         bool double_it = false;
@@ -1340,7 +1371,23 @@ MoveExecutionResult Battle::execute_move_damaging(
 
     // -- P0-3: Substitute routing (A-path) ------------------------------------
     // Crystal: if target has Substitute, damage goes to substitute_hp, not HP.
-    if (target.has_volatile(VolatileStatus::Substitute) && target.substitute_hp > 0) {
+    // Crystal quirk: when Focus Band is held (c=param != 0 in DoEnemyDamage), the
+    // Substitute routing is bypassed entirely — "jr .ignore_substitute". Damage hits
+    // real HP, Focus Band RNG is consumed, and the Substitute is left untouched.
+    // Detect KOSurvival item once here; this flag drives both the Substitute bypass
+    // below and the Focus Band check after damage application.
+    const ItemData* focus_band_item = nullptr;
+    if (!target.has_volatile(VolatileStatus::Endure) && target.held_item != ITEM_NONE) {
+        const ItemData* ti = registries_.items.get(target.held_item);
+        if (ti && ti->held_effect_type == HeldItemEffectType::KOSurvival) {
+            focus_band_item = ti;
+        }
+    }
+
+    if (focus_band_item == nullptr
+            && target.has_volatile(VolatileStatus::Substitute)
+            && target.substitute_hp > 0) {
+        // Normal Substitute path: absorb damage into substitute_hp.
         if (damage >= static_cast<int32_t>(target.substitute_hp)) {
             target.substitute_hp = 0;
             target.clear_volatile(VolatileStatus::Substitute);
@@ -1355,17 +1402,37 @@ MoveExecutionResult Battle::execute_move_damaging(
         // Do NOT call hook_on_damage_received: Crystal skips accumulation for Substitute hits.
         return MoveExecutionResult::Success;
     }
+    // If focus_band_item != nullptr and Substitute is active: Substitute is bypassed.
+    // Damage proceeds to real HP below. Substitute HP and volatile are left untouched.
 
-    // -- Apply damage ---------------------------------------------------------
+    // -- Apply damage to real HP ----------------------------------------------
     const int16_t old_hp = target.stats.hp;
     target.stats.hp = static_cast<int16_t>(
         std::max(0, static_cast<int32_t>(target.stats.hp) - damage));
 
     // -- P0-2: Endure 1-HP floor (A-path) -------------------------------------
+    // Endure check (only fires if Endure volatile is set; Focus Band path is separate).
     if (target.has_volatile(VolatileStatus::Endure) && target.stats.hp <= 0) {
         target.stats.hp = 1;
         message((user_is_player ? std::string("Opponent") : std::string("Player"))
                 + " endured the hit!");
+    }
+
+    // -- Focus Band: KOSurvival (A-path) --------------------------------------
+    // Crystal BattleCommand_ApplyDamage: Endure checked first (no Focus Band RNG if Endure fires).
+    // Then: if target holds KOSurvival item, unconditionally consume BattleRandom.
+    //   If RNG < param AND target would faint (hp <= 0): survive at 1 HP.
+    // focus_band_item is non-null only when Endure is NOT active and item is KOSurvival.
+    // When Substitute was active, it was bypassed above — Focus Band fires on real HP.
+    // Source: Crystal BattleCommand_ApplyDamage .focus_band
+    if (focus_band_item != nullptr) {
+        // RNG is consumed unconditionally whenever Focus Band is held (Crystal behavior).
+        const uint8_t fb_rng = rng_.next_byte();
+        if (target.stats.hp <= 0 && fb_rng < focus_band_item->held_param) {
+            target.stats.hp = 1;
+            message((user_is_player ? std::string("Opponent") : std::string("Player"))
+                    + " hung on with Focus Band!");
+        }
     }
 
     hp_change(user_is_player ? 1u : 0u, old_hp, target.stats.hp);
@@ -1447,6 +1514,25 @@ MoveExecutionResult Battle::execute_move_damaging(
         }
     }
     // Ã¢â€â‚¬Ã¢â€â‚¬ Stat change on hit (DefenseUpHit, AttackDownHit, etc.) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // King's Rock (PostHitFlinch): fires after effectchance, before stat_change.
+    // Source: Crystal BattleCommand_HeldFlinch — called from kingsrock script command,
+    // which appears OUTSIDE the startloop/endloop block in multi-hit scripts.
+    // Result: one roll per move (not per hit).
+    // Fires only when: move hit, target not behind Substitute.
+    // Miss suppression: misses return Miss above — we only reach here on a successful hit.
+    // Substitute suppression: Substitute routing causes early return; if Substitute was
+    // up, we already returned MoveExecutionResult::Success before reaching this point.
+    // Target faint does NOT suppress (kingsrock is outside the hit loop in Crystal scripts).
+    if (effective_desc.needs_kingsrock && user.held_item != ITEM_NONE
+            && !target.has_volatile(VolatileStatus::Substitute)) {
+        const ItemData* ui = registries_.items.get(user.held_item);
+        if (ui && ui->held_effect_type == HeldItemEffectType::PostHitFlinch) {
+            if (rng_.next_byte() < static_cast<uint32_t>(ui->held_param)) {
+                target.set_volatile(VolatileStatus::Flinch);
+            }
+        }
+    }
+
     if (effective_desc.stat_change != StatChangeTarget::None) {
         // For hit-effect stat changes (applied to target unconditionally on hit).
         apply_stat_change(user, target, effective_desc.stat_change, user_is_player);

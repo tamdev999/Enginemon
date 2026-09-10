@@ -434,37 +434,46 @@ bool roll_critical(uint8_t crit_stage, uint32_t random, const BattleRules& rules
 }
 
 uint8_t build_crit_stage(const BattlePokemon& user, const MoveData& move,
-                          const BattleRules& rules) {
+                          const BattleRules& rules,
+                          const Registries* regs) {
     // Source: effect_commands.asm BattleCommand_Critical
-    //   c = 0 (base)
-    //   +2 if move is in CriticalHitMoves list (checked against MOVE_ANIM = move ID)
-    //   +1 if user has Focus Energy volatile (SUBSTATUS_FOCUS_ENERGY)
-    //   Scope Lens (+1) and Lucky Punch/Stick (+2) require held-item checks not yet
-    //   representable in BattlePokemon — leave those at 0 with explicit comment.
-    //
-    // Crystal's CriticalHitMoves list stores MOVE_ANIM byte values from the move
-    // struct, which for all standard Crystal moves equals the move's constant
-    // (= MoveId as uint8_t).  rules.high_crit_moves contains these same values
-    // extracted from the ROM.  We compare against (uint8_t)move.id — valid for
-    // MoveId ≤ 255, which covers all 251 Crystal standard moves.
+    // Crystal order:
+    //   1. If user holds CritStageBoostSpecies item (Lucky Punch/Stick) AND species matches:
+    //      SET stage = param (= 2), jump directly to tally — skips FocusEnergy and high-crit.
+    //   2. Focus Energy: +1
+    //   3. High-crit move: +2
+    //   4. Scope Lens (CritStageBoost): +param (= 1)
+    //   Capped at 6.
     uint8_t stage = 0;
 
-    // High-crit move: +2 (source: data/moves/critical_hit_moves.asm)
-    // BattleRules::high_crit_moves stores semantic MoveId values.
-    // The frontend maps Crystal's MOVE_ANIM byte (= move constant = MoveId for
-    // standard Crystal moves) to MoveId at extraction time.
-    // Runtime compares move.id directly — no byte truncation.
-    if (rules.is_high_crit_move(move.id)) {
-        stage += 2;
+    // Step 1: Species-restricted crit items (Lucky Punch, Stick).
+    // Hard-SET stage to param and return immediately — no stacking with FocusEnergy or high-crit.
+    if (user.held_item != ITEM_NONE && regs) {
+        const ItemData* it = regs->items.get(user.held_item);
+        if (it && it->held_effect_type == HeldItemEffectType::CritStageBoostSpecies
+                && it->species_restriction != SPECIES_NONE
+                && user.species == it->species_restriction) {
+            return std::min<uint8_t>(it->held_param, 6u);
+        }
     }
 
-    // Focus Energy: +1 (source: BattleCommand_Critical .FocusEnergy check)
+    // Step 2: Focus Energy: +1 (source: BattleCommand_Critical .FocusEnergy check)
     if (user.has_volatile(VolatileStatus::FocusEnergy)) {
         stage += 1;
     }
 
-    // Scope Lens (HELD_CRITICAL_UP): +1 — held items not yet in BattlePokemon
-    // Lucky Punch (Chansey) / Stick (Farfetch'd): +2 — same reason
+    // Step 3: High-crit move: +2 (source: data/moves/critical_hit_moves.asm)
+    if (rules.is_high_crit_move(move.id)) {
+        stage += 2;
+    }
+
+    // Step 4: Scope Lens (CritStageBoost): +param (source: BattleCommand_Critical .ScopeLens check)
+    if (user.held_item != ITEM_NONE && regs) {
+        const ItemData* it = regs->items.get(user.held_item);
+        if (it && it->held_effect_type == HeldItemEffectType::CritStageBoost) {
+            stage += it->held_param;
+        }
+    }
 
     return std::min<uint8_t>(stage, 6);
 }

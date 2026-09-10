@@ -112,15 +112,17 @@ bool roll_critical(uint8_t crit_stage, uint32_t random, const BattleRules& rules
 
 // Build the effective crit stage from battle state.
 // Source: effect_commands.asm BattleCommand_Critical
-//   base stage = 0
-//   +2 if move.id is in BattleRules::high_crit_moves
-//     (stored as semantic MoveId values; comparison is direct MoveId equality)
-//   +1 if user has Focus Energy volatile (VolatileStatus::FocusEnergy)
-//   +2 if user holds Lucky Punch (Chansey) or Stick (Farfetch'd) — not yet representable
-//   +1 if user holds Scope Lens (HELD_CRITICAL_UP) — not yet representable
-// Returns 0..6 (clamped).
+//   Crystal order:
+//     1. If user holds CritStageBoostSpecies AND species matches: SET stage = param, done.
+//        (Lucky Punch for Chansey, Stick for Farfetch'd — hard-set to 2, skip FocusEnergy/high-crit)
+//     2. Focus Energy volatile: +1
+//     3. High-crit move in BattleRules::high_crit_moves: +2
+//     4. CritStageBoost item (Scope Lens): +param (= 1)
+//   Result clamped 0..6.
+// Pass regs=nullptr to skip held-item checks (test-only fallback).
 uint8_t build_crit_stage(const BattlePokemon& user, const MoveData& move,
-                         const BattleRules& rules);
+                         const BattleRules& rules,
+                         const Registries* regs = nullptr);
 
 // Accuracy check
 // Crystal source: effect_commands.asm BattleCommand_CheckHit .StatModifiers
@@ -156,7 +158,7 @@ uint8_t get_type_effectiveness(TypeId attack_type, TypeId defend_type,
 
 // Combined type effectiveness for dual types
 // Returns: 0, 25, 50, 100, 200, 400 (percentage)
-uint16_t get_combined_effectiveness(TypeId attack_type, 
+uint16_t get_combined_effectiveness(TypeId attack_type,
                                     TypeId def_type1, TypeId def_type2,
                                     const TypeChart& chart);
 
