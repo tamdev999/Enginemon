@@ -1233,6 +1233,21 @@ MoveExecutionResult Battle::execute_move_damaging(
     }
     const bool burned = physical && (user.status == Status::Burn);
 
+    // Metal Powder (SpeciesDefenseBoost): x1.5 defense for Ditto (both physical and special).
+    // Source: DittoMetalPowder in effect_commands.asm -- called after TruncateHL_BC for both
+    // physical and special defense. Crystal BUG: boosts special defense too, increasing damage
+    // taken rather than reducing it on special hits. We reproduce the bug faithfully.
+    // Applied after Reflect/LightScreen, before Selfdestruct halving.
+    if (target.held_item != ITEM_NONE) {
+        const ItemData* mp_item = registries_.items.get(target.held_item);
+        if (mp_item && mp_item->held_effect_type == HeldItemEffectType::SpeciesDefenseBoost
+                && mp_item->species_restriction != SPECIES_NONE
+                && target.species == mp_item->species_restriction) {
+            def_stat = def_stat + def_stat / 2;  // x1.5: matching Crystal srl+add
+            if (def_stat < 1) def_stat = 1;
+        }
+    }
+
     // Ã¢â€â‚¬Ã¢â€â‚¬ Selfdestruct defense halving Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Source: BattleCommand_DamageCalc Ã¢â‚¬â€ `srl c` halves defender's defense.
     // defense_shift=1 Ã¢â€ â€™ def_stat = max(1, def_stat >> 1)
@@ -1791,6 +1806,12 @@ void Battle::apply_end_of_turn_effects() {
     apply_residual(player_pokemon_,   true);
     apply_residual(opponent_pokemon_, false);
 
+    // Held item end-of-turn effects: Leftovers, Mysteryberry, HP berries, status cures.
+    // Source: Crystal HandleBetweenTurnEffects -- HandleLeftovers then HandleMysteryberry
+    // then (later) HandleHealingItems, all after residual and before natural thaw.
+    apply_held_item_end_of_turn(player_pokemon_,   true);
+    apply_held_item_end_of_turn(opponent_pokemon_, false);
+
     // Natural thaw: P1-Freeze. 25/256 chance per turn (after freeze_guard is consumed).
     // Source: Crystal HandleDefrost in core.asm.
     hook_end_of_turn_natural_thaw(player_pokemon_,   true);
@@ -1860,6 +1881,160 @@ void Battle::apply_residual(BattlePokemon& bp, bool is_player) {
         const int16_t old_hp = bp.stats.hp;
         bp.stats.hp = static_cast<int16_t>(std::max(0, static_cast<int32_t>(bp.stats.hp) - dmg));
         hp_change(is_player ? 0u : 1u, old_hp, bp.stats.hp);
+    }
+}
+
+// ============================================================================
+// Held item end-of-turn effects
+// Source: Crystal HandleBetweenTurnEffects ordering (core.asm):
+//   HandleLeftovers -> HandleMysteryberry -> HandleDefrost -> HandleHealingItems
+// Leftovers: EndTurnHealFraction (param=16 -> max_hp/16, minimum 1, only if not full HP, not consumed)
+// Mysteryberry: EndTurnRestorePP (restore 5 PP to first depleted move, consumed)
+// Berry/GoldBerry/BerryJuice: EndTurnHealBelowHalf (strict hp < floor(max_hp/2), flat heal, consumed)
+// StatusCure berries: StatusCure (cure matching Status, consumed)
+// MiracleBerry: AnyStatusCure (cure any major status + confusion, consumed)
+// Bitter Berry: ConfusionCure (cure confusion + clear confusion_turns, consumed)
+// ============================================================================
+void Battle::apply_held_item_end_of_turn(BattlePokemon& bp, bool is_player) {
+    if (bp.is_fainted()) return;
+    if (bp.held_item == ITEM_NONE) return;
+
+    const ItemData* item = registries_.items.get(bp.held_item);
+    if (!item || item->held_effect_type == HeldItemEffectType::None) return;
+
+    const char* side = is_player ? "Player" : "Opponent";
+
+    // Helper: consume item -- clears held_item on BattlePokemon and writes back to party.
+    auto consume_item = [&]() {
+        bp.held_item = ITEM_NONE;
+        if (is_player) {
+            Pokemon* pmon = player_party_.get(bp.party_index);
+            if (pmon) pmon->held_item = ITEM_NONE;
+        } else {
+            if (opponent_active_index_ < opponent_party_.size())
+                opponent_party_[opponent_active_index_].held_item = ITEM_NONE;
+        }
+    };
+
+    switch (item->held_effect_type) {
+
+    // ── Leftovers: HandleLeftovers in Crystal ────────────────────────────────
+    // Restore floor(max_hp / 16), minimum 1, each turn. Not consumed.
+    // Condition: hp must be strictly less than max_hp (no overheal).
+    case HeldItemEffectType::EndTurnHealFraction: {
+        if (bp.stats.hp >= bp.stats.max_hp) return;
+        const int32_t denom = static_cast<int32_t>(item->held_param > 0 ? item->held_param : 16);
+        const int16_t heal = static_cast<int16_t>(
+            std::max(1, static_cast<int32_t>(bp.stats.max_hp) / denom));
+        const int16_t old_hp = bp.stats.hp;
+        bp.stats.hp = static_cast<int16_t>(
+            std::min(static_cast<int32_t>(bp.stats.max_hp),
+                     static_cast<int32_t>(bp.stats.hp) + heal));
+        hp_change(is_player ? 0u : 1u, old_hp, bp.stats.hp);
+        message(std::string(side) + " restored HP using " + item->name + "!");
+        break;
+    }
+
+    // ── Mysteryberry: HandleMysteryberry in Crystal ──────────────────────────
+    // Restore 5 PP to the first move slot with pp == 0. Consumed.
+    // Crystal loops through move order and picks the first depleted move.
+    // Writes back to party Pokemon immediately.
+    case HeldItemEffectType::EndTurnRestorePP: {
+        bool restored = false;
+        for (size_t i = 0; i < 4; ++i) {
+            if (bp.moves[i].move == MOVE_NONE) continue;
+            if (bp.moves[i].pp == 0) {
+                const uint8_t restore = 5u;
+                bp.moves[i].pp = static_cast<uint8_t>(
+                    std::min(static_cast<uint32_t>(bp.moves[i].max_pp),
+                             static_cast<uint32_t>(bp.moves[i].pp) + restore));
+                // Write PP back to party immediately.
+                if (is_player) {
+                    Pokemon* pmon = player_party_.get(bp.party_index);
+                    if (pmon) pmon->moves[i].pp = bp.moves[i].pp;
+                } else {
+                    if (opponent_active_index_ < opponent_party_.size())
+                        opponent_party_[opponent_active_index_].moves[i].pp = bp.moves[i].pp;
+                }
+                restored = true;
+                message(std::string(side) + " restored PP using " + item->name + "!");
+                break;
+            }
+        }
+        if (restored) consume_item();
+        break;
+    }
+
+    // ── HP berry (Berry, Gold Berry, Berry Juice): HandleHPHealingItem ────────
+    // Activate when current HP < floor(max_hp / 2) (strict less-than).
+    // Heal flat param HP (capped at max). Consumed on activation.
+    case HeldItemEffectType::EndTurnHealBelowHalf: {
+        const int32_t half_hp = static_cast<int32_t>(bp.stats.max_hp) / 2;
+        if (static_cast<int32_t>(bp.stats.hp) >= half_hp) return;
+        const int16_t heal = static_cast<int16_t>(item->held_param);
+        const int16_t old_hp = bp.stats.hp;
+        bp.stats.hp = static_cast<int16_t>(
+            std::min(static_cast<int32_t>(bp.stats.max_hp),
+                     static_cast<int32_t>(bp.stats.hp) + static_cast<int32_t>(heal)));
+        hp_change(is_player ? 0u : 1u, old_hp, bp.stats.hp);
+        message(std::string(side) + " ate its " + item->name + " and recovered HP!");
+        consume_item();
+        break;
+    }
+
+    // ── Status-specific berry (PSNCureBerry, Burnt Berry, etc.) ─────────────
+    // held_param encodes the Status value to cure (matches engine Status enum ordinals).
+    // Cures only the matching status. Consumed.
+    // Source: UseHeldStatusHealingItem in Crystal -- checks specific status bit.
+    case HeldItemEffectType::StatusCure: {
+        const Status target_status = static_cast<Status>(item->held_param);
+        if (bp.status != target_status) return;
+        bp.status = Status::None;
+        bp.status_turns = 0;
+        // Recalculate speed if paralysis cured -- Crystal CalcPlayerStats fires after cure.
+        // In Enginemon, base_stats.speed is the unparalyzed value; no extra action needed.
+        message(std::string(side) + "'s " + item->name + " cured its status!");
+        consume_item();
+        break;
+    }
+
+    // ── MiracleBerry: UseHeldStatusHealingItem (ALL_STATUS) + UseConfusionHealingItem ──
+    // Clears any major status AND clears confusion. Both in one activation. Consumed.
+    // Source: UseHeldStatusHealingItem checks cp ALL_STATUS (HELD_HEAL_STATUS=15)
+    //         then also calls reset on SUBSTATUS_CONFUSED. One item use, both effects.
+    case HeldItemEffectType::AnyStatusCure: {
+        bool activated = false;
+        if (bp.status != Status::None) {
+            bp.status = Status::None;
+            bp.status_turns = 0;
+            activated = true;
+        }
+        if (bp.has_volatile(VolatileStatus::Confusion)) {
+            bp.clear_volatile(VolatileStatus::Confusion);
+            bp.confusion_turns = 0;
+            activated = true;
+        }
+        if (!activated) return;
+        message(std::string(side) + "'s " + item->name + " cured its ailment!");
+        consume_item();
+        break;
+    }
+
+    // ── Bitter Berry: UseConfusionHealingItem (HELD_HEAL_CONFUSION) ──────────
+    // Cures confusion only. Consumed.
+    // Condition: must have Confusion volatile active.
+    case HeldItemEffectType::ConfusionCure: {
+        if (!bp.has_volatile(VolatileStatus::Confusion)) return;
+        bp.clear_volatile(VolatileStatus::Confusion);
+        bp.confusion_turns = 0;
+        message(std::string(side) + "'s " + item->name + " snapped it out of confusion!");
+        consume_item();
+        break;
+    }
+
+    default:
+        // Other HeldItemEffectType values are handled outside end-of-turn (damage, accuracy, etc.)
+        break;
     }
 }
 

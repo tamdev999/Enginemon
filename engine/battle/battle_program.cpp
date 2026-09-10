@@ -560,6 +560,19 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                     }
                     const bool burned = physical && (user.status == Status::Burn);
 
+                    // Metal Powder (SpeciesDefenseBoost): x1.5 defense for Ditto.
+                    // Source: DittoMetalPowder -- both physical and special defense boosted (Crystal bug).
+                    if (target.held_item != ITEM_NONE) {
+                        const ItemData* mp_item = registries_.items.get(target.held_item);
+                        if (mp_item && mp_item->held_effect_type == HeldItemEffectType::SpeciesDefenseBoost
+                                && mp_item->species_restriction != SPECIES_NONE
+                                && target.species == mp_item->species_restriction) {
+                            def_stat = def_stat + def_stat / 2;
+                            if (def_stat < 1) def_stat = 1;
+                        }
+                    }
+
+
                     uint8_t eff_power = md.power;
                     if (pending_scale_mult > 0) {
                         eff_power = static_cast<uint8_t>(

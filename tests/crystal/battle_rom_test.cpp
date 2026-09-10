@@ -1,4 +1,4 @@
-﻿// tests/crystal/battle_rom_test.cpp
+// tests/crystal/battle_rom_test.cpp
 //
 // TRUE ROMÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢EXTRACTORÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢BRLSÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢RUNTIME PROPAGATION TESTS
 //
@@ -6685,6 +6685,8 @@ namespace ItemId {
     constexpr enginemon::ItemId MINT_BERRY   = 0x54;
     constexpr enginemon::ItemId PRZCUREBERRY = 0x4E;
     constexpr enginemon::ItemId BITTER_BERRY = 0x53;
+    constexpr enginemon::ItemId BERRY        = 0xAD;
+    constexpr enginemon::ItemId BERRY_JUICE  = 0x8B;
 }  // namespace ItemId
 
 // Crystal type IDs (from type_constants.asm, matching engine TypeId values)
@@ -6988,13 +6990,13 @@ TEST(p_itdt_status_cure_berries) {
     ASSERT_TRUE(r.has_value()); if (!r) return;
 
     // Verify each status-specific berry maps to StatusCure with correct param
-    // Params encode Status enum values (Sleep=1, Burn=2, Poison=3, Freeze=4, Paralysis=5)
+    // Params encode Status enum values (None=0, Sleep=1, Poison=2, BadPoison=3, Burn=4, Freeze=5, Paralysis=6)
     const struct { enginemon::ItemId id; uint8_t status_param; const char* name; } berries[] = {
-        { ItemId::PSNCUREBERRY, 3, "PSNCUREBERRY(Poison=3)" },
-        { ItemId::BURNT_BERRY,  4, "Burnt Berry(Freeze=4)" },
-        { ItemId::ICE_BERRY,    2, "Ice Berry(Burn=2)" },
+        { ItemId::PSNCUREBERRY, 2, "PSNCUREBERRY(Poison=2)" },
+        { ItemId::BURNT_BERRY,  5, "Burnt Berry(Freeze=5)" },
+        { ItemId::ICE_BERRY,    4, "Ice Berry(Burn=4)" },
         { ItemId::MINT_BERRY,   1, "Mint Berry(Sleep=1)" },
-        { ItemId::PRZCUREBERRY, 5, "PRZCureBerry(Paralysis=5)" },
+        { ItemId::PRZCUREBERRY, 6, "PRZCureBerry(Paralysis=6)" },
     };
 
     for (const auto& b : berries) {
@@ -7095,17 +7097,6 @@ TEST(p_itdt_real_rom_extraction_not_fabricated) {
 
     std::cout << "\n    rom_extraction: mutated KR param=15 (vanilla=30) — correct\n";
 }
-
-// ── MAIN section ─────────────────────────────────────────────────────────────
-
-// ============================================================================
-// ROOT_HELD_ITEM_EFFECTS Stage 2 — E2E battle mechanics
-//
-// These tests build a Registries with real ROM items + synthetic moves, run a
-// Battle::execute_turn() with deterministic RNG, and assert runtime outcomes.
-// No raw Crystal HELD_* constants; dispatch is on HeldItemEffectType only.
-// ============================================================================
-
 namespace {
 
 // Build a Registries containing real-ROM item data plus a single synthetic
@@ -7252,7 +7243,703 @@ static enginemon::BattleRules make_item_rules() {
     return make_rules_b();
 }
 
+
+// ── make_eot_battle helper ────────────────────────────────────────────────────
+// Builds a Party + Registries + BattleRules for end-of-turn item effect tests.
+// Returns them separately so the caller constructs Battle (not movable/copyable).
+struct EotSetup {
+    enginemon::Party                         party;
+    std::optional<enginemon::Registries>     reg_opt;
+    enginemon::BattleRules                   rules;
+    bool ok = false;
+    // Convenience: player HP/maxHP/item for assertions
+    int16_t player_hp     = 0;
+    int16_t player_max_hp = 0;
+    enginemon::ItemId player_item   = enginemon::ITEM_NONE;
+    enginemon::ItemId opp_item      = enginemon::ITEM_NONE;
+    int16_t opp_hp        = 500;
+    int16_t opp_max_hp    = 500;
+    enginemon::SpeciesId player_species = static_cast<enginemon::SpeciesId>(1u);
+    enginemon::Status    player_status  = enginemon::Status::None;
+};
+
+static EotSetup make_eot_setup(
+    enginemon::ItemId    player_item,
+    int16_t              player_hp,
+    int16_t              player_max_hp,
+    enginemon::ItemId    opp_item_    = enginemon::ITEM_NONE,
+    int16_t              opp_hp_      = 500,
+    int16_t              opp_max_hp_  = 500,
+    enginemon::SpeciesId player_species_ = static_cast<enginemon::SpeciesId>(1u),
+    enginemon::Status    player_status_  = enginemon::Status::None)
+{
+    EotSetup es;
+    es.player_item    = player_item;
+    es.player_hp      = player_hp;
+    es.player_max_hp  = player_max_hp;
+    es.opp_item       = opp_item_;
+    es.opp_hp         = opp_hp_;
+    es.opp_max_hp     = opp_max_hp_;
+    es.player_species = player_species_;
+    es.player_status  = player_status_;
+
+    // Extract real items from ROM
+    auto item_result = crystal::extract_all_items(*g_rom, *g_profile);
+    if (!item_result.success) { std::cerr << "  eot: item extract failed\n"; return es; }
+    crystal::PackageWriter w;
+    w.set_source_rom(std::string(40,'a'), "test");
+    w.add_item_data(item_result.items);
+    auto pkg = std::filesystem::temp_directory_path() / "eot_setup.emon";
+    if (!w.write(pkg)) { std::cerr << "  eot: write failed\n"; return es; }
+    auto rdr = enginemon::PackageReader::open(pkg);
+    if (!rdr) { std::filesystem::remove(pkg); return es; }
+    auto item_reg = rdr->load_item_registry();
+    std::filesystem::remove(pkg);
+
+    enginemon::Registries reg;
+    for (uint8_t t = 0; t < 28; ++t) {
+        enginemon::TypeData td; td.id = t; td.name = "T";
+        reg.types.register_entry(t, td);
+        for (uint8_t u = 0; u < 28; ++u) reg.type_chart.set_effectiveness(t, u, 10);
+    }
+    auto add_sp = [&](enginemon::SpeciesId sid, const char* nm, uint8_t def_) {
+        if (reg.species.get(sid) != nullptr) return;
+        enginemon::SpeciesData sp{};
+        sp.id = sid; sp.name = nm; sp.type1 = 0; sp.type2 = 0;
+        sp.base_stats = {50, 60, def_, 60, def_, 50};
+        sp.catch_rate = 45; sp.base_exp = 64; sp.base_friendship = 70;
+        reg.species.register_entry(sid, sp);
+    };
+    add_sp(static_cast<enginemon::SpeciesId>(1u), "T", 55);
+    add_sp(CrystalSpecies::DITTO,     "Ditto",   48);
+    add_sp(CrystalSpecies::CHANSEY,   "Chansey",  5);
+    add_sp(CrystalSpecies::FARFETCHD, "Farfchd", 55);
+    if (player_species_ > 1 &&
+        player_species_ != CrystalSpecies::DITTO &&
+        player_species_ != CrystalSpecies::CHANSEY &&
+        player_species_ != CrystalSpecies::FARFETCHD)
+        add_sp(player_species_, "Custom", 55);
+    // No-op Splash move (Status, 0 damage)
+    {
+        enginemon::MoveData md{};
+        md.id = static_cast<enginemon::MoveId>(1);
+        md.name = "SplashEot"; md.type = 0; md.power = 0;
+        md.accuracy = 0xFF; md.pp = 40;
+        md.category = enginemon::MoveCategory::Status;
+        md.effect_desc.is_supported = true;
+        reg.moves.register_entry(md.id, md);
+    }
+    for (const auto& [id, data] : *item_reg) reg.items.register_entry(id, data);
+    reg.freeze_all();
+    es.reg_opt = std::move(reg);
+
+    // Party: player Pokemon at slot 0
+    enginemon::Pokemon pmon{};
+    pmon.species    = player_species_;
+    pmon.level      = 50;
+    pmon.current_hp = static_cast<uint16_t>(std::max(0, static_cast<int32_t>(player_hp)));
+    pmon.max_hp     = static_cast<uint16_t>(player_max_hp);
+    pmon.attack = pmon.defense = pmon.speed = pmon.special_attack = pmon.special_defense = 80;
+    pmon.friendship = 200;
+    pmon.status     = player_status_;
+    pmon.held_item  = player_item;
+    pmon.moves[0].id = static_cast<enginemon::MoveId>(1);
+    pmon.moves[0].pp = 40;
+    es.party.add(pmon);
+
+    es.rules = make_item_rules();
+    es.ok = true;
+    return es;
+}
+
+// Configure player BattlePokemon from EotSetup and assign to battle.
+// party_index is 0 (first party slot).
+static void eot_configure_battle(enginemon::Battle& battle, const EotSetup& es) {
+    enginemon::BattlePokemon pbp{};
+    pbp.party_index = 0;
+    pbp.species     = es.player_species;
+    pbp.type1 = pbp.type2 = 0;
+    pbp.level       = 50;
+    pbp.stats.hp    = es.player_hp;
+    pbp.stats.max_hp = es.player_max_hp;
+    pbp.stats.attack = pbp.stats.defense = 80;
+    pbp.stats.speed  = pbp.stats.special_attack = pbp.stats.special_defense = 80;
+    pbp.base_stats  = pbp.stats;
+    pbp.stats.speed = pbp.base_stats.speed = 200;   // goes first
+    pbp.happiness   = 200;
+    pbp.held_item   = es.player_item;
+    pbp.status      = es.player_status;
+    pbp.moves[0].move   = static_cast<enginemon::MoveId>(1);
+    pbp.moves[0].pp     = pbp.moves[0].max_pp = 40;
+
+    enginemon::BattlePokemon obp{};
+    obp.party_index = 0;
+    obp.species     = static_cast<enginemon::SpeciesId>(1u);
+    obp.type1 = obp.type2 = 0;
+    obp.level       = 50;
+    obp.stats.hp    = es.opp_hp; obp.stats.max_hp = es.opp_max_hp;
+    obp.stats.attack = obp.stats.defense = 80;
+    obp.stats.speed  = obp.stats.special_attack = obp.stats.special_defense = 80;
+    obp.base_stats  = obp.stats;
+    obp.stats.speed = obp.base_stats.speed = 1;
+    obp.happiness   = 200;
+    obp.held_item   = es.opp_item;
+
+    battle.player_pokemon()   = pbp;
+    battle.opponent_pokemon() = obp;
+    battle.set_rng_callback([]() -> uint32_t { return uint32_t{0xFF}; });
+}
+
 } // anonymous namespace
+
+
+
+// ============================================================================
+// ROOT_HELD_ITEM_EFFECTS Stage 4 -- Metal Powder, Leftovers, berries, status cures
+// ============================================================================
+
+// ── Metal Powder (SpeciesDefenseBoost) ────────────────────────────────────────
+
+TEST(p_held_item_metal_powder_ditto_physical_def_boosted) {
+    // Ditto holding Metal Powder: x1.5 physical defense (and special, Crystal bug).
+    // Metal Powder boosts def -> damage received decreases.
+    auto reg_opt = make_item_battle_reg(CrystalType::NORMAL, 40, 0xFF);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+    auto& reg = *reg_opt;
+    enginemon::BattleRules rules = make_item_rules();
+
+    auto run = [&](enginemon::ItemId item) -> int16_t {
+        enginemon::Party party;
+        enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+        pmon.current_hp=pmon.max_hp=500; pmon.friendship=200;
+        party.add(pmon);
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+        auto pbp = make_item_bp(1, CrystalType::NORMAL, CrystalType::NORMAL, 300, 200);
+        enginemon::BattlePokemon ditto{};
+        ditto.species = CrystalSpecies::DITTO;
+        ditto.type1 = ditto.type2 = 0;
+        ditto.level = 50;
+        ditto.stats.hp = ditto.stats.max_hp = 500;
+        ditto.stats.defense = ditto.base_stats.defense = 48;
+        ditto.stats.special_defense = ditto.base_stats.special_defense = 48;
+        ditto.stats.attack = ditto.base_stats.attack = 48;
+        ditto.stats.special_attack = ditto.base_stats.special_attack = 48;
+        ditto.stats.speed = ditto.base_stats.speed = 1;
+        ditto.happiness = 200;
+        ditto.held_item = item;
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = ditto;
+        const std::vector<uint8_t> sc = {0xFF, 0xFF};
+        size_t idx = 0;
+        battle.set_rng_callback([&]() -> uint32_t {
+            return idx < sc.size() ? sc[idx++] : uint32_t{0xFF};
+        });
+        const int16_t before = battle.opponent_pokemon().stats.hp;
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+        return static_cast<int16_t>(before - battle.opponent_pokemon().stats.hp);
+    };
+
+    const int16_t dmg_no_item = run(enginemon::ITEM_NONE);
+    const int16_t dmg_with_mp = run(ItemId::METAL_POWDER);
+    ASSERT_TRUE(dmg_no_item > 0);
+    ASSERT_TRUE(dmg_with_mp > 0);
+    ASSERT_TRUE(dmg_with_mp < dmg_no_item);
+    std::cout << "\n    metal_powder/ditto_physical: no_item=" << dmg_no_item
+              << " with_mp=" << dmg_with_mp << "\n";
+}
+
+TEST(p_held_item_metal_powder_non_ditto_no_benefit) {
+    // Non-Ditto holding Metal Powder: NO effect, damage identical.
+    auto reg_opt = make_item_battle_reg(CrystalType::NORMAL, 40, 0xFF);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+    auto& reg = *reg_opt;
+    enginemon::BattleRules rules = make_item_rules();
+
+    auto run = [&](enginemon::ItemId item) -> int16_t {
+        enginemon::Party party;
+        enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+        pmon.current_hp=pmon.max_hp=500; pmon.friendship=200;
+        party.add(pmon);
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+        auto pbp = make_item_bp(1, CrystalType::NORMAL, CrystalType::NORMAL, 300, 200);
+        auto tgt = make_item_target(500, 1, item);
+        tgt.species = static_cast<enginemon::SpeciesId>(1u);
+        tgt.stats.defense = tgt.base_stats.defense = 55;
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = tgt;
+        const std::vector<uint8_t> sc = {0xFF, 0xFF};
+        size_t idx = 0;
+        battle.set_rng_callback([&]() -> uint32_t {
+            return idx < sc.size() ? sc[idx++] : uint32_t{0xFF};
+        });
+        const int16_t before = battle.opponent_pokemon().stats.hp;
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+        return static_cast<int16_t>(before - battle.opponent_pokemon().stats.hp);
+    };
+
+    const int16_t no_item = run(enginemon::ITEM_NONE);
+    const int16_t with_mp = run(ItemId::METAL_POWDER);
+    ASSERT_TRUE(no_item > 0);
+    ASSERT_EQ(no_item, with_mp);
+    std::cout << "\n    metal_powder/non_ditto: equal damage, no boost\n";
+}
+
+// ── Leftovers (EndTurnHealFraction) ──────────────────────────────────────────
+
+TEST(p_held_item_leftovers_heals_exactly_one_sixteenth) {
+    auto es = make_eot_setup(ItemId::LEFTOVERS, 100, 160);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{110});
+    ASSERT_EQ(battle.player_pokemon().held_item, ItemId::LEFTOVERS);  // not consumed
+    std::cout << "\n    leftovers: 100+10=110\n";
+}
+
+TEST(p_held_item_leftovers_minimum_heal_one) {
+    auto es = make_eot_setup(ItemId::LEFTOVERS, 5, 14);  // floor(14/16)=0, min=1
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{6});
+    std::cout << "\n    leftovers/min1: hp=6\n";
+}
+
+TEST(p_held_item_leftovers_full_hp_no_heal) {
+    auto es = make_eot_setup(ItemId::LEFTOVERS, 160, 160);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{160});
+    std::cout << "\n    leftovers/full_hp: unchanged=160\n";
+}
+
+TEST(p_held_item_leftovers_not_consumed) {
+    auto es = make_eot_setup(ItemId::LEFTOVERS, 80, 160);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    for (int t = 0; t < 2; ++t) {
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+    }
+    ASSERT_EQ(battle.player_pokemon().held_item, ItemId::LEFTOVERS);
+    std::cout << "\n    leftovers/not_consumed: retained after 2 turns\n";
+}
+
+TEST(p_held_item_leftovers_opponent_also_heals) {
+    // Opponent holds Leftovers; opp_item set in EotSetup
+    auto es = make_eot_setup(enginemon::ITEM_NONE, 160, 160,
+                              ItemId::LEFTOVERS, 80, 160);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.opponent_pokemon().stats.hp, int16_t{90});
+    ASSERT_EQ(battle.opponent_pokemon().held_item, ItemId::LEFTOVERS);
+    std::cout << "\n    leftovers/opponent: 80+10=90\n";
+}
+
+// ── HP Berries (EndTurnHealBelowHalf) ─────────────────────────────────────────
+
+TEST(p_held_item_berry_strict_below_half_activates) {
+    auto es = make_eot_setup(ItemId::BERRY, 99, 200);  // 99 < 100 = floor(200/2)
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{109});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    berry/activates: 99+10=109\n";
+}
+
+TEST(p_held_item_berry_does_not_activate_at_half) {
+    auto es = make_eot_setup(ItemId::BERRY, 100, 200);  // 100 == half, strict < fails
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{100});
+    ASSERT_EQ(battle.player_pokemon().held_item, ItemId::BERRY);
+    std::cout << "\n    berry/at_half: hp=100 unchanged, not consumed\n";
+}
+
+TEST(p_held_item_gold_berry_heals_30) {
+    auto es = make_eot_setup(ItemId::GOLD_BERRY, 50, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{80});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    gold_berry: 50+30=80\n";
+}
+
+TEST(p_held_item_berry_juice_heals_20) {
+    auto es = make_eot_setup(ItemId::BERRY_JUICE, 50, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{70});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    berry_juice: 50+20=70\n";
+}
+
+TEST(p_held_item_berry_consumed_cannot_activate_again) {
+    auto es = make_eot_setup(ItemId::BERRY, 50, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    // Turn 1: activates
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    // Drop HP below half, second turn: no heal
+    battle.player_pokemon().stats.hp = 50;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().stats.hp, int16_t{50});
+    std::cout << "\n    berry/consumed: no second heal\n";
+}
+
+// ── Status berries (StatusCure) ───────────────────────────────────────────────
+
+TEST(p_held_item_psncureberry_cures_poison) {
+    auto es = make_eot_setup(ItemId::PSNCUREBERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Poison);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().status, enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    psncureberry: poison cured\n";
+}
+
+TEST(p_held_item_psncureberry_no_cure_wrong_status) {
+    // PSNCureBerry cures Poison only; Sleep should be unaffected
+    auto es = make_eot_setup(ItemId::PSNCUREBERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Sleep);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    // Ensure sleep counter > 0 so the mon doesn't wake up this turn.
+    battle.player_pokemon().status_turns = 3;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    // Sleep status_turns was 3→2 (decremented), still asleep (> 0). PSNCureBerry
+    // checks for Poison (param=2); Status::Sleep(1) != Poison(2) → no activation.
+    ASSERT_EQ(battle.player_pokemon().status, enginemon::Status::Sleep);
+    ASSERT_EQ(battle.player_pokemon().held_item, ItemId::PSNCUREBERRY);  // retained
+    std::cout << "\n    psncureberry/wrong_status: sleep retained, item retained\n";
+}
+
+TEST(p_held_item_mint_berry_cures_sleep) {
+    auto es = make_eot_setup(ItemId::MINT_BERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Sleep);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().status_turns = 3;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().status, enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    mint_berry: sleep cured\n";
+}
+
+TEST(p_held_item_przcureberry_cures_paralysis) {
+    auto es = make_eot_setup(ItemId::PRZCUREBERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Paralysis);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().status, enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    przcureberry: paralysis cured\n";
+}
+
+TEST(p_held_item_burnt_berry_cures_freeze) {
+    auto es = make_eot_setup(ItemId::BURNT_BERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Freeze);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().freeze_guard = true;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().status, enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    burnt_berry: freeze cured\n";
+}
+
+TEST(p_held_item_ice_berry_cures_burn) {
+    auto es = make_eot_setup(ItemId::ICE_BERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Burn);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().status, enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    ice_berry: burn cured\n";
+}
+
+// ── MiracleBerry (AnyStatusCure) ──────────────────────────────────────────────
+
+TEST(p_held_item_miracleberry_cures_major_status_only) {
+    auto es = make_eot_setup(ItemId::MIRACLEBERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Poison);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().status, enginemon::Status::None);
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    miracleberry/major: poison cured\n";
+}
+
+TEST(p_held_item_miracleberry_cures_confusion_only) {
+    auto es = make_eot_setup(ItemId::MIRACLEBERRY, 200, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().set_volatile(enginemon::VolatileStatus::Confusion);
+    battle.player_pokemon().confusion_turns = 4;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_FALSE(battle.player_pokemon().has_volatile(enginemon::VolatileStatus::Confusion));
+    ASSERT_EQ(battle.player_pokemon().confusion_turns, uint8_t{0});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    miracleberry/confusion: cleared\n";
+}
+
+TEST(p_held_item_miracleberry_cures_both_simultaneously) {
+    auto es = make_eot_setup(ItemId::MIRACLEBERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Sleep);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().set_volatile(enginemon::VolatileStatus::Confusion);
+    battle.player_pokemon().confusion_turns = 3;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().status, enginemon::Status::None);
+    ASSERT_FALSE(battle.player_pokemon().has_volatile(enginemon::VolatileStatus::Confusion));
+    ASSERT_EQ(battle.player_pokemon().confusion_turns, uint8_t{0});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    miracleberry/both: sleep+confusion cleared in 1 use\n";
+}
+
+// ── Bitter Berry (ConfusionCure) ───────────────────────────────────────────────
+
+TEST(p_held_item_bitter_berry_clears_confusion_and_counter) {
+    auto es = make_eot_setup(ItemId::BITTER_BERRY, 200, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().set_volatile(enginemon::VolatileStatus::Confusion);
+    battle.player_pokemon().confusion_turns = 5;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_FALSE(battle.player_pokemon().has_volatile(enginemon::VolatileStatus::Confusion));
+    ASSERT_EQ(battle.player_pokemon().confusion_turns, uint8_t{0});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    bitter_berry: confusion+counter cleared\n";
+}
+
+TEST(p_held_item_bitter_berry_retained_when_not_confused) {
+    auto es = make_eot_setup(ItemId::BITTER_BERRY, 200, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().held_item, ItemId::BITTER_BERRY);
+    std::cout << "\n    bitter_berry/not_confused: item retained\n";
+}
+
+// ── Mysteryberry (EndTurnRestorePP) ───────────────────────────────────────────
+
+TEST(p_held_item_mysteryberry_restores_first_depleted_move) {
+    auto es = make_eot_setup(ItemId::MYSTERYBERRY, 200, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().moves[0].pp     = 0;
+    battle.player_pokemon().moves[0].max_pp = 15;
+    if (auto* pm = es.party.get(0)) { pm->moves[0].pp = 0; }
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().moves[0].pp, uint8_t{5});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    const enginemon::Pokemon* pmon = es.party.get(0);
+    if (pmon) ASSERT_EQ(pmon->moves[0].pp, uint8_t{5});
+    std::cout << "\n    mysteryberry/first: pp=0->5, party updated\n";
+}
+
+TEST(p_held_item_mysteryberry_only_first_depleted) {
+    auto es = make_eot_setup(ItemId::MYSTERYBERRY, 200, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().moves[0].pp = 0; battle.player_pokemon().moves[0].max_pp = 10;
+    battle.player_pokemon().moves[1].move = static_cast<enginemon::MoveId>(2);
+    battle.player_pokemon().moves[1].pp = 0; battle.player_pokemon().moves[1].max_pp = 10;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().moves[0].pp, uint8_t{5});
+    ASSERT_EQ(battle.player_pokemon().moves[1].pp, uint8_t{0});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    mysteryberry/first_only: move0 restored, move1 unchanged\n";
+}
+
+TEST(p_held_item_mysteryberry_no_activation_when_no_depleted) {
+    auto es = make_eot_setup(ItemId::MYSTERYBERRY, 200, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().moves[0].pp = 5; battle.player_pokemon().moves[0].max_pp = 10;
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    // Move 0 was used (PP decremented from 5 to 4). Mysteryberry condition is pp==0,
+    // which is false — so Mysteryberry does NOT activate and is NOT consumed.
+    ASSERT_EQ(battle.player_pokemon().moves[0].pp, uint8_t{4});  // decremented by move use
+    ASSERT_EQ(battle.player_pokemon().held_item, ItemId::MYSTERYBERRY);
+    std::cout << "\n    mysteryberry/no_depleted: item retained\n";
+}
+
+TEST(p_held_item_mysteryberry_pp_capped_at_max) {
+    auto es = make_eot_setup(ItemId::MYSTERYBERRY, 200, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().moves[0].pp     = 0;
+    battle.player_pokemon().moves[0].max_pp = 3;  // restore min(5,3)=3
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().moves[0].pp, uint8_t{3});
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    mysteryberry/cap: pp capped at max_pp=3\n";
+}
+
+// ── Consumption persistence ────────────────────────────────────────────────────
+
+TEST(p_held_item_consumption_persists_to_party_berry) {
+    auto es = make_eot_setup(ItemId::BERRY, 50, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);
+    const enginemon::Pokemon* pmon = es.party.get(0);
+    ASSERT_TRUE(pmon != nullptr);
+    if (pmon) ASSERT_EQ(pmon->held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    berry/party_persist: party[0].held_item cleared\n";
+}
+
+TEST(p_held_item_consumption_persists_to_party_status_berry) {
+    auto es = make_eot_setup(ItemId::PSNCUREBERRY, 200, 200,
+                              enginemon::ITEM_NONE, 500, 500,
+                              static_cast<enginemon::SpeciesId>(1u), enginemon::Status::Poison);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    const enginemon::Pokemon* pmon = es.party.get(0);
+    ASSERT_TRUE(pmon != nullptr);
+    if (pmon) ASSERT_EQ(pmon->held_item, enginemon::ITEM_NONE);
+    std::cout << "\n    psncureberry/party_persist\n";
+}
+
+TEST(p_held_item_consumption_persists_to_party_mysteryberry) {
+    auto es = make_eot_setup(ItemId::MYSTERYBERRY, 200, 200);
+    ASSERT_TRUE(es.ok); if (!es.ok) return;
+    enginemon::Battle battle(enginemon::BattleType::Wild, es.party, *es.reg_opt, es.rules);
+    eot_configure_battle(battle, es);
+    battle.player_pokemon().moves[0].pp = 0;
+    battle.player_pokemon().moves[0].max_pp = 10;
+    if (auto* pm = es.party.get(0)) { pm->moves[0].pp = 0; }
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    const enginemon::Pokemon* pmon = es.party.get(0);
+    ASSERT_TRUE(pmon != nullptr);
+    if (pmon) {
+        ASSERT_EQ(pmon->held_item, enginemon::ITEM_NONE);
+        ASSERT_EQ(pmon->moves[0].pp, uint8_t{5});
+    }
+    std::cout << "\n    mysteryberry/party_persist: held_item+PP written\n";
+}
+
+// ── MAIN section ─────────────────────────────────────────────────────────────
+
+// ============================================================================
+// ROOT_HELD_ITEM_EFFECTS Stage 2 — E2E battle mechanics
+//
+// These tests build a Registries with real ROM items + synthetic moves, run a
+// Battle::execute_turn() with deterministic RNG, and assert runtime outcomes.
+// No raw Crystal HELD_* constants; dispatch is on HeldItemEffectType only.
+// ============================================================================
 
 // ── Crit items: Scope Lens, Lucky Punch, Stick ────────────────────────────────
 
@@ -9064,6 +9751,38 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p_held_item_focus_band_nonlethal_rng_consumed);
     RUN_TEST(p_held_item_focus_band_endure_suppresses_fb_rng);
     RUN_TEST(p_held_item_focus_band_substitute_quirk);
+
+    // ROOT_HELD_ITEM_EFFECTS Stage 4 -- Metal Powder, Leftovers, berries, status cures
+    RUN_TEST(p_held_item_metal_powder_ditto_physical_def_boosted);
+    RUN_TEST(p_held_item_metal_powder_non_ditto_no_benefit);
+    RUN_TEST(p_held_item_leftovers_heals_exactly_one_sixteenth);
+    RUN_TEST(p_held_item_leftovers_minimum_heal_one);
+    RUN_TEST(p_held_item_leftovers_full_hp_no_heal);
+    RUN_TEST(p_held_item_leftovers_not_consumed);
+    RUN_TEST(p_held_item_leftovers_opponent_also_heals);
+    RUN_TEST(p_held_item_berry_strict_below_half_activates);
+    RUN_TEST(p_held_item_berry_does_not_activate_at_half);
+    RUN_TEST(p_held_item_gold_berry_heals_30);
+    RUN_TEST(p_held_item_berry_juice_heals_20);
+    RUN_TEST(p_held_item_berry_consumed_cannot_activate_again);
+    RUN_TEST(p_held_item_psncureberry_cures_poison);
+    RUN_TEST(p_held_item_psncureberry_no_cure_wrong_status);
+    RUN_TEST(p_held_item_mint_berry_cures_sleep);
+    RUN_TEST(p_held_item_przcureberry_cures_paralysis);
+    RUN_TEST(p_held_item_burnt_berry_cures_freeze);
+    RUN_TEST(p_held_item_ice_berry_cures_burn);
+    RUN_TEST(p_held_item_miracleberry_cures_major_status_only);
+    RUN_TEST(p_held_item_miracleberry_cures_confusion_only);
+    RUN_TEST(p_held_item_miracleberry_cures_both_simultaneously);
+    RUN_TEST(p_held_item_bitter_berry_clears_confusion_and_counter);
+    RUN_TEST(p_held_item_bitter_berry_retained_when_not_confused);
+    RUN_TEST(p_held_item_mysteryberry_restores_first_depleted_move);
+    RUN_TEST(p_held_item_mysteryberry_only_first_depleted);
+    RUN_TEST(p_held_item_mysteryberry_no_activation_when_no_depleted);
+    RUN_TEST(p_held_item_mysteryberry_pp_capped_at_max);
+    RUN_TEST(p_held_item_consumption_persists_to_party_berry);
+    RUN_TEST(p_held_item_consumption_persists_to_party_status_berry);
+    RUN_TEST(p_held_item_consumption_persists_to_party_mysteryberry);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

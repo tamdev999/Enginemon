@@ -195,23 +195,22 @@ static void semanticize_item(
 
     case HELD_HEAL_POISON:
         // PSNCUREBERRY — cure Poison (Status::Poison) at end of turn.
-        // param encodes Status::Poison in the runtime; we store the raw param=0
-        // and let the runtime use the Status enum. To avoid Status enum knowledge
-        // here, we use a flat param value matching Status::Poison = 3 (engine enum).
+        // held_param is cast directly to Status enum in apply_held_item_end_of_turn.
+        // Status::Poison = 2 (None=0, Sleep=1, Poison=2, BadPoison=3, Burn=4, Freeze=5, Paralysis=6)
         e.held_effect_type = HT::StatusCure;
-        e.held_param = 3;  // Status::Poison = 3 in engine
+        e.held_param = 2;  // Status::Poison = 2 in engine
         e.consumable = true;
         break;
     case HELD_HEAL_FREEZE:
-        // Burnt Berry — cure Freeze (Status::Freeze = 4).
+        // Burnt Berry — cure Freeze (Status::Freeze = 5).
         e.held_effect_type = HT::StatusCure;
-        e.held_param = 4;  // Status::Freeze = 4 in engine
+        e.held_param = 5;  // Status::Freeze = 5 in engine
         e.consumable = true;
         break;
     case HELD_HEAL_BURN:
-        // Ice Berry — cure Burn (Status::Burn = 2).
+        // Ice Berry — cure Burn (Status::Burn = 4).
         e.held_effect_type = HT::StatusCure;
-        e.held_param = 2;  // Status::Burn = 2 in engine
+        e.held_param = 4;  // Status::Burn = 4 in engine
         e.consumable = true;
         break;
     case HELD_HEAL_SLEEP:
@@ -221,9 +220,9 @@ static void semanticize_item(
         e.consumable = true;
         break;
     case HELD_HEAL_PARALYZE:
-        // PRZCureBerry — cure Paralysis (Status::Paralysis = 5).
+        // PRZCureBerry — cure Paralysis (Status::Paralysis = 6).
         e.held_effect_type = HT::StatusCure;
-        e.held_param = 5;  // Status::Paralysis = 5 in engine
+        e.held_param = 6;  // Status::Paralysis = 6 in engine
         e.consumable = true;
         break;
     case HELD_HEAL_STATUS:
