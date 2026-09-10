@@ -186,7 +186,14 @@ static constexpr uint8_t BRLS_SCHEMA_VERSION = 3;
 //   u8 boosted_type (TypeId; 0xFF = none),
 //   u16 species_restriction LE (SpeciesId; 0 = none),
 //   u8 flags (bit 0 = consumable)
-static constexpr uint8_t ITDT_SCHEMA_VERSION = 1;
+// v2: held_effect_raw removed; per-entry shrinks from 13 to 12 bytes.
+//   u16 item_id LE, u16 price LE, u8 held_param,
+//   u8 permissions, u8 pocket,
+//   u8 held_effect_type (HeldItemEffectType enum),
+//   u8 boosted_type (TypeId; 0xFF = none),
+//   u16 species_restriction LE (SpeciesId; 0 = none),
+//   u8 flags (bit 0 = consumable)
+static constexpr uint8_t ITDT_SCHEMA_VERSION = 2;
 
 struct TocEntry {
     ChunkType type;

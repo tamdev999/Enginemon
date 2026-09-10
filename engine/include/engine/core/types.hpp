@@ -336,8 +336,7 @@ struct ItemData {
 
     ItemPocket pocket;
     uint16_t price;
-    uint8_t held_effect;    // Effect when held in battle (0 = none)
-    uint8_t held_param;     // Parameter for held effect
+    uint8_t held_param;     // Semantic parameter for held effect (e.g. HP restored, chance threshold)
     uint8_t field_effect;   // Effect when used from menu (0 = none)
 
     bool is_key_item;

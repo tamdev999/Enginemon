@@ -1122,14 +1122,14 @@ void PackageWriter::add_item_data(const std::vector<ItemDataEntry>& entries) {
                 std::format("PackageWriter::add_item_data: duplicate ItemId {}", e.id));
         }
     }
-    // Wire format (ITDT v1): u8 version, u32 count LE, per entry 13 bytes:
-    //   u16 item_id, u16 price, u8 held_effect_raw, u8 held_param,
+    // Wire format (ITDT v2): u8 version, u32 count LE, per entry 12 bytes:
+    //   u16 item_id, u16 price, u8 held_param,
     //   u8 permissions, u8 pocket,
     //   u8 held_effect_type, u8 boosted_type,
     //   u16 species_restriction LE, u8 flags (bit0=consumable)
     const auto count32 = static_cast<uint32_t>(entries.size());
     std::vector<uint8_t> buf;
-    buf.reserve(1 + 4 + entries.size() * 13);
+    buf.reserve(1 + 4 + entries.size() * 12);
     buf.push_back(enginemon::ITDT_SCHEMA_VERSION);
     buf.push_back(static_cast<uint8_t>(count32 & 0xFF));
     buf.push_back(static_cast<uint8_t>((count32 >>  8) & 0xFF));
@@ -1141,7 +1141,6 @@ void PackageWriter::add_item_data(const std::vector<ItemDataEntry>& entries) {
         buf.push_back(static_cast<uint8_t>((id16 >> 8) & 0xFF));
         buf.push_back(static_cast<uint8_t>(e.price & 0xFF));
         buf.push_back(static_cast<uint8_t>((e.price >> 8) & 0xFF));
-        buf.push_back(e.held_effect_raw);
         buf.push_back(e.held_param);
         buf.push_back(e.permissions);
         buf.push_back(e.pocket);

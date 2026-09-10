@@ -129,7 +129,6 @@ static void semanticize_item(
     e.id              = static_cast<enginemon::ItemId>(item_id);
     e.price           = static_cast<uint16_t>(rec[ITEMATTR_PRICE_LO]) |
                         (static_cast<uint16_t>(rec[ITEMATTR_PRICE_HI]) << 8);
-    e.held_effect_raw = rec[ITEMATTR_EFFECT];
     e.held_param      = rec[ITEMATTR_PARAM];
     e.permissions     = rec[ITEMATTR_PERMS];
     e.pocket          = rec[ITEMATTR_POCKET] & 0x0Fu;  // low nibble is pocket
@@ -140,9 +139,9 @@ static void semanticize_item(
     e.species_restriction  = enginemon::SPECIES_NONE;
     e.consumable           = false;
 
-    const uint8_t eff = e.held_effect_raw;
+    const uint8_t eff = rec[ITEMATTR_EFFECT];  // raw HELD_* byte (Crystal-frontend only)
 
-    // ── Species-restricted items: dispatched by item ID, not held_effect_raw ─
+    // ── Species-restricted items: dispatched by item ID, not HELD_* byte ──
     // LUCKY_PUNCH and BERSERK_GENE have HELD_NONE in the attributes table.
     // STICK also has HELD_NONE. These require item-ID-based special-casing
     // in the compiler (frontend-only). The runtime sees semantic types only.
@@ -165,7 +164,7 @@ static void semanticize_item(
         return;
     }
 
-    // ── held_effect_raw dispatch ─────────────────────────────────────────────
+    // ── HELD_* byte dispatch (all Crystal-frontend-only; never escapes this file) ──
     switch (eff) {
     case HELD_NONE:
         // Most items fall here; held_effect_type stays None.

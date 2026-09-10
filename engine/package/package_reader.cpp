@@ -1433,7 +1433,6 @@ PackageReader::load_item_registry() const {
         if (!in.good() && !in.eof()) return std::nullopt;
         const uint16_t price = read_le<uint16_t>(in);
         if (!in.good() && !in.eof()) return std::nullopt;
-        const uint8_t held_effect_raw = static_cast<uint8_t>(in.get());
         const uint8_t held_param      = static_cast<uint8_t>(in.get());
         const uint8_t permissions     = static_cast<uint8_t>(in.get());
         const uint8_t pocket_raw      = static_cast<uint8_t>(in.get());
@@ -1457,7 +1456,6 @@ PackageReader::load_item_registry() const {
         ItemData d;
         d.id                  = mid;
         d.price               = price;
-        d.held_effect         = held_effect_raw;
         d.held_param          = held_param;
         d.field_effect        = 0u;
         d.is_key_item         = ((permissions & 0x80u) != 0);  // CANT_TOSS bit in Crystal

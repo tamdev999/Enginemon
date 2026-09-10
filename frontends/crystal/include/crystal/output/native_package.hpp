@@ -212,8 +212,7 @@ public:
     struct ItemDataEntry {
         enginemon::ItemId    id;                // Item ID (1-based; 0 = NO_ITEM)
         uint16_t             price;             // Raw price from ROM
-        uint8_t              held_effect_raw;   // Raw HELD_* byte (Crystal-side only)
-        uint8_t              held_param;        // Raw parameter
+        uint8_t              held_param;        // Semantic parameter (HP restored, chance threshold, etc.)
         uint8_t              permissions;       // CANT_SELECT etc. (Crystal-side)
         uint8_t              pocket;            // 0=ITEM,1=BALL,2=KEY,3=TM
         // Semanticized fields (no raw Crystal HELD_* values in engine):
