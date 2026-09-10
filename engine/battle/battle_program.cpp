@@ -612,6 +612,16 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                             static_cast<uint8_t>(md.type),
                             md.effect_id, *rules_);
 
+                    // SolarBeam rain penalty: halves_in_rain is set by the Crystal
+                    // frontend for EFFECT_SOLARBEAM. The WeatherMoveModifiers table
+                    // lookup via effect_id is dead (raw Crystal ID vs semantic ID);
+                    // this explicit check replaces it with no raw-ID dispatch.
+                    // Source: suiCune DoWeatherModifiers WeatherMoveModifiers entry
+                    //   {WEATHER_RAIN, EFFECT_SOLARBEAM, multiplier=5 (×0.5)}.
+                    if (md.effect_desc.halves_in_rain && field_.weather == Weather::Rain) {
+                        damage = std::max(1, damage / 2);
+                    }
+
                     if (stab) {
                         damage += damage / 2;
                         damage = std::clamp(damage, 2, 999);
@@ -1284,17 +1294,36 @@ int Battle::execute_program_set_volatile(const BOp& op, BattlePokemon& user,
 
             if (op.param8d == 5u || op.param8d == 8u) {
                 // Protect (param8d=5) or Endure (param8d=8): probability check.
-                // Crystal ProtectChance: success only if user went first this turn.
-                // Also halve probability each consecutive use.
-                // Check user went first: player_goes_first_ XOR user_is_player gives
-                // whether this user acted first.
+                // Source: suiCune move_effects/protect.c ProtectChance()
+                //
+                // Crystal exact behavior:
+                //   1. Fail if opponent went first this turn.
+                //   2. Fail if user has an active Substitute.
+                //   3. threshold = 0xFF >> consecutive_count
+                //   4. If threshold == 0: fail, reset counter.
+                //   5. Loop: roll = BattleRandom(); if roll == 0 → resample
+                //   6. Success iff (roll - 1) < threshold  (so P = threshold/255)
+                //   7. On failure: reset consecutive counter to 0.
+                //   8. On success: increment consecutive counter.
+                //
+                // Consequences:
+                //   count=0: 255/255 = 100% (zero always resampled)
+                //   count=1: 127/255 ≈ 49.8%
+                //   count=2: 63/255 ≈ 24.7%
+                //   ...
+                //   count=8: threshold=0 → always fail, reset
                 const bool user_went_first = (user_is_player == player_goes_first_);
                 if (!user_went_first) {
                     message(md.name + " — failed!");
+                    user.protect_consecutive = 0;
                     return 2;
                 }
-                // Probability: 0xFF >> protect_consecutive (halves each use, min 0).
-                // If protect_counter == 0: always succeeds (255/256 ≈ 100%).
+                // Crystal: fail if user has Substitute (BattleCommand_CheckHit_DrainSub gate).
+                if (user.has_volatile(VolatileStatus::Substitute)) {
+                    message(md.name + " — failed!");
+                    user.protect_consecutive = 0;
+                    return 2;
+                }
                 const uint8_t threshold = (user.protect_consecutive < 8)
                     ? static_cast<uint8_t>(0xFF >> user.protect_consecutive) : 0u;
                 if (threshold == 0u) {
@@ -1302,8 +1331,11 @@ int Battle::execute_program_set_volatile(const BOp& op, BattlePokemon& user,
                     user.protect_consecutive = 0;
                     return 2;
                 }
-                const uint8_t roll = rng_.next_byte();
-                if (roll >= threshold) {
+                // Crystal: resample until non-zero, then check (roll-1) < threshold.
+                // This gives P(success) = threshold/255 (denominator 255 not 256).
+                uint8_t roll;
+                do { roll = rng_.next_byte(); } while (roll == 0u);
+                if (static_cast<uint8_t>(roll - 1u) >= threshold) {
                     message(md.name + " — failed!");
                     user.protect_consecutive = 0;
                     return 2;

@@ -98,19 +98,15 @@ static void pack_effect_desc(const enginemon::SemanticEffectDescription& d,
     pb(d.is_perish_song,        60);
     pb(d.is_attract,            61);
     pb(d.is_baton_pass,         62);
-    pb(d.is_heal_bell,          63);
-    // is_endure and is_rage: packed as bits in byte [63] high nibble
-    // to fit within 64 bytes without expanding the schema further.
-    // byte [63] bit layout: [7:4] = {is_endure, is_rage, 0, 0}, [3:0] = is_heal_bell value
-    // CORRECTION: store is_endure at [63] and is_rage in a separate encoding.
-    // Actually: 64 bytes gives us [0..63] = 64 slots. is_heal_bell is at [63].
-    // is_endure and is_rage need 2 more bytes. Use a bitfield in [63]:
-    // byte [63] bit layout: [0]=is_heal_bell, [1]=is_endure, [2]=is_rage, [3]=has_effectchance_phase
+    // byte [63] is a bitfield: [0]=is_heal_bell, [1]=is_endure, [2]=is_rage,
+    //   [3]=has_effectchance_phase, [4]=crash_on_miss, [5]=halves_in_rain
     raw[63] = static_cast<uint8_t>(
         (d.is_heal_bell           ? 0x01u : 0u) |
         (d.is_endure              ? 0x02u : 0u) |
         (d.is_rage                ? 0x04u : 0u) |
-        (d.has_effectchance_phase ? 0x08u : 0u));
+        (d.has_effectchance_phase ? 0x08u : 0u) |
+        (d.crash_on_miss          ? 0x10u : 0u) |
+        (d.halves_in_rain         ? 0x20u : 0u));
 }
 
 bool semanticize_move_entries(
@@ -174,6 +170,26 @@ bool semanticize_move_entries(
                         // Any other effect that somehow produced MoveFixed via 0x3F keeps it.
                         break;
                 }
+            }
+
+            // ── Jump Kick / Hi Jump Kick crash damage on miss ────────────────
+            // Source: pokecrystal GetFailureResultText EFFECT_JUMP_KICK path:
+            // when accuracy misses and effect == JUMP_KICK, wCurDamage is preserved
+            // and crash = wCurDamage >> 3 (min 1) deals to user.
+            // This must be set based on raw_crystal_effect (not script opcode).
+            if (e.raw_crystal_effect == crystal::EffectId::JUMP_KICK) {
+                desc.crash_on_miss = true;
+            }
+
+            // ── SolarBeam rain penalty ────────────────────────────────────────
+            // Source: suiCune DoWeatherModifiers WeatherMoveModifiers table:
+            //   {weather=WEATHER_RAIN, effect=EFFECT_SOLARBEAM, multiplier=5 (×0.5)}
+            // Crystal halves SolarBeam damage in Rain. The raw-effect-ID lookup in
+            // apply_weather_modifier() is dead because runtime uses SemEffect IDs.
+            // Encode this as a semantic bool so runtime can check it without any
+            // Crystal raw effect-ID knowledge.
+            if (e.raw_crystal_effect == crystal::EffectId::SOLARBEAM) {
+                desc.halves_in_rain = true;
             }
 
             // ── Hard fail: unrecognized opcode in script ───────────────────────

@@ -930,6 +930,15 @@ PackageReader::load_move_registry() const {
 
         // SemanticEffectDescription — 43 bytes (layout matches write side)
         SemanticEffectDescription desc;
+
+        // P2-3: Validate each enum field before casting. Malformed packages
+        // (corrupt data or mismatched compiler/runtime versions) must fail closed
+        // before any out-of-range enum value reaches runtime dispatch.
+        // Helper: returns false if raw_val exceeds the maximum valid enumerator.
+        auto valid_enum = [](uint8_t raw_val, uint8_t max_valid) -> bool {
+            return raw_val <= max_valid;
+        };
+
         desc.has_standard_damage   = read_bool();  // [0]
         desc.has_recoil            = read_bool();  // [1]
         desc.has_drain             = read_bool();  // [2]
@@ -938,15 +947,24 @@ PackageReader::load_move_registry() const {
         desc.is_ohko               = read_bool();  // [5]
         desc.cannot_ko             = read_bool();  // [6]
         desc.sets_recharge         = read_bool();  // [7]
-        desc.constant_damage_source = static_cast<ConstantDamageSource>(read_u8());  // [8]
-        desc.set_power_source       = static_cast<SetPowerSource>(read_u8());         // [9]
-        desc.conditional_double     = static_cast<ConditionalDoubleCondition>(read_u8()); // [10]
-        desc.secondary_effect       = static_cast<SecondaryEffectType>(read_u8());    // [11]
-        desc.primary_status         = static_cast<PrimaryStatusType>(read_u8());      // [12]
-        desc.stat_change            = static_cast<StatChangeTarget>(read_u8());       // [13]
-        desc.heal_source            = static_cast<HealSource>(read_u8());             // [14]
-        desc.set_screen             = static_cast<ScreenType>(read_u8());             // [15]
-        desc.set_weather            = static_cast<WeatherSetType>(read_u8());         // [16]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 5)) return std::nullopt;  // ConstantDamageSource max=5
+          desc.constant_damage_source = static_cast<ConstantDamageSource>(v); }  // [8]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 5)) return std::nullopt;  // SetPowerSource max=5
+          desc.set_power_source = static_cast<SetPowerSource>(v); }               // [9]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 3)) return std::nullopt;  // ConditionalDoubleCondition max=3
+          desc.conditional_double = static_cast<ConditionalDoubleCondition>(v); } // [10]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 19)) return std::nullopt; // SecondaryEffectType max=19
+          desc.secondary_effect = static_cast<SecondaryEffectType>(v); }          // [11]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 5)) return std::nullopt;  // PrimaryStatusType max=5
+          desc.primary_status = static_cast<PrimaryStatusType>(v); }              // [12]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 32)) return std::nullopt; // StatChangeTarget max=32
+          desc.stat_change = static_cast<StatChangeTarget>(v); }                  // [13]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 2)) return std::nullopt;  // HealSource max=2
+          desc.heal_source = static_cast<HealSource>(v); }                        // [14]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 2)) return std::nullopt;  // ScreenType max=2
+          desc.set_screen = static_cast<ScreenType>(v); }                         // [15]
+        { uint8_t v = read_u8(); if (!valid_enum(v, 3)) return std::nullopt;  // WeatherSetType max=3
+          desc.set_weather = static_cast<WeatherSetType>(v); }                    // [16]
         desc.sets_spikes           = read_bool();  // [17]
         desc.is_multi_hit          = read_bool();  // [18]
         desc.is_charge             = read_bool();  // [19]
@@ -994,13 +1012,15 @@ PackageReader::load_move_registry() const {
         desc.is_perish_song        = read_bool();  // [60]
         desc.is_attract            = read_bool();  // [61]
         desc.is_baton_pass         = read_bool();  // [62]
-        // [63] is a bitfield: bit0=is_heal_bell, bit1=is_endure, bit2=is_rage, bit3=has_effectchance_phase
+        // [63] is a bitfield: bit0=is_heal_bell, bit1=is_endure, bit2=is_rage, bit3=has_effectchance_phase, bit4=crash_on_miss, bit5=halves_in_rain
         {
             const uint8_t b63 = read_u8();
             desc.is_heal_bell            = (b63 & 0x01u) != 0;
             desc.is_endure               = (b63 & 0x02u) != 0;
             desc.is_rage                 = (b63 & 0x04u) != 0;
             desc.has_effectchance_phase  = (b63 & 0x08u) != 0;
+            desc.crash_on_miss           = (b63 & 0x10u) != 0;
+            desc.halves_in_rain          = (b63 & 0x20u) != 0;
         }
         if (!in.good() && !in.eof()) return std::nullopt;
 
@@ -1038,7 +1058,11 @@ PackageReader::load_move_registry() const {
                 md.effect_program.ops.reserve(op_count);
                 for (uint16_t oi = 0; oi < op_count; ++oi) {
                     BOp op;
-                    op.kind    = static_cast<BOpKind>(read_u8());
+                    // P2-3: Validate BOpKind before cast. Valid range: 1–12 (Damage..TransferItem).
+                    // A raw value of 0 or > 12 indicates a corrupt or version-mismatched package.
+                    { uint8_t k = read_u8();
+                      if (k < 1u || k > 12u) return std::nullopt;
+                      op.kind = static_cast<BOpKind>(k); }
                     op.param8a = read_u8();
                     op.param8b = read_u8();
                     op.param8c = read_u8();

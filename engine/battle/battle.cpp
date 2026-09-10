@@ -1,4 +1,4 @@
-﻿// engine/battle/battle.cpp
+// engine/battle/battle.cpp
 // Gen 2 battle system Î“Ã‡Ã¶ turn-based Pokemon battles
 //
 // Architecture note:
@@ -893,8 +893,8 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
             case ConstantDamageSource::ReversalFlail: {
                 // hp_bar_pixels = floor(current_hp Ãƒâ€” HP_BAR_MULT / max_hp)
                 const uint8_t mult = rules_ ? rules_->get_reversal_hp_bar_mult() : uint8_t{48};
-                const int32_t hp_pixels = (target.stats.hp > 0)
-                    ? static_cast<int32_t>(target.stats.hp) * mult / target.stats.max_hp
+                const int32_t hp_pixels = (user.stats.hp > 0)
+                    ? static_cast<int32_t>(user.stats.hp) * mult / user.stats.max_hp
                     : 0;
                 const uint8_t hp_px = static_cast<uint8_t>(std::clamp(hp_pixels, 0, 255));
                 const uint8_t power = rules_ ? rules_->get_reversal_power(hp_px) : uint8_t{20};

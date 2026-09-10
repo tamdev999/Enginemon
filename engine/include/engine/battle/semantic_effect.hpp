@@ -371,6 +371,20 @@ struct SemanticEffectDescription {
     // Set by switchturn(0x93) appearing before attackup2(0x77) in Swagger's script.
     bool swagger_stat_change = false;
 
+    // Jump Kick / Hi Jump Kick — crash damage on accuracy miss.
+    // Source: pokecrystal GetFailureResultText EFFECT_JUMP_KICK path.
+    // On miss: user takes max(1, computed_hit_damage >> 3). No crash if type immune.
+    // Set via raw_effect == EffectId::JUMP_KICK in semanticizer post-fixup.
+    bool crash_on_miss = false;
+
+    // SolarBeam / two-turn charge moves that are halved in Rain.
+    // Source: suiCune DoWeatherModifiers WeatherMoveModifiers table — EFFECT_SOLARBEAM
+    // entry {weather=Rain, effect=151, multiplier=5 (×0.5)}.
+    // Set in the semanticizer for EFFECT_SOLARBEAM (raw crystal effect 151).
+    // Runtime checks this flag and applies ×0.5 when field_.weather == Rain.
+    // This replaces the dead raw-effect-ID lookup in apply_weather_modifier().
+    bool halves_in_rain = false;
+
     // Splash — explicit no-op (Splash does nothing; is_supported=true, immediate Success).
     bool is_splash = false;
 

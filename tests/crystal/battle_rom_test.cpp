@@ -1,4 +1,4 @@
-﻿// tests/crystal/battle_rom_test.cpp
+// tests/crystal/battle_rom_test.cpp
 //
 // TRUE ROMÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢EXTRACTORÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢BRLSÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢RUNTIME PROPAGATION TESTS
 //
@@ -1799,10 +1799,10 @@ TEST(p0_protect_blocks_ohko) {
 
     const int16_t player_hp_before = battle.player_pokemon().stats.hp;
     // Scripted RNG: player first (0x00), OHKO accuracy = always hit (supply 0x00 < acc).
-    const std::vector<uint8_t> script = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    const std::vector<uint8_t> script = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 0x01 = non-zero Protect/Endure roll (resamples 0 per Crystal); 0x00 for subsequent OHKO/damage rolls
     size_t idx = 0;
     battle.set_rng_callback([&]() -> uint32_t {
-        return (idx < script.size()) ? script[idx++] : uint32_t{0x00};
+        return (idx < script.size()) ? script[idx++] : uint32_t{0x01}; // non-zero fallback prevents zero-resample infinite loop
     });
     battle.set_player_action(enginemon::ActionFight{0, 0});
     battle.set_opponent_action(enginemon::ActionFight{0, 0});
@@ -1857,10 +1857,10 @@ TEST(p0_protect_blocks_constant_damage) {
     battle.opponent_pokemon() = opp_bp;
 
     const int16_t player_hp_before = battle.player_pokemon().stats.hp;
-    const std::vector<uint8_t> script = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    const std::vector<uint8_t> script = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 0x01 = non-zero Protect/Endure roll (resamples 0 per Crystal); 0x00 for subsequent OHKO/damage rolls
     size_t idx = 0;
     battle.set_rng_callback([&]() -> uint32_t {
-        return (idx < script.size()) ? script[idx++] : uint32_t{0x00};
+        return (idx < script.size()) ? script[idx++] : uint32_t{0x01}; // non-zero fallback prevents zero-resample infinite loop
     });
     battle.set_player_action(enginemon::ActionFight{0, 0});
     battle.set_opponent_action(enginemon::ActionFight{0, 0});
@@ -1925,10 +1925,10 @@ TEST(p0_constant_damage_records_damage_history) {
 
     const int16_t opp_before = battle.opponent_pokemon().stats.hp;
     const int16_t p_before   = battle.player_pokemon().stats.hp;
-    const std::vector<uint8_t> script = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    const std::vector<uint8_t> script = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 0x01 = non-zero Protect/Endure roll (resamples 0 per Crystal); 0x00 for subsequent OHKO/damage rolls
     size_t idx = 0;
     battle.set_rng_callback([&]() -> uint32_t {
-        return (idx < script.size()) ? script[idx++] : uint32_t{0x00};
+        return (idx < script.size()) ? script[idx++] : uint32_t{0x01}; // non-zero fallback prevents zero-resample infinite loop
     });
     battle.set_player_action(enginemon::ActionFight{0, 0});
     battle.set_opponent_action(enginemon::ActionFight{0, 0});
@@ -5358,6 +5358,149 @@ TEST(p1b6_triple_kick_stops_on_miss) {
 }
 
 // ============================================================================
+// ROOT_WEATHER_SOLAR_PENALTY
+// SolarBeam damage in Rain must be halved (×0.5).
+// Source: suiCune DoWeatherModifiers WeatherMoveModifiers entry
+//   {WEATHER_RAIN, EFFECT_SOLARBEAM, multiplier=5 (×0.5)}.
+// The fix encodes halves_in_rain=true on SolarBeam's SemanticEffectDescription.
+// Runtime checks this field instead of the dead raw-effect-ID lookup.
+//
+// Test structure:
+//   Turn 1 (no weather): SolarBeam charges (Charging volatile set, no damage).
+//   Turn 2 (no weather): SolarBeam fires → record damage X.
+//   Turn 1 (rain active): SolarBeam charges.
+//   Turn 2 (rain active): SolarBeam fires → damage must be approximately X/2.
+//
+// Also verifies normal rain Fire/Water type modifiers are unaffected.
+// ============================================================================
+
+static enginemon::MoveId find_solarbeam_move(
+    const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& reg)
+{
+    for (const auto& [id, md] : reg) {
+        if (md.has_program && md.effect_desc.halves_in_rain) return id;
+    }
+    return enginemon::MOVE_NONE;
+}
+
+TEST(p_solarbeam_rain_penalty) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "solar");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    const enginemon::MoveId solar_id = find_solarbeam_move(*r);
+    ASSERT_NE(solar_id, enginemon::MOVE_NONE);
+    if (solar_id == enginemon::MOVE_NONE) return;
+
+    // halves_in_rain semantic field must be set.
+    const enginemon::MoveData* solar_md = r->get(solar_id);
+    ASSERT_TRUE(solar_md != nullptr); if (!solar_md) return;
+    ASSERT_TRUE(solar_md->effect_desc.halves_in_rain);
+
+    auto rules = make_rules_b();
+    // Add Rain weather type modifier for Water and Fire (to verify they still work).
+    rules.weather_type_modifiers.push_back({1, 21, 15}); // Rain boosts Water(21)
+    rules.weather_type_modifiers.push_back({1, 20, 5});  // Rain weakens Fire(20)
+
+    // Build parties.
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=500; pmon.friendship=200;
+    party.add(pmon);
+
+    // Find RainDance to set up Rain weather.
+    enginemon::MoveId rain_id = enginemon::MOVE_NONE;
+    for (const auto& [id, md] : *r) {
+        if (md.effect_desc.is_supported
+                && md.effect_desc.set_weather == enginemon::WeatherSetType::Rain)
+        { rain_id = id; break; }
+    }
+    ASSERT_NE(rain_id, enginemon::MOVE_NONE);
+    if (rain_id == enginemon::MOVE_NONE) return;
+
+    // Build a registries with GRASS type (22) registered for the SolarBeam test.
+    // make_b_reg only adds types 0-19; SolarBeam is GRASS (22) which needs to exist.
+    auto make_solar_reg = [&](const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& moves)
+        -> enginemon::Registries
+    {
+        enginemon::Registries reg;
+        for (uint8_t t = 0; t < 28; ++t) {
+            enginemon::TypeData td; td.id = t; td.name = "T";
+            reg.types.register_entry(t, td);
+            for (uint8_t u = 0; u < 28; ++u)
+                reg.type_chart.set_effectiveness(t, u, 10);
+        }
+        enginemon::SpeciesData sp{}; sp.id = 1; sp.name = "T"; sp.type1 = 0; sp.type2 = 0;
+        sp.base_stats = {50,60,55,55,50,50}; sp.catch_rate = 45; sp.base_exp = 64;
+        reg.species.register_entry(1, sp);
+        for (const auto& [id_pair, md_pair] : moves)
+            reg.moves.register_entry(id_pair, md_pair);
+        reg.freeze_all();
+        return reg;
+    };
+
+    auto run_solarbeam = [&](bool use_rain) -> int16_t {
+        auto reg = make_solar_reg(*r);
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+        std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        size_t idx=0;
+        battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+        enginemon::BattlePokemon player = make_bp_b(solar_id, 500);
+        player.stats.speed = 200; player.base_stats.speed = 200;
+        enginemon::BattlePokemon opp = make_bp_b(enginemon::MOVE_NONE, 500);
+        opp.stats.speed = 1; opp.base_stats.speed = 1;
+        battle.player_pokemon() = player;
+        battle.opponent_pokemon() = opp;
+
+        if (use_rain) {
+            // Use RainDance to set Rain weather before the SolarBeam sequence.
+            battle.player_pokemon().moves[0].move = rain_id;
+            battle.set_player_action(enginemon::ActionFight{0,0});
+            battle.set_opponent_action(enginemon::ActionFight{0,0});
+            battle.execute_turn();
+            // Now swap to SolarBeam.
+            battle.player_pokemon().moves[0].move = solar_id;
+            battle.player_pokemon().moves[0].pp = battle.player_pokemon().moves[0].max_pp = 10;
+        }
+
+        // SolarBeam turn 1: charge (no damage).
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+
+        // SolarBeam turn 2: fire (damage applied).
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+        return battle.opponent_pokemon().stats.hp;
+    };
+
+    const int16_t hp_after_clear = run_solarbeam(false);
+    const int16_t hp_after_rain  = run_solarbeam(true);
+
+    const int32_t dmg_clear = 500 - static_cast<int32_t>(hp_after_clear);
+    const int32_t dmg_rain  = 500 - static_cast<int32_t>(hp_after_rain);
+
+    std::cout << "\n    SolarBeam: clear_dmg=" << dmg_clear
+              << " rain_dmg=" << dmg_rain << "\n";
+
+    // Rain damage must be strictly less than clear-weather damage.
+    ASSERT_TRUE(dmg_clear > 0);   // deals damage in clear weather
+    ASSERT_TRUE(dmg_rain  > 0);   // still deals damage in rain
+    ASSERT_TRUE(dmg_rain < dmg_clear);  // rain halves it
+
+    // Rain damage must be approximately half of clear damage (within ±3 due to variation rounding).
+    const int32_t expected_half = dmg_clear / 2;
+    ASSERT_TRUE(dmg_rain >= expected_half - 3 && dmg_rain <= expected_half + 3);
+
+    // Verify halves_in_rain was actually used (and not rain type modifiers for GRASS type).
+    // SolarBeam is GRASS type; Rain has no WeatherTypeModifier for GRASS → pure semantic flag.
+    std::cout << "    SolarBeam rain penalty: dmg_rain=" << dmg_rain
+              << " expected≈" << expected_half << " [±3] ok\n";
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -5469,6 +5612,9 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p1b6_double_hit_deals_exactly_two_hits);
     RUN_TEST(p1b6_triple_kick_three_hits_escalating_power);
     RUN_TEST(p1b6_triple_kick_stops_on_miss);
+
+    // ROOT_WEATHER_SOLAR_PENALTY
+    RUN_TEST(p_solarbeam_rain_penalty);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

@@ -4174,6 +4174,266 @@ TEST(ohko_sub_absorb_real_hp_unchanged_history_zero) {
     }
 }
 
+// =============================================================================
+// ROOT_REVERSAL_HP_DIRECTION regression tests
+// Reversal/Flail power is determined by the USER's HP percentage, not the
+// target's. Source: suiCune BattleCommand_ConstantDamage EFFECT_REVERSAL reads
+// wBattleMon.hp/maxHP (attacker), not wEnemyMon.hp.
+// =============================================================================
+
+TEST(reversal_user_low_hp_target_full_high_power) {
+    using namespace enginemon;
+    // User at 1/500 HP (very low) → hp_px=0 → power=200 (max power)
+    // Target at 500/500 HP (full) → would give hp_px=48 → power=20 (min power) under OLD bug
+    // This test FAILS under the old target-HP implementation.
+    MoveData md = make_reversal_move();
+    auto reg   = make_b_registries(md);
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    rules.reversal_table[0] = {1, 200};   // hp_px=0 → power=200
+    rules.reversal_table[5] = {48, 20};   // hp_px≥48 → power=20
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(179, 1, 500);    // 1/500 HP = very low
+    BattlePokemon opp  = make_b_pokemon(1, 500, 500);   // 500/500 HP = full
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    // With user low HP, power=200 → high damage, opp HP should be significantly reduced.
+    // Under old bug (target HP used): target at 500/500 → hp_px=48 → power=20 → small damage.
+    // With correct user HP: user at 1/500 → hp_px=0 → power=200 → large damage.
+    const int16_t opp_after = battle.opponent_pokemon().stats.hp;
+    ASSERT_TRUE(opp_after < int16_t{400});  // power=200 must deal significant damage
+    std::cout << "  [Reversal user-low HP (1/500) target-full (500/500): opp_hp=" << opp_after
+              << " < 400, high power confirmed]\n";
+}
+
+TEST(reversal_user_full_hp_target_low_no_high_power) {
+    using namespace enginemon;
+    // User at 500/500 HP (full) → hp_px=48 → power=20 (min power)
+    // Target at 100/500 HP — under old bug (target HP used): hp_px=floor(100×48/500)=9 → power=200
+    // Under correct fix (user HP used): user at 500/500 → hp_px=48 → power=20 → modest damage
+    // This test FAILS under the old target-HP implementation (target low HP → power=200 → KO target).
+    MoveData md = make_reversal_move();
+    auto reg   = make_b_registries(md);
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    rules.reversal_table[0] = {9,  200};  // hp_px≤9  → power=200 (old bug path for target at 100/500)
+    rules.reversal_table[5] = {48, 20};   // hp_px≤48 → power=20  (correct path for user at 500/500)
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(179, 500, 500);  // 500/500 HP = full → hp_px=48 → power=20
+    BattlePokemon opp  = make_b_pokemon(1, 100, 500);   // 100/500 HP — under old bug → hp_px=9 → power=200
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    const int16_t opp_before = battle.opponent_pokemon().stats.hp;
+    battle.execute_turn();
+    const int16_t opp_after = battle.opponent_pokemon().stats.hp;
+    const int32_t dmg = opp_before - opp_after;
+    // Under correct fix: user full HP → power=20 → small damage (≤30 at level50/attack60).
+    // Under old bug: target 100/500 HP → hp_px=9 → power=200 → large damage (≥200), likely faint.
+    ASSERT_TRUE(dmg < int32_t{50});  // power=20 deals small damage (≤30 typical at level50)
+    ASSERT_TRUE(opp_after > int16_t{0});  // target survives with power=20
+    std::cout << "  [Reversal user-full HP (500/500) target-low (100/500): dmg=" << dmg
+              << " < 50, low power confirmed]\n";
+}
+
+TEST(flail_user_low_hp_target_full_high_power) {
+    using namespace enginemon;
+    // Same directionality proof for Flail (same effect, Normal type user).
+    MoveData md = make_flail_move();
+    auto reg   = make_b_registries(md);
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    rules.reversal_table[0] = {1, 200};
+    rules.reversal_table[5] = {48, 20};
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(175, 1, 500);   // 1/500 HP
+    BattlePokemon opp  = make_b_pokemon(1, 500, 500);  // 500/500 HP
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    const int16_t opp_after = battle.opponent_pokemon().stats.hp;
+    ASSERT_TRUE(opp_after < int16_t{400});
+    std::cout << "  [Flail user-low HP (1/500) target-full (500/500): opp_hp=" << opp_after
+              << " < 400, high power confirmed]\n";
+}
+
+// =============================================================================
+// ROOT_PROTECT_DECAY regression tests
+// Crystal exact ProtectChance: resample zero, check (roll-1) < threshold.
+// P(count=0)=100%, P(count=1)=127/255, ..., P(count=8)=0%.
+// Substitute gate: Protect/Endure fail if user has active Substitute.
+// =============================================================================
+
+// Helpers: build Protect and Endure move data
+static MoveData make_protect_move() {
+    using namespace enginemon; using namespace crystal;
+    SemanticEffectDescription desc; desc.is_protect = true;
+    DecodedEffectScript sc; sc.effect_id = 111;
+    EffectCommandByte sb; sb.value = 0xFF; sc.bytes.push_back(sb);
+    auto pr = EffectProgramCompiler::compile(desc, sc, 111, 0);
+    MoveData mv; mv.id=210; mv.name="Protect"; mv.type=1;
+    mv.power=0; mv.accuracy=0xFF; mv.pp=10; mv.category=MoveCategory::Status;
+    mv.effect_desc=desc; mv.has_program=true; mv.effect_program=std::move(pr.program);
+    return mv;
+}
+static MoveData make_endure_move() {
+    using namespace enginemon; using namespace crystal;
+    SemanticEffectDescription desc; desc.is_endure = true;
+    DecodedEffectScript sc; sc.effect_id = 116;
+    EffectCommandByte sb; sb.value = 0xFF; sc.bytes.push_back(sb);
+    auto pr = EffectProgramCompiler::compile(desc, sc, 116, 0);
+    MoveData mv; mv.id=211; mv.name="Endure"; mv.type=1;
+    mv.power=0; mv.accuracy=0xFF; mv.pp=10; mv.category=MoveCategory::Status;
+    mv.effect_desc=desc; mv.has_program=true; mv.effect_program=std::move(pr.program);
+    return mv;
+}
+
+TEST(protect_count0_zero_roll_resamples_succeeds) {
+    using namespace enginemon;
+    // count=0, threshold=255. Crystal resamples when BattleRandom()==0.
+    // Feed: 0x00 (resampled), 0x01 (used: roll-1=0 < 255 → success).
+    // Must succeed (Protect volatile set); NOT fail on the zero roll.
+    auto reg   = make_b_registries(make_protect_move());
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(210, 100, 100);
+    BattlePokemon opp  = make_b_pokemon(1, 100, 100);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    user.stats.speed = 200; user.base_stats.speed = 200;  // user goes first
+    opp.stats.speed  = 1;   opp.base_stats.speed  = 1;
+    user.protect_consecutive = 0;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    // Scripted RNG: first byte=0 (resampled), second byte=1 (roll=1, roll-1=0 < 255 → succeed)
+    std::vector<uint8_t> rng_seq = {0x00, 0x01, 0xFF, 0xFF};
+    size_t rng_idx = 0;
+    battle.set_rng_callback([&]() -> uint32_t {
+        return (rng_idx < rng_seq.size()) ? rng_seq[rng_idx++] : 0xFF;
+    });
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    ASSERT_TRUE(battle.player_pokemon().has_volatile(VolatileStatus::Protect));
+    std::cout << "  [Protect count=0 zero-roll resampled, non-zero succeeds ok]\n";
+}
+
+TEST(protect_count1_boundary) {
+    using namespace enginemon;
+    // count=1, threshold=127. Success iff (roll-1) < 127, i.e. roll in [1..127].
+    // Roll=127: roll-1=126 < 127 → SUCCESS.
+    // Roll=128: roll-1=127, not < 127 → FAIL.
+    auto test_one = [&](uint8_t roll_byte, bool expect_success) {
+        auto reg   = make_b_registries(make_protect_move());
+        auto party = make_test_party();
+        auto rules = make_b_rules();
+        Battle battle(BattleType::Wild, party, reg, rules);
+        BattlePokemon user = make_b_pokemon(210, 100, 100);
+        BattlePokemon opp  = make_b_pokemon(1, 100, 100);
+        opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+        user.stats.speed = 200; user.base_stats.speed = 200;
+        opp.stats.speed  = 1;   opp.base_stats.speed  = 1;
+        user.protect_consecutive = 1;  // count=1, threshold=127
+        battle.player_pokemon() = user;
+        battle.opponent_pokemon() = opp;
+        std::vector<uint8_t> rng_seq = {roll_byte, 0xFF, 0xFF};
+        size_t rng_idx = 0;
+        battle.set_rng_callback([&]() -> uint32_t {
+            return (rng_idx < rng_seq.size()) ? rng_seq[rng_idx++] : 0xFF;
+        });
+        battle.set_player_action(ActionFight{0, 0});
+        battle.set_opponent_action(ActionFight{1, 0});
+        battle.execute_turn();
+        const bool protected_volatile = battle.player_pokemon().has_volatile(VolatileStatus::Protect);
+        ASSERT_EQ(protected_volatile, expect_success);
+    };
+    test_one(127, true);   // roll=127: roll-1=126 < 127 → success
+    test_one(128, false);  // roll=128: roll-1=127 NOT < 127 → fail
+    std::cout << "  [Protect count=1 boundary: roll=127 ok, roll=128 fails ok]\n";
+}
+
+TEST(protect_count8_always_fails) {
+    using namespace enginemon;
+    // count=8, threshold=0 → always fail and reset counter.
+    auto reg   = make_b_registries(make_protect_move());
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(210, 100, 100);
+    BattlePokemon opp  = make_b_pokemon(1, 100, 100);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    user.stats.speed = 200; user.base_stats.speed = 200;
+    opp.stats.speed  = 1;   opp.base_stats.speed  = 1;
+    user.protect_consecutive = 8;  // threshold=0xFF>>8=0 → always fail
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    ASSERT_FALSE(battle.player_pokemon().has_volatile(VolatileStatus::Protect));
+    // Counter should be reset to 0 on failure.
+    ASSERT_EQ(battle.player_pokemon().protect_consecutive, uint8_t{0});
+    std::cout << "  [Protect count=8 always fails, counter reset ok]\n";
+}
+
+TEST(protect_with_substitute_fails) {
+    using namespace enginemon;
+    // Crystal: Protect fails if user has Substitute (BattleCommand_CheckHit_DrainSub gate).
+    auto reg   = make_b_registries(make_protect_move());
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(210, 100, 100);
+    BattlePokemon opp  = make_b_pokemon(1, 100, 100);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    user.stats.speed = 200; user.base_stats.speed = 200;
+    opp.stats.speed  = 1;   opp.base_stats.speed  = 1;
+    user.protect_consecutive = 0;
+    user.set_volatile(VolatileStatus::Substitute);  // user has Substitute
+    user.substitute_hp = 25;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    // Protect must fail because user has Substitute.
+    ASSERT_FALSE(battle.player_pokemon().has_volatile(VolatileStatus::Protect));
+    std::cout << "  [Protect + Substitute: Protect fails ok]\n";
+}
+
+TEST(endure_with_substitute_fails) {
+    using namespace enginemon;
+    // Same gate: Endure fails if user has Substitute.
+    auto reg   = make_b_registries(make_endure_move());
+    auto party = make_test_party();
+    auto rules = make_b_rules();
+    Battle battle(BattleType::Wild, party, reg, rules);
+    BattlePokemon user = make_b_pokemon(211, 100, 100);
+    BattlePokemon opp  = make_b_pokemon(1, 100, 100);
+    opp.moves[0].move = MOVE_NONE; opp.moves[1].move = MOVE_NONE;
+    user.stats.speed = 200; user.base_stats.speed = 200;
+    opp.stats.speed  = 1;   opp.base_stats.speed  = 1;
+    user.protect_consecutive = 0;
+    user.set_volatile(VolatileStatus::Substitute);
+    user.substitute_hp = 25;
+    battle.player_pokemon() = user;
+    battle.opponent_pokemon() = opp;
+    battle.set_player_action(ActionFight{0, 0});
+    battle.set_opponent_action(ActionFight{1, 0});
+    battle.execute_turn();
+    ASSERT_FALSE(battle.player_pokemon().has_volatile(VolatileStatus::Endure));
+    std::cout << "  [Endure + Substitute: Endure fails ok]\n";
+}
+
 int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << "=== Battle Calculator + AI Tests ===\n";
 
@@ -4448,6 +4708,18 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     // ROOT_OHKO_BOOKKEEPING regression
     RUN(ohko_sub_absorb_real_hp_unchanged_history_zero);
+
+    // ROOT_REVERSAL_HP_DIRECTION regression
+    RUN(reversal_user_low_hp_target_full_high_power);
+    RUN(reversal_user_full_hp_target_low_no_high_power);
+    RUN(flail_user_low_hp_target_full_high_power);
+
+    // ROOT_PROTECT_DECAY regression
+    RUN(protect_count0_zero_roll_resamples_succeeds);
+    RUN(protect_count1_boundary);
+    RUN(protect_count8_always_fails);
+    RUN(protect_with_substitute_fails);
+    RUN(endure_with_substitute_fails);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Failed: " << g_failed << "\n";
