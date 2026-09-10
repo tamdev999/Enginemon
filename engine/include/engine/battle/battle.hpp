@@ -523,7 +523,14 @@ private:
     // 2 = return MoveExecutionResult::Miss (failed).
     int execute_program_set_volatile(const BOp& op, BattlePokemon& user, BattlePokemon& target,
                                       const MoveData& md, bool user_is_player);
-    
+    // King's Rock shared helper: one roll per move, used by both A-path and B-path.
+    // Source: Crystal BattleCommand_HeldFlinch (kingsrock command, 0x4D).
+    // Fires when: move_desc.needs_kingsrock, user holds PostHitFlinch item,
+    // and target is NOT behind an intact Substitute.
+    // If the roll fires, sets VolatileStatus::Flinch on target.
+    // Target faint does NOT suppress the roll (outside hit loops in Crystal scripts).
+    void apply_kings_rock(const SemanticEffectDescription& move_desc,
+                          BattlePokemon& user, BattlePokemon& target);
     // Damage calculation
     int32_t calculate_damage(const BattlePokemon& attacker, 
                             const BattlePokemon& defender,

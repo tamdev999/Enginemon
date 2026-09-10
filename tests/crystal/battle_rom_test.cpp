@@ -1,4 +1,4 @@
-// tests/crystal/battle_rom_test.cpp
+﻿// tests/crystal/battle_rom_test.cpp
 //
 // TRUE ROMÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢EXTRACTORÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢BRLSÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢RUNTIME PROPAGATION TESTS
 //
@@ -8337,6 +8337,523 @@ TEST(p_held_item_focus_band_substitute_quirk) {
 }
 
 // ============================================================================
+// ROOT_HELD_ITEM_EFFECTS Stage 3 -- B-path King's Rock correctness
+//
+// These tests prove exactly one King's Rock roll per B-path move, not per hit.
+// Pattern: run the same move with and without King's Rock; verify N+1 vs N RNG calls.
+// Tests fail if King's Rock never rolls OR rolls once per hit.
+// ============================================================================
+
+namespace {
+
+// Build a Registries with B-path moves (real ROM) + real items.
+// Returns nullopt if extraction fails.
+static std::optional<enginemon::Registries>
+make_bpath_kr_reg(const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& moves)
+{
+    auto item_result = crystal::extract_all_items(*g_rom, *g_profile);
+    if (!item_result.success) return std::nullopt;
+    crystal::PackageWriter w;
+    w.set_source_rom(std::string(40,'a'), "test");
+    w.add_item_data(item_result.items);
+    auto pkg = std::filesystem::temp_directory_path() / "bpath_kr_reg.emon";
+    if (!w.write(pkg)) return std::nullopt;
+    auto rdr = enginemon::PackageReader::open(pkg);
+    if (!rdr) { std::filesystem::remove(pkg); return std::nullopt; }
+    auto item_reg = rdr->load_item_registry();
+    std::filesystem::remove(pkg);
+
+    enginemon::Registries reg;
+    for (uint8_t t = 0; t < 28; ++t) {
+        enginemon::TypeData td; td.id = t; td.name = "T";
+        reg.types.register_entry(t, td);
+        for (uint8_t u = 0; u < 28; ++u)
+            reg.type_chart.set_effectiveness(t, u, 10);
+    }
+    enginemon::SpeciesData sp{};
+    sp.id = 1; sp.name = "T"; sp.type1 = 0; sp.type2 = 0;
+    sp.base_stats = {50,80,55,55,50,50};
+    sp.catch_rate = 45; sp.base_exp = 64; sp.base_friendship = 70;
+    reg.species.register_entry(1, sp);
+    for (const auto& [id, md] : moves) reg.moves.register_entry(id, md);
+    for (const auto& [id, data] : *item_reg) reg.items.register_entry(id, data);
+    reg.freeze_all();
+    return reg;
+}
+
+// Build BattlePokemon for B-path King's Rock tests.
+static enginemon::BattlePokemon make_bkr_attacker(
+    enginemon::MoveId move_id, enginemon::ItemId held = enginemon::ITEM_NONE)
+{
+    enginemon::BattlePokemon bp{};
+    bp.species = 1; bp.type1 = 0; bp.type2 = 0; bp.level = 50;
+    bp.stats.hp = bp.stats.max_hp = 300;
+    bp.stats.attack = bp.stats.defense = bp.stats.speed = 80;
+    bp.stats.special_attack = bp.stats.special_defense = 80;
+    bp.base_stats = bp.stats;
+    bp.stats.speed = bp.base_stats.speed = 200;  // goes first
+    bp.happiness = 200;
+    bp.dv_atk = bp.dv_def = bp.dv_spd = bp.dv_spc = 15;
+    bp.moves[0].move = move_id;
+    bp.moves[0].pp   = bp.moves[0].max_pp = 10;
+    bp.held_item = held;
+    return bp;
+}
+
+// Count RNG calls when move_id is used with the given item.
+// All RNG bytes after the provided script are 0xFF.
+// Returns rng_call_count.
+static uint32_t count_bpath_rng_calls(
+    enginemon::MoveId move_id,
+    enginemon::ItemId held_item,
+    const enginemon::Registries& reg,
+    const std::vector<uint8_t>& rng_script,
+    int16_t target_hp = 2000)
+{
+    enginemon::BattleRules rules = make_item_rules();
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species = 1; pmon.level = 50;
+    pmon.current_hp = pmon.max_hp = 300; pmon.friendship = 200;
+    party.add(pmon);
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+    auto pbp = make_bkr_attacker(move_id, held_item);
+    auto obp = make_item_target(target_hp, 1);
+    battle.player_pokemon()  = pbp;
+    battle.opponent_pokemon()= obp;
+    uint32_t calls = 0;
+    size_t idx = 0;
+    battle.set_rng_callback([&]() -> uint32_t {
+        ++calls;
+        return idx < rng_script.size() ? rng_script[idx++] : uint32_t{0xFF};
+    });
+    battle.set_player_action(enginemon::ActionFight{0, 0});
+    battle.set_opponent_action(enginemon::ActionFight{0, 0});
+    battle.execute_turn();
+    return calls;
+}
+
+// Find a generic multi-hit move (2-5 random hits) with needs_kingsrock=true.
+static enginemon::MoveId find_generic_multihit_kr_move(
+    const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& r)
+{
+    for (const auto& [id, md] : r) {
+        if (!md.has_program) continue;
+        if (!md.effect_desc.is_multi_hit) continue;
+        if (!md.effect_desc.needs_kingsrock) continue;
+        // Generic MultiHit: InitCounter(HitLoop, 2, 5)
+        for (const auto& op : md.effect_program.ops) {
+            if (op.kind == enginemon::BOpKind::InitCounter
+                    && static_cast<enginemon::BCounterKind>(op.param8a) == enginemon::BCounterKind::HitLoop
+                    && op.param8b == 2u && op.param8c == 5u) {
+                return id;
+            }
+        }
+    }
+    return enginemon::MOVE_NONE;
+}
+
+// Find Twineedle (POISON_MULTI_HIT: 2 fixed hits + poison secondary).
+static enginemon::MoveId find_twineedle_kr_move(
+    const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& r)
+{
+    for (const auto& [id, md] : r) {
+        if (!md.has_program) continue;
+        if (!md.effect_desc.is_multi_hit) continue;
+        if (!md.effect_desc.needs_kingsrock) continue;
+        if (md.effect_desc.secondary_effect != enginemon::SecondaryEffectType::Poison) continue;
+        // Fixed 2-hit loop
+        for (const auto& op : md.effect_program.ops) {
+            if (op.kind == enginemon::BOpKind::InitCounter
+                    && static_cast<enginemon::BCounterKind>(op.param8a) == enginemon::BCounterKind::HitLoop
+                    && op.param8b == 2u && op.param8c == 2u) {
+                return id;
+            }
+        }
+    }
+    return enginemon::MOVE_NONE;
+}
+
+} // anonymous namespace
+
+// ── B-path King's Rock: generic MultiHit (2-5 random hits) ──────────────────
+//
+// Without King's Rock:
+//   B-path MultiHit: effectchance-phase=none, hit_count determined by 2 RNG bytes,
+//   then per hit: crit(1) + variation(1) = 2 per hit.
+//   For 2 hits: 2 + 2*2 = 6. For 3 hits: 2 + 3*2 = 8. Etc.
+// With King's Rock: +1 call at the end.
+//
+// Proof: run with a fixed King's Rock byte = 0x1D (29 < 30 => flinch).
+// Without item: count N. With item: count N+1. Flinch present only with item.
+TEST(p_bpath_kings_rock_generic_multihit_one_roll) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto move_reg_opt = mvdt_roundtrip(entries, "bkr_mh");
+    ASSERT_TRUE(move_reg_opt.has_value()); if (!move_reg_opt) return;
+
+    const enginemon::MoveId mh_id = find_generic_multihit_kr_move(*move_reg_opt);
+    if (mh_id == enginemon::MOVE_NONE) {
+        std::cout << "\n    bpath_kr/multihit: no generic multihit+kingsrock move found, skip\n";
+        return;
+    }
+    auto reg_opt = make_bpath_kr_reg(*move_reg_opt);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+
+    // Adaptive: measure N without King's Rock using script that guarantees a hit.
+    // For generic multihit: InitCounter consumes 1 RNG byte, acc check consumes 1,
+    // then per-hit crit+var consumes 2 per hit. Use 0x00 for guaranteed hit on acc.
+    std::vector<uint8_t> no_kr_long(20, 0xFF);
+    no_kr_long[0] = 0x00;  // init-counter: r1=0 -> 2 hits
+    no_kr_long[1] = 0x00;  // acc: 0 < any acc -> hit
+    const uint32_t n = count_bpath_rng_calls(mh_id, enginemon::ITEM_NONE, *reg_opt, no_kr_long);
+
+    // Build KR script: N bytes of safe values, then 0x1D at position N.
+    std::vector<uint8_t> kr_script(n, 0xFF);
+    kr_script[0] = 0x00;  // init-counter: same hit path
+    if (n > 1) kr_script[1] = 0x00;  // acc: guaranteed hit
+    kr_script.push_back(0x1D);  // KR byte at position N
+    kr_script.push_back(0xFF);  // padding
+
+    const uint32_t n_kr = count_bpath_rng_calls(mh_id, ItemId::KINGS_ROCK, *reg_opt, kr_script);
+
+    // Verify flinch fires with King's Rock (RNG 29 < 30): use the same kr_script.
+    {
+        enginemon::BattleRules rules = make_item_rules();
+        enginemon::Party party;
+        enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+        pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+        party.add(pmon);
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, *reg_opt, rules);
+        battle.player_pokemon()  = make_bkr_attacker(mh_id, ItemId::KINGS_ROCK);
+        battle.opponent_pokemon()= make_item_target(2000, 1);
+        size_t idx = 0;
+        battle.set_rng_callback([&]() -> uint32_t {
+            return idx < kr_script.size() ? kr_script[idx++] : uint32_t{0xFF};
+        });
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+        const bool flinched = battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch);
+        std::cout << "\n    bpath_kr/multihit: n_no_kr=" << n << " n_kr=" << n_kr
+                  << " flinch=" << (flinched ? 1 : 0)
+                  << " (n_kr == n+1 => " << (n_kr == n + 1 ? "PASS" : "FAIL") << ")\n";
+        ASSERT_TRUE(flinched);
+    }
+    // N+1 calls exactly (one King's Rock roll, not per hit)
+    ASSERT_EQ(n_kr, n + 1u);
+}
+
+// ── B-path King's Rock: Double Hit (exactly 2 hits) ─────────────────────────
+//
+// Double Hit: InitCounter(HitLoop,2,2), Damage.
+// No effectchance. Per hit: crit(1) + variation(1) = 2. Two hits = 4 calls.
+// With King's Rock: 4 + 1 = 5 calls.
+TEST(p_bpath_kings_rock_double_hit_exactly_one_roll) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto move_reg_opt = mvdt_roundtrip(entries, "bkr_dh");
+    ASSERT_TRUE(move_reg_opt.has_value()); if (!move_reg_opt) return;
+
+    enginemon::MoveId dh_id = find_double_hit_move(*move_reg_opt);
+    if (dh_id != enginemon::MOVE_NONE) {
+        const enginemon::MoveData* md = move_reg_opt->get(dh_id);
+        if (!md || !md->effect_desc.needs_kingsrock) dh_id = enginemon::MOVE_NONE;
+    }
+    if (dh_id == enginemon::MOVE_NONE) {
+        std::cout << "\n    bpath_kr/double_hit: no double-hit+kingsrock move, skip\n";
+        return;
+    }
+    auto reg_opt = make_bpath_kr_reg(*move_reg_opt);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+
+    // Double Hit, acc=0xFF (no acc byte): 2 hits * (crit + var) = 4 calls.
+    // King's Rock byte = 0x1D (flinch) at position 4.
+    const std::vector<uint8_t> no_kr = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    const std::vector<uint8_t> kr    = {0xFF, 0xFF, 0xFF, 0xFF, 0x1D};
+
+    const uint32_t n    = count_bpath_rng_calls(dh_id, enginemon::ITEM_NONE, *reg_opt, no_kr);
+    const uint32_t n_kr = count_bpath_rng_calls(dh_id, ItemId::KINGS_ROCK,  *reg_opt, kr);
+
+    std::cout << "\n    bpath_kr/double_hit: n_no_kr=" << n << " n_kr=" << n_kr
+              << " (expected n_kr == n+1)\n";
+    // Exactly N+1 calls: fails if 0 extra (never rolled) or N+2+ (per-hit rolling)
+    ASSERT_EQ(n_kr, n + 1u);
+
+    // Verify threshold: 29 flinches, 30 does not
+    auto run_flinch = [&](uint8_t kr_byte) -> bool {
+        enginemon::BattleRules rules = make_item_rules();
+        enginemon::Party party;
+        enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+        pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+        party.add(pmon);
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, *reg_opt, rules);
+        battle.player_pokemon()  = make_bkr_attacker(dh_id, ItemId::KINGS_ROCK);
+        battle.opponent_pokemon()= make_item_target(2000, 1);
+        const std::vector<uint8_t> sc = {0xFF, 0xFF, 0xFF, 0xFF, kr_byte};
+        size_t idx = 0;
+        battle.set_rng_callback([&]() -> uint32_t {
+            return idx < sc.size() ? sc[idx++] : uint32_t{0xFF};
+        });
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+        return battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch);
+    };
+    ASSERT_TRUE(run_flinch(29));   // 29 < 30 -> flinch
+    ASSERT_FALSE(run_flinch(30));  // 30 >= 30 -> no flinch
+    std::cout << "    double_hit 29->flinch, 30->no_flinch\n";
+}
+
+// ── B-path King's Rock: Twineedle (2 fixed hits, poison secondary) ───────────
+//
+// Twineedle: effectchance fires ONCE before the hit loop (+1 RNG before hits).
+// Per hit: crit(1) + variation(1). Two hits = 2 calls. Plus effectchance = 3 total.
+// With King's Rock: 3 + 1 = 4 calls.
+TEST(p_bpath_kings_rock_twineedle_exactly_one_roll) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto move_reg_opt = mvdt_roundtrip(entries, "bkr_tw");
+    ASSERT_TRUE(move_reg_opt.has_value()); if (!move_reg_opt) return;
+
+    const enginemon::MoveId tw_id = find_twineedle_kr_move(*move_reg_opt);
+    if (tw_id == enginemon::MOVE_NONE) {
+        std::cout << "\n    bpath_kr/twineedle: no twineedle+kingsrock move found, skip\n";
+        return;
+    }
+    auto reg_opt = make_bpath_kr_reg(*move_reg_opt);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+
+    // Twineedle, acc=0xFF: effectchance=0xFF(no-secondary), crit1=0xFF, var1=0xFF, crit2=0xFF, var2=0xFF
+    // Without King's Rock: 5 calls. With King's Rock + KR byte at position 5: 6 calls.
+    const std::vector<uint8_t> no_kr = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    const std::vector<uint8_t> kr    = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1D};
+
+    const uint32_t n    = count_bpath_rng_calls(tw_id, enginemon::ITEM_NONE, *reg_opt, no_kr);
+    const uint32_t n_kr = count_bpath_rng_calls(tw_id, ItemId::KINGS_ROCK,  *reg_opt, kr);
+
+    std::cout << "\n    bpath_kr/twineedle: n_no_kr=" << n << " n_kr=" << n_kr
+              << " (expected n_kr == n+1)\n";
+    ASSERT_EQ(n_kr, n + 1u);
+}
+
+// ── B-path King's Rock: Triple Kick (3 sequential Damage ops) ───────────────
+// -- B-path King's Rock: Triple Kick (3 sequential Damage ops) ---------------
+//
+// Triple Kick: 3 separate Damage ops (ScalePower + Damage x3).
+// Without kingsrock_rolled guard it would fire 3 times.
+// kingsrock_rolled ensures only the first Damage op fires King's Rock.
+// Proof: n_kr == n_no_kr + 1 (not n+3).
+TEST(p_bpath_kings_rock_triple_kick_exactly_one_roll) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto move_reg_opt = mvdt_roundtrip(entries, "bkr_tk");
+    ASSERT_TRUE(move_reg_opt.has_value()); if (!move_reg_opt) return;
+
+    enginemon::MoveId tk_id = find_triple_kick_move(*move_reg_opt);
+    if (tk_id != enginemon::MOVE_NONE) {
+        const enginemon::MoveData* md = move_reg_opt->get(tk_id);
+        if (!md || !md->effect_desc.needs_kingsrock) tk_id = enginemon::MOVE_NONE;
+    }
+    if (tk_id == enginemon::MOVE_NONE) {
+        std::cout << "\n    bpath_kr/triple_kick: no triple_kick+kingsrock move, skip\n";
+        return;
+    }
+    auto reg_opt = make_bpath_kr_reg(*move_reg_opt);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+
+    // Adaptive: measure N without King's Rock using a guaranteed-hit script.
+    // Triple Kick has accuracy < 0xFF (Crystal: 75). Use 0x10 < 75 to force a hit.
+    // Remaining bytes 0xFF: safe for crit (no crit) and variation (passes immediately).
+    std::vector<uint8_t> no_kr_hit(20, 0xFF);
+    no_kr_hit[0] = 0x10;  // acc: 0x10=16 < 75 -> hit
+    const uint32_t n = count_bpath_rng_calls(tk_id, enginemon::ITEM_NONE, *reg_opt, no_kr_hit, 5000);
+
+    // Build KR script: same hit byte at position 0, 0xFF for rest, 0x1D at position N.
+    std::vector<uint8_t> kr_script(n, 0xFF);
+    kr_script[0] = 0x10;  // acc: guaranteed hit (same as no-KR baseline)
+    kr_script.push_back(0x1D);  // KR byte at position N (29 < 30 -> flinch)
+    kr_script.push_back(0xFF);  // padding
+
+
+    const uint32_t n_kr = count_bpath_rng_calls(tk_id, ItemId::KINGS_ROCK, *reg_opt, kr_script, 5000);
+
+    std::cout << "\n    bpath_kr/triple_kick: n_no_kr=" << n << " n_kr=" << n_kr
+              << " (expected n_kr == n+1, NOT n+3)\n";
+    // n+1 proves one roll per move; n+3 would prove per-hit (broken kingsrock_rolled guard).
+    ASSERT_EQ(n_kr, n + 1u);
+}
+
+// ── B-path King's Rock: miss suppresses RNG ──────────────────────────────────
+//
+// For a B-path move that can miss (accuracy < 0xFF), miss -> King's Rock never fires.
+// Proven by: with KR, miss RNG bytes consumed == without KR.
+TEST(p_bpath_kings_rock_miss_no_extra_rng) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto move_reg_opt = mvdt_roundtrip(entries, "bkr_miss");
+    ASSERT_TRUE(move_reg_opt.has_value()); if (!move_reg_opt) return;
+
+    // Find any B-path multi-hit move with needs_kingsrock that has acc != 0xFF (missable).
+    // Prefer Triple Kick (known acc=75 in Crystal) for deterministic behavior.
+    enginemon::MoveId miss_id = enginemon::MOVE_NONE;
+    {
+        enginemon::MoveId tk_id = find_triple_kick_move(*move_reg_opt);
+        if (tk_id != enginemon::MOVE_NONE) {
+            const enginemon::MoveData* md = move_reg_opt->get(tk_id);
+            if (md && md->effect_desc.needs_kingsrock && md->accuracy != 0xFF && md->accuracy != 0)
+                miss_id = tk_id;
+        }
+    }
+    // Fallback: any B-path multi-hit+KR with acc in 1..254
+    if (miss_id == enginemon::MOVE_NONE) {
+        for (const auto& [id, md] : *move_reg_opt) {
+            if (!md.has_program) continue;
+            if (!md.effect_desc.is_multi_hit) continue;
+            if (!md.effect_desc.needs_kingsrock) continue;
+            if (md.accuracy == 0xFF || md.accuracy == 0) continue;
+            miss_id = id; break;
+        }
+    }
+    if (miss_id == enginemon::MOVE_NONE) {
+        std::cout << "\n    bpath_kr/miss: no missable multihit+kingsrock move found, skip\n";
+        return;
+    }
+    auto reg_opt = make_bpath_kr_reg(*move_reg_opt);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+
+    // Force miss: measure N_no_kr with all-0xFF script (acc=0xFF >= any_acc -> miss).
+    // For Triple Kick: acc byte is at position 0 (first Damage op, no InitCounter).
+    // King's Rock must NOT fire on a miss.
+    const std::vector<uint8_t> all_ff(20, 0xFF);
+    const uint32_t calls_no_kr = count_bpath_rng_calls(miss_id, enginemon::ITEM_NONE,
+                                                         *reg_opt, all_ff);
+    const uint32_t calls_with_kr = count_bpath_rng_calls(miss_id, ItemId::KINGS_ROCK,
+                                                           *reg_opt, all_ff);
+
+    std::cout << "\n    bpath_kr/miss: calls_no_kr=" << calls_no_kr
+              << " calls_with_kr=" << calls_with_kr
+              << " (miss suppresses KR: both equal)\n";
+    // On a miss, King's Rock must NOT fire -> same call count with or without item
+    ASSERT_EQ(calls_with_kr, calls_no_kr);
+    // Verify no flinch on miss
+    {
+        enginemon::BattleRules rules = make_item_rules();
+        enginemon::Party party;
+        enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+        pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+        party.add(pmon);
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, *reg_opt, rules);
+        battle.player_pokemon()  = make_bkr_attacker(miss_id, ItemId::KINGS_ROCK);
+        battle.opponent_pokemon()= make_item_target(2000, 1);
+        size_t idx = 0;
+        battle.set_rng_callback([&]() -> uint32_t {
+            return idx < all_ff.size() ? all_ff[idx++] : uint32_t{0xFF};
+        });
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+        ASSERT_FALSE(battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch));
+    }
+}
+
+// -- B-path King's Rock: Substitute absorbs all hits, no King's Rock RNG -----
+//
+// When target has an intact large Substitute, all hits route into substitute_hp.
+// King's Rock must NOT fire (target.has_volatile(Substitute) is still true after loop).
+TEST(p_bpath_kings_rock_substitute_no_rng) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto move_reg_opt = mvdt_roundtrip(entries, "bkr_sub");
+    ASSERT_TRUE(move_reg_opt.has_value()); if (!move_reg_opt) return;
+
+    enginemon::MoveId dh_id = find_double_hit_move(*move_reg_opt);
+    if (dh_id != enginemon::MOVE_NONE) {
+        const enginemon::MoveData* md = move_reg_opt->get(dh_id);
+        if (!md || !md->effect_desc.needs_kingsrock) dh_id = enginemon::MOVE_NONE;
+    }
+    if (dh_id == enginemon::MOVE_NONE) {
+        std::cout << "\n    bpath_kr/sub: no double-hit+kingsrock move, skip\n";
+        return;
+    }
+    auto reg_opt = make_bpath_kr_reg(*move_reg_opt);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+
+    // With King's Rock and intact Substitute (9999 HP): KR must NOT fire.
+    // Script: crit+var for each of 2 hits. KR byte at position 4 = 0x1D (flinch if consumed).
+    const std::vector<uint8_t> kr_script = {0xFF, 0xFF, 0xFF, 0xFF, 0x1D, 0xFF};
+
+    const uint32_t calls_no_sub = count_bpath_rng_calls(dh_id, ItemId::KINGS_ROCK,
+                                                         *reg_opt, kr_script, 2000);
+
+    enginemon::BattleRules rules = make_item_rules();
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+
+    uint32_t calls_with_sub = 0;
+    {
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, *reg_opt, rules);
+        auto obp = make_item_target(2000, 1);
+        obp.set_volatile(enginemon::VolatileStatus::Substitute);
+        obp.substitute_hp = 9999;  // intact, absorbs all damage
+        battle.player_pokemon()  = make_bkr_attacker(dh_id, ItemId::KINGS_ROCK);
+        battle.opponent_pokemon()= obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&]() -> uint32_t {
+            ++calls_with_sub;
+            return idx < kr_script.size() ? kr_script[idx++] : uint32_t{0xFF};
+        });
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+        // Substitute should still be intact
+        ASSERT_TRUE(battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Substitute));
+        // No flinch (KR was suppressed)
+        ASSERT_FALSE(battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch));
+    }
+    std::cout << "\n    bpath_kr/sub: calls_no_sub=" << calls_no_sub
+              << " calls_with_sub=" << calls_with_sub
+              << " (sub suppresses KR: sub < no_sub)\n";
+    // With Substitute: fewer calls than without (no KR byte consumed)
+    ASSERT_TRUE(calls_with_sub < calls_no_sub);
+}
+
+// ── B-path King's Rock: faint does NOT suppress ──────────────────────────────
+//
+// When target faints from the multi-hit, King's Rock still fires.
+// Proven by counting calls: same N+1 even when target HP is 1.
+TEST(p_bpath_kings_rock_faint_still_rolls) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto move_reg_opt = mvdt_roundtrip(entries, "bkr_faint");
+    ASSERT_TRUE(move_reg_opt.has_value()); if (!move_reg_opt) return;
+
+    enginemon::MoveId dh_id = find_double_hit_move(*move_reg_opt);
+    if (dh_id != enginemon::MOVE_NONE) {
+        const enginemon::MoveData* md = move_reg_opt->get(dh_id);
+        if (!md || !md->effect_desc.needs_kingsrock) dh_id = enginemon::MOVE_NONE;
+    }
+    if (dh_id == enginemon::MOVE_NONE) {
+        std::cout << "\n    bpath_kr/faint: no double-hit+kingsrock move, skip\n";
+        return;
+    }
+    auto reg_opt = make_bpath_kr_reg(*move_reg_opt);
+    ASSERT_TRUE(reg_opt.has_value()); if (!reg_opt) return;
+
+    // Target HP=1: will faint on first hit. King's Rock must still roll.
+    const std::vector<uint8_t> no_kr = {0xFF, 0xFF, 0xFF, 0xFF};
+    const std::vector<uint8_t> kr    = {0xFF, 0xFF, 0xFF, 0xFF, 0x1D};
+
+    const uint32_t n    = count_bpath_rng_calls(dh_id, enginemon::ITEM_NONE, *reg_opt, no_kr, 1);
+    const uint32_t n_kr = count_bpath_rng_calls(dh_id, ItemId::KINGS_ROCK,  *reg_opt, kr,    1);
+
+    std::cout << "\n    bpath_kr/faint: n_no_kr=" << n << " n_kr=" << n_kr
+              << " (faint does not suppress KR: n_kr == n+1)\n";
+    ASSERT_EQ(n_kr, n + 1u);
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -8511,7 +9028,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p_fake_out_accuracy_miss_no_flinch);
     RUN_TEST(p_fake_out_zero_damage_always);
 
-    // ROOT_HELD_ITEM_EFFECTS Stage 2 — E2E battle mechanics
+    // ROOT_HELD_ITEM_EFFECTS Stage 2 -- E2E battle mechanics
     // Crit items
     RUN_TEST(p_held_item_scope_lens_changes_crit);
     RUN_TEST(p_held_item_lucky_punch_boosts_chansey);
@@ -8534,6 +9051,14 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p_held_item_kings_rock_substitute_no_rng);
     RUN_TEST(p_held_item_kings_rock_double_hit_one_roll);
     RUN_TEST(p_held_item_kings_rock_faint_still_rolls);
+    // B-path King's Rock -- strong N vs N+1 RNG tests
+    RUN_TEST(p_bpath_kings_rock_generic_multihit_one_roll);
+    RUN_TEST(p_bpath_kings_rock_double_hit_exactly_one_roll);
+    RUN_TEST(p_bpath_kings_rock_twineedle_exactly_one_roll);
+    RUN_TEST(p_bpath_kings_rock_triple_kick_exactly_one_roll);
+    RUN_TEST(p_bpath_kings_rock_miss_no_extra_rng);
+    RUN_TEST(p_bpath_kings_rock_substitute_no_rng);
+    RUN_TEST(p_bpath_kings_rock_faint_still_rolls);
     // Focus Band
     RUN_TEST(p_held_item_focus_band_lethal_boundary);
     RUN_TEST(p_held_item_focus_band_nonlethal_rng_consumed);

@@ -114,7 +114,7 @@ bool roll_critical(uint8_t crit_stage, uint32_t random, const BattleRules& rules
 // Source: effect_commands.asm BattleCommand_Critical
 //   Crystal order:
 //     1. If user holds CritStageBoostSpecies AND species matches: SET stage = param, done.
-//        (Lucky Punch for Chansey, Stick for Farfetch'd — hard-set to 2, skip FocusEnergy/high-crit)
+//        (Lucky Punch for Chansey, Stick for Farfetch'd -- hard-set to 2, skip FocusEnergy/high-crit)
 //     2. Focus Energy volatile: +1
 //     3. High-crit move in BattleRules::high_crit_moves: +2
 //     4. CritStageBoost item (Scope Lens): +param (= 1)

@@ -1523,15 +1523,7 @@ MoveExecutionResult Battle::execute_move_damaging(
     // Substitute suppression: Substitute routing causes early return; if Substitute was
     // up, we already returned MoveExecutionResult::Success before reaching this point.
     // Target faint does NOT suppress (kingsrock is outside the hit loop in Crystal scripts).
-    if (effective_desc.needs_kingsrock && user.held_item != ITEM_NONE
-            && !target.has_volatile(VolatileStatus::Substitute)) {
-        const ItemData* ui = registries_.items.get(user.held_item);
-        if (ui && ui->held_effect_type == HeldItemEffectType::PostHitFlinch) {
-            if (rng_.next_byte() < static_cast<uint32_t>(ui->held_param)) {
-                target.set_volatile(VolatileStatus::Flinch);
-            }
-        }
-    }
+    apply_kings_rock(effective_desc, user, target);
 
     if (effective_desc.stat_change != StatChangeTarget::None) {
         // For hit-effect stat changes (applied to target unconditionally on hit).
@@ -1545,6 +1537,28 @@ MoveExecutionResult Battle::execute_move_damaging(
     }
 
     return MoveExecutionResult::Success;
+}
+
+// ============================================================================
+// Helper: King's Rock one-per-move flinch roll (A-path and B-path shared)
+// Source: Crystal BattleCommand_HeldFlinch (kingsrock command, script opcode 0x4D).
+// Called once per move after damage and secondary effects complete.
+// Does NOT fire when:
+//   - move_desc.needs_kingsrock is false
+//   - user holds no item, or item is not PostHitFlinch
+//   - target is behind an intact Substitute (Crystal BattleCommand_HeldFlinch checks this)
+// Does fire when target has fainted (kingsrock is outside the hit loop in Crystal scripts).
+// ============================================================================
+void Battle::apply_kings_rock(const SemanticEffectDescription& move_desc,
+                               BattlePokemon& user, BattlePokemon& target) {
+    if (!move_desc.needs_kingsrock) return;
+    if (user.held_item == ITEM_NONE) return;
+    if (target.has_volatile(VolatileStatus::Substitute)) return;
+    const ItemData* ui = registries_.items.get(user.held_item);
+    if (!ui || ui->held_effect_type != HeldItemEffectType::PostHitFlinch) return;
+    if (rng_.next_byte() < static_cast<uint32_t>(ui->held_param)) {
+        target.set_volatile(VolatileStatus::Flinch);
+    }
 }
 
 // ============================================================================

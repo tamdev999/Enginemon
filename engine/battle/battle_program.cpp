@@ -277,6 +277,9 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
     // ScalePower multiplier communicated to the next Damage op.
     // 0 = no scaling pending; non-zero = multiply eff_power by this.
     uint8_t pending_scale_mult = 0;
+    // King's Rock: rolled exactly once per execute_program call, AFTER all ops complete.
+    // Placed outside the ops loop to guarantee one roll even for TripleKick (3 Damage ops).
+    // Uses move_hit which is set by the first accuracy check and persists across all ops.
 
 
     for (const BOp& op : prog.ops) {
@@ -1311,6 +1314,14 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
 
         } // switch op.kind
     } // for ops
+
+    // -- King's Rock (PostHitFlinch): B-path, exactly once per move ---------------
+    // Source: Crystal BattleCommand_HeldFlinch (kingsrock command, 0x4D).
+    // Placed after ALL ops to guarantee exactly one roll even for TripleKick (3 Damage ops).
+    // Fires only when move_hit=true (acc check passed) and target not behind Substitute.
+    if (move_hit) {
+        apply_kings_rock(md.effect_desc, user, target);
+    }
 
     user.last_move_used = md.id;
     return MoveExecutionResult::Success;
