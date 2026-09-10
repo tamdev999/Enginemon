@@ -1,4 +1,4 @@
-// engine/battle/battle.cpp
+﻿// engine/battle/battle.cpp
 // Gen 2 battle system Î“Ã‡Ã¶ turn-based Pokemon battles
 //
 // Architecture note:
@@ -654,6 +654,13 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         if (effective_desc.stat_change != StatChangeTarget::None
                 && !effective_desc.swagger_stat_change) {
             apply_stat_change(user, target, effective_desc.stat_change, user_is_player);
+            // Minimize: set Minimized volatile so Stomp deals double damage.
+            // Source: suiCune MinimizeDropSub — called from RaiseStat only when
+            // the move animation is MINIMIZE. sets_minimize is set only for move ID 107.
+            // Double Team shares EvasionUp but does NOT set this flag.
+            if (effective_desc.sets_minimize) {
+                user.set_volatile(VolatileStatus::Minimized);
+            }
             return MoveExecutionResult::Success;
         }
 
@@ -1252,15 +1259,19 @@ MoveExecutionResult Battle::execute_move_damaging(
         bool double_it = false;
         switch (effective_desc.conditional_double) {
             case ConditionalDoubleCondition::TargetFlying:
-                double_it = target.has_volatile(VolatileStatus::Trapped);  // placeholder: no Flying volatile yet
+                // Source: suiCune BattleCommand_DoubleFlyingDamage — checks SUBSTATUS_FLYING on opponent.
+                // VolatileStatus::Flying is set by Fly/Sky Attack charge; cleared on fire turn.
+                double_it = target.has_volatile(VolatileStatus::Flying);
                 break;
             case ConditionalDoubleCondition::TargetUnderground:
-                // No Underground volatile yet; leave as normal damage
-                double_it = false;
+                // Source: suiCune BattleCommand_DoubleUndergroundDamage — checks SUBSTATUS_UNDERGROUND.
+                // VolatileStatus::Underground is set by Dig charge; cleared on fire turn.
+                double_it = target.has_volatile(VolatileStatus::Underground);
                 break;
             case ConditionalDoubleCondition::TargetMinimized:
-                // No Minimized volatile yet; leave as normal damage
-                double_it = false;
+                // Source: suiCune BattleCommand_DoubleMinimizeDamage — checks wPlayerMinimized/wEnemyMinimized.
+                // VolatileStatus::Minimized is set by Minimize; NOT set by Double Team.
+                double_it = target.has_volatile(VolatileStatus::Minimized);
                 break;
             default: break;
         }

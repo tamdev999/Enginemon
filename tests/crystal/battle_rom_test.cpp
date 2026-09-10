@@ -1,4 +1,4 @@
-// tests/crystal/battle_rom_test.cpp
+﻿// tests/crystal/battle_rom_test.cpp
 //
 // TRUE ROMÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢EXTRACTORÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢BRLSÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢RUNTIME PROPAGATION TESTS
 //
@@ -5501,6 +5501,316 @@ TEST(p_solarbeam_rain_penalty) {
 }
 
 // ============================================================================
+// ROOT_CONDITIONAL_DOUBLE
+//
+// Crystal: Gust/Twister double vs Flying; Earthquake/Magnitude double vs
+//          Underground; Stomp doubles vs Minimized (not Double Team).
+// Each test uses paired identical RNG so damage X vs 2X is deterministic.
+// ============================================================================
+
+// Helper: find a move with the given ConditionalDoubleCondition.
+// Returns the first found move ID.
+static enginemon::MoveId find_cond_dbl_move(
+    const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& reg,
+    enginemon::ConditionalDoubleCondition cond)
+{
+    for (const auto& [id, md] : reg) {
+        if (md.effect_desc.is_supported
+                && md.effect_desc.conditional_double == cond)
+            return id;
+    }
+    return enginemon::MOVE_NONE;
+}
+
+// Helper: find a move with the given ConditionalDoubleCondition AND matching
+// a specific stock move ID (to pick Gust vs Twister precisely).
+static enginemon::MoveId find_cond_dbl_move_id(
+    const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& reg,
+    enginemon::ConditionalDoubleCondition cond,
+    enginemon::MoveId preferred_id)
+{
+    const enginemon::MoveData* md = reg.get(preferred_id);
+    if (md && md->effect_desc.conditional_double == cond) return preferred_id;
+    return find_cond_dbl_move(reg, cond);
+}
+
+// Helper: run one battle turn; player uses move_id (speed=200), opponent has
+// no moves (speed=1). Returns final opponent HP. RNG fed byte-by-byte.
+static int16_t run_cond_dbl_turn(
+    const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& reg_,
+    enginemon::MoveId move_id,
+    int16_t opp_hp,
+    const std::vector<uint8_t>& rng_bytes,
+    std::function<void(enginemon::BattlePokemon&)> setup_opp = nullptr)
+{
+    auto reg  = make_b_reg(reg_);
+    auto rules = make_rules_b();
+    // Populate Rain+type modifiers so weather doesn't interfere
+    rules.weather_type_modifiers.push_back({1, 21, 15});
+    rules.weather_type_modifiers.push_back({1, 20, 5});
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=500; party.add(pmon);
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+    enginemon::BattlePokemon player = make_bp_b(move_id, 500);
+    player.stats.speed = player.base_stats.speed = 200;
+    enginemon::BattlePokemon opp = make_bp_b(enginemon::MOVE_NONE, opp_hp);
+    opp.stats.max_hp = opp_hp;
+    opp.stats.speed = opp.base_stats.speed = 1;
+    if (setup_opp) setup_opp(opp);
+    battle.player_pokemon()  = player;
+    battle.opponent_pokemon() = opp;
+    size_t idx = 0;
+    battle.set_rng_callback([&]()->uint32_t{
+        return (idx < rng_bytes.size()) ? rng_bytes[idx++] : 0x01u;
+    });
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+    return battle.opponent_pokemon().stats.hp;
+}
+
+// ── Gust vs Flying ────────────────────────────────────────────────────────
+TEST(p_cond_dbl_gust_vs_flying) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "cdbl_gust");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Move 16 = GUST, effect 149 = EFFECT_GUST, TargetFlying
+    constexpr enginemon::MoveId GUST_ID = 16;
+    const enginemon::MoveData* gust_md = r->get(GUST_ID);
+    ASSERT_TRUE(gust_md != nullptr); if (!gust_md) return;
+    ASSERT_EQ(gust_md->effect_desc.conditional_double,
+              enginemon::ConditionalDoubleCondition::TargetFlying);
+
+    // Identical RNG for both runs: crit=0xFF (no crit), variation=0xFF (max)
+    std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+    // Pair A: normal target
+    const int16_t hp_normal = run_cond_dbl_turn(*r, GUST_ID, 500, rng);
+    const int32_t dmg_normal = 500 - hp_normal;
+
+    // Pair B: Flying target
+    const int16_t hp_flying = run_cond_dbl_turn(*r, GUST_ID, 500, rng,
+        [](enginemon::BattlePokemon& opp){
+            opp.set_volatile(enginemon::VolatileStatus::Flying);
+        });
+    const int32_t dmg_flying = 500 - hp_flying;
+
+    std::cout << "\n    Gust: normal=" << dmg_normal << " flying=" << dmg_flying << "\n";
+    ASSERT_TRUE(dmg_normal > 0);
+    ASSERT_TRUE(dmg_flying > 0);
+    ASSERT_EQ(dmg_flying, dmg_normal * 2);
+}
+
+// ── Twister vs Flying ────────────────────────────────────────────────────
+TEST(p_cond_dbl_twister_vs_flying) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "cdbl_twister");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Move 239 = TWISTER, effect 146 = EFFECT_TWISTER, TargetFlying
+    constexpr enginemon::MoveId TWISTER_ID = 239;
+    const enginemon::MoveData* twister_md = r->get(TWISTER_ID);
+    ASSERT_TRUE(twister_md != nullptr); if (!twister_md) return;
+    ASSERT_EQ(twister_md->effect_desc.conditional_double,
+              enginemon::ConditionalDoubleCondition::TargetFlying);
+
+    // Twister has effectchance_phase; force secondary to fail (0xFF >= any chance)
+    std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+    const int16_t hp_normal = run_cond_dbl_turn(*r, TWISTER_ID, 500, rng);
+    const int32_t dmg_normal = 500 - hp_normal;
+
+    const int16_t hp_flying = run_cond_dbl_turn(*r, TWISTER_ID, 500, rng,
+        [](enginemon::BattlePokemon& opp){
+            opp.set_volatile(enginemon::VolatileStatus::Flying);
+        });
+    const int32_t dmg_flying = 500 - hp_flying;
+
+    std::cout << "\n    Twister: normal=" << dmg_normal << " flying=" << dmg_flying << "\n";
+    ASSERT_TRUE(dmg_normal > 0);
+    ASSERT_TRUE(dmg_flying > 0);
+    ASSERT_EQ(dmg_flying, dmg_normal * 2);
+}
+
+// ── Earthquake vs Underground ─────────────────────────────────────────────
+TEST(p_cond_dbl_earthquake_vs_underground) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "cdbl_eq");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Move 89 = EARTHQUAKE, effect 147 = EFFECT_EARTHQUAKE, TargetUnderground
+    constexpr enginemon::MoveId EQ_ID = 89;
+    const enginemon::MoveData* eq_md = r->get(EQ_ID);
+    ASSERT_TRUE(eq_md != nullptr); if (!eq_md) return;
+    ASSERT_EQ(eq_md->effect_desc.conditional_double,
+              enginemon::ConditionalDoubleCondition::TargetUnderground);
+
+    std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+    const int16_t hp_normal     = run_cond_dbl_turn(*r, EQ_ID, 500, rng);
+    const int32_t dmg_normal    = 500 - hp_normal;
+
+    const int16_t hp_underground = run_cond_dbl_turn(*r, EQ_ID, 500, rng,
+        [](enginemon::BattlePokemon& opp){
+            opp.set_volatile(enginemon::VolatileStatus::Underground);
+        });
+    const int32_t dmg_underground = 500 - hp_underground;
+
+    std::cout << "\n    Earthquake: normal=" << dmg_normal << " underground=" << dmg_underground << "\n";
+    ASSERT_TRUE(dmg_normal > 0);
+    ASSERT_TRUE(dmg_underground > 0);
+    ASSERT_EQ(dmg_underground, dmg_normal * 2);
+}
+
+// ── Magnitude vs Underground ──────────────────────────────────────────────
+TEST(p_cond_dbl_magnitude_vs_underground) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "cdbl_mag");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Move 222 = MAGNITUDE, effect 126 = EFFECT_MAGNITUDE, TargetUnderground
+    constexpr enginemon::MoveId MAG_ID = 222;
+    const enginemon::MoveData* mag_md = r->get(MAG_ID);
+    ASSERT_TRUE(mag_md != nullptr); if (!mag_md) return;
+    ASSERT_EQ(mag_md->effect_desc.conditional_double,
+              enginemon::ConditionalDoubleCondition::TargetUnderground);
+
+    // Source: suiCune data/moves/magnitude_power.asm
+    // Magnitude table: {threshold, power, display_level}
+    // threshold bytes: 0x1E(Mag4,10), 0x50(Mag5,30), 0x7F(Mag6,50), 0x99(Mag7,70),
+    //                  0xB3(Mag8,90), 0xCC(Mag9,110), 0xFF(Mag10,150)
+    auto rules_mag = make_rules_b();
+    rules_mag.magnitude_table[0] = {0x1E, 10, 4};
+    rules_mag.magnitude_table[1] = {0x50, 30, 5};
+    rules_mag.magnitude_table[2] = {0x7F, 50, 6};
+    rules_mag.magnitude_table[3] = {0x99, 70, 7};
+    rules_mag.magnitude_table[4] = {0xB3, 90, 8};
+    rules_mag.magnitude_table[5] = {0xCC, 110, 9};
+    rules_mag.magnitude_table[6] = {0xFF, 150, 10};
+
+    // Use RNG 0x00: 0x00 <= 0x1E → power=10 (Magnitude 4). Both pairs use same byte.
+    // Then 0xFF for crit, 0xFF for variation.
+    std::vector<uint8_t> rng_normal     = {0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    std::vector<uint8_t> rng_underground = {0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+    auto run_mag = [&](bool set_underground) -> int16_t {
+        auto reg  = make_b_reg(*r);
+        enginemon::Party party;
+        enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+        pmon.current_hp=pmon.max_hp=500; party.add(pmon);
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules_mag);
+        enginemon::BattlePokemon player = make_bp_b(MAG_ID, 500);
+        player.stats.speed = player.base_stats.speed = 200;
+        enginemon::BattlePokemon opp = make_bp_b(enginemon::MOVE_NONE, 500);
+        opp.stats.max_hp = 500;
+        opp.stats.speed = opp.base_stats.speed = 1;
+        if (set_underground) opp.set_volatile(enginemon::VolatileStatus::Underground);
+        battle.player_pokemon()  = player;
+        battle.opponent_pokemon() = opp;
+        auto& rng_seq = set_underground ? rng_underground : rng_normal;
+        size_t idx = 0;
+        battle.set_rng_callback([&]()->uint32_t{
+            return (idx < rng_seq.size()) ? rng_seq[idx++] : 0x01u;
+        });
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+        return battle.opponent_pokemon().stats.hp;
+    };
+
+    const int16_t hp_normal      = run_mag(false);
+    const int32_t dmg_normal     = 500 - hp_normal;
+    const int16_t hp_underground = run_mag(true);
+    const int32_t dmg_underground = 500 - hp_underground;
+
+    std::cout << "\n    Magnitude: normal=" << dmg_normal << " underground=" << dmg_underground << "\n";
+    ASSERT_TRUE(dmg_normal > 0);
+    ASSERT_TRUE(dmg_underground > 0);
+    ASSERT_EQ(dmg_underground, dmg_normal * 2);
+}
+
+// ── Stomp vs Minimized ────────────────────────────────────────────────────
+TEST(p_cond_dbl_stomp_vs_minimize) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "cdbl_stomp_min");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Move 23 = STOMP, effect 150 = EFFECT_STOMP, TargetMinimized
+    constexpr enginemon::MoveId STOMP_ID = 23;
+    const enginemon::MoveData* stomp_md = r->get(STOMP_ID);
+    ASSERT_TRUE(stomp_md != nullptr); if (!stomp_md) return;
+    ASSERT_EQ(stomp_md->effect_desc.conditional_double,
+              enginemon::ConditionalDoubleCondition::TargetMinimized);
+
+    // Verify Minimize (move 107) has sets_minimize=true
+    constexpr enginemon::MoveId MINIMIZE_ID = 107;
+    const enginemon::MoveData* min_md = r->get(MINIMIZE_ID);
+    ASSERT_TRUE(min_md != nullptr); if (!min_md) return;
+    ASSERT_TRUE(min_md->effect_desc.sets_minimize);
+
+    std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+    // Stomp normal target (no Minimized volatile)
+    const int16_t hp_normal = run_cond_dbl_turn(*r, STOMP_ID, 500, rng);
+    const int32_t dmg_normal = 500 - hp_normal;
+
+    // Stomp Minimized target
+    const int16_t hp_minimized = run_cond_dbl_turn(*r, STOMP_ID, 500, rng,
+        [](enginemon::BattlePokemon& opp){
+            opp.set_volatile(enginemon::VolatileStatus::Minimized);
+        });
+    const int32_t dmg_minimized = 500 - hp_minimized;
+
+    std::cout << "\n    Stomp: normal=" << dmg_normal << " minimized=" << dmg_minimized << "\n";
+    ASSERT_TRUE(dmg_normal > 0);
+    ASSERT_TRUE(dmg_minimized > 0);
+    ASSERT_EQ(dmg_minimized, dmg_normal * 2);
+}
+
+// ── Stomp after Double Team must NOT double ───────────────────────────────
+TEST(p_cond_dbl_stomp_vs_double_team_not_doubled) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "cdbl_stomp_dt");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Double Team = move 104 = EFFECT_EVASION_UP, sets_minimize must be FALSE
+    constexpr enginemon::MoveId DTEAM_ID = 104;
+    constexpr enginemon::MoveId STOMP_ID = 23;
+    const enginemon::MoveData* dt_md = r->get(DTEAM_ID);
+    ASSERT_TRUE(dt_md != nullptr); if (!dt_md) return;
+    ASSERT_FALSE(dt_md->effect_desc.sets_minimize);  // Double Team must NOT set Minimized
+
+    std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+    // Stomp normal target (no evasion change)
+    const int16_t hp_normal = run_cond_dbl_turn(*r, STOMP_ID, 500, rng);
+    const int32_t dmg_normal = 500 - hp_normal;
+
+    // Stomp target that used Double Team (evasion +1 but NOT Minimized)
+    const int16_t hp_after_dt = run_cond_dbl_turn(*r, STOMP_ID, 500, rng,
+        [](enginemon::BattlePokemon& opp){
+            // Double Team: evasion stage +1, but Minimized volatile NOT set
+            opp.stages.evasion = 1;
+            // Explicitly verify Minimized is NOT set
+        });
+    const int32_t dmg_after_dt = 500 - hp_after_dt;
+
+    std::cout << "\n    Stomp+DTeam: normal=" << dmg_normal << " after_double_team=" << dmg_after_dt << "\n";
+    ASSERT_TRUE(dmg_normal > 0);
+    // Stomp after Double Team must NOT be doubled (evasion ≠ Minimized)
+    ASSERT_TRUE(dmg_after_dt < dmg_normal * 2);  // NOT doubled
+    std::cout << "    Stomp after Double Team is NOT doubled: ok\n";
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -5615,6 +5925,14 @@ int main(int argc, char* argv[]) {
 
     // ROOT_WEATHER_SOLAR_PENALTY
     RUN_TEST(p_solarbeam_rain_penalty);
+
+    // ROOT_CONDITIONAL_DOUBLE
+    RUN_TEST(p_cond_dbl_gust_vs_flying);
+    RUN_TEST(p_cond_dbl_twister_vs_flying);
+    RUN_TEST(p_cond_dbl_earthquake_vs_underground);
+    RUN_TEST(p_cond_dbl_magnitude_vs_underground);
+    RUN_TEST(p_cond_dbl_stomp_vs_minimize);
+    RUN_TEST(p_cond_dbl_stomp_vs_double_team_not_doubled);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

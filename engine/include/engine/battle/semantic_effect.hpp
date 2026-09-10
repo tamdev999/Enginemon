@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // engine/include/engine/battle/semantic_effect.hpp
 //
 // SemanticEffectDescription — typed compiler-side description of one move's
@@ -384,6 +384,13 @@ struct SemanticEffectDescription {
     // Runtime checks this flag and applies ×0.5 when field_.weather == Rain.
     // This replaces the dead raw-effect-ID lookup in apply_weather_modifier().
     bool halves_in_rain = false;
+
+    // Minimize — sets VolatileStatus::Minimized on the user.
+    // Source: suiCune MinimizeDropSub — only fired for move MINIMIZE (0x6b = 107),
+    // not for Double Team, even though both share EFFECT_EVASION_UP.
+    // Runtime sets Minimized volatile when apply_stat_change sees EvasionUp1+sets_minimize.
+    // Stomp (ConditionalDoubleCondition::TargetMinimized) checks VolatileStatus::Minimized.
+    bool sets_minimize = false;
 
     // Splash — explicit no-op (Splash does nothing; is_supported=true, immediate Success).
     bool is_splash = false;

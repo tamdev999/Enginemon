@@ -1,4 +1,4 @@
-// engine/package/package_reader.cpp
+﻿// engine/package/package_reader.cpp
 // Runtime package reader implementation
 //
 // Deserializes EMON package data directly into runtime-native types.
@@ -41,11 +41,11 @@ static constexpr auto crc_table = make_crc_table();
 uint32_t calculate_crc32(const void* data, size_t size) {
     const auto* bytes = static_cast<const uint8_t*>(data);
     uint32_t crc = 0xFFFFFFFF;
-    
+
     for (size_t i = 0; i < size; ++i) {
         crc = crc_table[(crc ^ bytes[i]) & 0xFF] ^ (crc >> 8);
     }
-    
+
     return crc ^ 0xFFFFFFFF;
 }
 
@@ -67,11 +67,11 @@ class BoundsReader {
 public:
     BoundsReader(std::istream& in, size_t total_size)
         : in_(in), total_size_(total_size), current_pos_(0) {}
-    
+
     bool has_bytes(size_t count) const {
         return current_pos_ + count <= total_size_;
     }
-    
+
     template<typename T>
     bool read_le(T& out) {
         if (!has_bytes(sizeof(T))) return false;
@@ -84,7 +84,7 @@ public:
         current_pos_ += sizeof(T);
         return true;
     }
-    
+
     bool read_bytes(void* dst, size_t count) {
         if (!has_bytes(count)) return false;
         in_.read(static_cast<char*>(dst), count);
@@ -92,16 +92,16 @@ public:
         current_pos_ += count;
         return true;
     }
-    
+
     bool skip(size_t count) {
         if (!has_bytes(count)) return false;
         in_.seekg(count, std::ios::cur);
         current_pos_ += count;
         return in_.good();
     }
-    
+
     size_t remaining() const { return total_size_ - current_pos_; }
-    
+
 private:
     std::istream& in_;
     size_t total_size_;
@@ -136,12 +136,12 @@ static std::string read_fixed_string(std::istream& in, size_t size) {
 static bool read_length_string(std::istream& in, std::string& out) {
     uint16_t len = read_le<uint16_t>(in);
     if (!in.good()) return false;
-    
+
     // Bounds check: reject unreasonably large strings
     if (len > PackageLimits::MAX_STRING_LENGTH) {
         return false;
     }
-    
+
     out.resize(len);
     if (len > 0) {
         in.read(out.data(), len);
@@ -244,7 +244,7 @@ static RuntimeObject read_object(std::istream& in) {
 
 static RuntimeConnection read_connection(std::istream& in) {
     RuntimeConnection conn;
-    
+
     // Read raw direction byte and convert to runtime type.
     // An unrecognized direction byte is a structural package error — throw
     // rather than silently defaulting to North.
@@ -260,7 +260,7 @@ static RuntimeConnection read_connection(std::istream& in) {
                             "— malformed or wrong-schema package",
                             static_cast<int>(raw_dir)));
     }
-    
+
     conn.src_skip_blocks    = read_le<int32_t>(in);
     conn.strip_length_blocks = in.get();
     conn.coord_adjust_tiles = read_le<int32_t>(in);
@@ -277,14 +277,14 @@ static RuntimeConnection read_connection(std::istream& in) {
 template<typename T>
 static std::vector<T> read_counted_array(std::istream& in, T (*read_item)(std::istream&)) {
     uint32_t count = read_le<uint32_t>(in);
-    
+
     if (count > PackageLimits::MAX_ARRAY_COUNT) {
         throw std::runtime_error(
             std::format("read_counted_array: declared count {} exceeds MAX_ARRAY_COUNT {} "
                         "— malformed or wrong-schema package",
                         count, PackageLimits::MAX_ARRAY_COUNT));
     }
-    
+
     std::vector<T> arr;
     arr.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
@@ -304,9 +304,9 @@ static std::vector<T> read_counted_array(std::istream& in, T (*read_item)(std::i
 // malformed payload (nullopt) from a valid but empty/default resource.
 static std::optional<RuntimeMap> deserialize_map(const std::vector<uint8_t>& data) {
     std::istringstream in(std::string(data.begin(), data.end()), std::ios::binary);
-    
+
     RuntimeMap map;
-    
+
     // Fixed fields
     map.map_id = read_fixed_string(in, 64);
     map.display_name = read_fixed_string(in, 64);
@@ -315,35 +315,35 @@ static std::optional<RuntimeMap> deserialize_map(const std::vector<uint8_t>& dat
     map.landmark_id = read_fixed_string(in, 32);
     map.map_script_id = read_fixed_string(in, 64);
     map.fish_group_id = read_fixed_string(in, 32);
-    
+
     map.width = in.get();
     map.height = in.get();
     map.border_block = in.get();
     map.environment_type = in.get();
-    
+
     if (!in.good()) return std::nullopt;  // Fixed-header truncated
-    
+
     // Derive semantic Environment from raw Crystal byte
     map.environment = environment_from_crystal(map.environment_type);
-    
+
     uint8_t flags = in.get();
     map.is_outdoor = (flags & 0x01) != 0;
     map.phone_service_disabled = (flags & 0x02) != 0;
-    
+
     map.lighting = in.get();
-    
+
     // Derive time_policy from lighting byte
     if (map.lighting <= 4) {
         map.time_policy = static_cast<PalettePolicy>(map.lighting);
     } else {
         map.time_policy = PalettePolicy::Auto;
     }
-    
+
     in.get();  // padding
     in.get();  // padding
-    
+
     if (!in.good()) return std::nullopt;
-    
+
     // Block data — oversized block_count is a structural error, not a silent skip
     uint32_t block_count = read_le<uint32_t>(in);
     if (block_count > PackageLimits::MAX_BLOCK_COUNT) {
@@ -352,7 +352,7 @@ static std::optional<RuntimeMap> deserialize_map(const std::vector<uint8_t>& dat
     map.blocks.resize(block_count);
     in.read(reinterpret_cast<char*>(map.blocks.data()), block_count);
     if (!in.good() && !in.eof()) return std::nullopt;  // Truncated block data
-    
+
     // Events — read_counted_array and read_connection both throw on structural failure;
     // catch and convert to nullopt so the whole map decode is a clean failure.
     try {
@@ -364,7 +364,7 @@ static std::optional<RuntimeMap> deserialize_map(const std::vector<uint8_t>& dat
     } catch (const std::exception& e) {
         return std::nullopt;  // Structural failure in event arrays
     }
-    
+
     return map;
 }
 
@@ -375,29 +375,29 @@ static std::optional<RuntimeMap> deserialize_map(const std::vector<uint8_t>& dat
 std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return nullptr;
-    
+
     // Get file size for bounds validation
     in.seekg(0, std::ios::end);
     size_t file_size = static_cast<size_t>(in.tellg());
     in.seekg(0, std::ios::beg);
-    
+
     // Validate minimum header size
     if (file_size < sizeof(PackageHeader)) {
         return nullptr;  // Truncated: header doesn't fit
     }
-    
+
     auto reader = std::unique_ptr<PackageReader>(new PackageReader());
     reader->path_ = path;
     reader->file_size_ = file_size;
-    
+
     // Read header
     in.read(reinterpret_cast<char*>(&reader->header_), sizeof(PackageHeader));
-    
+
     // Validate magic
     if (reader->header_.magic != PackageHeader::MAGIC) {
         return nullptr;
     }
-    
+
     // Validate format version before interpreting any version-dependent payloads.
     // An older or newer version must fail explicitly rather than silently
     // decoding fields under wrong-schema assumptions.
@@ -407,25 +407,25 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
                   << " (expected " << PackageHeader::VERSION << ")\n";
         return nullptr;
     }
-    
+
     // Validate TOC bounds: offset + size must be within file
     if (reader->header_.toc_offset > file_size ||
         reader->header_.toc_size > file_size ||
         reader->header_.toc_offset + reader->header_.toc_size > file_size) {
         return nullptr;  // TOC extends beyond file
     }
-    
+
     // Read TOC
     in.seekg(reader->header_.toc_offset);
     uint32_t toc_entries = reader->header_.toc_size / (sizeof(uint32_t) * 5);
-    
+
     // Validate TOC entry count
     if (toc_entries > PackageLimits::MAX_TOC_ENTRIES) {
         return nullptr;  // Unreasonable TOC size
     }
-    
+
     reader->toc_.reserve(toc_entries);
-    
+
     for (uint32_t i = 0; i < toc_entries; ++i) {
         TocEntry entry;
         entry.type = static_cast<ChunkType>(read_le<uint32_t>(in));
@@ -433,29 +433,29 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
         entry.size = read_le<uint32_t>(in);
         entry.count = read_le<uint32_t>(in);
         entry.crc32 = read_le<uint32_t>(in);
-        
+
         // Validate each chunk's bounds BEFORE using
         if (entry.offset > file_size ||
             entry.size > file_size ||
             entry.offset + entry.size > file_size) {
             return nullptr;  // Chunk extends beyond file
         }
-        
+
         // Validate chunk size against limits
         if (entry.size > PackageLimits::MAX_CHUNK_SIZE) {
             return nullptr;  // Chunk too large
         }
-        
+
         reader->toc_.push_back(entry);
     }
-    
+
     // Build indices for all chunk types
     for (size_t i = 0; i < reader->toc_.size(); ++i) {
         const auto& entry = reader->toc_[i];
         in.seekg(entry.offset);
-        
+
         std::unordered_map<std::string, size_t>* target_index = nullptr;
-        
+
         switch (entry.type) {
             case ChunkType::Maps:
                 target_index = &reader->map_index_;
@@ -475,45 +475,45 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
             default:
                 continue;
         }
-        
+
         // Validate count against limits
         if (entry.count > PackageLimits::MAX_ARRAY_COUNT) {
             return nullptr;  // Too many entries in chunk
         }
-        
+
         // Track consumed bytes within chunk for bounds checking
         size_t consumed = 0;
-        
+
         for (uint32_t j = 0; j < entry.count; ++j) {
             // Check we have room for length prefix
             if (consumed + 2 > entry.size) {
                 return nullptr;  // Truncated index entry
             }
-            
+
             uint16_t id_len = read_le<uint16_t>(in);
             consumed += 2;
-            
+
             // Validate string length
             if (id_len > PackageLimits::MAX_STRING_LENGTH ||
                 consumed + id_len > entry.size) {
                 return nullptr;  // String extends beyond chunk
             }
-            
+
             std::string id(id_len, '\0');
             in.read(id.data(), id_len);
             consumed += id_len;
-            
+
             // Check we have room for data_size
             if (consumed + 4 > entry.size) {
                 return nullptr;  // Truncated index entry
             }
-            
+
             uint32_t data_size = read_le<uint32_t>(in);
             consumed += 4;
-            
+
             // Don't need to validate data_size fits here since we're just reading index
             // The actual data read will validate against remaining chunk size
-            
+
             // Reject duplicate IDs: a duplicate in the index means the writer
             // emitted an invalid package.  Reject rather than silently accepting
             // last-wins (which would desync the index from the sequential data scan).
@@ -524,25 +524,25 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
             (void)data_size;
         }
     }
-    
+
     return reader;
 }
 
 bool PackageReader::validate() const {
     std::ifstream in(path_, std::ios::binary);
     if (!in) return false;
-    
+
     for (const auto& entry : toc_) {
         std::vector<uint8_t> data(entry.size);
         in.seekg(entry.offset);
         in.read(reinterpret_cast<char*>(data.data()), entry.size);
-        
+
         uint32_t actual_crc = calculate_crc32(data.data(), data.size());
         if (actual_crc != entry.crc32) {
             return false;
         }
     }
-    
+
     return true;
 }
 
@@ -586,12 +586,12 @@ std::optional<std::vector<uint8_t>> PackageReader::read_indexed_chunk(
     ChunkType type,
     const std::string& target_id,
     const std::unordered_map<std::string, size_t>& index) const {
-    
+
     auto it = index.find(target_id);
     if (it == index.end()) {
         return std::nullopt;
     }
-    
+
     // Find the chunk
     const TocEntry* chunk = nullptr;
     for (const auto& entry : toc_) {
@@ -601,13 +601,13 @@ std::optional<std::vector<uint8_t>> PackageReader::read_indexed_chunk(
         }
     }
     if (!chunk || chunk->count == 0) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Read index to find offsets
     in.seekg(chunk->offset);
-    
+
     std::vector<std::pair<std::string, uint32_t>> chunk_index;
     for (uint32_t i = 0; i < chunk->count; ++i) {
         uint16_t id_len = read_le<uint16_t>(in);
@@ -616,12 +616,12 @@ std::optional<std::vector<uint8_t>> PackageReader::read_indexed_chunk(
         uint32_t data_size = read_le<uint32_t>(in);
         chunk_index.push_back({id, data_size});
     }
-    
+
     // Find target
     uint32_t data_offset = 0;
     uint32_t target_size = 0;
     bool found = false;
-    
+
     for (const auto& [id, size] : chunk_index) {
         if (id == target_id) {
             target_size = size;
@@ -630,29 +630,29 @@ std::optional<std::vector<uint8_t>> PackageReader::read_indexed_chunk(
         }
         data_offset += size;
     }
-    
+
     if (!found) return std::nullopt;
-    
+
     // Calculate index size
     uint32_t index_size = 0;
     for (const auto& [id, size] : chunk_index) {
         index_size += 2 + static_cast<uint32_t>(id.size()) + 4;
     }
-    
+
     // Read data
     in.seekg(chunk->offset + index_size + data_offset);
     std::vector<uint8_t> data(target_size);
     in.read(reinterpret_cast<char*>(data.data()), target_size);
-    
+
     if (!in.good()) return std::nullopt;
-    
+
     return data;
 }
 
 std::optional<RuntimeMap> PackageReader::load_map(const std::string& map_id) const {
     auto data = read_indexed_chunk(ChunkType::Maps, map_id, map_index_);
     if (!data) return std::nullopt;
-    
+
     // deserialize_map returns nullopt on any structural failure —
     // a malformed payload is distinguishable from "map not found" (data = nullopt).
     return deserialize_map(*data);
@@ -671,34 +671,34 @@ std::optional<std::vector<uint8_t>> PackageReader::load_font_atlas(
 std::optional<std::string> PackageReader::load_script(const std::string& script_id) const {
     auto data = read_indexed_chunk(ChunkType::Scripts, script_id, script_index_);
     if (!data) return std::nullopt;
-    
+
     return std::string(data->begin(), data->end());
 }
 
 std::optional<RuntimeSprite> PackageReader::load_sprite(const std::string& sprite_id) const {
     auto data = read_indexed_chunk(ChunkType::Sprites, sprite_id, sprite_index_);
     if (!data) return std::nullopt;
-    
+
     // Deserialize sprite with stream-health checks at each structural read.
     // Returns nullopt on any truncation rather than a partially-built sprite.
     std::istringstream in(std::string(data->begin(), data->end()), std::ios::binary);
-    
+
     RuntimeSprite sprite;
-    
+
     // Read sprite_id (length-prefixed)
     uint16_t id_len = read_le<uint16_t>(in);
     if (!in.good()) return std::nullopt;
     sprite.sprite_id.resize(id_len);
     in.read(sprite.sprite_id.data(), id_len);
     if (!in.good() && !in.eof()) return std::nullopt;
-    
+
     // Read type and palette
     int type_byte = in.get();
     int palette_byte = in.get();
     if (!in.good() && !in.eof()) return std::nullopt;
     sprite.type = static_cast<SpriteType>(type_byte);
     sprite.default_palette = static_cast<SpritePalette>(palette_byte);
-    
+
     // Read frames
     uint32_t frame_count = read_le<uint32_t>(in);
     if (!in.good()) return std::nullopt;
@@ -707,7 +707,7 @@ std::optional<RuntimeSprite> PackageReader::load_sprite(const std::string& sprit
         in.read(reinterpret_cast<char*>(sprite.frames[i].pixels.data()), 256);
         if (!in.good() && !in.eof()) return std::nullopt;
     }
-    
+
     return sprite;
 }
 
@@ -721,22 +721,22 @@ std::optional<SpriteObjPalettes> PackageReader::load_obj_palettes() const {
         }
     }
     if (!pal_chunk || pal_chunk->size == 0) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Read palette data
     in.seekg(pal_chunk->offset);
     std::vector<uint8_t> data(pal_chunk->size);
     in.read(reinterpret_cast<char*>(data.data()), pal_chunk->size);
-    
+
     if (!in.good()) return std::nullopt;
-    
+
     // Deserialize palettes
     std::istringstream sin(std::string(data.begin(), data.end()), std::ios::binary);
-    
+
     SpriteObjPalettes palettes;
-    
+
     // 4 time-of-day variants × 8 palettes × 4 colors × 2 bytes (RGB555)
     for (int tod = 0; tod < 4; ++tod) {
         for (int pal = 0; pal < 8; ++pal) {
@@ -745,7 +745,7 @@ std::optional<SpriteObjPalettes> PackageReader::load_obj_palettes() const {
             }
         }
     }
-    
+
     return palettes;
 }
 
@@ -1012,7 +1012,7 @@ PackageReader::load_move_registry() const {
         desc.is_perish_song        = read_bool();  // [60]
         desc.is_attract            = read_bool();  // [61]
         desc.is_baton_pass         = read_bool();  // [62]
-        // [63] is a bitfield: bit0=is_heal_bell, bit1=is_endure, bit2=is_rage, bit3=has_effectchance_phase, bit4=crash_on_miss, bit5=halves_in_rain
+        // [63] is a bitfield: bit0=is_heal_bell, bit1=is_endure, bit2=is_rage, bit3=has_effectchance_phase, bit4=crash_on_miss, bit5=halves_in_rain, bit6=sets_minimize
         {
             const uint8_t b63 = read_u8();
             desc.is_heal_bell            = (b63 & 0x01u) != 0;
@@ -1021,6 +1021,7 @@ PackageReader::load_move_registry() const {
             desc.has_effectchance_phase  = (b63 & 0x08u) != 0;
             desc.crash_on_miss           = (b63 & 0x10u) != 0;
             desc.halves_in_rain          = (b63 & 0x20u) != 0;
+            desc.sets_minimize           = (b63 & 0x40u) != 0;
         }
         if (!in.good() && !in.eof()) return std::nullopt;
 

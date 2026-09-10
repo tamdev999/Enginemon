@@ -5,7 +5,7 @@
 // EXTENSIBILITY:
 // Vanilla Crystal implements Gen 2 mechanics only (no abilities, etc).
 // However, this is NOT a hard limitation of the engine architecture.
-// 
+//
 // Future mods/frontends can extend mechanics by:
 // - Adding new entries to enums (Status, Weather, etc.) via registry
 // - Registering new effect handlers for moves/items/abilities
@@ -62,7 +62,7 @@ enum class FlagNamespace : uint8_t {
 struct FlagRef {
     FlagNamespace ns;
     uint16_t value;
-    
+
     // Comparison operators - different namespaces are NEVER equal
     bool operator==(const FlagRef& other) const {
         return ns == other.ns && value == other.value;
@@ -72,14 +72,14 @@ struct FlagRef {
         if (ns != other.ns) return ns < other.ns;
         return value < other.value;
     }
-    
+
     // Factory methods for clarity
     static FlagRef event_flag(uint16_t v) { return {FlagNamespace::Event, v}; }
     static FlagRef engine_flag(uint16_t v) { return {FlagNamespace::Engine, v}; }
-    
+
     // Human-readable debug string
     std::string to_string() const {
-        return (ns == FlagNamespace::Event ? "EventFlag{" : "EngineFlag{") + 
+        return (ns == FlagNamespace::Event ? "EventFlag{" : "EngineFlag{") +
                std::to_string(value) + "}";
     }
 };
@@ -153,24 +153,24 @@ struct SpeciesData {
     SpeciesId id;
     std::string name;
     std::string category;  // e.g. "Seed Pokemon"
-    
+
     BaseStats base_stats;
     TypeId type1;
     TypeId type2;  // TYPE_NONE if single type
-    
+
     uint8_t catch_rate;
     uint8_t base_exp;
     uint8_t gender_ratio;  // 0-254 for female chance, 255 for genderless
     uint8_t egg_cycles;
     uint8_t base_friendship;
     uint8_t growth_rate;
-    
+
     std::array<uint16_t, 2> ev_yield;  // HP/Atk, Def/Speed, SpAtk/SpDef packed
-    
+
     std::vector<std::pair<uint8_t, MoveId>> learnset;  // level -> move
     std::vector<MoveId> tm_compatibility;
     std::vector<SpeciesId> egg_moves;
-    
+
     SpriteId front_sprite;
     SpriteId back_sprite;
     SpriteId icon_sprite;
@@ -255,29 +255,29 @@ namespace SemEffect {
 struct MoveData {
     MoveId id;
     std::string name;
-    
+
     TypeId type;
     MoveCategory category;
     MoveTarget target;
-    
+
     uint8_t power;          // 0 for status moves
     uint8_t accuracy;       // 0 for always-hit moves
     uint8_t pp;
     int8_t priority;        // Usually 0, positive = faster
-    
+
     EffectId effect_id  = SemEffect::Unknown;  // Semantic effect identifier (EMON-stable)
     uint8_t effect_chance;  // Raw Crystal MOVE_CHANCE byte (0–255).
                             // Assembled from the source percentage by the percent RGBDS macro
                             // (e.g. "20 percent" in moves.asm assembles to floor(20*255/100)=51).
                             // Crystal BattleCommand_EffectChance fires iff BattleRandom < this byte.
                             // Runtime must compare rng_byte directly against this value; no *255/100.
-    
+
     bool makes_contact;
     bool is_sound_based;
-    
+
     // Animation/presentation
     uint8_t animation_id;
-    
+
     // Semantic effect description — produced by Crystal frontend from decoded effect script.
     // execute_move() reads this struct for execution dispatch instead of effect_id.
     // Populated at package load time; zero-init gives "ordinary single-hit damage" defaults.
@@ -305,13 +305,13 @@ struct ItemData {
     ItemId id;
     std::string name;
     std::string description;
-    
+
     ItemPocket pocket;
     uint16_t price;
     uint8_t held_effect;    // Effect when held in battle (0 = none)
     uint8_t held_param;     // Parameter for held effect
     uint8_t field_effect;   // Effect when used from menu (0 = none)
-    
+
     bool is_key_item;
     bool is_tm_hm;
     MoveId tm_move;         // If is_tm_hm, which move it teaches
@@ -345,7 +345,7 @@ struct TrainerData {
         uint8_t dv_spc = 8;   // Special DV (vanilla default 8)
     };
     std::vector<Pokemon> party;
-    
+
     std::vector<ItemId> items;  // Items trainer can use
     ScriptId before_battle_script;
     ScriptId after_win_script;
@@ -411,6 +411,10 @@ enum class VolatileStatus : uint32_t {
     LockOn       = 1u << 24,  // Lock-On -- next move always hits; consumed on next hit check
     DestinyBond  = 1u << 25,  // Destiny Bond -- if user faints from direct damage, opponent faints too
     Perish       = 1u << 26,  // Perish Song countdown active
+    Minimized    = 1u << 27,  // Minimize used — Stomp deals double damage
+                               // Source: suiCune MinimizeDropSub sets wPlayerMinimized/wEnemyMinimized.
+                               // Set only by Minimize (move 107); NOT set by Double Team.
+                               // Clears on ordinary switch-out (volatile_status reset to 0).
 };
 
 // Direction for movement
@@ -444,7 +448,7 @@ enum class MovementType : uint8_t {
     SlowJumpStep,       // 0x2C-0x2F: Slow ledge jump
     JumpStep,           // 0x30-0x33: Normal ledge jump
     FastJumpStep,       // 0x34-0x37: Fast ledge jump
-    
+
     // Non-directional control commands - 0x38+
     RemoveSliding,      // 0x38: Stop sliding state
     SetSliding,         // 0x39: Start sliding state
@@ -479,7 +483,7 @@ struct MovementCommand {
     MovementType type;
     Direction direction = Direction::Down;  // For directional commands
     uint8_t param = 0;                      // For sleep/dig/shake (frame count)
-    
+
     // Helper to check if this moves the object
     bool is_step() const {
         switch (type) {
@@ -497,7 +501,7 @@ struct MovementCommand {
                 return false;
         }
     }
-    
+
     // Helper to check if this is a facing change only
     bool is_turn() const {
         switch (type) {
@@ -511,7 +515,7 @@ struct MovementCommand {
                 return false;
         }
     }
-    
+
     // Check if directional (uses direction field)
     bool is_directional() const {
         return static_cast<uint8_t>(type) <= static_cast<uint8_t>(MovementType::FastJumpStep);
@@ -535,18 +539,18 @@ enum class MovementTargetType : uint8_t {
 struct MovementTarget {
     MovementTargetType type;
     uint8_t object_id = 0;  // Only valid when type == Object
-    
+
     // Factory methods for clear semantics
     static MovementTarget object(uint8_t id) { return {MovementTargetType::Object, id}; }
     static MovementTarget player() { return {MovementTargetType::Player, 0}; }
     static MovementTarget last_talked() { return {MovementTargetType::LastTalked, 0}; }
-    
+
     // Check if this is the player (object_id 0 OR explicit Player type)
     bool is_player() const {
-        return type == MovementTargetType::Player || 
+        return type == MovementTargetType::Player ||
                (type == MovementTargetType::Object && object_id == 0);
     }
-    
+
     // Check if this targets the last talked NPC
     bool is_last_talked() const { return type == MovementTargetType::LastTalked; }
 };
@@ -566,11 +570,11 @@ enum class VarValueSourceType : uint8_t {
 struct VarValueSource {
     VarValueSourceType type;
     int16_t value = 0;  // Only valid when type == Literal
-    
+
     // Factory methods for clear semantics
     static VarValueSource literal(int16_t v) { return {VarValueSourceType::Literal, v}; }
     static VarValueSource script_result() { return {VarValueSourceType::ScriptResult, 0}; }
-    
+
     // Check source type
     bool is_literal() const { return type == VarValueSourceType::Literal; }
     bool is_script_result() const { return type == VarValueSourceType::ScriptResult; }
@@ -616,7 +620,7 @@ struct ElevatorFloor {
     FloorLabel label;       // Display label (FLOOR_1F, etc.)
     uint8_t warp_id;        // Destination warp ID in target map
     MapId target_map;       // Semantic map ID to warp to
-    
+
     bool operator==(const ElevatorFloor& other) const {
         return label == other.label && warp_id == other.warp_id && target_map == other.target_map;
     }
@@ -627,7 +631,7 @@ struct ElevatorDefinition {
     ElevatorId id;                          // Semantic ID assigned at compile time
     std::string name;                       // Debug/display name (e.g., "GoldenrodDeptStoreElevator")
     std::vector<ElevatorFloor> floors;      // Ordered floor destinations
-    
+
     bool operator==(const ElevatorDefinition& other) const {
         return floors == other.floors;  // Identity is determined by floor list content
     }

@@ -1,4 +1,4 @@
-// frontends/crystal/compile/move_semanticizer.cpp
+﻿// frontends/crystal/compile/move_semanticizer.cpp
 //
 // Move semanticization step: Crystal ROM → SemanticEffectDescription per move.
 //
@@ -99,14 +99,15 @@ static void pack_effect_desc(const enginemon::SemanticEffectDescription& d,
     pb(d.is_attract,            61);
     pb(d.is_baton_pass,         62);
     // byte [63] is a bitfield: [0]=is_heal_bell, [1]=is_endure, [2]=is_rage,
-    //   [3]=has_effectchance_phase, [4]=crash_on_miss, [5]=halves_in_rain
+    //   [3]=has_effectchance_phase, [4]=crash_on_miss, [5]=halves_in_rain, [6]=sets_minimize
     raw[63] = static_cast<uint8_t>(
         (d.is_heal_bell           ? 0x01u : 0u) |
         (d.is_endure              ? 0x02u : 0u) |
         (d.is_rage                ? 0x04u : 0u) |
         (d.has_effectchance_phase ? 0x08u : 0u) |
         (d.crash_on_miss          ? 0x10u : 0u) |
-        (d.halves_in_rain         ? 0x20u : 0u));
+        (d.halves_in_rain         ? 0x20u : 0u) |
+        (d.sets_minimize          ? 0x40u : 0u));
 }
 
 bool semanticize_move_entries(
@@ -190,6 +191,18 @@ bool semanticize_move_entries(
             // Crystal raw effect-ID knowledge.
             if (e.raw_crystal_effect == crystal::EffectId::SOLARBEAM) {
                 desc.halves_in_rain = true;
+            }
+
+            // ── Minimize — set Minimized volatile ────────────────────────────
+            // Source: suiCune MinimizeDropSub — called from BattleCommand_StatUp
+            // after evasionup raises the stage. Sets wPlayerMinimized=1 ONLY when
+            // BATTLE_VARS_MOVE_ANIM == MINIMIZE. Double Team (same EFFECT_EVASION_UP,
+            // different move ID) has a different animation byte so the flag is not set.
+            // We encode this via move ID at semanticize time (compiler side only;
+            // no raw effect-ID or move-ID reaches the runtime).
+            // Minimize = move ID 107 (0x6b) in vanilla Crystal.
+            if (e.id == static_cast<uint16_t>(107u)) {
+                desc.sets_minimize = true;
             }
 
             // ── Hard fail: unrecognized opcode in script ───────────────────────
