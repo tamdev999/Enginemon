@@ -1,4 +1,4 @@
-# Engine library - native C++ runtime
+﻿# Engine library - native C++ runtime
 # No ROM knowledge, no Game Boy concepts, only semantic game data
 
 add_library(enginemon_engine STATIC
@@ -10,10 +10,10 @@ add_library(enginemon_engine STATIC
     core/headless_runtime.cpp
     core/game_state.cpp
     core/timing.cpp
-    
+
     # Package loading (runtime side of compiler/runtime boundary)
     package/package_reader.cpp
-    
+
     # World / movement / collision / interaction / warps
     world/movement_manager.cpp
     world/collision.cpp
@@ -21,10 +21,10 @@ add_library(enginemon_engine STATIC
     world/world_manager.cpp
     world/runtime_tileset.cpp
     world/sprite_atlas.cpp
-    
+
     # Input system
     input/input_system.cpp
-    
+
     # Battle system (mechanics, AI)
     battle/calculator.cpp
     battle/battle.cpp
@@ -34,13 +34,13 @@ add_library(enginemon_engine STATIC
     # Party/Pokemon management
     party/party.cpp
     party/pokemon.cpp
-    
+
     # Scripting (Lua orchestration)
     scripting/lua_runtime.cpp
     scripting/api_bindings.cpp
     scripting/coroutine_manager.cpp
     scripting/semantic_ir.cpp  # heavy: 154-alt SemanticOp variant — /Ob0 on MSVC (see below)
-    
+
     # Build system (shared across frontends)
     build/thread_pool.cpp
     build/build_stats.cpp
@@ -70,5 +70,11 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     set_source_files_properties(
         scripting/semantic_ir.cpp
         PROPERTIES COMPILE_OPTIONS "/Ob0"
+    )
+    # battle.cpp has execute_move which is ~950 lines; MSVC ICEs with optimization.
+    # Disable optimization on the specific TU to avoid ICE on this version of MSVC.
+    set_source_files_properties(
+        battle/battle.cpp
+        PROPERTIES COMPILE_OPTIONS "/Od;/bigobj"
     )
 endif()
