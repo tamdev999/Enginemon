@@ -5811,6 +5811,310 @@ TEST(p_cond_dbl_stomp_vs_double_team_not_doubled) {
 }
 
 // ============================================================================
+// ROOT_OPPONENT_SWITCH_STAGE_RESET
+// ============================================================================
+
+// Opponent receives +2 Attack stage, switches out, another mon enters, then
+// the original switches back. Its Attack stage must be neutral (0) on return.
+// Also verifies HP/status/item/PP persist correctly through the cycle.
+TEST(p_opp_switch_resets_stat_stages) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "opp_sw_stage");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+    auto rules = make_rules_b(); auto reg = make_b_reg(*r);
+
+    enginemon::Battle battle(enginemon::BattleType::Trainer, party, reg, rules);
+    battle.player_pokemon() = make_bp2(enginemon::MOVE_NONE, 300, 1);
+
+    // Slot 0: the "original" opponent with +2 Attack stage, 200 HP, status Burned.
+    auto slot0 = make_bp2(enginemon::MOVE_NONE, 200, 50);
+    slot0.stages.attack  = 2;
+    slot0.stages.defense = 1;
+    slot0.status         = enginemon::Status::Burn;
+    slot0.held_item      = static_cast<enginemon::ItemId>(1u);  // arbitrary non-zero item
+    slot0.moves[1].pp    = 7;   // non-default PP on slot 1
+
+    // Slot 1: a fresh second opponent.
+    auto slot1 = make_bp2(enginemon::MOVE_NONE, 300, 50);
+
+    // Set the ACTIVE opponent to slot0's data; push bench slots for the party vector.
+    // pattern: active = slot0_data; party[0] = placeholder; party[1] = slot1_bench.
+    battle.opponent_pokemon() = slot0;
+    battle.push_opponent_party_slot(slot0);   // placeholder at index 0 (gets overwritten on switch-out)
+    battle.push_opponent_party_slot(slot1);   // index 1: the mon we switch TO
+
+    // Switch to slot 1 — this writes slot0's persistent state back and loads slot1.
+    battle.force_switch_opponent(1);
+
+    // The active mon is now slot1. Slot0 is benched.
+    // Switch back to slot 0 — should load with stages = 0 (reset), but HP/status/item/PP intact.
+    battle.force_switch_opponent(0);
+
+    const auto& opp = battle.opponent_pokemon();
+
+    // Stages must be neutral — the fix zeroes stages on switch-in.
+    ASSERT_EQ(opp.stages.attack,  int8_t{0});
+    ASSERT_EQ(opp.stages.defense, int8_t{0});
+
+    // Persistent state must survive.
+    ASSERT_EQ(opp.stats.hp, int16_t{200});       // HP preserved
+    ASSERT_EQ(opp.status,   enginemon::Status::Burn);  // Status preserved
+    ASSERT_EQ(opp.held_item, static_cast<enginemon::ItemId>(1u));  // Item preserved
+    ASSERT_EQ(opp.moves[1].pp, uint8_t{7});      // PP preserved
+
+    std::cout << "\n    opp_switch_stage_reset: atk=" << (int)opp.stages.attack
+              << " def=" << (int)opp.stages.defense
+              << " hp=" << opp.stats.hp
+              << " status=" << (int)opp.status
+              << " pp1=" << (int)opp.moves[1].pp << "\n";
+}
+
+// Opponent switch-out preserves HP, status, item and PP across a full out/back cycle.
+TEST(p_opp_switch_preserves_hp_status_item_pp) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "opp_sw_persist");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+    auto rules = make_rules_b(); auto reg = make_b_reg(*r);
+
+    enginemon::Battle battle(enginemon::BattleType::Trainer, party, reg, rules);
+    battle.player_pokemon() = make_bp2(enginemon::MOVE_NONE, 300, 1);
+
+    auto slot0 = make_bp2(enginemon::MOVE_NONE, 175, 50);
+    slot0.status       = enginemon::Status::Poison;
+    slot0.status_turns = 3;
+    slot0.held_item    = static_cast<enginemon::ItemId>(5u);
+    slot0.moves[0].pp  = 4;
+    slot0.moves[2].pp  = 9;
+
+    auto slot1 = make_bp2(enginemon::MOVE_NONE, 300, 50);
+
+    // Active = slot0 data; push bench slots.
+    battle.opponent_pokemon() = slot0;
+    battle.push_opponent_party_slot(slot0);   // placeholder at index 0
+    battle.push_opponent_party_slot(slot1);   // bench at index 1
+
+    // Switch away from slot0.
+    battle.force_switch_opponent(1);
+    // Switch back to slot0.
+    battle.force_switch_opponent(0);
+
+    const auto& opp = battle.opponent_pokemon();
+    ASSERT_EQ(opp.stats.hp,     int16_t{175});
+    ASSERT_EQ(opp.status,       enginemon::Status::Poison);
+    ASSERT_EQ(opp.status_turns, uint8_t{3});
+    ASSERT_EQ(opp.held_item,    static_cast<enginemon::ItemId>(5u));
+    ASSERT_EQ(opp.moves[0].pp,  uint8_t{4});
+    ASSERT_EQ(opp.moves[2].pp,  uint8_t{9});
+
+    std::cout << "\n    opp_switch_persist: hp=" << opp.stats.hp
+              << " status=" << (int)opp.status
+              << " item=" << (int)opp.held_item
+              << " pp0=" << (int)opp.moves[0].pp << "\n";
+}
+
+// ============================================================================
+// ROOT_BATON_PASS_TRANSFER
+// ============================================================================
+
+// Helper: run a Baton Pass turn and return the incoming player_pokemon.
+// The Baton Pass user is at slot 0, the incoming is at party slot 1.
+static enginemon::BattlePokemon run_baton_pass(
+    const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& reg_ref,
+    const enginemon::BattleRules& rules,
+    enginemon::MoveId bp_id,
+    std::function<void(enginemon::BattlePokemon&)> setup_user)
+{
+    enginemon::Party party;
+    enginemon::Pokemon pm1{}; pm1.species=1; pm1.level=50; pm1.current_hp=pm1.max_hp=300; pm1.friendship=200;
+    enginemon::Pokemon pm2 = pm1;
+    party.add(pm1); party.add(pm2);
+
+    auto reg = make_b_reg(reg_ref);
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+
+    // Player uses Baton Pass (slot 0 = bp_id), moves first (speed 200).
+    auto pbp = make_bp2(bp_id, 300, 200);
+    setup_user(pbp);
+    battle.player_pokemon() = pbp;
+    battle.opponent_pokemon() = make_bp2(enginemon::MOVE_NONE, 300, 1);
+
+    size_t idx = 0;
+    const std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF};
+    battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+
+    return battle.player_pokemon();
+}
+
+// Baton Pass: Substitute volatile + substitute_hp transferred to incoming mon.
+TEST(p_baton_pass_transfers_substitute_hp) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_sub");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    auto rules = make_rules_b();
+    const uint16_t sub_hp = 75u;
+
+    auto incoming = run_baton_pass(*r, rules, bp_id, [&](enginemon::BattlePokemon& user){
+        user.set_volatile(enginemon::VolatileStatus::Substitute);
+        user.substitute_hp = sub_hp;
+    });
+
+    ASSERT_TRUE(incoming.has_volatile(enginemon::VolatileStatus::Substitute));
+    ASSERT_EQ(incoming.substitute_hp, sub_hp);
+
+    std::cout << "\n    bp_sub: sub=" << incoming.has_volatile(enginemon::VolatileStatus::Substitute)
+              << " sub_hp=" << incoming.substitute_hp << "\n";
+}
+
+// Baton Pass: Mist volatile transferred.
+TEST(p_baton_pass_transfers_mist) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_mist");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    auto rules = make_rules_b();
+
+    auto incoming = run_baton_pass(*r, rules, bp_id, [](enginemon::BattlePokemon& user){
+        user.set_volatile(enginemon::VolatileStatus::Mist);
+    });
+
+    ASSERT_TRUE(incoming.has_volatile(enginemon::VolatileStatus::Mist));
+    std::cout << "\n    bp_mist: mist=" << incoming.has_volatile(enginemon::VolatileStatus::Mist) << "\n";
+}
+
+// Baton Pass: Rollout volatile + rollout_count transferred.
+TEST(p_baton_pass_transfers_rollout_count) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_rollout");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    auto rules = make_rules_b();
+
+    auto incoming = run_baton_pass(*r, rules, bp_id, [](enginemon::BattlePokemon& user){
+        user.set_volatile(enginemon::VolatileStatus::Rollout);
+        user.rollout_count = 3;
+        user.set_volatile(enginemon::VolatileStatus::Curled);  // Defense Curl bonus
+    });
+
+    ASSERT_TRUE(incoming.has_volatile(enginemon::VolatileStatus::Rollout));
+    ASSERT_EQ(incoming.rollout_count, uint8_t{3});
+    ASSERT_TRUE(incoming.has_volatile(enginemon::VolatileStatus::Curled));
+
+    std::cout << "\n    bp_rollout: rollout=" << incoming.has_volatile(enginemon::VolatileStatus::Rollout)
+              << " count=" << (int)incoming.rollout_count
+              << " curled=" << incoming.has_volatile(enginemon::VolatileStatus::Curled) << "\n";
+}
+
+// Baton Pass: FuryCutter count transferred.
+// fury_cutter_count is a counter (not a volatile bit), transferred independently.
+TEST(p_baton_pass_transfers_fury_cutter_count) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_fury");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    auto rules = make_rules_b();
+
+    auto incoming = run_baton_pass(*r, rules, bp_id, [](enginemon::BattlePokemon& user){
+        user.fury_cutter_count = 4;
+    });
+
+    ASSERT_EQ(incoming.fury_cutter_count, uint8_t{4});
+    std::cout << "\n    bp_fury: fury_count=" << (int)incoming.fury_cutter_count << "\n";
+}
+
+// Baton Pass: Minimized volatile transferred.
+// Source: wPlayerMinimized is a separate RAM byte not cleared by ResetBatonPassStatus.
+TEST(p_baton_pass_transfers_minimized) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_min");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    auto rules = make_rules_b();
+
+    auto incoming = run_baton_pass(*r, rules, bp_id, [](enginemon::BattlePokemon& user){
+        user.set_volatile(enginemon::VolatileStatus::Minimized);
+    });
+
+    ASSERT_TRUE(incoming.has_volatile(enginemon::VolatileStatus::Minimized));
+    std::cout << "\n    bp_minimized: minimized=" << incoming.has_volatile(enginemon::VolatileStatus::Minimized) << "\n";
+}
+
+// Baton Pass: explicitly excluded state (Infatuation, Transformed, Encore) is NOT transferred.
+// Source: ResetBatonPassStatus clears these. Confusion also excluded (existing test authority).
+TEST(p_baton_pass_clears_excluded_state) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_excl");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    auto rules = make_rules_b();
+
+    auto incoming = run_baton_pass(*r, rules, bp_id, [](enginemon::BattlePokemon& user){
+        user.set_volatile(enginemon::VolatileStatus::Infatuation);
+        user.set_volatile(enginemon::VolatileStatus::Transformed);
+        user.set_volatile(enginemon::VolatileStatus::Nightmare);
+        user.set_volatile(enginemon::VolatileStatus::Confusion);
+        user.confusion_turns = 3;
+        user.encore_turns    = 5;
+        user.trap_turns      = 3;
+        user.trapping_move   = static_cast<enginemon::MoveId>(1u);
+    });
+
+    ASSERT_FALSE(incoming.has_volatile(enginemon::VolatileStatus::Infatuation));
+    ASSERT_FALSE(incoming.has_volatile(enginemon::VolatileStatus::Transformed));
+    ASSERT_FALSE(incoming.has_volatile(enginemon::VolatileStatus::Nightmare));
+    ASSERT_FALSE(incoming.has_volatile(enginemon::VolatileStatus::Confusion));
+    ASSERT_EQ(incoming.encore_turns, uint8_t{0});
+    ASSERT_EQ(incoming.trap_turns,   uint8_t{0});
+
+    std::cout << "\n    bp_excl: infat=" << incoming.has_volatile(enginemon::VolatileStatus::Infatuation)
+              << " transf=" << incoming.has_volatile(enginemon::VolatileStatus::Transformed)
+              << " nightmare=" << incoming.has_volatile(enginemon::VolatileStatus::Nightmare)
+              << " conf=" << incoming.has_volatile(enginemon::VolatileStatus::Confusion)
+              << " encore=" << (int)incoming.encore_turns
+              << " trap=" << (int)incoming.trap_turns << "\n";
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -5933,6 +6237,18 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p_cond_dbl_magnitude_vs_underground);
     RUN_TEST(p_cond_dbl_stomp_vs_minimize);
     RUN_TEST(p_cond_dbl_stomp_vs_double_team_not_doubled);
+
+    // ROOT_OPPONENT_SWITCH_STAGE_RESET
+    RUN_TEST(p_opp_switch_resets_stat_stages);
+    RUN_TEST(p_opp_switch_preserves_hp_status_item_pp);
+
+    // ROOT_BATON_PASS_TRANSFER
+    RUN_TEST(p_baton_pass_transfers_substitute_hp);
+    RUN_TEST(p_baton_pass_transfers_mist);
+    RUN_TEST(p_baton_pass_transfers_rollout_count);
+    RUN_TEST(p_baton_pass_transfers_fury_cutter_count);
+    RUN_TEST(p_baton_pass_transfers_minimized);
+    RUN_TEST(p_baton_pass_clears_excluded_state);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

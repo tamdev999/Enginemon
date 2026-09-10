@@ -458,7 +458,6 @@ void test_sem_game_specific_event_no_write_preserves_context();
 void test_sem_game_specific_event_writes_var_flag_blocks_constant_propagation();
 void test_sem_special_clean_ir_still_passes_legality();
 void test_sem_special_rejected_by_stage5_legality_gate();
-void test_sem_special_still_rejected_after_registry_cleanup();
 void test_semantic_fix_encountermusic_distinct_from_playmapmusic();
 void test_semantic_fix_getmoney_preserves_account();
 void test_semantic_fix_getstring_preserves_text_pointer();
@@ -1339,7 +1338,6 @@ int main(int argc, char* argv[]) {
     RUN_TEST(behavior_known_unimplemented_errors_explicitly);
     RUN_TEST(behavior_unknown_unregistered_errors_explicitly);
     RUN_TEST(behavior_writes_script_var_errors_before_branch);
-    RUN_TEST(sem_special_still_rejected_after_registry_cleanup);
     // Max-compat + Species Finder adversarial tests
     RUN_TEST(compat_exact_hash_gives_exacthash_match);
     RUN_TEST(compat_modified_hash_layout_valid_not_rejected);

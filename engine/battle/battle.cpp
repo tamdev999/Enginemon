@@ -1896,10 +1896,28 @@ void Battle::force_switch_player(size_t party_slot) {
 void Battle::force_switch_opponent(size_t party_slot) {
     if (party_slot >= opponent_party_.size()) return;
     const size_t old_slot = opponent_active_index_;
-    opponent_party_[old_slot] = opponent_pokemon_;
-    opponent_active_index_    = party_slot;
-    opponent_pokemon_         = opponent_party_[party_slot];
-    opponent_pokemon_.volatile_status = 0;  // Clear volatile on switch
+
+    // Write back only persistent state from the outgoing BattlePokemon to the party slot.
+    // Source: Crystal SaveEnemyMon — only HP, status, item, PP are persisted.
+    // Stat stages are battle-only and must NOT be written back; they are zeroed on switch-out.
+    {
+        BattlePokemon& out = opponent_party_[old_slot];
+        out.stats.hp    = opponent_pokemon_.stats.hp;
+        out.stats.max_hp = opponent_pokemon_.stats.max_hp;
+        out.status      = opponent_pokemon_.status;
+        out.status_turns = opponent_pokemon_.status_turns;
+        out.held_item   = opponent_pokemon_.held_item;
+        for (size_t i = 0; i < 4; ++i)
+            out.moves[i].pp = opponent_pokemon_.moves[i].pp;
+        // stages deliberately NOT written back — Crystal resets stages on switch-out.
+    }
+
+    opponent_active_index_ = party_slot;
+    // Load incoming Pokémon fresh from the party slot, then explicitly zero battle-only state.
+    // Source: Crystal NewEnemyMonStatus / ResetEnemyStatLevels — stages reset to 0, volatiles cleared.
+    opponent_pokemon_ = opponent_party_[party_slot];
+    opponent_pokemon_.volatile_status = 0;
+    opponent_pokemon_.stages = {};
     switched(1u, old_slot, party_slot);
     message("Opponent sent out a new Pok\u00e9mon!");
 
