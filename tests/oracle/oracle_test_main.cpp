@@ -121,6 +121,43 @@ void test_p55_closure_farscall_fullpipe();
 void test_p55_closure_endall_behavioral();
 void test_p55_closure_scall_e2e();
 void test_p55_closure_farscall_e2e();
+// Move Oracle Phase 1 (oracle_test_moves.cpp)
+void test_p_moves_oracle_coverage_251();
+void test_p_moves_rain_sunny_asm_fallback();
+void test_p_moves_behavioral_fingerprints();
+// Runtime oracle (oracle_test_runtime.cpp)
+void test_p_rt_sweep_damage();
+void test_p_rt_sweep_primary_status();
+void test_p_rt_sweep_stat_changes();
+void test_p_rt_sweep_field_volatiles();
+void test_p_rt_sweep_ohko();
+void test_p_rt_sweep_constant_damage();
+void test_p_rt_sweep_recoil();
+void test_p_rt_sweep_charge_turn1();
+void test_p_rt_sweep_self_destruct();
+void test_p_rt_sweep_heal();
+void test_p_rt_sweep_rampage();
+void test_p_rt_sweep_wild_end();
+void test_p_rt_sweep_splash();
+void test_p_rt_sweep_multi_hit();
+void test_p_rt_sweep_drain();
+void test_p_rt_sweep_secondary_effect();
+void test_p_rt_branch_belly_drum_vanilla_bug();
+void test_p_rt_branch_jump_kick_hit_and_miss();
+void test_p_rt_branch_false_swipe();
+void test_p_rt_branch_bide();
+void test_p_rt_branch_future_sight();
+void test_p_rt_branch_leech_seed_grass_immunity();
+void test_p_rt_branch_perish_song_both_sides();
+void test_p_rt_branch_dream_eater_requires_sleep();
+void test_p_rt_branch_snore_sleep_required();
+void test_p_rt_sweep_remaining_251();
+void test_p_rt_branch_swagger_and_misc();
+void test_p_rt_branch_hyper_beam_recharge();
+void test_p_rt_branch_present_variable();
+void test_p_rt_secondary_rng_diagnostic();
+void test_p_rt_secondary_root8_all();
+void test_p_rt_master_report();
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -405,6 +442,55 @@ int main(int argc, char* argv[]) {
     // No g_rom required — fixture ROM is built from hand-authored bytes
     RUN_TEST(p55_closure_scall_e2e);
     RUN_TEST(p55_closure_farscall_e2e);
+    // =========================================================================
+    // Move Oracle Phase 1 — 251 stock Crystal moves, SuiCune ground truth
+    // Production path: ROM → extract_move_entries → semanticize → PackageWriter
+    //   → PackageReader → MoveData field comparison against SuiCune oracle.
+    // Source: references/suiCune/data/moves/moves.c (all 251 entries)
+    //         references/suiCune/constants/move_effect_constants.h (effect IDs)
+    //         ASM fallback: pokecrystal for Rain Dance / Sunny Day accuracy byte.
+    // =========================================================================
+    if (g_rom && g_profile) {
+        RUN_TEST(p_moves_oracle_coverage_251);
+        RUN_TEST(p_moves_rain_sunny_asm_fallback);
+        RUN_TEST(p_moves_behavioral_fingerprints);
+        // Runtime oracle — 251 moves through Battle
+        RUN_TEST(p_rt_sweep_damage);
+        RUN_TEST(p_rt_sweep_primary_status);
+        RUN_TEST(p_rt_sweep_stat_changes);
+        RUN_TEST(p_rt_sweep_field_volatiles);
+        RUN_TEST(p_rt_sweep_ohko);
+        RUN_TEST(p_rt_sweep_constant_damage);
+        RUN_TEST(p_rt_sweep_recoil);
+        RUN_TEST(p_rt_sweep_charge_turn1);
+        RUN_TEST(p_rt_sweep_self_destruct);
+        RUN_TEST(p_rt_sweep_heal);
+        RUN_TEST(p_rt_sweep_rampage);
+        RUN_TEST(p_rt_sweep_wild_end);
+        RUN_TEST(p_rt_sweep_splash);
+        RUN_TEST(p_rt_sweep_multi_hit);
+        RUN_TEST(p_rt_sweep_drain);
+        RUN_TEST(p_rt_sweep_secondary_effect);
+        RUN_TEST(p_rt_branch_belly_drum_vanilla_bug);
+        RUN_TEST(p_rt_branch_jump_kick_hit_and_miss);
+        RUN_TEST(p_rt_branch_false_swipe);
+        RUN_TEST(p_rt_branch_bide);
+        RUN_TEST(p_rt_branch_future_sight);
+        RUN_TEST(p_rt_branch_leech_seed_grass_immunity);
+        RUN_TEST(p_rt_branch_perish_song_both_sides);
+        RUN_TEST(p_rt_branch_dream_eater_requires_sleep);
+        RUN_TEST(p_rt_branch_snore_sleep_required);
+        RUN_TEST(p_rt_sweep_remaining_251);
+        RUN_TEST(p_rt_branch_swagger_and_misc);
+        RUN_TEST(p_rt_branch_hyper_beam_recharge);
+        RUN_TEST(p_rt_branch_present_variable);
+        RUN_TEST(p_rt_secondary_rng_diagnostic);
+        RUN_TEST(p_rt_secondary_root8_all);
+        RUN_TEST(p_rt_master_report);
+    } else {
+        std::cerr << "[Move Oracle] SKIP: no ROM/profile available.\n";
+        g_tests_failed++;
+    }
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_tests_passed << "\n";

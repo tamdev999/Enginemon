@@ -65,6 +65,17 @@ extern bool g_current_test_failed;
 
 #define ASSERT_FALSE(cond) ASSERT_TRUE(!(cond))
 
+#define ASSERT_NE(a, b) \
+    do { \
+        if ((a) == (b)) { \
+            std::cerr << "  FAIL: " << #a << " != " << #b \
+                      << "  both " << static_cast<int64_t>(a) \
+                      << " at line " << __LINE__ << "\n"; \
+            g_current_test_failed = true; \
+            return; \
+        } \
+    } while(0)
+
 #define ASSERT_EQ(a, b) \
     do { \
         if ((a) != (b)) { \
