@@ -107,7 +107,8 @@ static void pack_effect_desc(const enginemon::SemanticEffectDescription& d,
         (d.has_effectchance_phase ? 0x08u : 0u) |
         (d.crash_on_miss          ? 0x10u : 0u) |
         (d.halves_in_rain         ? 0x20u : 0u) |
-        (d.sets_minimize          ? 0x40u : 0u));
+        (d.sets_minimize          ? 0x40u : 0u) |
+        (d.is_fake_out            ? 0x80u : 0u));
 }
 
 bool semanticize_move_entries(

@@ -853,6 +853,26 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     // Foresight (Identified): Normal and Fighting moves bypass Ghost immunity.
     // Source: Crystal BattleCommand_CheckTypeMatchup -- skip type_chart for Identified target.
     TypeId effective_move_type = md->type;
+
+    // ── Fake Out gate ──────────────────────────────────────────────────────
+    // Crystal BattleCommand_FakeOut: succeeds only when user went first this turn.
+    // Fails if: user went second, target has Substitute, target is asleep, target is frozen.
+    // Zero damage effect — flinches target on success, then returns immediately.
+    // Source: pokecrystal EFFECT_FAKE_OUT / BattleCommand_FakeOut (effect 141).
+    if (effective_desc.is_fake_out) {
+        const bool user_went_first = (user_is_player == player_goes_first_);
+        if (!user_went_first
+                || target.has_volatile(VolatileStatus::Substitute)
+                || target.status == Status::Sleep
+                || target.status == Status::Freeze) {
+            message(md->name + " -- but it failed!");
+            return MoveExecutionResult::Miss;
+        }
+        // Success: unconditional Flinch on target, zero damage.
+        target.set_volatile(VolatileStatus::Flinch);
+        message(md->name + " -- the target flinched!");
+        return MoveExecutionResult::Success;
+    }
     uint16_t type_eff;
     {
         const bool identified = target.has_volatile(VolatileStatus::Identified);

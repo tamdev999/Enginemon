@@ -647,8 +647,11 @@ void EffectSemanticizer::apply_command(uint8_t opcode, SemanticEffectDescription
             break;
 
         // ── Corrected: 0x94 = fakeout (unused in stock moves) ─────────────────
-        case 0x94:  // fakeout — flinch if user went first; effect 141, no stock move
-            // No stock move uses this effect. Explicit break prevents default: hit.
+        case 0x94:  // fakeout — flinch if user went first this turn; effect 141
+            // No stock vanilla Crystal move uses effect 141.
+            // Zero damage; unconditional Flinch on success.
+            // Source: pokecrystal EFFECT_FAKE_OUT / BattleCommand_FakeOut.
+            desc.is_fake_out = true;
             break;
 
         // ── Corrected: 0x97 = rage ─────────────────────────────────────────────

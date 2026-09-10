@@ -1,4 +1,4 @@
-﻿// tests/crystal/battle_rom_test.cpp
+// tests/crystal/battle_rom_test.cpp
 //
 // TRUE ROMÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢EXTRACTORÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢BRLSÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢RUNTIME PROPAGATION TESTS
 //
@@ -42,6 +42,7 @@
 #include "crystal/battle/crystal_effects.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -6277,6 +6278,350 @@ TEST(p_baton_pass_opponent_preserves_stages_ordinary_switch_resets) {
 }
 
 // ============================================================================
+// ROOT_FAKE_OUT — effect 141
+// ============================================================================
+
+// Helper: build a MoveData with is_fake_out=true, is_supported=true, zero damage.
+// Fake Out is a Physical Normal move (no stock move uses it in vanilla Crystal).
+// Use ID 252 to avoid collision with stock Crystal moves (1-251).
+static enginemon::MoveData make_fake_out_move(enginemon::MoveId id = static_cast<enginemon::MoveId>(252)) {
+    enginemon::MoveData md;
+    md.id          = id;
+    md.name        = "FakeOut";
+    md.type        = static_cast<enginemon::TypeId>(0u);  // Normal
+    md.power       = 40;
+    md.accuracy    = 0xFF;   // always hits (100%)
+    md.pp          = 10;
+    md.category    = enginemon::MoveCategory::Physical;
+    md.effect_id   = 0;
+    md.has_program = false;
+    md.effect_desc.is_fake_out = true;
+    md.effect_desc.is_supported = true;
+    // Zero damage: has_standard_damage = false, constant_damage_source = None
+    return md;
+}
+
+// Helper: build Registries with a FakeOut move (id=252) and a Normal move (id=1).
+static enginemon::Registries make_fake_out_reg() {
+    enginemon::Registries reg;
+    for (uint8_t t=0; t<20; ++t) {
+        enginemon::TypeData td; td.id=t; td.name="T";
+        reg.types.register_entry(t, td);
+        for (uint8_t u=0; u<20; ++u) reg.type_chart.set_effectiveness(t,u,10);
+    }
+    enginemon::SpeciesData sp{}; sp.id=1; sp.name="T"; sp.type1=0; sp.type2=0;
+    sp.base_stats={50,60,55,55,50,50}; sp.catch_rate=45; sp.base_exp=64; sp.base_friendship=70;
+    reg.species.register_entry(1, sp);
+    reg.moves.register_entry(static_cast<enginemon::MoveId>(252), make_fake_out_move());
+    // Normal damaging move for the opponent
+    enginemon::MoveData normal{};
+    normal.id=1; normal.name="Tackle"; normal.type=0;
+    normal.power=40; normal.accuracy=0xFF; normal.pp=35;
+    normal.category=enginemon::MoveCategory::Physical;
+    normal.effect_desc.has_standard_damage=true;
+    normal.effect_desc.is_supported=true;
+    reg.moves.register_entry(1, normal);
+    reg.freeze_all();
+    return reg;
+}
+
+// Serialization roundtrip: pack MoveDataEntry with is_fake_out bit set (byte[63] bit 7),
+// write through PackageWriter, read back via PackageReader, verify is_fake_out=true.
+// Source: move_semanticizer.cpp pack_effect_desc + package_reader.cpp deserialization.
+TEST(p_fake_out_serialization_roundtrip) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    // Inject a synthetic entry for effect 141 with the is_fake_out bit set.
+    crystal::PackageWriter::MoveDataEntry fo_entry{};
+    fo_entry.id              = static_cast<enginemon::MoveId>(252);
+    fo_entry.type_id         = 0;
+    fo_entry.power           = 40;
+    fo_entry.accuracy        = 0xFF;
+    fo_entry.pp              = 10;
+    fo_entry.category        = (uint8_t)enginemon::MoveCategory::Physical;
+    fo_entry.effect_id       = 0;
+    fo_entry.raw_crystal_effect = 141;
+    // Build effect_desc_raw: set is_supported=true (byte[35]=1), is_fake_out=bit7 of byte[63].
+    std::memset(fo_entry.effect_desc_raw, 0, sizeof(fo_entry.effect_desc_raw));
+    fo_entry.effect_desc_raw[35] = 1u;   // is_supported = true
+    fo_entry.effect_desc_raw[63] = 0x80u; // is_fake_out = bit 7
+    entries.push_back(fo_entry);
+
+    auto r = mvdt_roundtrip(entries, "fo_serial");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    const enginemon::MoveData* fo = r->get(static_cast<enginemon::MoveId>(252));
+    ASSERT_TRUE(fo != nullptr); if (!fo) return;
+
+    ASSERT_TRUE(fo->effect_desc.is_supported);
+    ASSERT_TRUE(fo->effect_desc.is_fake_out);
+    ASSERT_FALSE(fo->effect_desc.has_standard_damage);  // no damage pipeline
+    ASSERT_FALSE(fo->has_program);                       // A-path, not B
+
+    std::cout << "\n    fo_serial: is_fake_out=" << fo->effect_desc.is_fake_out
+              << " is_supported=" << fo->effect_desc.is_supported
+              << " has_program=" << fo->has_program << "\n";
+}
+
+// Fake Out: user goes first -> target flinches, zero damage.
+TEST(p_fake_out_first_mover_flinches) {
+    auto rules = make_rules_b();
+    auto reg = make_fake_out_reg();
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+    // Player (speed=200) uses FakeOut first; opponent (speed=1) is target.
+    auto pbp = make_bp2(static_cast<enginemon::MoveId>(252), 300, 200);
+    auto obp = make_bp2(static_cast<enginemon::MoveId>(1),   300, 1);
+    battle.player_pokemon() = pbp;
+    battle.opponent_pokemon() = obp;
+
+    size_t idx=0; const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF};
+    battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+
+    // Flinch is consumed during the second actor's pre-move check — it won't be set
+    // after the full turn. Verify the flinch had effect by checking player HP is still 300
+    // (opponent's Tackle was blocked by flinch and never executed).
+    const bool flinch_after = battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch);
+    const int16_t opp_hp    = battle.opponent_pokemon().stats.hp;
+    const int16_t player_hp = battle.player_pokemon().stats.hp;
+
+    std::cout << "\n    fo_first: flinch_after=" << flinch_after
+              << " opp_hp=" << opp_hp << " player_hp=" << player_hp
+              << " (expected flinch_after=0, opp_hp=300, player_hp=300)\n";
+
+    ASSERT_FALSE(flinch_after);         // Flinch was consumed (not still set after turn)
+    ASSERT_EQ(opp_hp,    int16_t{300}); // Zero damage from Fake Out
+    ASSERT_EQ(player_hp, int16_t{300}); // Opponent's Tackle blocked by flinch — player unhurt
+}
+
+// Fake Out: user goes second -> fails, no flinch.
+TEST(p_fake_out_second_mover_fails) {
+    auto rules = make_rules_b();
+    auto reg = make_fake_out_reg();
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+    // Player (speed=1) goes second; opponent (speed=200) goes first.
+    auto pbp = make_bp2(static_cast<enginemon::MoveId>(252), 300, 1);
+    auto obp = make_bp2(static_cast<enginemon::MoveId>(1),   300, 200);
+    battle.player_pokemon() = pbp;
+    battle.opponent_pokemon() = obp;
+
+    size_t idx=0; const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF};
+    battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+
+    const bool flinched = battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch);
+    const int16_t opp_hp = battle.opponent_pokemon().stats.hp;
+
+    std::cout << "\n    fo_second: flinched=" << flinched << " opp_hp=" << opp_hp
+              << " (expected flinch=0 hp=300)\n";
+
+    ASSERT_FALSE(flinched);           // No flinch — Fake Out failed
+    ASSERT_EQ(opp_hp, int16_t{300}); // Zero damage
+}
+
+// Fake Out vs Substitute: fails, Substitute intact.
+TEST(p_fake_out_vs_substitute_fails) {
+    auto rules = make_rules_b();
+    auto reg = make_fake_out_reg();
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+    auto pbp = make_bp2(static_cast<enginemon::MoveId>(252), 300, 200);
+    auto obp = make_bp2(static_cast<enginemon::MoveId>(1),   300, 1);
+    obp.set_volatile(enginemon::VolatileStatus::Substitute);
+    obp.substitute_hp = 50;
+    battle.player_pokemon() = pbp;
+    battle.opponent_pokemon() = obp;
+
+    size_t idx=0; const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF};
+    battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+
+    const bool flinched = battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch);
+    const bool sub_intact = battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Substitute);
+    const uint16_t sub_hp = battle.opponent_pokemon().substitute_hp;
+
+    std::cout << "\n    fo_sub: flinched=" << flinched << " sub=" << sub_intact
+              << " sub_hp=" << sub_hp << " (expected flinch=0 sub=1 hp=50)\n";
+
+    ASSERT_FALSE(flinched);          // No flinch
+    ASSERT_TRUE(sub_intact);         // Substitute unchanged
+    ASSERT_EQ(sub_hp, uint16_t{50}); // Substitute HP unchanged
+}
+
+// Fake Out vs sleeping target: fails, no flinch.
+TEST(p_fake_out_vs_sleep_fails) {
+    auto rules = make_rules_b();
+    auto reg = make_fake_out_reg();
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+    auto pbp = make_bp2(static_cast<enginemon::MoveId>(252), 300, 200);
+    auto obp = make_bp2(static_cast<enginemon::MoveId>(1),   300, 1);
+    obp.status = enginemon::Status::Sleep;
+    obp.status_turns = 3;
+    battle.player_pokemon() = pbp;
+    battle.opponent_pokemon() = obp;
+
+    size_t idx=0; const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF};
+    battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+
+    const bool flinched = battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch);
+    std::cout << "\n    fo_sleep: flinched=" << flinched << " (expected 0)\n";
+    ASSERT_FALSE(flinched);
+}
+
+// Fake Out vs frozen target: fails, no flinch.
+TEST(p_fake_out_vs_freeze_fails) {
+    auto rules = make_rules_b();
+    auto reg = make_fake_out_reg();
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rules);
+    auto pbp = make_bp2(static_cast<enginemon::MoveId>(252), 300, 200);
+    auto obp = make_bp2(static_cast<enginemon::MoveId>(1),   300, 1);
+    obp.status = enginemon::Status::Freeze;
+    battle.player_pokemon() = pbp;
+    battle.opponent_pokemon() = obp;
+
+    size_t idx=0; const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF};
+    battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+
+    const bool flinched = battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch);
+    std::cout << "\n    fo_freeze: flinched=" << flinched << " (expected 0)\n";
+    ASSERT_FALSE(flinched);
+}
+
+// Fake Out accuracy miss: move misses, no flinch, no damage.
+// Use accuracy=1 and rng=0x02 so roll_accuracy() fails (rng_byte >= accuracy).
+TEST(p_fake_out_accuracy_miss_no_flinch) {
+    auto rules = make_rules_b();
+    auto reg = make_fake_out_reg();
+
+    // Give FakeOut a non-perfect accuracy for this test.
+    {
+        enginemon::MoveData fo = make_fake_out_move(static_cast<enginemon::MoveId>(252));
+        fo.accuracy = 1;   // very low accuracy — rng=0x02 will miss
+        enginemon::Registries reg2;
+        for (uint8_t t=0; t<20; ++t) {
+            enginemon::TypeData td; td.id=t; td.name="T";
+            reg2.types.register_entry(t, td);
+            for (uint8_t u=0; u<20; ++u) reg2.type_chart.set_effectiveness(t,u,10);
+        }
+        enginemon::SpeciesData sp{}; sp.id=1; sp.name="T"; sp.type1=0; sp.type2=0;
+        sp.base_stats={50,60,55,55,50,50}; sp.catch_rate=45; sp.base_exp=64; sp.base_friendship=70;
+        reg2.species.register_entry(1, sp);
+        reg2.moves.register_entry(static_cast<enginemon::MoveId>(252), fo);
+        enginemon::MoveData normal{}; normal.id=1; normal.name="Tackle"; normal.type=0;
+        normal.power=40; normal.accuracy=0xFF; normal.pp=35;
+        normal.category=enginemon::MoveCategory::Physical;
+        normal.effect_desc.has_standard_damage=true; normal.effect_desc.is_supported=true;
+        reg2.moves.register_entry(1, normal);
+        reg2.freeze_all();
+
+        enginemon::Party party;
+        enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+        pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+        party.add(pmon);
+
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg2, rules);
+        auto pbp = make_bp2(static_cast<enginemon::MoveId>(252), 300, 200);
+        auto obp = make_bp2(static_cast<enginemon::MoveId>(1),   300, 1);
+        battle.player_pokemon() = pbp;
+        battle.opponent_pokemon() = obp;
+
+        // rng=0x02 > accuracy=1 -> accuracy miss fires before the FakeOut gate
+        size_t idx=0; const std::vector<uint8_t> rng={0x02,0xFF,0xFF,0xFF};
+        battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+
+        const bool flinched = battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch);
+        const int16_t opp_hp = battle.opponent_pokemon().stats.hp;
+        std::cout << "\n    fo_miss: flinched=" << flinched << " opp_hp=" << opp_hp
+                  << " (expected flinch=0 hp=300)\n";
+        ASSERT_FALSE(flinched);
+        ASSERT_EQ(opp_hp, int16_t{300});
+    }
+}
+
+// Fake Out: zero damage in all success and failure cases.
+TEST(p_fake_out_zero_damage_always) {
+    auto rules = make_rules_b();
+    auto reg = make_fake_out_reg();
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+
+    // Success case (user goes first): target HP unchanged
+    {
+        enginemon::Battle b(enginemon::BattleType::Wild, party, reg, rules);
+        b.player_pokemon() = make_bp2(static_cast<enginemon::MoveId>(252), 300, 200);
+        b.opponent_pokemon() = make_bp2(static_cast<enginemon::MoveId>(1), 300, 1);
+        size_t idx=0; const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF};
+        b.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+        b.set_player_action(enginemon::ActionFight{0,0});
+        b.set_opponent_action(enginemon::ActionFight{0,0});
+        b.execute_turn();
+        ASSERT_EQ(b.opponent_pokemon().stats.hp, int16_t{300});
+        std::cout << "\n    fo_zero_dmg success: hp=" << b.opponent_pokemon().stats.hp << "\n";
+    }
+
+    // Failure case (user goes second): target HP unchanged
+    {
+        enginemon::Battle b(enginemon::BattleType::Wild, party, reg, rules);
+        b.player_pokemon() = make_bp2(static_cast<enginemon::MoveId>(252), 300, 1);
+        b.opponent_pokemon() = make_bp2(static_cast<enginemon::MoveId>(1), 300, 200);
+        size_t idx=0; const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF};
+        b.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+        b.set_player_action(enginemon::ActionFight{0,0});
+        b.set_opponent_action(enginemon::ActionFight{0,0});
+        b.execute_turn();
+        ASSERT_EQ(b.opponent_pokemon().stats.hp, int16_t{300});
+        std::cout << "    fo_zero_dmg failure: hp=" << b.opponent_pokemon().stats.hp << "\n";
+    }
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -6416,6 +6761,16 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p_baton_pass_player_transfers_confusion);
     RUN_TEST(p_baton_pass_opponent_transfers_confusion);
     RUN_TEST(p_baton_pass_opponent_preserves_stages_ordinary_switch_resets);
+
+    // ROOT_FAKE_OUT
+    RUN_TEST(p_fake_out_serialization_roundtrip);
+    RUN_TEST(p_fake_out_first_mover_flinches);
+    RUN_TEST(p_fake_out_second_mover_fails);
+    RUN_TEST(p_fake_out_vs_substitute_fails);
+    RUN_TEST(p_fake_out_vs_sleep_fails);
+    RUN_TEST(p_fake_out_vs_freeze_fails);
+    RUN_TEST(p_fake_out_accuracy_miss_no_flinch);
+    RUN_TEST(p_fake_out_zero_damage_always);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

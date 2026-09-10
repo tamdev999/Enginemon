@@ -1012,7 +1012,7 @@ PackageReader::load_move_registry() const {
         desc.is_perish_song        = read_bool();  // [60]
         desc.is_attract            = read_bool();  // [61]
         desc.is_baton_pass         = read_bool();  // [62]
-        // [63] is a bitfield: bit0=is_heal_bell, bit1=is_endure, bit2=is_rage, bit3=has_effectchance_phase, bit4=crash_on_miss, bit5=halves_in_rain, bit6=sets_minimize
+        // [63] is a bitfield: bit0=is_heal_bell, bit1=is_endure, bit2=is_rage, bit3=has_effectchance_phase, bit4=crash_on_miss, bit5=halves_in_rain, bit6=sets_minimize, bit7=is_fake_out
         {
             const uint8_t b63 = read_u8();
             desc.is_heal_bell            = (b63 & 0x01u) != 0;
@@ -1022,6 +1022,7 @@ PackageReader::load_move_registry() const {
             desc.crash_on_miss           = (b63 & 0x10u) != 0;
             desc.halves_in_rain          = (b63 & 0x20u) != 0;
             desc.sets_minimize           = (b63 & 0x40u) != 0;
+            desc.is_fake_out             = (b63 & 0x80u) != 0;
         }
         if (!in.good() && !in.eof()) return std::nullopt;
 

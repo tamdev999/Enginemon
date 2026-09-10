@@ -433,6 +433,13 @@ struct SemanticEffectDescription {
 
     uint8_t ai_classification = 0;  // SemEffect:: value for AI lists (SemEffect::Unknown = 0)
 
+    // Fake Out: zero-damage flinch that succeeds only when user went first this turn.
+    // Fails if user went second, or if target has Substitute, is asleep, or is frozen.
+    // Source: pokecrystal EFFECT_FAKE_OUT / BattleCommand_FakeOut (opcode 0x94).
+    // No stock vanilla Crystal move uses effect 141.
+    // Serialized: wire byte [63] bit 7 (0x80).
+    bool is_fake_out = false;
+
     // ────────────────────────────────────────────────────────────────────────
     // SUPPORT GATE
     // ────────────────────────────────────────────────────────────────────────

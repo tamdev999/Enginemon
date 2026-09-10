@@ -1902,9 +1902,11 @@ static std::vector<BehaviorOracle> build_behavior_table() {
     t[140].has_standard_damage = true;
     t[140].secondary_effect = SE::AllStatsUp;
 
-    // 141: EFFECT_FAKE_OUT — B-path FakeOut: first-turn-only, flinch
+    // 141: EFFECT_FAKE_OUT — A-path: zero-damage flinch; user-went-first gate.
+    // No stock vanilla Crystal move uses this effect.
+    // Crystal script: checkobedience usedmovetext doturn checkhit fakeout moveanim failuretext endmove
+    // No damagecalc, no applydamage. is_fake_out flag gates in execute_move.
     t[141].effect_name = "FAKE_OUT";
-    t[141].has_program = true;
 
     // 142: EFFECT_BELLY_DRUM — +6 Attack, costs 50% HP
     // SuiCune: B-path BellyDrum; stat_change=MaxAttack
