@@ -300,6 +300,34 @@ enum class ItemPocket : uint8_t {
     TmsHms
 };
 
+// ============================================================================
+// Semantic held-item effect type — engine-semantic, never contains raw Crystal
+// HELD_* numeric values or raw Crystal item/species IDs.
+//
+// The Crystal frontend maps raw HELD_* bytes from the ROM into this enum
+// at package-build time. The runtime dispatches on HeldItemEffectType only.
+// ============================================================================
+enum class HeldItemEffectType : uint8_t {
+    None               =  0,  // No held-item battle effect
+    CritStageBoost     =  1,  // +param crit stages (Scope Lens)
+    CritStageBoostSpecies = 2, // +param crit stages only for species_restriction (Stick, Lucky Punch)
+    AccuracyReduction  =  3,  // Defender: accuracy -= param before stage mult (BrightPowder)
+    TurnOrderBoost     =  4,  // RNG < param → holder goes first (Quick Claw)
+    PostHitFlinch      =  5,  // After hit: RNG < param → target flinches (King's Rock)
+    TypeDamageBoost    =  6,  // Damage ×(100+param)/100 for move type == boosted_type
+    KOSurvival         =  7,  // RNG < param → survive KO at 1 HP (Focus Band, not consumed)
+    EndTurnHealFraction=  8,  // End-of-turn: restore max_hp/param HP (Leftovers, param=16)
+    EndTurnHealBelowHalf= 9,  // End-of-turn: if hp < max_hp/2, restore param HP; consumed (Berry)
+    StatusCure         = 10,  // End-of-turn: cure Status matching param (status-specific berries)
+    AnyStatusCure      = 11,  // End-of-turn: cure any major status and confusion (MiracleBerry)
+    ConfusionCure      = 12,  // End-of-turn: cure confusion; consumed (Bitter Berry)
+    EndTurnRestorePP   = 13,  // End-of-turn: restore 5 PP to first depleted move; consumed (Mysteryberry)
+    SpeciesDefenseBoost= 14,  // Damage-calc: ×1.5 defense for species_restriction (Metal Powder/Ditto)
+    BerserkActivation  = 15,  // Battle-start: consumed → +2 Atk, set Confusion (Berserk Gene)
+    GuaranteedEscape   = 16,  // Always succeed wild escape attempt (Smoke Ball)
+    AmuletCoin         = 17,  // Double battle prize money and Pay Day payout (Amulet Coin)
+};
+
 // Item definition
 struct ItemData {
     ItemId id;
@@ -315,6 +343,24 @@ struct ItemData {
     bool is_key_item;
     bool is_tm_hm;
     MoveId tm_move;         // If is_tm_hm, which move it teaches
+
+    // ── Semantic held-item fields ────────────────────────────────────────────
+    // Populated by the Crystal frontend at package-build time.
+    // The runtime dispatches on held_effect_type; it never reads raw HELD_*
+    // values or raw Crystal item/species IDs from this struct.
+    HeldItemEffectType held_effect_type = HeldItemEffectType::None;
+
+    // TypeDamageBoost: the move type that receives the damage bonus.
+    // TYPE_NONE (0xFF) for all other effect types.
+    TypeId boosted_type = TYPE_NONE;
+
+    // CritStageBoostSpecies / SpeciesDefenseBoost: the species that must hold
+    // this item for the effect to apply.  SPECIES_NONE (0) = no restriction.
+    SpeciesId species_restriction = SPECIES_NONE;
+
+    // true for single-use held items that are consumed on activation
+    // (berries, status-cure items, Berserk Gene, MiracleBerry, etc.)
+    bool consumable = false;
 };
 
 // Trainer class

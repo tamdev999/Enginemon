@@ -50,11 +50,11 @@ static constexpr auto crc_table = make_crc_table();
 uint32_t calculate_crc32(const void* data, size_t size) {
     const auto* bytes = static_cast<const uint8_t*>(data);
     uint32_t crc = 0xFFFFFFFF;
-    
+
     for (size_t i = 0; i < size; ++i) {
         crc = crc_table[(crc ^ bytes[i]) & 0xFF] ^ (crc >> 8);
     }
-    
+
     return crc ^ 0xFFFFFFFF;
 }
 
@@ -181,7 +181,7 @@ static void write_object(std::ostream& out, const ObjectEvent& obj) {
     out.put(obj.palette);
     out.put(obj.is_trainer ? 1 : 0);
     out.put(obj.trainer_sight_range);
-    
+
     write_length_string(out, obj.sprite_id);
     write_length_string(out, obj.script_id);
     write_length_string(out, obj.visibility_flag);
@@ -197,7 +197,7 @@ static void write_connection(std::ostream& out, const MapConnection& conn) {
 
 static std::vector<uint8_t> serialize_map(const ExtractedMap& map) {
     std::ostringstream out(std::ios::binary);
-    
+
     // Fixed fields
     write_fixed_string(out, map.map_id, 64);
     write_fixed_string(out, map.display_name, 64);
@@ -206,33 +206,33 @@ static std::vector<uint8_t> serialize_map(const ExtractedMap& map) {
     write_fixed_string(out, map.landmark_id, 32);
     write_fixed_string(out, map.map_script_id, 64);
     write_fixed_string(out, map.fish_group_id, 32);
-    
+
     out.put(map.width);
     out.put(map.height);
     out.put(map.border_block);
     out.put(map.environment_type);
-    
+
     // Flags packed into a byte
     uint8_t flags = 0;
     if (map.is_outdoor) flags |= 0x01;
     if (map.phone_service_disabled) flags |= 0x02;
     out.put(flags);
-    
+
     out.put(map.lighting);
     out.put(0);  // padding
     out.put(0);  // padding
-    
+
     // Block data
     write_le(out, static_cast<uint32_t>(map.blocks.size()));
     out.write(reinterpret_cast<const char*>(map.blocks.data()), map.blocks.size());
-    
+
     // Events
     write_counted_array(out, map.warps, write_warp);
     write_counted_array(out, map.coord_events, write_coord_event);
     write_counted_array(out, map.bg_events, write_bg_event);
     write_counted_array(out, map.objects, write_object);
     write_counted_array(out, map.connections, write_connection);
-    
+
     std::string data = out.str();
     return std::vector<uint8_t>(data.begin(), data.end());
 }
@@ -294,7 +294,7 @@ static ObjectEvent read_object(std::istream& in) {
     obj.palette = in.get();
     obj.is_trainer = (in.get() != 0);
     obj.trainer_sight_range = in.get();
-    
+
     uint16_t sprite_len = read_le<uint16_t>(in);
     obj.sprite_id.resize(sprite_len);
     in.read(obj.sprite_id.data(), sprite_len);
@@ -304,7 +304,7 @@ static ObjectEvent read_object(std::istream& in) {
     uint16_t flag_len = read_le<uint16_t>(in);
     obj.visibility_flag.resize(flag_len);
     in.read(obj.visibility_flag.data(), flag_len);
-    
+
     return obj;
 }
 
@@ -333,9 +333,9 @@ static std::vector<T> read_counted_array(std::istream& in, T (*read_item)(std::i
 
 static ExtractedMap deserialize_map(const std::vector<uint8_t>& data) {
     std::istringstream in(std::string(data.begin(), data.end()), std::ios::binary);
-    
+
     ExtractedMap map;
-    
+
     // Fixed fields
     map.map_id = read_fixed_string(in, 64);
     map.display_name = read_fixed_string(in, 64);
@@ -344,32 +344,32 @@ static ExtractedMap deserialize_map(const std::vector<uint8_t>& data) {
     map.landmark_id = read_fixed_string(in, 32);
     map.map_script_id = read_fixed_string(in, 64);
     map.fish_group_id = read_fixed_string(in, 32);
-    
+
     map.width = in.get();
     map.height = in.get();
     map.border_block = in.get();
     map.environment_type = in.get();
-    
+
     uint8_t flags = in.get();
     map.is_outdoor = (flags & 0x01) != 0;
     map.phone_service_disabled = (flags & 0x02) != 0;
-    
+
     map.lighting = in.get();
     in.get();  // padding
     in.get();  // padding
-    
+
     // Block data
     uint32_t block_count = read_le<uint32_t>(in);
     map.blocks.resize(block_count);
     in.read(reinterpret_cast<char*>(map.blocks.data()), block_count);
-    
+
     // Events
     map.warps = read_counted_array(in, read_warp);
     map.coord_events = read_counted_array(in, read_coord_event);
     map.bg_events = read_counted_array(in, read_bg_event);
     map.objects = read_counted_array(in, read_object);
     map.connections = read_counted_array(in, read_connection);
-    
+
     return map;
 }
 
@@ -395,7 +395,7 @@ void PackageWriter::add_map(const ExtractedMap& map) {
         }
     }
     auto data = serialize_map(map);
-    
+
     // Store serialized data with map_id as key
     SerializedMap entry;
     std::memset(&entry, 0, sizeof(entry));
@@ -411,12 +411,12 @@ void PackageWriter::add_map(const ExtractedMap& map) {
     if (map.is_outdoor) entry.flags |= 0x01;
     if (map.phone_service_disabled) entry.flags |= 0x02;
     entry.lighting = map.lighting;
-    
+
     maps_.push_back(entry);
-    
+
     // Store full serialized data
     map_data_.push_back({map.map_id, std::move(data)});
-    
+
     stats_.maps_written++;
 }
 
@@ -429,19 +429,19 @@ void PackageWriter::add_tileset_atlas(const TilesetAtlas& atlas) {
         }
     }
     std::ostringstream out(std::ios::binary);
-    
+
     // Header
     write_le(out, atlas.atlas_width);
     write_le(out, atlas.atlas_height);
     write_le(out, static_cast<uint32_t>(atlas.pixels.size()));
-    
+
     // Pixel data (RGBA32)
-    out.write(reinterpret_cast<const char*>(atlas.pixels.data()), 
+    out.write(reinterpret_cast<const char*>(atlas.pixels.data()),
               atlas.pixels.size() * sizeof(uint32_t));
-    
+
     // Metatile UV count
     write_le(out, static_cast<uint32_t>(atlas.metatile_uvs.size()));
-    
+
     // UV data
     for (const auto& uv : atlas.metatile_uvs) {
         write_le(out, std::bit_cast<uint32_t>(uv.u0));
@@ -449,13 +449,13 @@ void PackageWriter::add_tileset_atlas(const TilesetAtlas& atlas) {
         write_le(out, std::bit_cast<uint32_t>(uv.u1));
         write_le(out, std::bit_cast<uint32_t>(uv.v1));
     }
-    
+
     // Collision data
     write_le(out, static_cast<uint32_t>(atlas.collision.size()));
     for (auto coll : atlas.collision) {
         out.put(static_cast<uint8_t>(coll));
     }
-    
+
     std::string data = out.str();
     tileset_data_.push_back({atlas.tileset_id, std::vector<uint8_t>(data.begin(), data.end())});
     stats_.tilesets_written++;
@@ -482,27 +482,27 @@ void PackageWriter::add_tileset(const ExtractedTileset& tileset, TimeOfDay tod) 
     //   standard_palette_rows[5] - 5 rows × 7 palettes × 4 colors × 4 bytes (RGBA32)
     //   has_fixed_special_palette (u8)
     //   [if has_fixed] fixed_special_palette - 7 palettes × 4 colors × 4 bytes (RGBA32)
-    
+
     std::ostringstream out(std::ios::binary);
-    
+
     // Write tile count
     write_le(out, static_cast<uint32_t>(tileset.tiles.size()));
-    
+
     // Write each tile as 64 indexed pixels (NOT pre-colored RGBA)
     for (const auto& tile : tileset.tiles) {
         out.write(reinterpret_cast<const char*>(tile.pixels.data()), 64);
     }
-    
+
     // Write block count
     write_le(out, static_cast<uint32_t>(tileset.metatiles.size()));
-    
+
     // Write each block's 16 tile IDs
     for (const auto& block : tileset.metatiles) {
         for (int i = 0; i < 16; ++i) {
             write_le(out, static_cast<uint16_t>(block.tile_indices[i]));
         }
     }
-    
+
     // Write collision count and data (CLASSIFIED to semantic CollisionClass)
     // The Crystal classifier converts raw bytes to semantic values at packaging time
     // Runtime never sees raw Crystal collision bytes
@@ -512,13 +512,13 @@ void PackageWriter::add_tileset(const ExtractedTileset& tileset, TimeOfDay tod) 
         auto coll_class = crystal::classify_crystal_collision(coll);
         out.put(static_cast<uint8_t>(coll_class));
     }
-    
+
     // Write palette map
     write_le(out, static_cast<uint32_t>(tileset.palette_map.size()));
     for (auto pal_id : tileset.palette_map) {
         out.put(pal_id);
     }
-    
+
     // Helper to write a palette set (7 palettes × 4 colors × RGBA32)
     auto write_palette_set = [&out](const std::array<Palette, 7>& palettes) {
         for (int pal_id = 0; pal_id < 7; ++pal_id) {
@@ -528,12 +528,12 @@ void PackageWriter::add_tileset(const ExtractedTileset& tileset, TimeOfDay tod) 
             }
         }
     };
-    
+
     // Write all 5 standard palette rows
     for (int row = 0; row < 5; ++row) {
         write_palette_set(tileset.time_palettes[row]);
     }
-    
+
     // Write fixed special palette (if present)
     if (tileset.fixed_special_palette.has_value()) {
         out.put(1);  // has_fixed = true
@@ -541,11 +541,11 @@ void PackageWriter::add_tileset(const ExtractedTileset& tileset, TimeOfDay tod) 
     } else {
         out.put(0);  // has_fixed = false
     }
-    
+
     std::string data = out.str();
     tileset_data_.push_back({tileset.tileset_id, std::vector<uint8_t>(data.begin(), data.end())});
     stats_.tilesets_written++;
-    
+
     std::cout << "[PACKAGE] Tileset " << tileset.tileset_id << ": "
               << tileset.tiles.size() << " indexed tiles, "
               << tileset.metatiles.size() << " blocks, "
@@ -564,16 +564,16 @@ void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
         }
     }
     std::ostringstream out(std::ios::binary);
-    
+
     // Header: dimensions
     write_le(out, atlas.atlas_width);
     write_le(out, atlas.atlas_height);
-    
+
     // Pixel data (RGBA32)
     write_le(out, static_cast<uint32_t>(atlas.pixels.size()));
-    out.write(reinterpret_cast<const char*>(atlas.pixels.data()), 
+    out.write(reinterpret_cast<const char*>(atlas.pixels.data()),
               atlas.pixels.size() * sizeof(uint32_t));
-    
+
     // Glyph UV count and data
     write_le(out, static_cast<uint32_t>(atlas.glyph_uvs.size()));
     for (const auto& uv : atlas.glyph_uvs) {
@@ -582,7 +582,7 @@ void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
         write_le(out, std::bit_cast<uint32_t>(uv.u1));
         write_le(out, std::bit_cast<uint32_t>(uv.v1));
     }
-    
+
     // Charmap entries (native format: UTF-8 → GlyphId)
     // NOTE: crystal_code is NOT serialized - it's frontend/compiler provenance only
     write_le(out, static_cast<uint32_t>(atlas.charmap.size()));
@@ -597,7 +597,7 @@ void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
         write_length_string(out, entry.control_name);
         write_length_string(out, entry.utf8_char);
     }
-    
+
     // Special glyph indices
     write_le(out, atlas.border_top_left);
     write_le(out, atlas.border_top);
@@ -607,7 +607,7 @@ void PackageWriter::add_font_atlas(const FontAtlas& atlas) {
     write_le(out, atlas.border_bottom_right);
     write_le(out, atlas.space_glyph);
     write_le(out, atlas.cursor_glyph);
-    
+
     std::string data = out.str();
     font_data_.push_back({atlas.font_id, std::vector<uint8_t>(data.begin(), data.end())});
 }
@@ -633,12 +633,12 @@ void PackageWriter::add_sprite(const RuntimeSprite& sprite) {
         }
     }
     std::ostringstream out(std::ios::binary);
-    
+
     // Header: sprite_id, type, palette
     write_length_string(out, sprite.sprite_id);
     out.put(static_cast<uint8_t>(sprite.type));
     out.put(static_cast<uint8_t>(sprite.default_palette));
-    
+
     // Frame count and frames
     write_le(out, static_cast<uint32_t>(sprite.frames.size()));
     for (const auto& frame : sprite.frames) {
@@ -652,14 +652,14 @@ void PackageWriter::add_sprite(const RuntimeSprite& sprite) {
         // Each icon frame is 1024 bytes (32×32 pixels, values 0-3)
         out.write(reinterpret_cast<const char*>(iframe.pixels.data()), 1024);
     }
-    
+
     std::string data = out.str();
     sprite_data_.push_back({sprite.sprite_id, std::vector<uint8_t>(data.begin(), data.end())});
 }
 
 void PackageWriter::add_obj_palettes(const SpriteObjPalettes& palettes) {
     std::ostringstream out(std::ios::binary);
-    
+
     // 4 time-of-day variants × 8 palettes × 4 colors × 2 bytes (RGB555)
     for (int tod = 0; tod < 4; ++tod) {
         for (int pal = 0; pal < 8; ++pal) {
@@ -669,7 +669,7 @@ void PackageWriter::add_obj_palettes(const SpriteObjPalettes& palettes) {
             }
         }
     }
-    
+
     std::string data = out.str();
     obj_palettes_data_ = std::vector<uint8_t>(data.begin(), data.end());
 }
@@ -1111,6 +1111,50 @@ void PackageWriter::add_battle_rules(const enginemon::BattleRules& rules) {
     battle_rules_data_ = std::move(buf);
 }
 
+void PackageWriter::add_item_data(const std::vector<ItemDataEntry>& entries) {
+    if (!item_data_data_.empty()) {
+        throw std::runtime_error("PackageWriter::add_item_data: called more than once");
+    }
+    std::unordered_set<enginemon::ItemId> seen;
+    for (const auto& e : entries) {
+        if (!seen.insert(e.id).second) {
+            throw std::runtime_error(
+                std::format("PackageWriter::add_item_data: duplicate ItemId {}", e.id));
+        }
+    }
+    // Wire format (ITDT v1): u8 version, u32 count LE, per entry 13 bytes:
+    //   u16 item_id, u16 price, u8 held_effect_raw, u8 held_param,
+    //   u8 permissions, u8 pocket,
+    //   u8 held_effect_type, u8 boosted_type,
+    //   u16 species_restriction LE, u8 flags (bit0=consumable)
+    const auto count32 = static_cast<uint32_t>(entries.size());
+    std::vector<uint8_t> buf;
+    buf.reserve(1 + 4 + entries.size() * 13);
+    buf.push_back(enginemon::ITDT_SCHEMA_VERSION);
+    buf.push_back(static_cast<uint8_t>(count32 & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >>  8) & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >> 16) & 0xFF));
+    buf.push_back(static_cast<uint8_t>((count32 >> 24) & 0xFF));
+    for (const auto& e : entries) {
+        const auto id16 = static_cast<uint16_t>(e.id);
+        buf.push_back(static_cast<uint8_t>(id16 & 0xFF));
+        buf.push_back(static_cast<uint8_t>((id16 >> 8) & 0xFF));
+        buf.push_back(static_cast<uint8_t>(e.price & 0xFF));
+        buf.push_back(static_cast<uint8_t>((e.price >> 8) & 0xFF));
+        buf.push_back(e.held_effect_raw);
+        buf.push_back(e.held_param);
+        buf.push_back(e.permissions);
+        buf.push_back(e.pocket);
+        buf.push_back(static_cast<uint8_t>(e.held_effect_type));
+        buf.push_back(e.boosted_type);
+        const auto sr16 = static_cast<uint16_t>(e.species_restriction);
+        buf.push_back(static_cast<uint8_t>(sr16 & 0xFF));
+        buf.push_back(static_cast<uint8_t>((sr16 >> 8) & 0xFF));
+        buf.push_back(e.consumable ? 0x01u : 0x00u);
+    }
+    item_data_data_ = std::move(buf);
+}
+
 void PackageWriter::add_species_icon_map(
     const std::vector<SpeciesIconEntry>& entries)
 {
@@ -1152,154 +1196,154 @@ void PackageWriter::set_source_rom(const std::string& sha1, const std::string& v
 bool PackageWriter::write(const std::filesystem::path& path) const {
     std::ofstream out(path, std::ios::binary);
     if (!out) return false;
-    
+
     // Reserve space for header (will rewrite later)
     out.write(reinterpret_cast<const char*>(&header_), sizeof(header_));
-    
+
     // Build and write chunks
     std::vector<TocEntry> toc;
     std::vector<uint8_t> all_data;
-    
+
     // Maps chunk
     if (!map_data_.empty()) {
         TocEntry entry;
         entry.type = ChunkType::Maps;
         entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
         entry.count = static_cast<uint32_t>(map_data_.size());
-        
+
         std::ostringstream chunk(std::ios::binary);
-        
+
         // Write map index (id -> offset within chunk)
         for (const auto& [id, data] : map_data_) {
             write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
         }
-        
+
         // Write map data
         for (const auto& [id, data] : map_data_) {
             chunk.write(reinterpret_cast<const char*>(data.data()), data.size());
         }
-        
+
         std::string chunk_data = chunk.str();
         entry.size = static_cast<uint32_t>(chunk_data.size());
         entry.crc32 = calculate_crc32(chunk_data.data(), chunk_data.size());
-        
+
         toc.push_back(entry);
         all_data.insert(all_data.end(), chunk_data.begin(), chunk_data.end());
     }
-    
+
     // Tileset atlas chunk
     if (!tileset_data_.empty()) {
         TocEntry entry;
         entry.type = ChunkType::TilesetAtlases;
         entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
         entry.count = static_cast<uint32_t>(tileset_data_.size());
-        
+
         std::ostringstream chunk(std::ios::binary);
-        
+
         // Write index (id -> size)
         for (const auto& [id, data] : tileset_data_) {
             write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
         }
-        
+
         // Write tileset data
         for (const auto& [id, data] : tileset_data_) {
             chunk.write(reinterpret_cast<const char*>(data.data()), data.size());
         }
-        
+
         std::string chunk_data = chunk.str();
         entry.size = static_cast<uint32_t>(chunk_data.size());
         entry.crc32 = calculate_crc32(chunk_data.data(), chunk_data.size());
-        
+
         toc.push_back(entry);
         all_data.insert(all_data.end(), chunk_data.begin(), chunk_data.end());
     }
-    
+
     // Font atlas chunk
     if (!font_data_.empty()) {
         TocEntry entry;
         entry.type = ChunkType::Fonts;
         entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
         entry.count = static_cast<uint32_t>(font_data_.size());
-        
+
         std::ostringstream chunk(std::ios::binary);
-        
+
         // Write index (id -> size)
         for (const auto& [id, data] : font_data_) {
             write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
         }
-        
+
         // Write font data
         for (const auto& [id, data] : font_data_) {
             chunk.write(reinterpret_cast<const char*>(data.data()), data.size());
         }
-        
+
         std::string chunk_data = chunk.str();
         entry.size = static_cast<uint32_t>(chunk_data.size());
         entry.crc32 = calculate_crc32(chunk_data.data(), chunk_data.size());
-        
+
         toc.push_back(entry);
         all_data.insert(all_data.end(), chunk_data.begin(), chunk_data.end());
     }
-    
+
     // Scripts chunk (ScriptId → Lua code)
     if (!script_data_.empty()) {
         TocEntry entry;
         entry.type = ChunkType::Scripts;
         entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
         entry.count = static_cast<uint32_t>(script_data_.size());
-        
+
         std::ostringstream chunk(std::ios::binary);
-        
+
         // Write index (script_id -> lua_code_size)
         for (const auto& [id, lua_code] : script_data_) {
             write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(lua_code.size()));
         }
-        
+
         // Write script Lua code
         for (const auto& [id, lua_code] : script_data_) {
             chunk.write(lua_code.data(), lua_code.size());
         }
-        
+
         std::string chunk_data = chunk.str();
         entry.size = static_cast<uint32_t>(chunk_data.size());
         entry.crc32 = calculate_crc32(chunk_data.data(), chunk_data.size());
-        
+
         toc.push_back(entry);
         all_data.insert(all_data.end(), chunk_data.begin(), chunk_data.end());
     }
-    
+
     // Sprites chunk (sprite_id → RuntimeSprite data)
     if (!sprite_data_.empty()) {
         TocEntry entry;
         entry.type = ChunkType::Sprites;
         entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
         entry.count = static_cast<uint32_t>(sprite_data_.size());
-        
+
         std::ostringstream chunk(std::ios::binary);
-        
+
         // Write index (sprite_id -> data_size)
         for (const auto& [id, data] : sprite_data_) {
             write_chunk_id(chunk, id);
             write_le(chunk, static_cast<uint32_t>(data.size()));
         }
-        
+
         // Write sprite data
         for (const auto& [id, data] : sprite_data_) {
             chunk.write(reinterpret_cast<const char*>(data.data()), data.size());
         }
-        
+
         std::string chunk_data = chunk.str();
         entry.size = static_cast<uint32_t>(chunk_data.size());
         entry.crc32 = calculate_crc32(chunk_data.data(), chunk_data.size());
-        
+
         toc.push_back(entry);
         all_data.insert(all_data.end(), chunk_data.begin(), chunk_data.end());
     }
-    
+
     // OBJ Palettes chunk (single blob, shared across all sprites)
     if (!obj_palettes_data_.empty()) {
         TocEntry entry;
@@ -1308,7 +1352,7 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         entry.count = 1;  // Single palettes blob
         entry.size = static_cast<uint32_t>(obj_palettes_data_.size());
         entry.crc32 = calculate_crc32(obj_palettes_data_.data(), obj_palettes_data_.size());
-        
+
         toc.push_back(entry);
         all_data.insert(all_data.end(), obj_palettes_data_.begin(), obj_palettes_data_.end());
     }
@@ -1362,10 +1406,22 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         toc.push_back(brl_entry);
         all_data.insert(all_data.end(), battle_rules_data_.begin(), battle_rules_data_.end());
     }
-    
+
+    // ItemData chunk -- ItemId -> semantic held-item data (single flat blob)
+    if (!item_data_data_.empty()) {
+        TocEntry itd_entry;
+        itd_entry.type   = ChunkType::ItemData;
+        itd_entry.offset = static_cast<uint32_t>(sizeof(PackageHeader) + all_data.size());
+        itd_entry.count  = 1;
+        itd_entry.size   = static_cast<uint32_t>(item_data_data_.size());
+        itd_entry.crc32  = calculate_crc32(item_data_data_.data(), item_data_data_.size());
+        toc.push_back(itd_entry);
+        all_data.insert(all_data.end(), item_data_data_.begin(), item_data_data_.end());
+    }
+
     // Write data
     out.write(reinterpret_cast<const char*>(all_data.data()), all_data.size());
-    
+
     // Write TOC
     uint32_t toc_offset = static_cast<uint32_t>(out.tellp());
     for (const auto& entry : toc) {
@@ -1376,16 +1432,16 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
         write_le(out, entry.crc32);
     }
     uint32_t toc_size = static_cast<uint32_t>(out.tellp()) - toc_offset;
-    
+
     // Rewrite header with TOC info
     PackageHeader final_header = header_;
     final_header.toc_offset = toc_offset;
     final_header.toc_size = toc_size;
     final_header.data_crc32 = calculate_crc32(all_data.data(), all_data.size());
-    
+
     out.seekp(0);
     out.write(reinterpret_cast<const char*>(&final_header), sizeof(final_header));
-    
+
     return out.good();
 }
 
@@ -1396,28 +1452,28 @@ bool PackageWriter::write(const std::filesystem::path& path) const {
 std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return nullptr;
-    
+
     auto reader = std::unique_ptr<PackageReader>(new PackageReader());
     reader->path_ = path;
-    
+
     // Read header
     in.read(reinterpret_cast<char*>(&reader->header_), sizeof(PackageHeader));
-    
+
     // Validate magic
     if (reader->header_.magic != PackageHeader::MAGIC) {
         return nullptr;
     }
-    
+
     // Validate format version — do not decode under wrong-schema assumptions.
     if (reader->header_.version != PackageHeader::VERSION) {
         return nullptr;
     }
-    
+
     // Read TOC
     in.seekg(reader->header_.toc_offset);
     uint32_t toc_entries = reader->header_.toc_size / (sizeof(uint32_t) * 5);
     reader->toc_.reserve(toc_entries);
-    
+
     for (uint32_t i = 0; i < toc_entries; ++i) {
         TocEntry entry;
         entry.type = static_cast<ChunkType>(read_le<uint32_t>(in));
@@ -1427,7 +1483,7 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
         entry.crc32 = read_le<uint32_t>(in);
         reader->toc_.push_back(entry);
     }
-    
+
     // Build map index
     for (size_t i = 0; i < reader->toc_.size(); ++i) {
         if (reader->toc_[i].type == ChunkType::Maps) {
@@ -1467,26 +1523,26 @@ std::unique_ptr<PackageReader> PackageReader::open(const std::filesystem::path& 
             }
         }
     }
-    
+
     return reader;
 }
 
 bool PackageReader::validate() const {
     std::ifstream in(path_, std::ios::binary);
     if (!in) return false;
-    
+
     // Validate each chunk's CRC
     for (const auto& entry : toc_) {
         std::vector<uint8_t> data(entry.size);
         in.seekg(entry.offset);
         in.read(reinterpret_cast<char*>(data.data()), entry.size);
-        
+
         uint32_t actual_crc = calculate_crc32(data.data(), data.size());
         if (actual_crc != entry.crc32) {
             return false;
         }
     }
-    
+
     return true;
 }
 
@@ -1504,7 +1560,7 @@ std::optional<SerializedMap> PackageReader::load_map(const std::string& map_id) 
     if (it == map_index_.end()) {
         return std::nullopt;
     }
-    
+
     // Find maps chunk
     const TocEntry* maps_chunk = nullptr;
     for (const auto& entry : toc_) {
@@ -1514,13 +1570,13 @@ std::optional<SerializedMap> PackageReader::load_map(const std::string& map_id) 
         }
     }
     if (!maps_chunk) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Navigate to map data
     in.seekg(maps_chunk->offset);
-    
+
     // Skip index entries to find data offset
     uint32_t data_offset = 0;
     for (uint32_t i = 0; i <= it->second; ++i) {
@@ -1531,7 +1587,7 @@ std::optional<SerializedMap> PackageReader::load_map(const std::string& map_id) 
             data_offset += data_size;
         }
     }
-    
+
     // Calculate where map data starts (after all index entries)
     in.seekg(maps_chunk->offset);
     uint32_t index_size = 0;
@@ -1540,10 +1596,10 @@ std::optional<SerializedMap> PackageReader::load_map(const std::string& map_id) 
         index_size += 2 + id_len + 4;
         in.seekg(id_len + 4, std::ios::cur);
     }
-    
+
     // Seek to target map data
     in.seekg(maps_chunk->offset + index_size + data_offset);
-    
+
     // Re-read to get actual size
     in.seekg(maps_chunk->offset);
     uint32_t target_size = 0;
@@ -1552,14 +1608,14 @@ std::optional<SerializedMap> PackageReader::load_map(const std::string& map_id) 
         in.seekg(id_len, std::ios::cur);
         target_size = read_le<uint32_t>(in);
     }
-    
+
     in.seekg(maps_chunk->offset + index_size + data_offset);
     std::vector<uint8_t> data(target_size);
     in.read(reinterpret_cast<char*>(data.data()), target_size);
-    
+
     // Deserialize
     ExtractedMap map = deserialize_map(data);
-    
+
     // Convert to SerializedMap
     SerializedMap result;
     std::memset(&result, 0, sizeof(result));
@@ -1575,7 +1631,7 @@ std::optional<SerializedMap> PackageReader::load_map(const std::string& map_id) 
     if (map.is_outdoor) result.flags |= 0x01;
     if (map.phone_service_disabled) result.flags |= 0x02;
     result.lighting = map.lighting;
-    
+
     return result;
 }
 
@@ -1598,13 +1654,13 @@ std::optional<std::vector<uint8_t>> PackageReader::load_tileset_atlas(
         }
     }
     if (!tileset_chunk || tileset_chunk->count == 0) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Read index to find target tileset
     in.seekg(tileset_chunk->offset);
-    
+
     std::vector<std::pair<std::string, uint32_t>> index;
     for (uint32_t i = 0; i < tileset_chunk->count; ++i) {
         uint16_t id_len = read_le<uint16_t>(in);
@@ -1613,12 +1669,12 @@ std::optional<std::vector<uint8_t>> PackageReader::load_tileset_atlas(
         uint32_t data_size = read_le<uint32_t>(in);
         index.push_back({id, data_size});
     }
-    
+
     // Find target
     uint32_t data_offset = 0;
     uint32_t target_size = 0;
     bool found = false;
-    
+
     for (const auto& [id, size] : index) {
         if (id == tileset_id) {
             target_size = size;
@@ -1627,22 +1683,22 @@ std::optional<std::vector<uint8_t>> PackageReader::load_tileset_atlas(
         }
         data_offset += size;
     }
-    
+
     if (!found) return std::nullopt;
-    
+
     // Calculate index size
     uint32_t index_size = 0;
     for (const auto& [id, size] : index) {
         index_size += 2 + static_cast<uint32_t>(id.size()) + 4;
     }
-    
+
     // Read tileset data
     in.seekg(tileset_chunk->offset + index_size + data_offset);
     std::vector<uint8_t> data(target_size);
     in.read(reinterpret_cast<char*>(data.data()), target_size);
-    
+
     if (!in.good()) return std::nullopt;
-    
+
     return data;
 }
 
@@ -1657,13 +1713,13 @@ std::optional<std::vector<uint8_t>> PackageReader::load_font_atlas(
         }
     }
     if (!font_chunk || font_chunk->count == 0) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Read index to find target font
     in.seekg(font_chunk->offset);
-    
+
     std::vector<std::pair<std::string, uint32_t>> index;
     for (uint32_t i = 0; i < font_chunk->count; ++i) {
         uint16_t id_len = read_le<uint16_t>(in);
@@ -1672,12 +1728,12 @@ std::optional<std::vector<uint8_t>> PackageReader::load_font_atlas(
         uint32_t data_size = read_le<uint32_t>(in);
         index.push_back({id, data_size});
     }
-    
+
     // Find target
     uint32_t data_offset = 0;
     uint32_t target_size = 0;
     bool found = false;
-    
+
     for (const auto& [id, size] : index) {
         if (id == font_id) {
             target_size = size;
@@ -1686,22 +1742,22 @@ std::optional<std::vector<uint8_t>> PackageReader::load_font_atlas(
         }
         data_offset += size;
     }
-    
+
     if (!found) return std::nullopt;
-    
+
     // Calculate index size
     uint32_t index_size = 0;
     for (const auto& [id, size] : index) {
         index_size += 2 + static_cast<uint32_t>(id.size()) + 4;
     }
-    
+
     // Read font data
     in.seekg(font_chunk->offset + index_size + data_offset);
     std::vector<uint8_t> data(target_size);
     in.read(reinterpret_cast<char*>(data.data()), target_size);
-    
+
     if (!in.good()) return std::nullopt;
-    
+
     return data;
 }
 
@@ -1710,7 +1766,7 @@ std::optional<std::string> PackageReader::load_script(const std::string& script_
     if (it == script_index_.end()) {
         return std::nullopt;
     }
-    
+
     // Find scripts chunk
     const TocEntry* script_chunk = nullptr;
     for (const auto& entry : toc_) {
@@ -1720,13 +1776,13 @@ std::optional<std::string> PackageReader::load_script(const std::string& script_
         }
     }
     if (!script_chunk || script_chunk->count == 0) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Read index to find target script
     in.seekg(script_chunk->offset);
-    
+
     std::vector<std::pair<std::string, uint32_t>> index;
     for (uint32_t i = 0; i < script_chunk->count; ++i) {
         uint16_t id_len = read_le<uint16_t>(in);
@@ -1735,12 +1791,12 @@ std::optional<std::string> PackageReader::load_script(const std::string& script_
         uint32_t data_size = read_le<uint32_t>(in);
         index.push_back({id, data_size});
     }
-    
+
     // Find target
     uint32_t data_offset = 0;
     uint32_t target_size = 0;
     bool found = false;
-    
+
     for (const auto& [id, size] : index) {
         if (id == script_id) {
             target_size = size;
@@ -1749,22 +1805,22 @@ std::optional<std::string> PackageReader::load_script(const std::string& script_
         }
         data_offset += size;
     }
-    
+
     if (!found) return std::nullopt;
-    
+
     // Calculate index size
     uint32_t index_size = 0;
     for (const auto& [id, size] : index) {
         index_size += 2 + static_cast<uint32_t>(id.size()) + 4;
     }
-    
+
     // Read script Lua code
     in.seekg(script_chunk->offset + index_size + data_offset);
     std::string lua_code(target_size, '\0');
     in.read(lua_code.data(), target_size);
-    
+
     if (!in.good()) return std::nullopt;
-    
+
     return lua_code;
 }
 
@@ -1792,7 +1848,7 @@ static enginemon::RuntimeBgEventType convert_bg_event_type(BgEventType type) {
         case BgEventType::Copy:       return enginemon::RuntimeBgEventType::Copy;
     }
     // Unhandled enum value - hard fail package construction
-    throw std::runtime_error("convert_bg_event_type: invalid BgEventType value " + 
+    throw std::runtime_error("convert_bg_event_type: invalid BgEventType value " +
                              std::to_string(static_cast<int>(type)));
 }
 
@@ -1812,7 +1868,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
     if (it == map_index_.end()) {
         return std::nullopt;
     }
-    
+
     // Find maps chunk
     const TocEntry* maps_chunk = nullptr;
     for (const auto& entry : toc_) {
@@ -1822,13 +1878,13 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         }
     }
     if (!maps_chunk) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Navigate to map data
     in.seekg(maps_chunk->offset);
-    
+
     // Skip index entries to find data offset
     uint32_t data_offset = 0;
     for (uint32_t i = 0; i <= it->second; ++i) {
@@ -1839,7 +1895,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
             data_offset += data_size;
         }
     }
-    
+
     // Calculate where map data starts (after all index entries)
     in.seekg(maps_chunk->offset);
     uint32_t index_size = 0;
@@ -1848,7 +1904,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         index_size += 2 + id_len + 4;
         in.seekg(id_len + 4, std::ios::cur);
     }
-    
+
     // Re-read to get actual size
     in.seekg(maps_chunk->offset);
     uint32_t target_size = 0;
@@ -1857,22 +1913,22 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         in.seekg(id_len, std::ios::cur);
         target_size = read_le<uint32_t>(in);
     }
-    
+
     // Seek to target map data
     in.seekg(maps_chunk->offset + index_size + data_offset);
     std::vector<uint8_t> data(target_size);
     in.read(reinterpret_cast<char*>(data.data()), target_size);
-    
+
     if (!in.good()) {
         return std::nullopt;
     }
-    
+
     // Deserialize to ExtractedMap first
     ExtractedMap extracted = deserialize_map(data);
-    
+
     // Convert to runtime-native RuntimeMap
     enginemon::RuntimeMap result;
-    
+
     // Basic properties
     result.map_id = std::move(extracted.map_id);
     result.display_name = std::move(extracted.display_name);
@@ -1889,7 +1945,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
     result.fish_group_id = std::move(extracted.fish_group_id);
     result.landmark_id = std::move(extracted.landmark_id);
     result.map_script_id = std::move(extracted.map_script_id);
-    
+
     // Convert warps
     result.warps.reserve(extracted.warps.size());
     for (auto& w : extracted.warps) {
@@ -1900,7 +1956,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         rw.target_warp_index = w.target_warp_index;
         result.warps.push_back(std::move(rw));
     }
-    
+
     // Convert coord events
     result.coord_events.reserve(extracted.coord_events.size());
     for (auto& ce : extracted.coord_events) {
@@ -1911,7 +1967,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         rce.scene_id = ce.scene_id;
         result.coord_events.push_back(std::move(rce));
     }
-    
+
     // Convert BG events
     result.bg_events.reserve(extracted.bg_events.size());
     for (auto& bg : extracted.bg_events) {
@@ -1925,7 +1981,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         rbg.condition_flag = std::move(bg.condition_flag);
         result.bg_events.push_back(std::move(rbg));
     }
-    
+
     // Convert objects
     result.objects.reserve(extracted.objects.size());
     for (auto& obj : extracted.objects) {
@@ -1946,7 +2002,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         ro.visibility_flag = std::move(obj.visibility_flag);
         result.objects.push_back(std::move(ro));
     }
-    
+
     // Convert connections
     result.connections.reserve(extracted.connections.size());
     for (auto& conn : extracted.connections) {
@@ -1958,7 +2014,7 @@ std::optional<enginemon::RuntimeMap> PackageReader::load_full_map(const std::str
         rc.coord_adjust_tiles = conn.coord_adjust_tiles;
         result.connections.push_back(std::move(rc));
     }
-    
+
     return result;
 }
 
@@ -1967,7 +2023,7 @@ std::optional<enginemon::RuntimeSprite> PackageReader::load_sprite(const std::st
     if (it == sprite_index_.end()) {
         return std::nullopt;
     }
-    
+
     // Find sprites chunk
     const TocEntry* sprite_chunk = nullptr;
     for (const auto& entry : toc_) {
@@ -1977,13 +2033,13 @@ std::optional<enginemon::RuntimeSprite> PackageReader::load_sprite(const std::st
         }
     }
     if (!sprite_chunk || sprite_chunk->count == 0) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Read index to find target sprite
     in.seekg(sprite_chunk->offset);
-    
+
     std::vector<std::pair<std::string, uint32_t>> index;
     for (uint32_t i = 0; i < sprite_chunk->count; ++i) {
         uint16_t id_len = read_le<uint16_t>(in);
@@ -1992,12 +2048,12 @@ std::optional<enginemon::RuntimeSprite> PackageReader::load_sprite(const std::st
         uint32_t data_size = read_le<uint32_t>(in);
         index.push_back({id, data_size});
     }
-    
+
     // Find target
     uint32_t data_offset = 0;
     uint32_t target_size = 0;
     bool found = false;
-    
+
     for (const auto& [id, size] : index) {
         if (id == sprite_id) {
             target_size = size;
@@ -2006,36 +2062,36 @@ std::optional<enginemon::RuntimeSprite> PackageReader::load_sprite(const std::st
         }
         data_offset += size;
     }
-    
+
     if (!found) return std::nullopt;
-    
+
     // Calculate index size
     uint32_t index_size = 0;
     for (const auto& [id, size] : index) {
         index_size += 2 + static_cast<uint32_t>(id.size()) + 4;
     }
-    
+
     // Read sprite data
     in.seekg(sprite_chunk->offset + index_size + data_offset);
     std::vector<uint8_t> data(target_size);
     in.read(reinterpret_cast<char*>(data.data()), target_size);
-    
+
     if (!in.good()) return std::nullopt;
-    
+
     // Deserialize sprite
     std::istringstream sin(std::string(data.begin(), data.end()), std::ios::binary);
-    
+
     enginemon::RuntimeSprite sprite;
-    
+
     // Read sprite_id (redundant but consistent with format)
     uint16_t id_len = read_le<uint16_t>(sin);
     sprite.sprite_id.resize(id_len);
     sin.read(sprite.sprite_id.data(), id_len);
-    
+
     // Read type and palette
     sprite.type = static_cast<enginemon::SpriteType>(sin.get());
     sprite.default_palette = static_cast<enginemon::SpritePalette>(sin.get());
-    
+
     // Read frames
     uint32_t frame_count = read_le<uint32_t>(sin);
     sprite.frames.resize(frame_count);
@@ -2050,7 +2106,7 @@ std::optional<enginemon::RuntimeSprite> PackageReader::load_sprite(const std::st
     for (uint32_t i = 0; i < icon_frame_count; ++i) {
         sin.read(reinterpret_cast<char*>(sprite.icon_frames[i].pixels.data()), 1024);
     }
-    
+
     return sprite;
 }
 
@@ -2073,22 +2129,22 @@ std::optional<enginemon::SpriteObjPalettes> PackageReader::load_obj_palettes() c
         }
     }
     if (!pal_chunk || pal_chunk->size == 0) return std::nullopt;
-    
+
     std::ifstream in(path_, std::ios::binary);
     if (!in) return std::nullopt;
-    
+
     // Read palette data
     in.seekg(pal_chunk->offset);
     std::vector<uint8_t> data(pal_chunk->size);
     in.read(reinterpret_cast<char*>(data.data()), pal_chunk->size);
-    
+
     if (!in.good()) return std::nullopt;
-    
+
     // Deserialize palettes
     std::istringstream sin(std::string(data.begin(), data.end()), std::ios::binary);
-    
+
     enginemon::SpriteObjPalettes palettes;
-    
+
     // 4 time-of-day variants × 8 palettes × 4 colors × 2 bytes (RGB555)
     for (int tod = 0; tod < 4; ++tod) {
         for (int pal = 0; pal < 8; ++pal) {
@@ -2097,7 +2153,7 @@ std::optional<enginemon::SpriteObjPalettes> PackageReader::load_obj_palettes() c
             }
         }
     }
-    
+
     return palettes;
 }
 

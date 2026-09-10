@@ -9,7 +9,7 @@ add_library(enginemon_crystal STATIC
     rom/symbol_map.cpp
     rom/profile.cpp
     rom/crystal_layout_resolver.cpp
-    
+
     # Data extractors
     extract/maps.cpp
     extract/tilesets.cpp
@@ -19,18 +19,19 @@ add_library(enginemon_crystal STATIC
     extract/battle_rules.cpp
     extract/sm83_lifter.cpp
     extract/effect_script_decoder.cpp
+    extract/items.cpp
     # Battle semantics
     battle/effect_semanticizer.cpp
     battle/effect_program_compiler.cpp
-    
+
     # Output/packaging
     output/native_package.cpp
-    
+
     # Compiler (ROM → EMON package)
     compile/full_compiler.cpp
     compile/corpus_discovery.cpp
     compile/move_semanticizer.cpp
-    
+
     # Script compilation (always enabled - does not require engine)
     script/decoder.cpp
     script/lua_emitter.cpp

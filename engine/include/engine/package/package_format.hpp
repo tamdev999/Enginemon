@@ -30,19 +30,19 @@ namespace enginemon {
 struct PackageHeader {
     static constexpr uint32_t MAGIC = 0x454D4F4E;  // "EMON"
     static constexpr uint32_t VERSION = 3;  // v3: connection fields src_skip_blocks/strip_length_blocks/coord_adjust_tiles replace strip_offset/strip_length
-    
+
     uint32_t magic;
     uint32_t version;
     uint32_t flags;
-    
+
     // Source ROM info (for verification, not extraction)
     char source_sha1[41];       // Null-terminated hex string
     char source_version[32];    // e.g., "Crystal USA v1.1"
-    
+
     // Table of contents offsets
     uint32_t toc_offset;
     uint32_t toc_size;
-    
+
     // Checksums for integrity
     uint32_t data_crc32;
 };
@@ -128,6 +128,11 @@ enum class ChunkType : uint32_t {
                                  // MoveEffectPriorities, AI move/effect lists, and
                                  // TrainerClassAttributes.
                                  // Runtime populates HeadlessRuntime::battle_rules from this chunk.
+    ItemData    = 0x49544454,   // "ITDT" — ItemId -> ItemData (held_effect_type, param, etc.)
+                                 // Compiled from Crystal ItemAttributes ROM table by the
+                                 // Crystal frontend, semanticized into HeldItemEffectType.
+                                 // Runtime populates Registries::items from this chunk.
+                                 // No raw Crystal HELD_* values or item/species IDs survive.
 };
 
 // ============================================================================
@@ -170,8 +175,18 @@ static constexpr uint8_t MVDT_SCHEMA_VERSION = 4;
 //     Old packages (no version byte or wrong version) are rejected.
 // v3: appends Metronome exception list after frontend_limits:
 //       u8  metronome_excepts_count
-//       count × u16 LE MoveId
+//       count x u16 LE MoveId
 static constexpr uint8_t BRLS_SCHEMA_VERSION = 3;
+
+// ITDT schema version.
+// v1: u8 schema_version, u32 count LE, then per-entry (13 bytes):
+//   u16 item_id LE, u16 price LE, u8 held_effect_raw, u8 held_param,
+//   u8 permissions, u8 pocket,
+//   u8 held_effect_type (HeldItemEffectType enum),
+//   u8 boosted_type (TypeId; 0xFF = none),
+//   u16 species_restriction LE (SpeciesId; 0 = none),
+//   u8 flags (bit 0 = consumable)
+static constexpr uint8_t ITDT_SCHEMA_VERSION = 1;
 
 struct TocEntry {
     ChunkType type;

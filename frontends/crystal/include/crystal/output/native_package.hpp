@@ -1,7 +1,7 @@
 #pragma once
 // crystal/output/native_package.hpp
 // Native package format for extracted Crystal data
-// 
+//
 // The package is the boundary between ROM extraction and runtime.
 // After writing a package, the ROM can be closed.
 // The engine loads only from packages, never from ROMs.
@@ -62,7 +62,7 @@ struct SerializedMap {
     char display_name[64];
     char tileset_id[32];
     char music_id[32];
-    
+
     uint8_t width;
     uint8_t height;
     uint8_t border_block;
@@ -70,7 +70,7 @@ struct SerializedMap {
     uint8_t flags;              // is_outdoor, phone_disabled, etc.
     uint8_t lighting;
     uint16_t _padding;
-    
+
     // Variable-length data follows:
     // - blocks (width * height bytes)
     // - warps (count + data)
@@ -87,20 +87,20 @@ struct SerializedMap {
 class PackageWriter {
 public:
     PackageWriter();
-    
+
     // Add extracted data
     void add_map(const ExtractedMap& map);
     void add_tileset_atlas(const TilesetAtlas& atlas);  // Legacy baked 32×32 metatiles
     void add_tileset(const ExtractedTileset& tileset, TimeOfDay tod);  // Native 8×8 tiles + blocks
     void add_font_atlas(const FontAtlas& atlas);
-    
+
     // Add compiled scripts (ScriptId → Lua code)
     // ScriptId must be globally unique (e.g., "new_bark_town::bg_event_0")
     void add_script(const std::string& script_id, const std::string& lua_code);
-    
+
     // Add sprite data (RuntimeSprite) - sprite_id becomes package key
     void add_sprite(const RuntimeSprite& sprite);
-    
+
     // Add OBJ palettes (shared across all sprites)
     void add_obj_palettes(const SpriteObjPalettes& palettes);
 
@@ -202,13 +202,34 @@ public:
     // Wire format version: enginemon::BRLS_SCHEMA_VERSION (u8, written as first byte of chunk).
     // Readers that see a different version must reject the package.
     void add_battle_rules(const enginemon::BattleRules& rules);
-    
+
+    // Add item data registry (ITDT chunk).
+    // One entry per item (ItemId -> held-item semantic fields).
+    // Duplicate ItemId -> throws. Empty entries -> throws.
+    // Serialised as a flat array keyed by ItemId; runtime populates
+    // Registries::items from this chunk via PackageReader::load_item_registry().
+    // Wire format version: enginemon::ITDT_SCHEMA_VERSION.
+    struct ItemDataEntry {
+        enginemon::ItemId    id;                // Item ID (1-based; 0 = NO_ITEM)
+        uint16_t             price;             // Raw price from ROM
+        uint8_t              held_effect_raw;   // Raw HELD_* byte (Crystal-side only)
+        uint8_t              held_param;        // Raw parameter
+        uint8_t              permissions;       // CANT_SELECT etc. (Crystal-side)
+        uint8_t              pocket;            // 0=ITEM,1=BALL,2=KEY,3=TM
+        // Semanticized fields (no raw Crystal HELD_* values in engine):
+        enginemon::HeldItemEffectType held_effect_type = enginemon::HeldItemEffectType::None;
+        enginemon::TypeId    boosted_type       = enginemon::TYPE_NONE;
+        enginemon::SpeciesId species_restriction = enginemon::SPECIES_NONE;
+        bool                 consumable         = false;
+    };
+    void add_item_data(const std::vector<ItemDataEntry>& entries);
+
     // Set metadata
     void set_source_rom(const std::string& sha1, const std::string& version);
-    
+
     // Write package to file
     bool write(const std::filesystem::path& path) const;
-    
+
     // Get statistics
     struct Stats {
         uint32_t maps_written = 0;
@@ -221,7 +242,7 @@ public:
 private:
     PackageHeader header_;
     std::vector<TocEntry> toc_;
-    
+
     // Collected data
     std::vector<SerializedMap> maps_;
     std::vector<std::pair<std::string, std::vector<uint8_t>>> map_data_;
@@ -234,10 +255,11 @@ private:
     std::vector<uint8_t> base_stats_data_;        // Serialized species base stats (single chunk)
     std::vector<uint8_t> move_data_data_;         // Serialized move data (single chunk)
     std::vector<uint8_t> battle_rules_data_;      // Serialized battle rules (single chunk)
-    
+    std::vector<uint8_t> item_data_data_;         // Serialized item data (single chunk)
+
     Stats stats_;
-    
-    void write_chunk(std::ostream& out, ChunkType type, 
+
+    void write_chunk(std::ostream& out, ChunkType type,
                      const void* data, size_t size) const;
 };
 
@@ -249,51 +271,51 @@ class PackageReader {
 public:
     // Load package from file
     static std::unique_ptr<PackageReader> open(const std::filesystem::path& path);
-    
+
     // Validate integrity
     bool validate() const;
-    
+
     // Get metadata
     const PackageHeader& header() const { return header_; }
     std::string source_sha1() const { return header_.source_sha1; }
     std::string source_version() const { return header_.source_version; }
-    
+
     // Load specific data
     std::vector<std::string> list_maps() const;
     std::optional<SerializedMap> load_map(const std::string& map_id) const;
-    
+
     // Load full map with all events (for runtime use)
     // Returns runtime-native type, not frontend type
     std::optional<enginemon::RuntimeMap> load_full_map(const std::string& map_id) const;
-    
+
     std::vector<std::string> list_tilesets() const;
     std::optional<std::vector<uint8_t>> load_tileset_atlas(const std::string& tileset_id) const;
-    
+
     // Load font atlas
     std::optional<std::vector<uint8_t>> load_font_atlas(const std::string& font_id) const;
-    
+
     // Load script by ScriptId (returns Lua code string)
     std::optional<std::string> load_script(const std::string& script_id) const;
-    
+
     // List all available scripts
     std::vector<std::string> list_scripts() const;
-    
+
     // Load sprite by sprite_id (returns semantic RuntimeSprite)
     std::optional<enginemon::RuntimeSprite> load_sprite(const std::string& sprite_id) const;
-    
+
     // List all available sprites
     std::vector<std::string> list_sprites() const;
-    
+
     // Load OBJ palettes (shared across all sprites)
     std::optional<enginemon::SpriteObjPalettes> load_obj_palettes() const;
 
 private:
     PackageReader() = default;
-    
+
     PackageHeader header_;
     std::vector<TocEntry> toc_;
     std::filesystem::path path_;
-    
+
     // Index maps for fast lookup
     std::unordered_map<std::string, size_t> map_index_;
     std::unordered_map<std::string, size_t> tileset_index_;

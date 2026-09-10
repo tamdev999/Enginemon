@@ -1394,4 +1394,87 @@ PackageReader::load_battle_rules() const {
     return rules;
 }
 
+std::optional<Registry<ItemId, ItemData>>
+PackageReader::load_item_registry() const {
+    // Locate the ItemData chunk in the TOC.
+    const TocEntry* chunk = nullptr;
+    for (const auto& entry : toc_) {
+        if (entry.type == ChunkType::ItemData) { chunk = &entry; break; }
+    }
+    if (!chunk || chunk->size < 5) return std::nullopt;  // need version + count
+
+    std::ifstream in(path_, std::ios::binary);
+    if (!in) return std::nullopt;
+    in.seekg(chunk->offset);
+
+    // Schema version byte.
+    const uint8_t schema_ver = static_cast<uint8_t>(in.get());
+    if (!in.good()) return std::nullopt;
+    if (schema_ver != ITDT_SCHEMA_VERSION) {
+        std::cerr << "[PackageReader] ITDT chunk schema version " << static_cast<int>(schema_ver)
+                  << " != expected " << static_cast<int>(ITDT_SCHEMA_VERSION)
+                  << " — package requires recompile\n";
+        return std::nullopt;
+    }
+
+    // u32 count LE
+    const uint32_t count = read_le<uint32_t>(in);
+    if (!in.good()) return std::nullopt;
+    if (count > 65535u) return std::nullopt;
+
+    // Validate HeldItemEffectType enum range.
+    constexpr uint8_t HELD_EFFECT_TYPE_MAX =
+        static_cast<uint8_t>(HeldItemEffectType::AmuletCoin);
+    auto valid_effect_type = [](uint8_t v) { return v <= HELD_EFFECT_TYPE_MAX; };
+
+    Registry<ItemId, ItemData> reg;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint16_t item_id_raw = read_le<uint16_t>(in);
+        if (!in.good() && !in.eof()) return std::nullopt;
+        const uint16_t price = read_le<uint16_t>(in);
+        if (!in.good() && !in.eof()) return std::nullopt;
+        const uint8_t held_effect_raw = static_cast<uint8_t>(in.get());
+        const uint8_t held_param      = static_cast<uint8_t>(in.get());
+        const uint8_t permissions     = static_cast<uint8_t>(in.get());
+        const uint8_t pocket_raw      = static_cast<uint8_t>(in.get());
+        const uint8_t effect_type_raw = static_cast<uint8_t>(in.get());
+        const uint8_t boosted_type    = static_cast<uint8_t>(in.get());
+        const uint16_t species_restr  = read_le<uint16_t>(in);
+        const uint8_t flags           = static_cast<uint8_t>(in.get());
+        if (!in.good() && !in.eof()) return std::nullopt;
+
+        // Validate HeldItemEffectType enum; reject unknown values.
+        if (!valid_effect_type(effect_type_raw)) {
+            std::cerr << "[PackageReader] ITDT: unknown HeldItemEffectType "
+                      << static_cast<int>(effect_type_raw)
+                      << " for item " << item_id_raw << "\n";
+            return std::nullopt;
+        }
+
+        ItemId mid = static_cast<ItemId>(item_id_raw);
+        if (reg.get(mid) != nullptr) return std::nullopt;  // duplicate — corrupt chunk
+
+        ItemData d;
+        d.id                  = mid;
+        d.price               = price;
+        d.held_effect         = held_effect_raw;
+        d.held_param          = held_param;
+        d.field_effect        = 0u;
+        d.is_key_item         = ((permissions & 0x80u) != 0);  // CANT_TOSS bit in Crystal
+        d.is_tm_hm            = (pocket_raw == 3u);
+        d.tm_move             = MOVE_NONE;
+        d.held_effect_type    = static_cast<HeldItemEffectType>(effect_type_raw);
+        d.boosted_type        = boosted_type;
+        d.species_restriction = static_cast<SpeciesId>(species_restr);
+        d.consumable          = (flags & 0x01u) != 0;
+        d.pocket              = (pocket_raw <= 3u)
+                                ? static_cast<ItemPocket>(pocket_raw)
+                                : ItemPocket::Items;
+
+        reg.register_entry(mid, std::move(d));
+    }
+    reg.freeze();
+    return reg;
+}
+
 } // namespace enginemon

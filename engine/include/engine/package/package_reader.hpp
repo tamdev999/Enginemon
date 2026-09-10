@@ -33,39 +33,39 @@ class PackageReader {
 public:
     // Load package from file
     static std::unique_ptr<PackageReader> open(const std::filesystem::path& path);
-    
+
     // Validate integrity
     bool validate() const;
-    
+
     // Get metadata
     const PackageHeader& header() const { return header_; }
     std::string source_sha1() const { return header_.source_sha1; }
     std::string source_version() const { return header_.source_version; }
-    
+
     // Load map data - returns runtime-native type directly
     std::vector<std::string> list_maps() const;
     std::optional<RuntimeMap> load_map(const std::string& map_id) const;
-    
+
     // Load tileset - returns raw bytes for RuntimeTileset::from_package_data()
     std::vector<std::string> list_tilesets() const;
     std::optional<std::vector<uint8_t>> load_tileset_data(const std::string& tileset_id) const;
-    
+
     // Legacy - kept for compatibility during transition
     std::optional<std::vector<uint8_t>> load_tileset_atlas(const std::string& tileset_id) const {
         return load_tileset_data(tileset_id);
     }
-    
+
     // Load font atlas (raw package data)
     std::optional<std::vector<uint8_t>> load_font_atlas(const std::string& font_id) const;
-    
+
     // Load script by ScriptId (returns Lua code string)
     std::optional<std::string> load_script(const std::string& script_id) const;
     std::vector<std::string> list_scripts() const;
-    
+
     // Load sprite - returns runtime-native type directly
     std::optional<RuntimeSprite> load_sprite(const std::string& sprite_id) const;
     std::vector<std::string> list_sprites() const;
-    
+
     // Load OBJ palettes (shared across all sprites)
     std::optional<SpriteObjPalettes> load_obj_palettes() const;
 
@@ -88,24 +88,31 @@ public:
 
     // Load battle rules (BattleRules chunk).
     // Returns a populated BattleRules or nullopt if the chunk is absent or corrupt.
-    // Fail-closed: any structural error → nullopt, not partial rules.
+    // Fail-closed: any structural error -> nullopt, not partial rules.
     std::optional<BattleRules> load_battle_rules() const;
+
+    // Load item data registry (ItemData chunk).
+    // Returns a populated Registry<ItemId, ItemData> or nullopt if the chunk is
+    // absent or structurally corrupt.
+    // Fail-closed: any read error, unknown HeldItemEffectType, or duplicate ItemId
+    // -> nullopt, not partial registry.
+    std::optional<Registry<ItemId, ItemData>> load_item_registry() const;
 
 private:
     PackageReader() = default;
-    
+
     PackageHeader header_;
     std::vector<TocEntry> toc_;
     std::filesystem::path path_;
     size_t file_size_ = 0;  // For bounds validation
-    
+
     // Index maps for fast lookup
     std::unordered_map<std::string, size_t> map_index_;
     std::unordered_map<std::string, size_t> tileset_index_;
     std::unordered_map<std::string, size_t> font_index_;
     std::unordered_map<std::string, size_t> script_index_;
     std::unordered_map<std::string, size_t> sprite_index_;
-    
+
     // Internal helpers for reading indexed chunks
     std::optional<std::vector<uint8_t>> read_indexed_chunk(
         ChunkType type,

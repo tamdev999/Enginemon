@@ -40,6 +40,7 @@
 #include "engine/party/pokemon.hpp"
 #include "crystal/compile/move_semanticizer.hpp"
 #include "crystal/battle/crystal_effects.hpp"
+#include "crystal/extract/item_extractor.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -6622,6 +6623,482 @@ TEST(p_fake_out_zero_damage_always) {
 }
 
 // ============================================================================
+// ROOT_HELD_ITEM_EFFECTS — Stage 1: Semantic item data pipeline
+// ============================================================================
+
+// Helper: extract item entries from real ROM, write through PackageWriter,
+// read back via PackageReader. Returns the loaded Registry or nullopt.
+static std::optional<enginemon::Registry<enginemon::ItemId, enginemon::ItemData>>
+itdt_roundtrip(const std::string& tag)
+{
+    auto item_result = crystal::extract_all_items(*g_rom, *g_profile);
+    if (!item_result.success) {
+        std::cerr << "  itdt_roundtrip: extraction failed: " << item_result.error << "\n";
+        return std::nullopt;
+    }
+
+    crystal::PackageWriter writer;
+    writer.set_source_rom("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "test_v1");
+    writer.add_item_data(item_result.items);
+
+    auto pkg_path = std::filesystem::temp_directory_path()
+                    / ("itdt_test_" + tag + ".emon");
+    if (!writer.write(pkg_path)) {
+        std::cerr << "  itdt_roundtrip: write failed\n";
+        return std::nullopt;
+    }
+
+    auto reader = enginemon::PackageReader::open(pkg_path);
+    if (!reader) {
+        std::filesystem::remove(pkg_path);
+        return std::nullopt;
+    }
+    auto reg = reader->load_item_registry();
+    std::filesystem::remove(pkg_path);
+    return reg;
+}
+
+// Item IDs from Crystal ROM (1-based), confirmed from item_constants.asm
+namespace ItemId {
+    constexpr enginemon::ItemId BRIGHTPOWDER = 0x03;
+    constexpr enginemon::ItemId LUCKY_PUNCH  = 0x1E;
+    constexpr enginemon::ItemId METAL_POWDER = 0x23;
+    constexpr enginemon::ItemId SCOPE_LENS   = 0x8C;
+    constexpr enginemon::ItemId KINGS_ROCK   = 0x52;
+    constexpr enginemon::ItemId QUICK_CLAW   = 0x49;
+    constexpr enginemon::ItemId FOCUS_BAND   = 0x77;
+    constexpr enginemon::ItemId LEFTOVERS    = 0x92;
+    constexpr enginemon::ItemId CHARCOAL     = 0x8A;
+    constexpr enginemon::ItemId DRAGON_SCALE = 0x97;
+    constexpr enginemon::ItemId DRAGON_FANG  = 0x90;
+    constexpr enginemon::ItemId STICK        = 0x69;
+    constexpr enginemon::ItemId METAL_COAT   = 0x8F;
+    constexpr enginemon::ItemId SMOKE_BALL   = 0x6A;
+    constexpr enginemon::ItemId AMULET_COIN  = 0x5B;
+    constexpr enginemon::ItemId GOLD_BERRY   = 0xAE;
+    constexpr enginemon::ItemId MYSTERYBERRY = 0x96;
+    constexpr enginemon::ItemId MIRACLEBERRY = 0x6D;
+    constexpr enginemon::ItemId BERSERK_GENE = 0x98;
+    constexpr enginemon::ItemId PSNCUREBERRY = 0x4A;
+    constexpr enginemon::ItemId BURNT_BERRY  = 0x4F;
+    constexpr enginemon::ItemId ICE_BERRY    = 0x50;
+    constexpr enginemon::ItemId MINT_BERRY   = 0x54;
+    constexpr enginemon::ItemId PRZCUREBERRY = 0x4E;
+    constexpr enginemon::ItemId BITTER_BERRY = 0x53;
+}  // namespace ItemId
+
+// Crystal type IDs (from type_constants.asm, matching engine TypeId values)
+namespace CrystalType {
+    constexpr enginemon::TypeId NORMAL    =  0;
+    constexpr enginemon::TypeId FIGHTING  =  1;
+    constexpr enginemon::TypeId FLYING    =  2;
+    constexpr enginemon::TypeId POISON    =  3;
+    constexpr enginemon::TypeId GROUND    =  4;
+    constexpr enginemon::TypeId ROCK      =  5;
+    constexpr enginemon::TypeId BUG       =  7;
+    constexpr enginemon::TypeId GHOST     =  8;
+    constexpr enginemon::TypeId STEEL     =  9;
+    constexpr enginemon::TypeId FIRE      = 20;
+    constexpr enginemon::TypeId WATER     = 21;
+    constexpr enginemon::TypeId GRASS     = 22;
+    constexpr enginemon::TypeId ELECTRIC  = 23;
+    constexpr enginemon::TypeId PSYCHIC   = 24;
+    constexpr enginemon::TypeId ICE       = 25;
+    constexpr enginemon::TypeId DRAGON    = 26;
+    constexpr enginemon::TypeId DARK      = 27;
+}  // namespace CrystalType
+
+// Crystal species IDs (from pokemon_constants.asm)
+namespace CrystalSpecies {
+    constexpr enginemon::SpeciesId CHANSEY   = 0x47;  // 71
+    constexpr enginemon::SpeciesId FARFETCHD = 0x35;  // 53
+    constexpr enginemon::SpeciesId DITTO     = 0x54;  // 84
+}  // namespace CrystalSpecies
+
+using HT = enginemon::HeldItemEffectType;
+
+// ── Core flinch/accuracy/speed/KO items ──────────────────────────────────────
+
+TEST(p_itdt_kings_rock_post_hit_flinch) {
+    auto r = itdt_roundtrip("kr");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::KINGS_ROCK);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::PostHitFlinch);
+    ASSERT_EQ(it->held_param, uint8_t{30});
+    std::cout << "\n    kings_rock: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param << "\n";
+}
+
+TEST(p_itdt_brightpowder_accuracy_reduction) {
+    auto r = itdt_roundtrip("bp");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::BRIGHTPOWDER);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::AccuracyReduction);
+    ASSERT_EQ(it->held_param, uint8_t{20});
+    std::cout << "\n    brightpowder: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param << "\n";
+}
+
+TEST(p_itdt_quick_claw_turn_order_boost) {
+    auto r = itdt_roundtrip("qc");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::QUICK_CLAW);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::TurnOrderBoost);
+    ASSERT_EQ(it->held_param, uint8_t{60});
+    std::cout << "\n    quick_claw: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param << "\n";
+}
+
+TEST(p_itdt_focus_band_ko_survival) {
+    auto r = itdt_roundtrip("fb");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::FOCUS_BAND);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::KOSurvival);
+    ASSERT_EQ(it->held_param, uint8_t{30});
+    ASSERT_FALSE(it->consumable);
+    std::cout << "\n    focus_band: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param
+              << " consumable=" << it->consumable << "\n";
+}
+
+// ── Crit items ────────────────────────────────────────────────────────────────
+
+TEST(p_itdt_scope_lens_crit_stage_boost) {
+    auto r = itdt_roundtrip("sl");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::SCOPE_LENS);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::CritStageBoost);
+    ASSERT_EQ(it->held_param, uint8_t{1});  // +1 crit stage
+    std::cout << "\n    scope_lens: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param << "\n";
+}
+
+TEST(p_itdt_lucky_punch_chansey_only) {
+    auto r = itdt_roundtrip("lp");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::LUCKY_PUNCH);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::CritStageBoostSpecies);
+    ASSERT_EQ(it->held_param, uint8_t{2});  // +2 crit stages
+    ASSERT_EQ(it->species_restriction, static_cast<enginemon::SpeciesId>(CrystalSpecies::CHANSEY));
+    std::cout << "\n    lucky_punch: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param
+              << " species=" << it->species_restriction << "\n";
+}
+
+TEST(p_itdt_stick_farfetchd_only) {
+    auto r = itdt_roundtrip("stick");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::STICK);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::CritStageBoostSpecies);
+    ASSERT_EQ(it->held_param, uint8_t{2});  // +2 crit stages
+    ASSERT_EQ(it->species_restriction, static_cast<enginemon::SpeciesId>(CrystalSpecies::FARFETCHD));
+    std::cout << "\n    stick: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param
+              << " species=" << it->species_restriction << "\n";
+}
+
+// ── Type boosters ─────────────────────────────────────────────────────────────
+
+TEST(p_itdt_charcoal_fire_type_boost) {
+    auto r = itdt_roundtrip("charcoal");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::CHARCOAL);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::TypeDamageBoost);
+    ASSERT_EQ(it->boosted_type, CrystalType::FIRE);
+    ASSERT_EQ(it->held_param, uint8_t{10});
+    std::cout << "\n    charcoal: type=" << (int)it->boosted_type
+              << " param=" << (int)it->held_param << "\n";
+}
+
+TEST(p_itdt_dragon_scale_dragon_type_boost) {
+    auto r = itdt_roundtrip("ds");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::DRAGON_SCALE);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::TypeDamageBoost);
+    ASSERT_EQ(it->boosted_type, CrystalType::DRAGON);
+    ASSERT_EQ(it->held_param, uint8_t{10});
+    std::cout << "\n    dragon_scale: type=" << (int)it->boosted_type << "\n";
+}
+
+TEST(p_itdt_dragon_fang_remains_none) {
+    auto r = itdt_roundtrip("df");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::DRAGON_FANG);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    // Dragon Fang has HELD_NONE in Crystal (BUG: Dragon Scale is the actual booster)
+    ASSERT_EQ(it->held_effect_type, HT::None);
+    std::cout << "\n    dragon_fang: effect=" << (int)it->held_effect_type
+              << " (expected None — Crystal bug)\n";
+}
+
+TEST(p_itdt_all_17_type_boosters) {
+    auto r = itdt_roundtrip("typeboost");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // All 17 type boosters verified from item_constants.asm:
+    // Item ID → TypeId mapping (TypeId from type_constants.asm)
+    const struct { uint16_t id; uint8_t type; const char* n; } verified[] = {
+        { 0x68, CrystalType::NORMAL,   "Pink Bow(0x68)" },
+        { 0x62, CrystalType::FIGHTING, "Blackbelt(0x62)" },
+        { 0x4D, CrystalType::FLYING,   "Sharp Beak(0x4D)" },
+        { 0x51, CrystalType::POISON,   "Poison Barb(0x51)" },
+        { 0x4C, CrystalType::GROUND,   "Soft Sand(0x4C)" },
+        { 0x7D, CrystalType::ROCK,     "Hard Stone(0x7D)" },
+        { 0x58, CrystalType::BUG,      "Silverpowder(0x58)" },
+        { 0x71, CrystalType::GHOST,    "Spell Tag(0x71)" },
+        { 0x8A, CrystalType::FIRE,     "Charcoal(0x8A)" },
+        { 0x5F, CrystalType::WATER,    "Mystic Water(0x5F)" },
+        { 0x75, CrystalType::GRASS,    "Miracle Seed(0x75)" },
+        { 0x6C, CrystalType::ELECTRIC, "Magnet(0x6C)" },
+        { 0x60, CrystalType::PSYCHIC,  "Twistedspoon(0x60)" },
+        { 0x6B, CrystalType::ICE,      "Nevermeltice(0x6B)" },
+        { 0x97, CrystalType::DRAGON,   "Dragon Scale(0x97)" },
+        { 0x66, CrystalType::DARK,     "Blackglasses(0x66)" },
+        { 0x8F, CrystalType::STEEL,    "Metal Coat(0x8F)" },
+    };
+
+    int pass_count = 0;
+    for (const auto& c : verified) {
+        const auto* it = r->get(static_cast<enginemon::ItemId>(c.id));
+        if (!it) {
+            std::cerr << "  MISSING " << c.n << "\n";
+            g_current_failed = true;
+            continue;
+        }
+        if (it->held_effect_type != HT::TypeDamageBoost) {
+            std::cerr << "  NOT TypeDamageBoost for " << c.n << ": effect="
+                      << (int)it->held_effect_type << "\n";
+            g_current_failed = true;
+            continue;
+        }
+        if (it->boosted_type != c.type) {
+            std::cerr << "  WRONG type for " << c.n << ": got " << (int)it->boosted_type
+                      << " expected " << (int)c.type << "\n";
+            g_current_failed = true;
+        } else if (it->held_param != 10) {
+            std::cerr << "  WRONG param for " << c.n << ": got " << (int)it->held_param << "\n";
+            g_current_failed = true;
+        } else {
+            ++pass_count;
+        }
+    }
+    std::cout << "\n    type_boosters: " << pass_count << "/17 mappings correct\n";
+    ASSERT_EQ(pass_count, 17);
+}
+
+// ── Healing/end-turn items ────────────────────────────────────────────────────
+
+TEST(p_itdt_leftovers_end_turn_heal_fraction) {
+    auto r = itdt_roundtrip("left");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::LEFTOVERS);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::EndTurnHealFraction);
+    ASSERT_EQ(it->held_param, uint8_t{16});  // max_hp / 16
+    ASSERT_FALSE(it->consumable);
+    std::cout << "\n    leftovers: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param << "\n";
+}
+
+TEST(p_itdt_gold_berry_below_half_heal) {
+    auto r = itdt_roundtrip("gb");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::GOLD_BERRY);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::EndTurnHealBelowHalf);
+    ASSERT_EQ(it->held_param, uint8_t{30});  // restore 30 HP
+    ASSERT_TRUE(it->consumable);
+    std::cout << "\n    gold_berry: effect=" << (int)it->held_effect_type
+              << " param=" << (int)it->held_param << "\n";
+}
+
+TEST(p_itdt_miracleberry_any_status_cure) {
+    auto r = itdt_roundtrip("mb");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::MIRACLEBERRY);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::AnyStatusCure);
+    ASSERT_TRUE(it->consumable);
+    std::cout << "\n    miracleberry: effect=" << (int)it->held_effect_type << "\n";
+}
+
+TEST(p_itdt_mysteryberry_restore_pp) {
+    auto r = itdt_roundtrip("myb");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::MYSTERYBERRY);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::EndTurnRestorePP);
+    ASSERT_TRUE(it->consumable);
+    std::cout << "\n    mysteryberry: effect=" << (int)it->held_effect_type << "\n";
+}
+
+TEST(p_itdt_metal_powder_ditto_defense_boost) {
+    auto r = itdt_roundtrip("mp");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::METAL_POWDER);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::SpeciesDefenseBoost);
+    ASSERT_EQ(it->species_restriction,
+              static_cast<enginemon::SpeciesId>(CrystalSpecies::DITTO));
+    std::cout << "\n    metal_powder: effect=" << (int)it->held_effect_type
+              << " species=" << it->species_restriction << "\n";
+}
+
+TEST(p_itdt_berserk_gene_activation) {
+    auto r = itdt_roundtrip("bg");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::BERSERK_GENE);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::BerserkActivation);
+    ASSERT_TRUE(it->consumable);
+    std::cout << "\n    berserk_gene: effect=" << (int)it->held_effect_type << "\n";
+}
+
+TEST(p_itdt_smoke_ball_guaranteed_escape) {
+    auto r = itdt_roundtrip("sb");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::SMOKE_BALL);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::GuaranteedEscape);
+    std::cout << "\n    smoke_ball: effect=" << (int)it->held_effect_type << "\n";
+}
+
+TEST(p_itdt_amulet_coin_reward_doubler) {
+    auto r = itdt_roundtrip("ac");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+    const auto* it = r->get(ItemId::AMULET_COIN);
+    ASSERT_TRUE(it != nullptr); if (!it) return;
+    ASSERT_EQ(it->held_effect_type, HT::AmuletCoin);
+    std::cout << "\n    amulet_coin: effect=" << (int)it->held_effect_type << "\n";
+}
+
+// ── Status cure berries ───────────────────────────────────────────────────────
+
+TEST(p_itdt_status_cure_berries) {
+    auto r = itdt_roundtrip("scb");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Verify each status-specific berry maps to StatusCure with correct param
+    // Params encode Status enum values (Sleep=1, Burn=2, Poison=3, Freeze=4, Paralysis=5)
+    const struct { enginemon::ItemId id; uint8_t status_param; const char* name; } berries[] = {
+        { ItemId::PSNCUREBERRY, 3, "PSNCUREBERRY(Poison=3)" },
+        { ItemId::BURNT_BERRY,  4, "Burnt Berry(Freeze=4)" },
+        { ItemId::ICE_BERRY,    2, "Ice Berry(Burn=2)" },
+        { ItemId::MINT_BERRY,   1, "Mint Berry(Sleep=1)" },
+        { ItemId::PRZCUREBERRY, 5, "PRZCureBerry(Paralysis=5)" },
+    };
+
+    for (const auto& b : berries) {
+        const auto* it = r->get(b.id);
+        ASSERT_TRUE(it != nullptr);
+        if (!it) { std::cerr << "  MISSING " << b.name << "\n"; continue; }
+        ASSERT_EQ(it->held_effect_type, HT::StatusCure);
+        ASSERT_EQ(it->held_param, b.status_param);
+        ASSERT_TRUE(it->consumable);
+        std::cout << "\n    " << b.name << ": effect=" << (int)it->held_effect_type
+                  << " param=" << (int)it->held_param << "\n";
+    }
+
+    // Bitter Berry (HELD_HEAL_CONFUSION)
+    const auto* bitter = r->get(ItemId::BITTER_BERRY);
+    ASSERT_TRUE(bitter != nullptr);
+    if (bitter) {
+        ASSERT_EQ(bitter->held_effect_type, HT::ConfusionCure);
+        ASSERT_TRUE(bitter->consumable);
+        std::cout << "    bitter_berry: effect=" << (int)bitter->held_effect_type << "\n";
+    }
+}
+
+// ── Registry population: Registries::items filled from package ───────────────
+
+TEST(p_itdt_registry_populated_from_package) {
+    // Full round-trip: extract → package → PackageReader → load_item_registry
+    auto r = itdt_roundtrip("reg_pop");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Must have all items including NO_ITEM=0
+    ASSERT_TRUE(r->size() >= 256u);
+
+    // NO_ITEM (0) must exist and have effect None
+    const auto* no_item = r->get(static_cast<enginemon::ItemId>(0));
+    ASSERT_TRUE(no_item != nullptr);
+    if (no_item) ASSERT_EQ(no_item->held_effect_type, HT::None);
+
+    // Sanity: items from the real Crystal ROM should have correct effect count
+    uint32_t effect_count = 0;
+    for (const auto& [id, data] : *r) {
+        if (data.held_effect_type != HT::None) ++effect_count;
+    }
+    // At minimum: 5 status berries + confusion berry + miracleberry + mysteryberry
+    // + 17 type boosters + scope lens + quick claw + kings rock + focus band
+    // + leftovers + berry/gold berry/berry juice + metal powder + berserk gene
+    // + smoke ball + amulet coin + lucky punch + stick = well over 40
+    ASSERT_TRUE(effect_count >= 40u);
+
+    std::cout << "\n    registry_populated: size=" << r->size()
+              << " items_with_effects=" << effect_count << "\n";
+}
+
+// ── Extractor uses real ROM (not manually instantiated ItemData) ──────────────
+
+TEST(p_itdt_real_rom_extraction_not_fabricated) {
+    // This test proves the extractor reads from the actual ROM bytes.
+    // Mutate one byte in the ROM (King's Rock param from 30 to 15) and verify
+    // the extracted effect param changes accordingly.
+    // item_attributes flat = flat_offset(0x01, 0x67c1) = 0x01*0x4000 + (0x67c1-0x4000) = 0x67c1
+    constexpr uint32_t ITEM_ATTRS_FLAT = 0x67c1u;
+    // King's Rock is item 0x52. Entry offset = (0x52 - 1) * 7 = 81 * 7 = 567.
+    // param is at byte 3 of the record: ITEM_ATTRS_FLAT + 567 + 3 = 0x67c1 + 570 = 0x69fb
+    constexpr uint32_t KR_PARAM_FLAT = ITEM_ATTRS_FLAT + (0x52u - 1u) * 7u + 3u;
+
+    // Verify vanilla ROM has param=30 at that address
+    {
+        const auto& raw = g_rom->raw();
+        ASSERT_EQ(raw[KR_PARAM_FLAT], uint8_t{30});
+    }
+
+    // Mutate: change param to 15
+    std::vector<uint8_t> mutated = g_rom->raw();
+    mutated[KR_PARAM_FLAT] = 15u;
+    auto mut_rom = rom_from_bytes(mutated, "itdt_romut");
+    ASSERT_TRUE(mut_rom != nullptr); if (!mut_rom) return;
+
+    // Extract from mutated ROM
+    auto mut_result = crystal::extract_all_items(*mut_rom, *g_profile);
+    ASSERT_TRUE(mut_result.success);
+    if (!mut_result.success) {
+        std::cerr << "  extraction failed: " << mut_result.error << "\n"; return;
+    }
+
+    // Find King's Rock entry
+    const crystal::PackageWriter::ItemDataEntry* kr_entry = nullptr;
+    for (const auto& e : mut_result.items) {
+        if (e.id == static_cast<enginemon::ItemId>(ItemId::KINGS_ROCK)) {
+            kr_entry = &e;
+            break;
+        }
+    }
+    ASSERT_TRUE(kr_entry != nullptr); if (!kr_entry) return;
+
+    // Mutated param must be 15, not 30
+    ASSERT_EQ(kr_entry->held_param, uint8_t{15});
+    ASSERT_EQ(kr_entry->held_effect_type, HT::PostHitFlinch);
+
+    std::cout << "\n    rom_extraction: mutated KR param=15 (vanilla=30) — correct\n";
+}
+
+// ── MAIN section ─────────────────────────────────────────────────────────────
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -6761,6 +7238,30 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p_baton_pass_player_transfers_confusion);
     RUN_TEST(p_baton_pass_opponent_transfers_confusion);
     RUN_TEST(p_baton_pass_opponent_preserves_stages_ordinary_switch_resets);
+
+    // ROOT_HELD_ITEM_EFFECTS Stage 1 — semantic item data pipeline
+    RUN_TEST(p_itdt_kings_rock_post_hit_flinch);
+    RUN_TEST(p_itdt_brightpowder_accuracy_reduction);
+    RUN_TEST(p_itdt_quick_claw_turn_order_boost);
+    RUN_TEST(p_itdt_focus_band_ko_survival);
+    RUN_TEST(p_itdt_scope_lens_crit_stage_boost);
+    RUN_TEST(p_itdt_lucky_punch_chansey_only);
+    RUN_TEST(p_itdt_stick_farfetchd_only);
+    RUN_TEST(p_itdt_charcoal_fire_type_boost);
+    RUN_TEST(p_itdt_dragon_scale_dragon_type_boost);
+    RUN_TEST(p_itdt_dragon_fang_remains_none);
+    RUN_TEST(p_itdt_all_17_type_boosters);
+    RUN_TEST(p_itdt_leftovers_end_turn_heal_fraction);
+    RUN_TEST(p_itdt_gold_berry_below_half_heal);
+    RUN_TEST(p_itdt_miracleberry_any_status_cure);
+    RUN_TEST(p_itdt_mysteryberry_restore_pp);
+    RUN_TEST(p_itdt_metal_powder_ditto_defense_boost);
+    RUN_TEST(p_itdt_berserk_gene_activation);
+    RUN_TEST(p_itdt_smoke_ball_guaranteed_escape);
+    RUN_TEST(p_itdt_amulet_coin_reward_doubler);
+    RUN_TEST(p_itdt_status_cure_berries);
+    RUN_TEST(p_itdt_registry_populated_from_package);
+    RUN_TEST(p_itdt_real_rom_extraction_not_fabricated);
 
     // ROOT_FAKE_OUT
     RUN_TEST(p_fake_out_serialization_roundtrip);
