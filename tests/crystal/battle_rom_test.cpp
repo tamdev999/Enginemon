@@ -4627,7 +4627,7 @@ TEST(p1b5_baton_pass_transfers_stages_clears_excluded) {
     ASSERT_EQ(new_atk, int8_t{2});     // Attack +2 transferred
     ASSERT_EQ(new_def, int8_t{1});     // Defense +1 transferred
     ASSERT_TRUE(fe_passed);            // FocusEnergy is in pass_mask
-    ASSERT_FALSE(conf_passed);         // Confusion is NOT in pass_mask
+    ASSERT_TRUE(conf_passed);          // Confusion IS passed (SubStatus3 not cleared by ResetBatonPassStatus)
 }
 
 // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ Mean Look: CantRun blocks run; cleared on switch-out ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
@@ -5961,6 +5961,45 @@ static enginemon::BattlePokemon run_baton_pass(
     return battle.player_pokemon();
 }
 
+// Helper: run opponent Baton Pass and return the incoming opponent_pokemon.
+// Opponent uses BP (speed 200), player is slow. Trainer battle so ForceSwitch works.
+static enginemon::BattlePokemon run_opponent_baton_pass(
+    const enginemon::Registry<enginemon::MoveId, enginemon::MoveData>& reg_ref,
+    const enginemon::BattleRules& rules,
+    enginemon::MoveId bp_id,
+    std::function<void(enginemon::BattlePokemon&)> setup_opp)
+{
+    enginemon::Party party;
+    enginemon::Pokemon pm1{}; pm1.species=1; pm1.level=50; pm1.current_hp=pm1.max_hp=300; pm1.friendship=200;
+    party.add(pm1);
+
+    auto reg = make_b_reg(reg_ref);
+
+    enginemon::Battle battle(enginemon::BattleType::Trainer, party, reg, rules);
+
+    // Player is slow, does nothing.
+    battle.player_pokemon() = make_bp2(enginemon::MOVE_NONE, 300, 1);
+
+    // Active opponent: uses Baton Pass (speed 200), pre-configured state.
+    auto obp = make_bp2(bp_id, 300, 200);
+    setup_opp(obp);
+    battle.opponent_pokemon() = obp;
+
+    // Bench opponent: the incoming mon.
+    auto bench = make_bp2(enginemon::MOVE_NONE, 300, 50);
+    battle.push_opponent_party_slot(obp);    // placeholder at index 0 (gets writeback)
+    battle.push_opponent_party_slot(bench);  // bench at index 1
+
+    size_t idx = 0;
+    const std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF};
+    battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+    battle.set_player_action(enginemon::ActionFight{0,0});
+    battle.set_opponent_action(enginemon::ActionFight{0,0});
+    battle.execute_turn();
+
+    return battle.opponent_pokemon();
+}
+
 // Baton Pass: Substitute volatile + substitute_hp transferred to incoming mon.
 TEST(p_baton_pass_transfers_substitute_hp) {
     auto entries = extract_move_entries(*g_rom, *g_profile);
@@ -6075,9 +6114,11 @@ TEST(p_baton_pass_transfers_minimized) {
     std::cout << "\n    bp_minimized: minimized=" << incoming.has_volatile(enginemon::VolatileStatus::Minimized) << "\n";
 }
 
-// Baton Pass: explicitly excluded state (Infatuation, Transformed, Encore) is NOT transferred.
-// Source: ResetBatonPassStatus clears these. Confusion also excluded (existing test authority).
-TEST(p_baton_pass_clears_excluded_state) {
+// Baton Pass: explicitly excluded state (Infatuation, Transformed, Encore, Nightmare) is NOT
+// transferred. Confusion IS passed per Crystal (SUBSTATUS_CONFUSED in SubStatus3; not cleared by
+// ResetBatonPassStatus; PassedBattleMonEntrance does not call NewBattleMonStatus).
+// Source: pokecrystal baton_pass.asm ResetBatonPassStatus + engine/battle/core.asm PassedBattleMonEntrance.
+TEST(p_baton_pass_excluded_state_and_confusion_passes) {
     auto entries = extract_move_entries(*g_rom, *g_profile);
     ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
     auto r = mvdt_roundtrip(entries, "bp_excl");
@@ -6099,19 +6140,140 @@ TEST(p_baton_pass_clears_excluded_state) {
         user.trapping_move   = static_cast<enginemon::MoveId>(1u);
     });
 
+    // Explicitly excluded by ResetBatonPassStatus:
     ASSERT_FALSE(incoming.has_volatile(enginemon::VolatileStatus::Infatuation));
     ASSERT_FALSE(incoming.has_volatile(enginemon::VolatileStatus::Transformed));
     ASSERT_FALSE(incoming.has_volatile(enginemon::VolatileStatus::Nightmare));
-    ASSERT_FALSE(incoming.has_volatile(enginemon::VolatileStatus::Confusion));
     ASSERT_EQ(incoming.encore_turns, uint8_t{0});
     ASSERT_EQ(incoming.trap_turns,   uint8_t{0});
+
+    // Confusion IS passed: SubStatus3 bit not cleared by ResetBatonPassStatus.
+    ASSERT_TRUE(incoming.has_volatile(enginemon::VolatileStatus::Confusion));
+    ASSERT_EQ(incoming.confusion_turns, uint8_t{2});  // 3 set, decremented once by pre-move check
 
     std::cout << "\n    bp_excl: infat=" << incoming.has_volatile(enginemon::VolatileStatus::Infatuation)
               << " transf=" << incoming.has_volatile(enginemon::VolatileStatus::Transformed)
               << " nightmare=" << incoming.has_volatile(enginemon::VolatileStatus::Nightmare)
               << " conf=" << incoming.has_volatile(enginemon::VolatileStatus::Confusion)
+              << " conf_turns=" << (int)incoming.confusion_turns
+              << " (expected 2)"
               << " encore=" << (int)incoming.encore_turns
               << " trap=" << (int)incoming.trap_turns << "\n";
+}
+
+// ============================================================================
+// ROOT_BATON_PASS_TRANSFER — corrective tests (confusion + opponent path)
+// ============================================================================
+
+// Player Baton Pass: Confusion volatile + confusion_turns transferred.
+// Source: SUBSTATUS_CONFUSED in SubStatus3 bit 7 — not cleared by ResetBatonPassStatus.
+// PassedBattleMonEntrance does not call NewBattleMonStatus.
+TEST(p_baton_pass_player_transfers_confusion) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_conf_player");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    auto rules = make_rules_b();
+
+    auto incoming = run_baton_pass(*r, rules, bp_id, [](enginemon::BattlePokemon& user){
+        user.set_volatile(enginemon::VolatileStatus::Confusion);
+        user.confusion_turns = 4;
+    });
+
+    ASSERT_TRUE(incoming.has_volatile(enginemon::VolatileStatus::Confusion));
+    ASSERT_EQ(incoming.confusion_turns, uint8_t{3});  // 4 set, decremented once by pre-move check
+
+    std::cout << "\n    bp_conf_player: conf=" << incoming.has_volatile(enginemon::VolatileStatus::Confusion)
+              << " turns=" << (int)incoming.confusion_turns << "\n";
+}
+
+// Opponent Baton Pass: Confusion volatile + confusion_turns transferred.
+// Crystal EnemySwitch_SetMode does NOT call NewEnemyMonStatus — substatus carries over.
+TEST(p_baton_pass_opponent_transfers_confusion) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_conf_opp");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    auto rules = make_rules_b();
+
+    auto incoming = run_opponent_baton_pass(*r, rules, bp_id, [](enginemon::BattlePokemon& opp){
+        opp.set_volatile(enginemon::VolatileStatus::Confusion);
+        opp.confusion_turns = 3;
+    });
+
+    ASSERT_TRUE(incoming.has_volatile(enginemon::VolatileStatus::Confusion));
+    ASSERT_EQ(incoming.confusion_turns, uint8_t{2});  // 3 set, decremented once by pre-move check
+
+    std::cout << "\n    bp_conf_opp: conf=" << incoming.has_volatile(enginemon::VolatileStatus::Confusion)
+              << " turns=" << (int)incoming.confusion_turns << "\n";
+}
+
+// Opponent Baton Pass: stat stages preserved.
+// Crystal: EnemySwitch_SetMode does NOT call ResetEnemyStatLevels.
+// Regression: ordinary opponent switch must still reset stages to neutral.
+TEST(p_baton_pass_opponent_preserves_stages_ordinary_switch_resets) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bp_opp_stages");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    enginemon::MoveId bp_id = find_baton_pass_move(*r);
+    ASSERT_NE(bp_id, enginemon::MOVE_NONE); if (bp_id == enginemon::MOVE_NONE) return;
+
+    enginemon::Party party;
+    enginemon::Pokemon pm1{}; pm1.species=1; pm1.level=50; pm1.current_hp=pm1.max_hp=300; pm1.friendship=200;
+    party.add(pm1);
+    auto rules = make_rules_b(); auto reg = make_b_reg(*r);
+
+    // --- Part A: Opponent Baton Pass preserves +2 Attack stage ---
+    {
+        enginemon::Battle battle(enginemon::BattleType::Trainer, party, reg, rules);
+        battle.player_pokemon() = make_bp2(enginemon::MOVE_NONE, 300, 1);
+        auto obp = make_bp2(bp_id, 300, 200);
+        obp.stages.attack = 2;
+        obp.stages.speed  = -1;
+        battle.opponent_pokemon() = obp;
+        auto bench = make_bp2(enginemon::MOVE_NONE, 300, 50);
+        battle.push_opponent_party_slot(obp);
+        battle.push_opponent_party_slot(bench);
+        size_t idx = 0; const std::vector<uint8_t> rng = {0xFF,0xFF,0xFF,0xFF};
+        battle.set_rng_callback([&]()->uint32_t{ return idx<rng.size()?rng[idx++]:0xFFu; });
+        battle.set_player_action(enginemon::ActionFight{0,0});
+        battle.set_opponent_action(enginemon::ActionFight{0,0});
+        battle.execute_turn();
+
+        const int8_t atk = battle.opponent_pokemon().stages.attack;
+        const int8_t spd = battle.opponent_pokemon().stages.speed;
+        std::cout << "\n    opp_bp_stages: atk=" << (int)atk << " spd=" << (int)spd << "\n";
+        ASSERT_EQ(atk, int8_t{2});   // Baton Pass: +2 Attack preserved
+        ASSERT_EQ(spd, int8_t{-1});  // -1 Speed preserved
+    }
+
+    // --- Part B: Ordinary opponent switch still resets stages ---
+    {
+        enginemon::Battle battle(enginemon::BattleType::Trainer, party, reg, rules);
+        battle.player_pokemon() = make_bp2(enginemon::MOVE_NONE, 300, 1);
+        auto slot0 = make_bp2(enginemon::MOVE_NONE, 300, 50);
+        slot0.stages.attack = 2;
+        auto slot1 = make_bp2(enginemon::MOVE_NONE, 300, 50);
+        battle.opponent_pokemon() = slot0;
+        battle.push_opponent_party_slot(slot0);
+        battle.push_opponent_party_slot(slot1);
+        // Ordinary switch: not Baton Pass
+        battle.force_switch_opponent(1);
+        battle.force_switch_opponent(0);
+        const int8_t atk = battle.opponent_pokemon().stages.attack;
+        std::cout << "    ordinary_switch_stages: atk=" << (int)atk << " (expected 0)\n";
+        ASSERT_EQ(atk, int8_t{0});   // Ordinary switch: stages reset
+    }
 }
 
 // ============================================================================
@@ -6248,7 +6410,12 @@ int main(int argc, char* argv[]) {
     RUN_TEST(p_baton_pass_transfers_rollout_count);
     RUN_TEST(p_baton_pass_transfers_fury_cutter_count);
     RUN_TEST(p_baton_pass_transfers_minimized);
-    RUN_TEST(p_baton_pass_clears_excluded_state);
+    RUN_TEST(p_baton_pass_excluded_state_and_confusion_passes);
+
+    // ROOT_BATON_PASS_TRANSFER corrective
+    RUN_TEST(p_baton_pass_player_transfers_confusion);
+    RUN_TEST(p_baton_pass_opponent_transfers_confusion);
+    RUN_TEST(p_baton_pass_opponent_preserves_stages_ordinary_switch_resets);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";

@@ -1169,25 +1169,30 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                 //   - Encored
                 //   - Trap count (wPlayerWrapCount / wEnemyWrapCount)
                 //
-                // Also excluded (transient / turn-start cleared / semantically broken to pass):
-                //   - Confusion (cleared per existing test authority + Crystal analysis)
+                // Also excluded (turn-start cleared or naturally unreachable with Baton Pass):
                 //   - Flinch, Protect, Endure (turn-transient)
                 //   - DestinyBond (cleared at turn start)
                 //   - Recharge (can't Baton Pass while recharging)
                 //   - Identified/Foresight (cleared on switch)
-                //   - Charging, Flying, Underground (mid-move invulnerability state)
-                //   - Bide, Rampage (locked multi-turn move state)
+                //   - Charging, Flying, Underground (CheckPlayerLockedIn gates on SUBSTATUS_CHARGED;
+                //       two-turn move forces continuation — Baton Pass unreachable while charging)
+                //   - Bide, Rampage (locked multi-turn move state; same forced-continuation gate)
                 //
                 // PASSED (surviving substatus bits + wPlayerMinimized, a separate RAM
                 //   byte never touched by ResetBatonPassStatus):
-                //   Substitute, FocusEnergy, Seeded, Cursed, Mist, LockOn, CantRun,
-                //   Perish, Rage, Rollout, Curled, Minimized.
+                //   Confusion, Substitute, FocusEnergy, Seeded, Cursed, Mist, LockOn,
+                //   CantRun, Perish, Rage, Rollout, Curled, Minimized.
+                //
+                // Opponent path: EnemySwitch_SetMode does NOT call NewEnemyMonStatus or
+                //   ResetEnemyStatLevels — substatus bytes and stat levels carry over
+                //   identically to player path.
                 //
                 // Counters transferred atomically with their volatile bits:
-                //   substitute_hp, perish_count, rollout_count, fury_cutter_count,
-                //   rage_accumulator.
+                //   confusion_turns, substitute_hp, perish_count, rollout_count,
+                //   fury_cutter_count, rage_accumulator.
                 const uint32_t pass_mask =
-                      static_cast<uint32_t>(VolatileStatus::Substitute)
+                      static_cast<uint32_t>(VolatileStatus::Confusion)
+                    | static_cast<uint32_t>(VolatileStatus::Substitute)
                     | static_cast<uint32_t>(VolatileStatus::FocusEnergy)
                     | static_cast<uint32_t>(VolatileStatus::Seeded)
                     | static_cast<uint32_t>(VolatileStatus::Cursed)
@@ -1206,17 +1211,19 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                         return MoveExecutionResult::Miss;
                     }
                     const size_t pick = switches[0];
-                    const auto     saved_stages  = user.stages;
-                    const uint32_t passed_vs     = user.volatile_status & pass_mask;
-                    const uint16_t saved_sub_hp  = user.substitute_hp;
-                    const uint8_t  saved_perish  = user.perish_count;
-                    const uint8_t  saved_rollout = user.rollout_count;
-                    const uint8_t  saved_fury    = user.fury_cutter_count;
-                    const uint8_t  saved_rage    = user.rage_accumulator;
+                    const auto     saved_stages   = user.stages;
+                    const uint32_t passed_vs      = user.volatile_status & pass_mask;
+                    const uint8_t  saved_conf     = user.confusion_turns;
+                    const uint16_t saved_sub_hp   = user.substitute_hp;
+                    const uint8_t  saved_perish   = user.perish_count;
+                    const uint8_t  saved_rollout  = user.rollout_count;
+                    const uint8_t  saved_fury     = user.fury_cutter_count;
+                    const uint8_t  saved_rage     = user.rage_accumulator;
                     force_switch_player(pick);
                     // Stat stages: Crystal player Baton Pass preserves stages.
                     player_pokemon_.stages            = saved_stages;
                     player_pokemon_.volatile_status  |= passed_vs;
+                    player_pokemon_.confusion_turns   = saved_conf;
                     player_pokemon_.substitute_hp     = saved_sub_hp;
                     player_pokemon_.perish_count      = saved_perish;
                     player_pokemon_.rollout_count     = saved_rollout;
@@ -1225,8 +1232,9 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                     message(md.name + " — passed the baton!");
                 } else {
                     // Opponent Baton Pass: pick first available opponent party member.
-                    // Crystal enemy path: EnemySwitch_SetMode -> NewEnemyMonStatus ->
-                    //   ResetEnemyStatLevels -> stages zeroed. Stages NOT preserved.
+                    // Crystal: EnemySwitch_SetMode does NOT call NewEnemyMonStatus or
+                    //   ResetEnemyStatLevels — stat stages and substatus carry over,
+                    //   same as player path. Stages ARE preserved.
                     std::vector<size_t> opp_sw;
                     for (size_t i = 0; i < opponent_party_.size(); ++i)
                         if (i != opponent_active_index_ && !opponent_party_[i].is_fainted())
@@ -1236,18 +1244,22 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
                         return MoveExecutionResult::Miss;
                     }
                     const size_t opick = opp_sw[0];
-                    const uint32_t passed_vs     = user.volatile_status & pass_mask;
-                    const uint16_t saved_sub_hp  = user.substitute_hp;
-                    const uint8_t  saved_perish  = user.perish_count;
-                    const uint8_t  saved_rollout = user.rollout_count;
-                    const uint8_t  saved_fury    = user.fury_cutter_count;
-                    const uint8_t  saved_rage    = user.rage_accumulator;
+                    const auto     saved_stages   = user.stages;
+                    const uint32_t passed_vs      = user.volatile_status & pass_mask;
+                    const uint8_t  saved_conf     = user.confusion_turns;
+                    const uint16_t saved_sub_hp   = user.substitute_hp;
+                    const uint8_t  saved_perish   = user.perish_count;
+                    const uint8_t  saved_rollout  = user.rollout_count;
+                    const uint8_t  saved_fury     = user.fury_cutter_count;
+                    const uint8_t  saved_rage     = user.rage_accumulator;
                     force_switch_opponent(opick);
-                    // No stage restoration for opponent (enemy path resets stages).
-                    opponent_pokemon_.volatile_status  |= passed_vs;
-                    opponent_pokemon_.substitute_hp     = saved_sub_hp;
-                    opponent_pokemon_.perish_count      = saved_perish;
-                    opponent_pokemon_.rollout_count     = saved_rollout;
+                    // Stat stages preserved (Crystal enemy path does NOT reset them).
+                    opponent_pokemon_.stages          = saved_stages;
+                    opponent_pokemon_.volatile_status |= passed_vs;
+                    opponent_pokemon_.confusion_turns  = saved_conf;
+                    opponent_pokemon_.substitute_hp    = saved_sub_hp;
+                    opponent_pokemon_.perish_count     = saved_perish;
+                    opponent_pokemon_.rollout_count    = saved_rollout;
                     opponent_pokemon_.fury_cutter_count = saved_fury;
                     opponent_pokemon_.rage_accumulator  = saved_rage;
                     message(md.name + " — opponent passed the baton!");
