@@ -908,7 +908,243 @@ TEST(p_rt_sweep_drain) {
 }
 
 // ============================================================================
-// TEST: p_rt_sweep_secondary_effect
+// TEST: p_rt_drain_exact_formula
+//
+// Proves the source-derived drain arithmetic for all five drain-family moves.
+//
+// Crystal source: SapHealth (engine/battle/effect_commands.asm ~line 3836).
+//   heal = wCurDamage >> 1   (one SRL_A / RR_A pair on the 16-bit damage value)
+//   if heal == 0: heal = 1   (minimum 1)
+//   new_hp = min(max_hp, current_hp + heal)   (max-HP clamp)
+//
+// SuiCune effect_commands.c SapHealth: `uint16_t dmg = ... >> 1; if(dmg==0) dmg=1;`
+// Both sources agree exactly.
+//
+// RNG: all drain moves have accuracy=0xFF (pct(100)=255). The 0xFF shortcut in
+// execute_move means NO accuracy RNG byte is consumed.
+// Crystal order: crit(pos0) -> variation(pos1) -> acc=skip.
+// Using {0x11, 0xFF, ...}: no crit (0x11=17 >= threshold), max variation (0xFF accepted).
+//
+// Player stats: level=50, special_attack=60, special_defense=60 (from rt_bp).
+// Opponent stats: special_defense=60 (rt_bp hardcodes 60 for spc stats).
+// All types neutral (rt_reg: all effectivenesses = 10). No STAB (player Normal, moves varied type).
+//
+// Damage formula (no crit, no STAB, neutral type, variation=0xFF/255~1.0):
+//   base = ((2*50/5 + 2) * power * spa/spd) / 50 + 2
+//        = (22 * power * 60/60) / 50 + 2
+//        = (22 * power) / 50 + 2   (integer division)
+//   damage = base * 255 / 255 = base  (variation=0xFF)
+//
+// Per move:
+//   Absorb    (id=71,  power=20): base=(22*20)/50+2=8+2=10  -> heal=max(1,5)=5
+//   Mega Drain(id=72,  power=40): base=(22*40)/50+2=17+2=19 -> heal=max(1,9)=9
+//   Leech Life(id=141, power=20): base=(22*20)/50+2=8+2=10  -> heal=max(1,5)=5
+//   Giga Drain(id=202, power=60): base=(22*60)/50+2=26+2=28 -> heal=max(1,14)=14
+//   Dream Eater(id=138,power=100): base=(22*100)/50+2=44+2=46 -> heal=max(1,23)=23
+//
+// Player starts at 150/300 HP (150 missing): normal drain heals well below max so
+// no clamping occurs in the basic cases.
+//
+// Clamp case: Giga Drain (heal=14) with player at 297/300 (missing=3).
+//   14 > 3 → would overheal → final HP must be 300.
+//
+// Minimum-1 guard: With the standard level-50 formula, engine floor is damage>=2,
+// so heal = max(1, 2>>1) = max(1,1) = 1. The minimum-1 guard cannot be separately
+// distinguished from the formula producing 1 at this floor. Minimum is implicitly
+// proven: any tested case with computed heal >= 1 confirms the guard is not lower.
+// ============================================================================
+TEST(p_rt_drain_exact_formula) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    // RNG: no crit (0x11>=17), max variation (0xFF accepted), acc=0xFF shortcut=skipped.
+    std::vector<uint8_t> rng_nocrit{0x11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+    struct DrainCase {
+        uint16_t id;
+        const char* name;
+        int32_t expected_damage;   // source-derived from formula above
+        int32_t expected_heal;     // max(1, expected_damage >> 1)
+    };
+
+    // All computed above from Crystal formula; not derived from Enginemon.
+    static const DrainCase CASES[] = {
+        { 71,  "ABSORB",     10, 5  },
+        { 72,  "MEGA_DRAIN", 19, 9  },
+        {141,  "LEECH_LIFE", 10, 5  },
+        {202,  "GIGA_DRAIN", 28, 14 },
+    };
+
+    int match = 0, mismatch = 0;
+    for (const auto& dc : CASES) {
+        auto mid = static_cast<enginemon::MoveId>(dc.id);
+
+        // Verify real stock move exists in registry
+        const enginemon::MoveData* md = s_rt_reg->get(mid);
+        if (!md || !md->effect_desc.is_supported) {
+            rt_record(dc.id, dc.name, false, "not compiled");
+            ++mismatch; continue;
+        }
+        // Confirm has_drain semantic
+        if (!md->effect_desc.has_drain) {
+            rt_record(dc.id, dc.name, false, "fixture: has_drain not set");
+            ++mismatch; continue;
+        }
+
+        // Execute with player at 150/300 so drain heal is fully visible.
+        // Use opp_hp=5000 so the opponent cannot be killed even at max variation/crit,
+        // ensuring damage_dealt = 5000 - t.opp_hp is the actual formula output.
+        auto t = rt_turn_partial(mid, rng_nocrit, 150, 300, 5000);
+        if (!t.valid) { rt_record(dc.id, dc.name, false, "not compiled"); ++mismatch; continue; }
+
+        const int32_t damage_dealt  = 5000 - static_cast<int32_t>(t.opp_hp);
+        const int32_t heal_observed = static_cast<int32_t>(t.player_hp) - 150;
+        const int32_t heal_expected = dc.expected_heal;
+
+        bool dmg_ok  = (damage_dealt == dc.expected_damage);
+        bool heal_ok = (heal_observed == heal_expected);
+        bool ok = dmg_ok && heal_ok;
+
+        std::string div;
+        if (!dmg_ok)  div = "damage: expected=" + std::to_string(dc.expected_damage)
+                              + " got=" + std::to_string(damage_dealt);
+        if (!heal_ok) div += (div.empty()?"":"  ") +
+                              std::string("heal: expected=") + std::to_string(heal_expected)
+                              + " got=" + std::to_string(heal_observed);
+        rt_record(dc.id, dc.name, ok, ok ? "" : div.c_str());
+        if (ok) ++match; else ++mismatch;
+
+        std::cout << "\n    " << dc.name << ": dmg=" << damage_dealt
+                  << " (exp=" << dc.expected_damage << ")"
+                  << " heal=" << heal_observed
+                  << " (exp=" << heal_expected << ")"
+                  << (ok ? " OK" : " MISMATCH");
+    }
+
+    // ── Clamp case: Giga Drain with player at 297/300 ──────────────────────────
+    // heal=14 > missing=3 → must clamp to max_hp=300, final HP == 300.
+    {
+        auto mid = static_cast<enginemon::MoveId>(202);
+        auto t = rt_turn_partial(mid, rng_nocrit, 297, 300, 5000);
+        const int32_t final_hp = static_cast<int32_t>(t.player_hp);
+        const int32_t clamp_damage = 5000 - static_cast<int32_t>(t.opp_hp);
+        bool clamp_ok = (final_hp == 300) && (clamp_damage > 0);
+        std::string div_clamp;
+        if (!clamp_ok) {
+            div_clamp = "clamp: final_hp=" + std::to_string(final_hp)
+                        + " max_hp=300"
+                        + " damage=" + std::to_string(clamp_damage);
+        }
+        rt_record(202, "GIGA_DRAIN_CLAMP", clamp_ok, clamp_ok ? "" : div_clamp.c_str());
+        if (clamp_ok) ++match; else ++mismatch;
+        std::cout << "\n    GIGA_DRAIN_CLAMP: final_hp=" << final_hp
+                  << " (expected=300, heal=14 > missing=3)" << (clamp_ok ? " OK" : " MISMATCH");
+    }
+
+    std::cout << "\n    drain_exact: match=" << match << " mismatch=" << mismatch << "\n";
+    ASSERT_EQ(mismatch, 0);
+}
+
+// ============================================================================
+// TEST: p_rt_dream_eater_exact_formula
+//
+// Dream Eater: requires sleeping target (BattleCommand_CheckHit_DreamEater in Crystal).
+// Awake target → checkhit fails → no damage, no healing.
+// Sleeping target → damage applies, draintarget heals user.
+//
+// Same SapHealth formula as Leech-family (see p_rt_drain_exact_formula comment).
+// Dream Eater (id=138, power=100, Psychic Special):
+//   base=(22*100)/50+2 = 44+2 = 46
+//   heal = max(1, 46>>1) = 23
+// ============================================================================
+TEST(p_rt_dream_eater_exact_formula) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    const auto de_id = static_cast<enginemon::MoveId>(138);
+    const enginemon::MoveData* md = s_rt_reg->get(de_id);
+    if (!md) { ASSERT_TRUE(false); return; }
+
+    // Fixture check: must be a supported drain with sleep requirement.
+    const bool fixture_ok = (md->effect_desc.is_supported
+                              && md->effect_desc.has_drain
+                              && md->effect_desc.drain_requires_sleep);
+    if (!fixture_ok) {
+        rt_record(138, "DREAM_EATER_FIXTURE", false,
+                  "fixture: drain/sleep flags not as expected");
+        ASSERT_TRUE(fixture_ok);
+        return;
+    }
+
+    // RNG: no crit (0x11), max variation (0xFF), acc=0xFF shortcut (skipped).
+    std::vector<uint8_t> rng_nocrit{0x11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+    // ── Awake target: move must fail ──────────────────────────────────────────
+    {
+        auto t = rt_turn_partial(de_id, rng_nocrit, 150, 300);
+        bool awake_ok = (t.opp_hp == 300) && (t.player_hp == 150);
+        rt_record(138, "DREAM_EATER_AWAKE_FAILS",
+                  awake_ok,
+                  awake_ok ? "" : "awake: target took damage or user was healed");
+        std::cout << "\n    DE awake: opp_hp=" << t.opp_hp
+                  << " player_hp=" << t.player_hp
+                  << (awake_ok ? " OK" : " MISMATCH");
+        ASSERT_TRUE(awake_ok);
+    }
+
+    // ── Sleeping target: exact drain arithmetic ───────────────────────────────
+    {
+        // Build battle directly (need to set opp.status = Sleep).
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=150; pm.max_hp=300; pm.friendship=200;
+        party.add(pm);
+        auto reg   = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, s_rt_rules);
+        auto pbp = rt_bp_partial(de_id, 150, 300, 200);
+        auto obp = rt_bp(enginemon::MOVE_NONE, 300, 1);
+        obp.status       = enginemon::Status::Sleep;
+        obp.status_turns = 4u;  // deep sleep — won't wake during this turn
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_nocrit, &idx]()->uint32_t {
+            return idx < rng_nocrit.size() ? rng_nocrit[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+
+        const int32_t damage_dealt  = 300 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        const int32_t heal_observed = static_cast<int32_t>(battle.player_pokemon().stats.hp) - 150;
+
+        // Source-derived expected values (not from Enginemon):
+        // Dream Eater power=100, formula gives base=46, heal=23.
+        const int32_t expected_damage = 46;
+        const int32_t expected_heal   = 23;
+
+        bool dmg_ok  = (damage_dealt  == expected_damage);
+        bool heal_ok = (heal_observed == expected_heal);
+        bool ok = dmg_ok && heal_ok;
+
+        std::string div;
+        if (!dmg_ok)  div  = "damage: expected=" + std::to_string(expected_damage)
+                              + " got=" + std::to_string(damage_dealt);
+        if (!heal_ok) div += (div.empty()?"":"  ")
+                              + std::string("heal: expected=") + std::to_string(expected_heal)
+                              + " got=" + std::to_string(heal_observed);
+        rt_record(138, "DREAM_EATER_ASLEEP_EXACT",
+                  ok, ok ? "" : div.c_str());
+
+        std::cout << "\n    DE asleep: dmg=" << damage_dealt
+                  << " (exp=" << expected_damage << ")"
+                  << " heal=" << heal_observed
+                  << " (exp=" << expected_heal << ")"
+                  << (ok ? " OK" : " MISMATCH");
+        std::cout << "\n";
+        ASSERT_TRUE(ok);
+    }
+}
+
+
 // Moves with % secondary effects. Uses scripted RNG to force the secondary to fire.
 // Checks the resulting status/volatile on the opponent.
 // Source: apply_secondary_effects in battle.cpp.
