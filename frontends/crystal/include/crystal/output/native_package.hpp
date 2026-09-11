@@ -178,7 +178,7 @@ public:
         // native_package.cpp to read/write this field with the full typed struct.
         // Files that only build MoveDataEntry without reading effect_desc do not need
         // to include semantic_effect.hpp.
-        static constexpr size_t EFFECT_DESC_BYTES = 64;
+        static constexpr size_t EFFECT_DESC_BYTES = 65;
         uint8_t effect_desc_raw[EFFECT_DESC_BYTES] = {};
 
         // Compiler-side only — NOT serialized directly; serialized via MVDT v3 extension.

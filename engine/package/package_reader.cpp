@@ -887,8 +887,8 @@ PackageReader::load_move_registry() const {
 
     // Schema version byte — first byte of chunk.
     // Reject any version that is not MVDT_SCHEMA_VERSION.
-    // v2 packages (schema=2, fixed 52 bytes/entry) must be recompiled to v3.
-    // v1 packages (no version byte) had a u32 count low byte first — also rejected.
+    // v2 packages (schema=2, fixed 52 bytes/entry) must be recompiled to v5.
+    // v4 packages (64-byte SemanticEffectDescription) must be recompiled to v5.
     uint8_t schema_ver = static_cast<uint8_t>(in.get());
     if (!in.good()) return std::nullopt;
     if (schema_ver != MVDT_SCHEMA_VERSION) {
@@ -900,7 +900,7 @@ PackageReader::load_move_registry() const {
 
     // Wire format v4: u8 schema_version, u32 count LE, then per-entry (variable size):
     //   u16 move_id, u8 type_id, power, accuracy, pp, effect_id, effect_chance, category
-    //   + 64 bytes SemanticEffectDescription (expanded from 43 in v3)
+    //   + 65 bytes SemanticEffectDescription (byte [64] = is_always_hit, added in v5)
     //   + u8 has_program + u16 op_count LE + op_count × 9 bytes (BOp)
     uint32_t count = read_le<uint32_t>(in);
     if (!in.good()) return std::nullopt;
@@ -1024,6 +1024,7 @@ PackageReader::load_move_registry() const {
             desc.sets_minimize           = (b63 & 0x40u) != 0;
             desc.is_fake_out             = (b63 & 0x80u) != 0;
         }
+        desc.is_always_hit         = read_bool();  // [64]
         if (!in.good() && !in.eof()) return std::nullopt;
 
         MoveId mid = static_cast<MoveId>(move_id_raw);

@@ -2641,11 +2641,11 @@ TEST(p2_invalid_bopkind_rejects_package) {
     ASSERT_TRUE(found_mvdt);
 
     // MVDT chunk: schema_ver(1) + count(4) + first_entry.
-    // First entry: move_id(2) + 7_base_fields + 64_desc = 73 bytes.
+    // First entry: move_id(2) + 7_base_fields + 65_desc = 74 bytes (MVDT v5).
     // Then: has_prog(1) + op_count_le16(2) + BOp[0].kind(1) = +4 bytes.
     // Because we filtered to B-only entries, has_prog==1 and op_count>0 is guaranteed.
     uint32_t bop_kind_offset = mvdt_offset + 1u + 4u  // schema_ver + count
-                             + 2u + 7u + 64u           // move_id + base + desc
+                             + 2u + 7u + 65u           // move_id + base + desc (v5: 65 bytes)
                              + 1u + 2u;                // has_prog + op_count
     ASSERT_TRUE(bop_kind_offset < raw.size());
 
@@ -8448,8 +8448,9 @@ TEST(p_held_item_brightpowder_ordinary_accuracy_reduced) {
         battle.player_pokemon()  = pbp;
         battle.opponent_pokemon()= obp;
         const int16_t before = battle.opponent_pokemon().stats.hp;
-        // Supply crit and variation after acc_rng
-        const std::vector<uint8_t> sc = {acc_rng, 0xFF, 0xFF, 0xFF};
+        // Crystal RNG order: crit(pos0) -> variation(pos1) -> accuracy(pos2)
+        // pos0=0x11(>=17=no crit), pos1=0xFF(rrca>=217=var accepted), pos2=acc_rng
+        const std::vector<uint8_t> sc = {0x11, 0xFF, acc_rng, 0xFF};
         size_t idx = 0;
         battle.set_rng_callback([&]() -> uint32_t {
             return idx < sc.size() ? sc[idx++] : uint32_t{0xFF};
@@ -8501,7 +8502,7 @@ TEST(p_held_item_brightpowder_0xff_base_can_be_reduced) {
         battle.player_pokemon()  = pbp;
         battle.opponent_pokemon()= obp;
         const int16_t before = battle.opponent_pokemon().stats.hp;
-        const std::vector<uint8_t> sc = {acc_rng, 0xFF, 0xFF, 0xFF};
+        const std::vector<uint8_t> sc = {0x11, 0xFF, acc_rng, 0xFF};
         size_t idx = 0;
         battle.set_rng_callback([&]() -> uint32_t {
             return idx < sc.size() ? sc[idx++] : uint32_t{0xFF};
@@ -8831,10 +8832,11 @@ TEST(p_held_item_kings_rock_miss_no_rng) {
     battle.player_pokemon()  = pbp;
     battle.opponent_pokemon()= obp;
 
-    // acc_rng=80 (>= 80) → miss; king's rock RNG byte (29) must NOT be consumed
-    // If consumed, it would set flinch. Verify no flinch.
+    // Crystal RNG order: crit(pos0) -> variation(pos1) -> accuracy(pos2) -> [king's rock skipped on miss]
+    // pos0=0x11(no crit), pos1=0xFF(var accepted), pos2=80(acc miss: 80>=80)
+    // pos3=29 is the king's rock byte — must NOT be consumed on miss
     uint32_t rng_calls = 0;
-    const std::vector<uint8_t> sc = {80, 29, 0xFF, 0xFF};
+    const std::vector<uint8_t> sc = {0x11, 0xFF, 80, 29, 0xFF};
     size_t idx = 0;
     battle.set_rng_callback([&]() -> uint32_t {
         ++rng_calls;
@@ -8846,9 +8848,8 @@ TEST(p_held_item_kings_rock_miss_no_rng) {
 
     // Move missed → no damage, no flinch
     ASSERT_FALSE(battle.opponent_pokemon().has_volatile(enginemon::VolatileStatus::Flinch));
-    // Only one RNG call: the accuracy check itself
-    // (opponent action also does an acc check, but opponent has MOVE_NONE → skip)
-    ASSERT_EQ(rng_calls, uint32_t{1});
+    // Three RNG calls: crit + variation + accuracy miss (King's Rock not consumed on miss)
+    ASSERT_EQ(rng_calls, uint32_t{3});
     std::cout << "\n    kings_rock/miss: no flinch, rng_calls=" << rng_calls << "\n";
 }
 
@@ -10076,13 +10077,12 @@ TEST(p_rng_oracle_accuracy_0xff_no_rng_call) {
     // 0xAA sentinel NOT consumed (proves no accuracy byte)
     ASSERT_TRUE(r.hit);
 
-    // Cross-check: Tackle (acc=0xF2) same script structure consumes 3 calls
-    // (accuracy byte at pos0 in Enginemon's order, then crit, then variation)
-    // Script must use variation-accepting bytes after acc and crit positions.
-    // Enginemon order: acc(pos0) -> crit(pos1) -> var(pos2). Use 0xFF for var.
+    // Cross-check: Tackle (acc=0xF2) consumes 3 calls (crit + variation + accuracy).
+    // Crystal order: crit(pos0) -> var(pos1) -> acc(pos2).
+    // Script: pos0=crit(0x11>=17=no crit), pos1=var(0xFF accepted), pos2=acc(0x00<242=hit)
     const auto tackle = run_oracle(static_cast<enginemon::MoveId>(33),
-                                    {0x00, 0x11, 0xFF, 0xAA});
-    ASSERT_EQ(tackle.call_count, uint32_t{3}); // acc=0x00<242 hit, crit=0x11 nocrit, var=0xFF accepted
+                                    {0x11, 0xFF, 0x00, 0xAA});
+    ASSERT_EQ(tackle.call_count, uint32_t{3}); // proves accuracy byte present (unlike Pound acc=0xFF)
 
     std::cout << "\n    p_rng_oracle_accuracy_0xff_no_rng_call: POUND id=1 raw_acc=0xFF"
               << " calls=2 (TACKLE raw_acc=0xF2 calls=" << tackle.call_count << ")\n";
@@ -10135,13 +10135,12 @@ TEST(p_rng_oracle_brightpowder_reduces_ordinary_0xff) {
     //   Enginemon: same. TEST SHOULD PASS.
     // Also proves the delta of exactly 1 call vs no-BP.
     //
-    // Script design uses Enginemon's actual order (accuracy -> crit -> variation) so
-    // bytes reliably reach each mechanic:
+    // Script design uses Crystal's order (crit -> variation -> accuracy):
     //   no-BP: eff_acc=0xFF -> shortcut, no acc call; crit at pos0, var at pos1
-    //   with-BP: eff_acc=235; acc at pos0, crit at pos1, var at pos2
-    // Both scripts use 0xFF for variation (rrca(0xFF)=0xFF>=217 always accepted).
+    //   with-BP: eff_acc=235; crit at pos0, var at pos1, acc at pos2
+    // Both scripts use 0xFF for variation (rrca(0xFF)=0xFF>=217 always accepted in one call).
     const uint32_t calls_no_bp = run_oracle_bp(0xFF, {0x11, 0xFF, 0xAA}, false);
-    const uint32_t calls_bp    = run_oracle_bp(0xFF, {0x00, 0x11, 0xFF, 0xAA}, true);
+    const uint32_t calls_bp    = run_oracle_bp(0xFF, {0x11, 0xFF, 0x00, 0xAA}, true);
 
     std::cout << "\n    p_rng_oracle_brightpowder_reduces_ordinary_0xff:"
               << " no_bp=" << calls_no_bp << " bp=" << calls_bp
@@ -10162,7 +10161,7 @@ TEST(p_rng_oracle_always_hit_brightpowder_mismatch) {
     // The test asserts Crystal's 2-call expectation.
     // If Enginemon ever gains a proper ALWAYS_HIT gate, this will turn green.
     const uint32_t calls_no_bp = run_oracle_bp(0xFF, {0x11, 0xFF, 0xAA}, false);
-    const uint32_t calls_bp    = run_oracle_bp(0xFF, {0x00, 0x11, 0xFF, 0xAA}, true);
+    const uint32_t calls_bp    = run_oracle_bp(0xFF, {0x11, 0xFF, 0x00, 0xAA}, true);
 
     std::cout << "\n    p_rng_oracle_always_hit_brightpowder_mismatch:"
               << " no_bp=" << calls_no_bp << " bp=" << calls_bp

@@ -466,11 +466,14 @@ private:
                       size_t move_slot, bool user_is_player);
     // Continuation of execute_move: handles all logic after type-immunity check.
     // Split out to avoid MSVC ICE on large functions.
+    // pre_crit: whether the critical hit was pre-rolled in execute_move (Crystal order).
+    // pre_variation: the accepted variation byte, already rrca-accepted (0 = not pre-rolled).
     MoveExecutionResult execute_move_damaging(BattlePokemon& user, BattlePokemon& target,
                       const MoveData* md, size_t move_slot, bool user_is_player,
                       const SemanticEffectDescription& effective_desc,
                       TypeId initial_effective_move_type, uint16_t type_eff,
-                      uint8_t computed_power);
+                      uint8_t computed_power,
+                      bool pre_crit, uint8_t pre_variation);
     void apply_end_of_turn_effects();
     void apply_residual(BattlePokemon& bp, bool is_player);
     void check_fainted();

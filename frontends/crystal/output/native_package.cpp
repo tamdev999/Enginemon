@@ -726,8 +726,8 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
         }
     }
 
-    // Wire format (v3):
-    //   u8  schema_version   = MVDT_SCHEMA_VERSION (currently 3)
+    // Wire format (v5):
+    //   u8  schema_version   = MVDT_SCHEMA_VERSION (currently 5)
     //   u32 count LE
     //   per entry (fixed 9+43=52 base bytes + variable program suffix):
     //     u16 move_id, u8 type_id, power, accuracy, pp, effect_id, effect_chance, category
@@ -738,7 +738,7 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
     // This prevents old packages from being silently misread as new format.
 
     auto count32 = static_cast<uint32_t>(entries.size());
-    constexpr uint32_t DESC_SIZE = 64;  // SemanticEffectDescription serialized size (MVDT v4)
+    constexpr uint32_t DESC_SIZE = 65;  // SemanticEffectDescription serialized size (MVDT v5)
     std::vector<uint8_t> buf;
     // Reserve for the fixed portion (9+43+3 bytes per entry); programs expand further.
     buf.reserve(1 + 4 + entries.size() * (9 + DESC_SIZE + 3));
@@ -782,10 +782,10 @@ void PackageWriter::add_move_data(const std::vector<MoveDataEntry>& entries) {
 
         // SemanticEffectDescription — 43 bytes (layout matches write side)
         const auto& d = e.effect_desc_raw;
-        static_assert(PackageWriter::MoveDataEntry::EFFECT_DESC_BYTES == 64,
-                      "effect_desc_raw size mismatch — update MVDT layout comment");
-        // Write all 64 bytes directly from the raw array
-        buf.insert(buf.end(), d, d + 64);
+        static_assert(PackageWriter::MoveDataEntry::EFFECT_DESC_BYTES == 65,
+                      "effect_desc_raw size mismatch -- update MVDT layout comment");
+        // Write all 65 bytes directly from the raw array (MVDT v5: byte [64] = is_always_hit)
+        buf.insert(buf.end(), d, d + 65);
 
         // SemanticEffectProgram (MVDT v3 suffix):
         //   u8  has_program

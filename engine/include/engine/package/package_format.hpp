@@ -167,7 +167,10 @@ enum class ChunkType : uint32_t {
 // v4: SemanticEffectDescription expanded from 43 to 64 bytes.
 //     Bytes [36..63] carry new A and B semantic fields (has_payday, sets_mist,
 //     is_leech_seed, is_protect, etc.). Packages compiled with v3 are rejected.
-static constexpr uint8_t MVDT_SCHEMA_VERSION = 4;
+// v5: SemanticEffectDescription expanded from 64 to 65 bytes.
+//     Byte [64] = is_always_hit (EFFECT_ALWAYS_HIT distinct gate).
+//     Packages compiled with v4 are rejected.
+static constexpr uint8_t MVDT_SCHEMA_VERSION = 5;
 
 // BRLS schema version.
 // v1 (no version byte): trailing optional bytes read with has_bytes() guards.

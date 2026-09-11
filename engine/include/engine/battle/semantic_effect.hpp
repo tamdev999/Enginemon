@@ -440,6 +440,14 @@ struct SemanticEffectDescription {
     // Serialized: wire byte [63] bit 7 (0x80).
     bool is_fake_out = false;
 
+    // True when the move's Crystal source effect is EFFECT_ALWAYS_HIT (raw=17).
+    // Crystal gate: CheckHit exits before BrightPowder and before stat accuracy
+    // modifiers — no accuracy RNG is consumed regardless of held items.
+    // Distinct from ordinary accuracy=0xFF: a 0xFF move can be reduced by
+    // BrightPowder and then triggers one accuracy RNG call; is_always_hit cannot.
+    // Serialized: wire byte [64].
+    bool is_always_hit = false;
+
     // ────────────────────────────────────────────────────────────────────────
     // SUPPORT GATE
     // ────────────────────────────────────────────────────────────────────────

@@ -109,6 +109,7 @@ static void pack_effect_desc(const enginemon::SemanticEffectDescription& d,
         (d.halves_in_rain         ? 0x20u : 0u) |
         (d.sets_minimize          ? 0x40u : 0u) |
         (d.is_fake_out            ? 0x80u : 0u));
+    pb(d.is_always_hit, 64);
 }
 
 bool semanticize_move_entries(
@@ -192,6 +193,16 @@ bool semanticize_move_entries(
             // Crystal raw effect-ID knowledge.
             if (e.raw_crystal_effect == crystal::EffectId::SOLARBEAM) {
                 desc.halves_in_rain = true;
+            }
+
+            // ── EFFECT_ALWAYS_HIT accuracy bypass ─────────────────────────────
+            // Source: pokecrystal engine/battle/effect_commands.asm CheckHit:
+            //   cp EFFECT_ALWAYS_HIT; ret z  — exits before BrightPowder and
+            //   before any accuracy stage computation or BattleRandom call.
+            // Distinct from ordinary accuracy=0xFF: a 0xFF move can be reduced by
+            // BrightPowder and trigger one accuracy RNG; is_always_hit cannot.
+            if (e.raw_crystal_effect == crystal::EffectId::ALWAYS_HIT) {
+                desc.is_always_hit = true;
             }
 
             // ── Minimize — set Minimized volatile ────────────────────────────

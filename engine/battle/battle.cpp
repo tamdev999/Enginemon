@@ -1,4 +1,4 @@
-﻿// engine/battle/battle.cpp
+// engine/battle/battle.cpp
 // Gen 2 battle system Î“Ã‡Ã¶ turn-based Pokemon battles
 //
 // Architecture note:
@@ -777,15 +777,46 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // DAMAGING PATH
     // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-
     // Accuracy check.
     if (md->accuracy == 0) {
         if (move_slot < 4 && user.moves[move_slot].pp < 63)
-            user.moves[move_slot].pp++;  // undo PP deduct Ã¢â‚¬â€ data error
+            user.moves[move_slot].pp++;  // undo PP deduct -- data error
         message("Move data error: accuracy not set for " + md->name);
         return MoveExecutionResult::InvalidData;
     }
+
+    // ── Crystal RNG order: crit and variation fire BEFORE accuracy ──────────
+    // Source: pokecrystal NormalHit/FlinchHit/ParalyzeHit script command order:
+    //   critical -> damagestats -> damagecalc -> stab -> damagevariation -> checkhit
+    // Pre-roll here so execute_move_damaging skips them.
+    // Only applies to the standard damage pipeline (has_standard_damage).
+    bool    pre_crit      = false;
+    uint8_t pre_variation = 0;
+    if (effective_desc.has_standard_damage) {
+        // Critical roll (BattleCommand_Critical).
+        uint8_t crit_stage = 0;
+        if (rules_) crit_stage = build_crit_stage(user, *md, *rules_, &registries_);
+        pre_crit = rules_
+            ? roll_critical(crit_stage, rng_.next_byte(), *rules_)
+            : roll_critical(crit_stage, rng_.next_byte());
+
+        // Damage variation loop (BattleCommand_DamageVariation).
+        // rrca(byte) = (byte >> 1) | (byte << 7); retry until rrca(byte) >= threshold.
+        const uint8_t var_threshold = rules_
+            ? rules_->get_damage_var_lower_bound() : uint8_t{0xD9};
+        do {
+            uint8_t r = rng_.next_byte();
+            pre_variation = (r >> 1) | (r << 7);
+        } while (pre_variation < var_threshold);
+    }
+
     {
+        // EFFECT_ALWAYS_HIT: CheckHit exits before BrightPowder and before any
+        // accuracy stage computation or BattleRandom call.
+        // Source: pokecrystal BattleCommand_CheckHit: cp EFFECT_ALWAYS_HIT; ret z
+        // Distinct from ordinary 0xFF: a 0xFF move can be reduced by BrightPowder
+        // and trigger an accuracy RNG call; is_always_hit cannot.
+        if (!effective_desc.is_always_hit) {
         // Lock-On / Mind Reader: bypass accuracy entirely.
         // Source: Crystal BattleCommand_CheckHit -- always-hit when LockOn volatile set on target.
         const bool lock_on_active = target.has_volatile(VolatileStatus::LockOn);
@@ -794,7 +825,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
         } else {
             // BrightPowder (AccuracyReduction): subtract param from move accuracy before
             // any accuracy check. Applied after LockOn check (LockOn bypasses it).
-            // Source: Crystal BattleCommand_CheckHit .BrightPowder — b -= c (b=acc, c=param),
+            // Source: Crystal BattleCommand_CheckHit .BrightPowder -- b -= c (b=acc, c=param),
             // floor at 0. Applies to ALL moves including 0xFF (ordinary never-miss moves).
             uint8_t eff_accuracy = md->accuracy;
             if (target.held_item != ITEM_NONE) {
@@ -805,7 +836,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                                    : 0u;
                 }
             }
-            // 0xFF shortcut: after BrightPowder, if acc still 0xFF → always hit (no RNG).
+            // 0xFF shortcut: after BrightPowder, if acc still 0xFF -> always hit (no RNG).
             if (eff_accuracy != 0xFF) {
                 const bool hit = rules_
                     ? roll_accuracy(eff_accuracy, user.stages.accuracy,
@@ -815,18 +846,10 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                 if (!hit) {
                     // Jump Kick / Hi Jump Kick: crash damage on accuracy miss ONLY when target
                     // is not type-immune.
-                    // Source: pokecrystal GetFailureResultText -- checks wTypeModifier != 0
-                    // before crash. wTypeModifier is 0 on type immunity.
-                    // We pre-check type_eff here to match Crystal's ordering.
                     if (effective_desc.crash_on_miss) {
-                        // Compute type effectiveness now to gate crash (mirrors Crystal's
-                        // wTypeModifier check in GetFailureResultText).
                         const uint16_t crash_type_eff = get_combined_effectiveness(
                             md->type, target.type1, target.type2, registries_.type_chart);
                         if (crash_type_eff != 0) {
-                            // Non-immune: crash fires.
-                            // crash = max(1, computed_hit_damage >> 3)
-                            // Source: pokecrystal effect_commands.asm -- srl/rr x3 on wCurDamage.
                             const bool physical = (md->category == MoveCategory::Physical);
                             auto ss2 = [this](int32_t b, int8_t s) {
                                 return rules_ ? apply_stat_stage(b,s,*rules_) : apply_stat_stage(b,s);
@@ -856,13 +879,20 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
                             hp_change(user_is_player ? 0u : 1u, old_user_hp, user.stats.hp);
                             message(md->name + " -- the user crashed!");
                         }
-                        // Immune target: no crash. Fall through to Miss return.
+                    }
+                    // EffectChance RNG on miss: Crystal EffectChance has no wAttackMissed gate.
+                    // Source: BattleCommand_EffectChance -- fires after CheckHit regardless of miss.
+                    // Substitute check inside EffectChance would suppress it, but miss does not.
+                    // Consume the byte here; damage is not applied and the effect is not activated.
+                    if (effective_desc.has_effectchance_phase) {
+                        rng_.next_byte();  // consumed but result discarded -- move missed
                     }
                     message("The attack missed!");
                     return MoveExecutionResult::Miss;
                 }
             }
         }
+        } // end !is_always_hit block
     }
 
     // Type effectiveness.
@@ -1179,7 +1209,8 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     // MSVC function-size limits (avoids ICE on large functions).
     return execute_move_damaging(user, target, md, move_slot, user_is_player,
                                  effective_desc, effective_move_type, type_eff,
-                                 computed_power);
+                                 computed_power,
+                                 pre_crit, pre_variation);
 }
 
 // ============================================================================
@@ -1190,8 +1221,8 @@ MoveExecutionResult Battle::execute_move_damaging(
     const MoveData* md, size_t move_slot, bool user_is_player,
     const SemanticEffectDescription& effective_desc,
     TypeId effective_move_type, uint16_t type_eff,
-    uint8_t computed_power) {
-
+    uint8_t computed_power,
+    bool pre_crit, uint8_t pre_variation) {
     // Ã¢â€â‚¬Ã¢â€â‚¬ Dream Eater: requires target asleep Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.drain_requires_sleep && target.status != Status::Sleep) {
         message(md->name + " Ã¢â‚¬â€ the target isn't asleep!");
@@ -1199,11 +1230,11 @@ MoveExecutionResult Battle::execute_move_damaging(
     }
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Critical hit Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-    uint8_t crit_stage = 0;
-    if (rules_) crit_stage = build_crit_stage(user, *md, *rules_, &registries_);
-    const bool is_crit = rules_
-        ? roll_critical(crit_stage, rng_.next_byte(), *rules_)
-        : roll_critical(crit_stage, rng_.next_byte());
+    // Critical hit: use pre-rolled result from execute_move (Crystal order: crit before accuracy).
+    const bool is_crit = pre_crit;
+    // (crit_stage was already used in execute_move for the pre-roll)
+    (void)pre_crit;  // already captured in is_crit above
+
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ STAB Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     const bool stab = (effective_move_type == user.type1 || effective_move_type == user.type2);
@@ -1357,15 +1388,15 @@ MoveExecutionResult Battle::execute_move_damaging(
         damage = std::min(damage, max_dmg);
     }
 
-    // Damage variation
-    const uint8_t var_threshold = rules_ ? rules_->get_damage_var_lower_bound() : uint8_t{0xD9};
-    const int32_t var_divisor   = rules_ ? static_cast<int32_t>(rules_->get_damage_var_divisor()) : int32_t{255};
-    uint8_t variation;
-    do {
-        uint8_t r = rng_.next_byte();
-        variation = (r >> 1) | (r << 7);
-    } while (variation < var_threshold);
+    // Damage variation: use pre-rolled accepted variation byte from execute_move.
+    // The variation loop was already executed in execute_move; pre_variation is
+    // the accepted rrca(byte) value (guaranteed >= var_threshold).
+    const int32_t var_divisor = rules_ ? static_cast<int32_t>(rules_->get_damage_var_divisor()) : int32_t{255};
+    const uint8_t variation = pre_variation;
+    // (var_threshold check was enforced during the pre-roll in execute_move)
     const int32_t safe_div = (var_divisor > 0) ? var_divisor : 255;
+    // (removed do-while loop; replaced by pre_variation parameter)
+
     damage = damage * static_cast<int32_t>(variation) / safe_div;
     if (damage < 2) damage = 2;
 
