@@ -1519,6 +1519,451 @@ TEST(p_rt_frustration_exact_formula) {
 }
 
 
+// ============================================================================
+// TEST: p_rt_psywave_exact (move id=149)
+//
+// Crystal source authority:
+//   effect_commands.asm .psywave:
+//     b = level + (level >> 1) = floor(level * 1.5). At level=50: b=75.
+//     Loop: BattleRandom; if 0 retry; if >= b retry; damage = accepted byte.
+//     Range: 1..74.
+//
+// Enginemon:
+//   const_dmg = rng_.next_byte() % max_dmg; loop if 0.
+//   max_dmg=75. Same range 1..74.
+//
+// RNG ORDER IN ENGINEMON (not Crystal!):
+//   Psywave accuracy=0xCC=204 (not 0xFF). Enginemon runs accuracy check BEFORE
+//   constant damage. So: [0]=accuracy_byte, [1..N]=psywave_damage_bytes.
+//
+// Metadata assert: constant_damage_source==Psywave (4), has_standard_damage==false.
+//
+// 4 cases (player level=50, opp_hp=5000):
+//   min:       RNG={0x00,0x01,...} -> acc hits (0x00<204); 0x01%75=1 -> damage=1
+//   max:       RNG={0x00,0x4A,...} -> 0x4A=74; 74%75=74 -> damage=74
+//   interior:  RNG={0x00,0x25,...} -> 0x25=37; 37%75=37 -> damage=37
+//   rejection: RNG={0x00,0x00,0x01,...} -> first byte=0x00; 0%75=0 -> retry; 0x01%75=1 -> damage=1
+// ============================================================================
+TEST(p_rt_psywave_exact) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    const auto psy_id = static_cast<enginemon::MoveId>(149);
+    const enginemon::MoveData* md = s_rt_reg->get(psy_id);
+    if (!md) {
+        rt_record(149, "PSYWAVE_FIXTURE", false, "MoveData not found for move 149");
+        ASSERT_TRUE(false); return;
+    }
+
+    // ── Assert move metadata matches Crystal source ───────────────────────────
+    {
+        bool const_src_ok = (md->effect_desc.constant_damage_source ==
+                             enginemon::ConstantDamageSource::Psywave);
+        bool std_dmg_ok   = (!md->effect_desc.has_standard_damage);
+        bool meta_ok = const_src_ok && std_dmg_ok;
+        std::string meta_div;
+        if (!const_src_ok) meta_div += "constant_damage_source!=Psywave ";
+        if (!std_dmg_ok)   meta_div += "has_standard_damage=true (expected false) ";
+        rt_record(149, "PSYWAVE_METADATA", meta_ok, meta_ok ? "" : meta_div.c_str());
+        std::cout << "\n    Psywave metadata: const_src="
+                  << (int)static_cast<uint8_t>(md->effect_desc.constant_damage_source)
+                  << " std_dmg=" << md->effect_desc.has_standard_damage
+                  << (meta_ok ? " OK" : " MISMATCH");
+        ASSERT_TRUE(meta_ok);
+    }
+
+    struct PsyCase { const char* label; std::vector<uint8_t> rng; int32_t expected_damage; };
+    // [0]=accuracy_byte (0x00 < 204 = hits), then psywave damage bytes.
+    // damage = rng_byte % 75; retry if 0.
+    static const PsyCase CASES[] = {
+        { "PSYWAVE_MIN",      {0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  1 },
+        { "PSYWAVE_MAX",      {0x00, 0x4A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 74 },
+        { "PSYWAVE_INTERIOR", {0x00, 0x25, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 37 },
+        { "PSYWAVE_REJECTION",{0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  1 },
+    };
+
+    int match = 0, mismatch = 0;
+    for (const auto& c : CASES) {
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=pm.max_hp=300; pm.friendship=200;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, s_rt_rules);
+
+        auto pbp = rt_bp(psy_id, 300, 200);
+        auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        std::vector<uint8_t> rng_copy = c.rng;
+        battle.set_rng_callback([&rng_copy, &idx]()->uint32_t {
+            return idx < rng_copy.size() ? rng_copy[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+
+        const int32_t damage_dealt = 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        const bool ok = (damage_dealt == c.expected_damage);
+
+        std::string div;
+        if (!ok) {
+            div = std::string("expected=") + std::to_string(c.expected_damage)
+                + " got=" + std::to_string(damage_dealt);
+        }
+        rt_record(149, c.label, ok, ok ? "" : div.c_str());
+        if (ok) ++match; else ++mismatch;
+
+        std::cout << "\n    Psywave " << c.label << ": dmg=" << damage_dealt
+                  << " (exp=" << c.expected_damage << ")"
+                  << (ok ? " OK" : " MISMATCH");
+    }
+    std::cout << "\n    psywave_exact: match=" << match << " mismatch=" << mismatch << "\n";
+    ASSERT_EQ(mismatch, 0);
+}
+
+
+// ============================================================================
+// TEST: p_rt_flail_exact (move id=175)
+//
+// Crystal source authority (data/moves/flail_reversal_power.asm + HP_BAR_LENGTH_PX=48):
+//   hp_pixels = floor(current_hp * 48 / max_hp). Use max_hp=48 so hp_pixels = current_hp.
+//   Tier table:
+//     pixels  0-1:   power=200
+//     pixels  2-4:   power=150
+//     pixels  5-9:   power=100
+//     pixels 10-16:  power=80
+//     pixels 17-32:  power=40
+//     pixels 33-48:  power=20
+//
+// FLAIL: Normal type (type=0x00), Physical. Player type1=0=Normal -> STAB applies.
+// Stats: player all=60 (rt_bp_partial with spd=60), opponent defense=60.
+// RNG: {0x11=no_crit, 0xFF=var_accepted, 0xFF,...} (acc=0xFF shortcut skipped).
+//
+// Damage formula (no crit, neutral type, variation=0xFF, STAB):
+//   base = (22*power*60/60)/50+2 = (22*power)/50+2
+//   STAB: damage = base + base/2   (truncates)
+//
+//   power=200: base=88+2=90,  STAB=90+45=135
+//   power=150: base=66+2=68,  STAB=68+34=102
+//   power=100: base=44+2=46,  STAB=46+23=69
+//   power=80:  base=35+2=37,  STAB=37+18=55
+//   power=40:  base=17+2=19,  STAB=19+9=28
+//   power=20:  base=8+2=10,   STAB=10+5=15
+//
+// 11 cases: hp=1(135), hp=2(102), hp=4(102), hp=5(69), hp=9(69), hp=10(55), hp=16(55),
+//           hp=17(28), hp=32(28), hp=33(15), hp=48(15).
+//
+// Metadata assert: constant_damage_source==ReversalFlail (5), has_standard_damage==false.
+// ============================================================================
+TEST(p_rt_flail_exact) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    const auto flail_id = static_cast<enginemon::MoveId>(175);
+    const enginemon::MoveData* md = s_rt_reg->get(flail_id);
+    if (!md) {
+        rt_record(175, "FLAIL_FIXTURE", false, "MoveData not found for move 175");
+        ASSERT_TRUE(false); return;
+    }
+
+    // ── Assert move metadata matches Crystal source ───────────────────────────
+    {
+        bool const_src_ok = (md->effect_desc.constant_damage_source ==
+                             enginemon::ConstantDamageSource::ReversalFlail);
+        bool std_dmg_ok   = (!md->effect_desc.has_standard_damage);
+        bool meta_ok = const_src_ok && std_dmg_ok;
+        std::string meta_div;
+        if (!const_src_ok) meta_div += "constant_damage_source!=ReversalFlail ";
+        if (!std_dmg_ok)   meta_div += "has_standard_damage=true (expected false) ";
+        rt_record(175, "FLAIL_METADATA", meta_ok, meta_ok ? "" : meta_div.c_str());
+        std::cout << "\n    Flail metadata: const_src="
+                  << (int)static_cast<uint8_t>(md->effect_desc.constant_damage_source)
+                  << " std_dmg=" << md->effect_desc.has_standard_damage
+                  << (meta_ok ? " OK" : " MISMATCH");
+        ASSERT_TRUE(meta_ok);
+    }
+
+    // Build BattleRules with the reversal table populated.
+    // Source: data/moves/flail_reversal_power.asm + HP_BAR_LENGTH_PX=48.
+    enginemon::BattleRules rev_rules = s_rt_rules;
+    rev_rules.reversal_table[0] = {  1, 200 };
+    rev_rules.reversal_table[1] = {  4, 150 };
+    rev_rules.reversal_table[2] = {  9, 100 };
+    rev_rules.reversal_table[3] = { 16,  80 };
+    rev_rules.reversal_table[4] = { 32,  40 };
+    rev_rules.reversal_table[5] = { 48,  20 };
+
+    // RNG: no crit (0x11>=17), max variation (0xFF). acc=0xFF shortcut: no accuracy byte.
+    std::vector<uint8_t> rng_nocrit{0x11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+    struct FlailCase { int16_t cur_hp; int32_t expected_damage; const char* label; };
+    // max_hp=48. hp_pixels = cur_hp (since floor(cur_hp * 48 / 48) = cur_hp).
+    // STAB: player type1=0 (Normal), move type=Normal (0x00).
+    static const FlailCase CASES[] = {
+        {  1, 135, "FLAIL_HP01" },
+        {  2, 102, "FLAIL_HP02" },
+        {  4, 102, "FLAIL_HP04" },
+        {  5,  69, "FLAIL_HP05" },
+        {  9,  69, "FLAIL_HP09" },
+        { 10,  55, "FLAIL_HP10" },
+        { 16,  55, "FLAIL_HP16" },
+        { 17,  28, "FLAIL_HP17" },
+        { 32,  28, "FLAIL_HP32" },
+        { 33,  15, "FLAIL_HP33" },
+        { 48,  15, "FLAIL_HP48" },
+    };
+
+    int match = 0, mismatch = 0;
+    for (const auto& c : CASES) {
+        // Separate Battle instance per case — do NOT reuse.
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=c.cur_hp; pm.max_hp=48; pm.friendship=200;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rev_rules);
+
+        // Player: all stats=60, cur_hp=c.cur_hp, max_hp=48.
+        auto pbp = rt_bp_partial(flail_id, c.cur_hp, 48, 60);
+        // Opponent: opp_hp=5000 to prevent overkill; defense=60 to match formula.
+        auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+        obp.stats.defense = 60; obp.base_stats.defense = 60;
+
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_nocrit, &idx]()->uint32_t {
+            return idx < rng_nocrit.size() ? rng_nocrit[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+
+        const int32_t damage_dealt = 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        const bool ok = (damage_dealt == c.expected_damage);
+
+        std::string div;
+        if (!ok) {
+            div = std::string("expected=") + std::to_string(c.expected_damage)
+                + " got=" + std::to_string(damage_dealt)
+                + " (hp=" + std::to_string(c.cur_hp) + "/48)";
+        }
+        rt_record(175, c.label, ok, ok ? "" : div.c_str());
+        if (ok) ++match; else ++mismatch;
+
+        std::cout << "\n    Flail hp=" << c.cur_hp << "/48"
+                  << " dmg=" << damage_dealt
+                  << " (exp=" << c.expected_damage << ")"
+                  << (ok ? " OK" : " MISMATCH");
+    }
+    std::cout << "\n    flail_exact: match=" << match << " mismatch=" << mismatch << "\n";
+    ASSERT_EQ(mismatch, 0);
+}
+
+
+// ============================================================================
+// TEST: p_rt_reversal_exact (move id=179)
+//
+// Crystal source authority (same tier structure as Flail):
+//   Same hp_pixels formula and same tier table.
+//
+// REVERSAL: Fighting type (type=0x01), Physical. Player type1=0=Normal -> NO STAB.
+// Stats: player all=60, opponent defense=60. Same as flail test.
+// RNG: {0x11, 0xFF, 0xFF,...}
+//
+// Damage formula (no crit, neutral type, variation=0xFF, NO STAB):
+//   base = (22*power)/50+2  (no STAB multiplier)
+//
+//   power=200: 88+2=90
+//   power=150: 66+2=68
+//   power=100: 44+2=46
+//   power=80:  35+2=37
+//   power=40:  17+2=19
+//   power=20:  8+2=10
+//
+// 11 cases: hp=1(90), hp=2(68), hp=4(68), hp=5(46), hp=9(46), hp=10(37), hp=16(37),
+//           hp=17(19), hp=32(19), hp=33(10), hp=48(10).
+//
+// PLUS 1 paired case: hp=10 with Flail(55) vs Reversal(37) -> must differ.
+//
+// Metadata assert: constant_damage_source==ReversalFlail (5), has_standard_damage==false.
+// ============================================================================
+TEST(p_rt_reversal_exact) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    const auto rev_id = static_cast<enginemon::MoveId>(179);
+    const enginemon::MoveData* md = s_rt_reg->get(rev_id);
+    if (!md) {
+        rt_record(179, "REVERSAL_FIXTURE", false, "MoveData not found for move 179");
+        ASSERT_TRUE(false); return;
+    }
+
+    // ── Assert move metadata matches Crystal source ───────────────────────────
+    {
+        bool const_src_ok = (md->effect_desc.constant_damage_source ==
+                             enginemon::ConstantDamageSource::ReversalFlail);
+        bool std_dmg_ok   = (!md->effect_desc.has_standard_damage);
+        bool meta_ok = const_src_ok && std_dmg_ok;
+        std::string meta_div;
+        if (!const_src_ok) meta_div += "constant_damage_source!=ReversalFlail ";
+        if (!std_dmg_ok)   meta_div += "has_standard_damage=true (expected false) ";
+        rt_record(179, "REVERSAL_METADATA", meta_ok, meta_ok ? "" : meta_div.c_str());
+        std::cout << "\n    Reversal metadata: const_src="
+                  << (int)static_cast<uint8_t>(md->effect_desc.constant_damage_source)
+                  << " std_dmg=" << md->effect_desc.has_standard_damage
+                  << (meta_ok ? " OK" : " MISMATCH");
+        ASSERT_TRUE(meta_ok);
+    }
+
+    // Build BattleRules with the reversal table populated.
+    enginemon::BattleRules rev_rules = s_rt_rules;
+    rev_rules.reversal_table[0] = {  1, 200 };
+    rev_rules.reversal_table[1] = {  4, 150 };
+    rev_rules.reversal_table[2] = {  9, 100 };
+    rev_rules.reversal_table[3] = { 16,  80 };
+    rev_rules.reversal_table[4] = { 32,  40 };
+    rev_rules.reversal_table[5] = { 48,  20 };
+
+    // RNG: no crit (0x11>=17), max variation (0xFF). acc=0xFF shortcut: no accuracy byte.
+    std::vector<uint8_t> rng_nocrit{0x11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+    struct RevCase { int16_t cur_hp; int32_t expected_damage; const char* label; };
+    // max_hp=48. hp_pixels = cur_hp. No STAB (Fighting vs Normal).
+    static const RevCase CASES[] = {
+        {  1,  90, "REVERSAL_HP01" },
+        {  2,  68, "REVERSAL_HP02" },
+        {  4,  68, "REVERSAL_HP04" },
+        {  5,  46, "REVERSAL_HP05" },
+        {  9,  46, "REVERSAL_HP09" },
+        { 10,  37, "REVERSAL_HP10" },
+        { 16,  37, "REVERSAL_HP16" },
+        { 17,  19, "REVERSAL_HP17" },
+        { 32,  19, "REVERSAL_HP32" },
+        { 33,  10, "REVERSAL_HP33" },
+        { 48,  10, "REVERSAL_HP48" },
+    };
+
+    int match = 0, mismatch = 0;
+    for (const auto& c : CASES) {
+        // Separate Battle instance per case — do NOT reuse.
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=c.cur_hp; pm.max_hp=48; pm.friendship=200;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rev_rules);
+
+        auto pbp = rt_bp_partial(rev_id, c.cur_hp, 48, 60);
+        auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+        obp.stats.defense = 60; obp.base_stats.defense = 60;
+
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_nocrit, &idx]()->uint32_t {
+            return idx < rng_nocrit.size() ? rng_nocrit[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+
+        const int32_t damage_dealt = 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        const bool ok = (damage_dealt == c.expected_damage);
+
+        std::string div;
+        if (!ok) {
+            div = std::string("expected=") + std::to_string(c.expected_damage)
+                + " got=" + std::to_string(damage_dealt)
+                + " (hp=" + std::to_string(c.cur_hp) + "/48)";
+        }
+        rt_record(179, c.label, ok, ok ? "" : div.c_str());
+        if (ok) ++match; else ++mismatch;
+
+        std::cout << "\n    Reversal hp=" << c.cur_hp << "/48"
+                  << " dmg=" << damage_dealt
+                  << " (exp=" << c.expected_damage << ")"
+                  << (ok ? " OK" : " MISMATCH");
+    }
+
+    // ── Paired case: Flail(hp=10) vs Reversal(hp=10) must differ ─────────────
+    // Flail: STAB (Normal vs Normal) -> expected=55
+    // Reversal: no STAB (Fighting vs Normal) -> expected=37
+    // Both must be correct AND they must differ.
+    {
+        const auto flail_id = static_cast<enginemon::MoveId>(175);
+        int32_t flail_dmg  = 0;
+        int32_t reversal_dmg = 0;
+
+        // Flail at hp=10
+        {
+            enginemon::Party party;
+            enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+            pm.current_hp=10; pm.max_hp=48; pm.friendship=200;
+            party.add(pm);
+            auto reg = rt_reg();
+            enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rev_rules);
+            auto pbp = rt_bp_partial(flail_id, 10, 48, 60);
+            auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+            obp.stats.defense = 60; obp.base_stats.defense = 60;
+            battle.player_pokemon()   = pbp;
+            battle.opponent_pokemon() = obp;
+            size_t idx2 = 0;
+            battle.set_rng_callback([&rng_nocrit, &idx2]()->uint32_t {
+                return idx2 < rng_nocrit.size() ? rng_nocrit[idx2++] : 0xFFu;
+            });
+            battle.set_player_action(enginemon::ActionFight{0, 0});
+            battle.set_opponent_action(enginemon::ActionFight{0, 0});
+            battle.execute_turn();
+            flail_dmg = 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        }
+
+        // Reversal at hp=10
+        {
+            enginemon::Party party;
+            enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+            pm.current_hp=10; pm.max_hp=48; pm.friendship=200;
+            party.add(pm);
+            auto reg = rt_reg();
+            enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, rev_rules);
+            auto pbp = rt_bp_partial(rev_id, 10, 48, 60);
+            auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+            obp.stats.defense = 60; obp.base_stats.defense = 60;
+            battle.player_pokemon()   = pbp;
+            battle.opponent_pokemon() = obp;
+            size_t idx3 = 0;
+            battle.set_rng_callback([&rng_nocrit, &idx3]()->uint32_t {
+                return idx3 < rng_nocrit.size() ? rng_nocrit[idx3++] : 0xFFu;
+            });
+            battle.set_player_action(enginemon::ActionFight{0, 0});
+            battle.set_opponent_action(enginemon::ActionFight{0, 0});
+            battle.execute_turn();
+            reversal_dmg = 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        }
+
+        // Flail: STAB=55, Reversal: no STAB=37. Must differ and be exact.
+        bool paired_ok = (flail_dmg != reversal_dmg) && (flail_dmg == 55) && (reversal_dmg == 37);
+        std::string paired_div;
+        if (!paired_ok) {
+            paired_div = "flail_dmg=" + std::to_string(flail_dmg)
+                       + " reversal_dmg=" + std::to_string(reversal_dmg)
+                       + " (expected 55 vs 37, must differ)";
+        }
+        rt_record(179, "PAIRED_FLAIL_REVERSAL_HP10", paired_ok,
+                  paired_ok ? "" : paired_div.c_str());
+        if (paired_ok) ++match; else ++mismatch;
+
+        std::cout << "\n    Paired(hp=10): flail=" << flail_dmg
+                  << " reversal=" << reversal_dmg
+                  << " (exp 55 vs 37)"
+                  << (paired_ok ? " OK" : " MISMATCH");
+    }
+
+    std::cout << "\n    reversal_exact: match=" << match << " mismatch=" << mismatch << "\n";
+    ASSERT_EQ(mismatch, 0);
+}
+
+
 // Moves with % secondary effects. Uses scripted RNG to force the secondary to fire.
 // Checks the resulting status/volatile on the opponent.
 // Source: apply_secondary_effects in battle.cpp.
