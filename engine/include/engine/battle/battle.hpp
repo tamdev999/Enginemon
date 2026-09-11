@@ -299,6 +299,8 @@ enum class MoveExecutionResult {
     Immune,              // Target immune to move type
     NoTarget,            // No valid target
     NoPP,                // Out of PP (struggle not yet implemented)
+    ActorSkipped,        // Actor's turn consumed without executing a move (recharge, etc.);
+                         // battle turn continues — second actor still acts
     UnsupportedSemantic, // Move effect not implemented; PP NOT deducted; turn halted
     InvalidData          // Malformed/missing move data (accuracy==0, etc.); turn halted
 };

@@ -445,7 +445,7 @@ MoveExecutionResult Battle::execute_move(BattlePokemon& user, BattlePokemon& tar
     if (user.recharge_turns > 0) {
         --user.recharge_turns;
         message(md->name + " Ã¢â‚¬â€ must recharge!");
-        return MoveExecutionResult::UnsupportedSemantic;  // turn skipped, no halt
+        return MoveExecutionResult::ActorSkipped;  // Crystal: actor skipped, battle turn continues
     }
 
     // -- Support gate - read from SemanticEffectDescription ------------------

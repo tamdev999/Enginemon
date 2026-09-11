@@ -154,6 +154,7 @@ void test_p_rt_branch_snore_sleep_required();
 void test_p_rt_sweep_remaining_251();
 void test_p_rt_branch_swagger_and_misc();
 void test_p_rt_branch_hyper_beam_recharge();
+void test_p_rt_branch_hyper_beam_recharge_two_turn();
 void test_p_rt_branch_present_variable();
 void test_p_rt_secondary_rng_diagnostic();
 void test_p_rt_secondary_root8_all();
@@ -483,6 +484,7 @@ int main(int argc, char* argv[]) {
         RUN_TEST(p_rt_sweep_remaining_251);
         RUN_TEST(p_rt_branch_swagger_and_misc);
         RUN_TEST(p_rt_branch_hyper_beam_recharge);
+        RUN_TEST(p_rt_branch_hyper_beam_recharge_two_turn);
         RUN_TEST(p_rt_branch_present_variable);
         RUN_TEST(p_rt_secondary_rng_diagnostic);
         RUN_TEST(p_rt_secondary_root8_all);

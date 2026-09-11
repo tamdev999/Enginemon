@@ -1485,7 +1485,126 @@ TEST(p_rt_branch_hyper_beam_recharge) {
 }
 
 // ============================================================================
-// TEST: p_rt_branch_present_variable
+// TEST: p_rt_branch_hyper_beam_recharge_two_turn
+// Two-turn Hyper Beam: turn 1 fires damage + sets recharge; turn 2 player
+// is forced to recharge (no second attack) while OPPONENT still acts.
+//
+// Source: Crystal core.asm Battle_PlayerFirst / Battle_EnemyFirst.
+//   DoPlayerTurn sees SUBSTATUS_RECHARGE, clears it, jp EndTurn.
+//   EndTurn only ends THIS actor's turn; the battle loop then calls
+//   EnemyTurn_EndOpponentProtectEndureDestinyBond unconditionally.
+//   The opponent always acts during the recharge turn.
+//
+// Opponent move: Growl (id=45, EF_AD1 = AttackDown1, no accuracy check,
+// no secondary RNG, zero damage).  Observable result: player_atk == -1.
+//
+// RNG:
+//   Turn 1: [0]=crit(0x00=crit), [1]=var(0xFF accepted), [2]=acc(0x00 < 0xE5 = hit)
+//   Turn 2: recharge gate fires before any RNG — no Hyper Beam RNG consumed.
+//           Growl: no accuracy roll, no secondary roll (zero RNG consumed).
+// ============================================================================
+TEST(p_rt_branch_hyper_beam_recharge_two_turn) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    // Find Hyper Beam (EF_HB) and Growl (id=45, EF_AD1)
+    enginemon::MoveId hb_id   = enginemon::MOVE_NONE;
+    enginemon::MoveId growl_id = enginemon::MOVE_NONE;
+    for (const auto& m : kM) {
+        if (m.eff == EF_HB)  { hb_id   = static_cast<enginemon::MoveId>(m.id); }
+        if (m.id  == 45)     { growl_id = static_cast<enginemon::MoveId>(m.id); }
+    }
+    ASSERT_NE(hb_id,   enginemon::MOVE_NONE);
+    ASSERT_NE(growl_id, enginemon::MOVE_NONE);
+    if (hb_id == enginemon::MOVE_NONE || growl_id == enginemon::MOVE_NONE) return;
+
+    // Build a single persistent Battle using BattleType::Trainer so the Wild AI
+    // block in execute_turn() does not consume an RNG byte before player's move.
+    // Trainer AI is not set (trainer_ai_=nullptr), so trainer AI block is also skipped.
+    // Both actions are explicitly pre-set before each execute_turn() call.
+    enginemon::Party party;
+    enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+    pm.current_hp = pm.max_hp = 300; pm.friendship = 200;
+    party.add(pm);
+    auto reg   = rt_reg();
+    auto rules = s_rt_rules;
+    enginemon::Battle battle(enginemon::BattleType::Trainer, party, reg, rules);
+    battle.player_pokemon()   = rt_bp(hb_id,   300, 200);  // speed=200, player first
+    battle.opponent_pokemon() = rt_bp(growl_id, 1000,  1);  // speed=1, Growl in slot 0, high HP to survive turn 1
+
+    // RNG: flat scripted vector covering both turns.
+    // Turn 1: crit=0x00, var=0xFF (accepted ≥0xD9), acc=0x00 (<0xE5=229 → hit).
+    // Turn 2: recharge gate fires before any RNG; Growl has no accuracy/secondary RNG.
+    //         Remaining bytes 0xFF are safe fallback.
+    std::vector<uint8_t> rng_all{0x00,0xFF,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    size_t rng_idx = 0;
+    battle.set_rng_callback([&rng_all,&rng_idx]()->uint32_t{
+        return rng_idx < rng_all.size() ? rng_all[rng_idx++] : 0xFFu;
+    });
+
+    // ── Turn 1: player uses Hyper Beam ────────────────────────────────────────
+    battle.set_player_action(enginemon::ActionFight{0, 0});
+    battle.set_opponent_action(enginemon::ActionFight{0, 0});  // slot 0 = Growl; bypasses Wild AI RNG
+    battle.execute_turn();
+
+    const int16_t opp_hp_after_t1 = battle.opponent_pokemon().stats.hp;
+    const uint8_t recharge_after_t1 = battle.player_pokemon().recharge_turns;
+    const int8_t  player_atk_after_t1 = battle.player_pokemon().stages.attack;  // Growl fires on T1 too
+
+    rt_record(static_cast<uint16_t>(hb_id), "HYPER_BEAM_2T_T1_DAMAGE",
+              opp_hp_after_t1 < 1000,
+              opp_hp_after_t1 < 1000 ? "" : "turn1: no damage dealt");
+    rt_record(static_cast<uint16_t>(hb_id), "HYPER_BEAM_2T_T1_RECHARGE",
+              recharge_after_t1 == 1,
+              recharge_after_t1 == 1 ? "" : "turn1: recharge_turns != 1");
+
+    std::cout << "\n    HB_2T turn1: opp_hp=" << opp_hp_after_t1
+              << " recharge_turns=" << (int)recharge_after_t1 << "\n";
+
+    ASSERT_TRUE(opp_hp_after_t1 < 1000);     // damage dealt (opponent survives to allow turn 2)
+    ASSERT_EQ(recharge_after_t1, uint8_t{1}); // recharge set
+
+    // ── Turn 2: player must recharge; opponent uses Growl ─────────────────────
+    // Pre-set both actions before execute_turn to skip Trainer AI block.
+    // Player reuses slot 0 (same Hyper Beam slot — recharge gate intercepts).
+    // Opponent uses Growl (slot 0).
+    battle.set_player_action(enginemon::ActionFight{0, 0});
+    battle.set_opponent_action(enginemon::ActionFight{0, 0});  // Growl, bypasses Trainer AI
+    battle.execute_turn();
+
+    const int16_t opp_hp_after_t2  = battle.opponent_pokemon().stats.hp;
+    const uint8_t recharge_after_t2 = battle.player_pokemon().recharge_turns;
+    const int8_t  player_atk_after_t2 = battle.player_pokemon().stages.attack;
+    // Capture attack stage after turn 1 for relative comparison.
+    // Growl fires on BOTH turns (turn 1 opp acts after HB, turn 2 opp acts during recharge).
+    // After turn 1: player_atk == -1. After turn 2: player_atk == -2.
+    // We assert player_atk DECREASED from turn-1 value to prove opponent acted on turn 2.
+
+    // Player must NOT have attacked (opp HP unchanged from after turn 1).
+    rt_record(static_cast<uint16_t>(hb_id), "HYPER_BEAM_2T_T2_NO_DAMAGE",
+              opp_hp_after_t2 == opp_hp_after_t1,
+              opp_hp_after_t2 == opp_hp_after_t1 ? "" : "turn2: player attacked during recharge");
+    // Recharge must clear.
+    rt_record(static_cast<uint16_t>(hb_id), "HYPER_BEAM_2T_T2_RECHARGE_CLEARED",
+              recharge_after_t2 == 0,
+              recharge_after_t2 == 0 ? "" : "turn2: recharge_turns not cleared");
+    // Opponent MUST have acted on turn 2: Growl fired on turn 1 too (player_atk_after_t1==-1),
+    // so turn 2 Growl drops it further. This assertion fails if turn_halted_ suppressed
+    // the opponent during the recharge turn.
+    const bool opp_acted_t2 = (player_atk_after_t2 < player_atk_after_t1);
+    rt_record(static_cast<uint16_t>(hb_id), "HYPER_BEAM_2T_T2_OPP_ACTED",
+              opp_acted_t2,
+              opp_acted_t2 ? "" : "turn2: opponent did NOT act (recharge halted battle turn)");
+
+    std::cout << "    HB_2T turn2: opp_hp=" << opp_hp_after_t2
+              << " recharge_turns=" << (int)recharge_after_t2
+              << " player_atk=" << (int)player_atk_after_t2 << "\n";
+
+    ASSERT_TRUE(opp_hp_after_t2 == opp_hp_after_t1);  // no second hit
+    ASSERT_EQ(recharge_after_t2, uint8_t{0});           // recharge cleared
+    ASSERT_TRUE(opp_acted_t2);                          // opponent's turn 2 Growl landed
+}
+
+
 // Present: random power or heal. Must execute without crash.
 // With seeded RNG=0x00, Present uses first power tier.
 // Source: B-path Present with set_power_source=PresentTable.
