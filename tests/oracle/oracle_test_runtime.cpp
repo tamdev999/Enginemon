@@ -1522,27 +1522,35 @@ TEST(p_rt_frustration_exact_formula) {
 // ============================================================================
 // TEST: p_rt_psywave_exact (move id=149)
 //
-// Crystal source authority:
-//   effect_commands.asm .psywave:
-//     b = level + (level >> 1) = floor(level * 1.5). At level=50: b=75.
-//     Loop: BattleRandom; if 0 retry; if >= b retry; damage = accepted byte.
-//     Range: 1..74.
+// Crystal script order (data/moves/effects.asm, Psywave label):
+//   constantdamage  <- Psywave RNG consumed here
+//   checkhit        <- accuracy RNG consumed here
+//   resettypematchup
+//   moveanim / failuretext
+//   applydamage
 //
-// Enginemon:
-//   const_dmg = rng_.next_byte() % max_dmg; loop if 0.
-//   max_dmg=75. Same range 1..74.
+// Therefore CRYSTAL RNG ORDER:
+//   [0] = Psywave damage byte  (accepted if: != 0 AND < 75 at level 50)
+//   [1] = accuracy byte        (accepted if: < 204, since acc=0xCC=204)
 //
-// RNG ORDER IN ENGINEMON (not Crystal!):
-//   Psywave accuracy=0xCC=204 (not 0xFF). Enginemon runs accuracy check BEFORE
-//   constant damage. So: [0]=accuracy_byte, [1..N]=psywave_damage_bytes.
+// Rejection classes (Crystal source effect_commands.asm .psywave):
+//   byte == 0     -> rejected (and a / jr z .psywave_loop)
+//   byte >= 75    -> rejected (cp b / jr nc .psywave_loop)
 //
-// Metadata assert: constant_damage_source==Psywave (4), has_standard_damage==false.
+// Enginemon CURRENT order (not Crystal, documented production mismatch):
+//   accuracy check runs before constant_damage_source=Psywave
+//   [0]=accuracy_byte, [1..N]=psywave_damage_bytes
 //
-// 4 cases (player level=50, opp_hp=5000):
-//   min:       RNG={0x00,0x01,...} -> acc hits (0x00<204); 0x01%75=1 -> damage=1
-//   max:       RNG={0x00,0x4A,...} -> 0x4A=74; 74%75=74 -> damage=74
-//   interior:  RNG={0x00,0x25,...} -> 0x25=37; 37%75=37 -> damage=37
-//   rejection: RNG={0x00,0x00,0x01,...} -> first byte=0x00; 0%75=0 -> retry; 0x01%75=1 -> damage=1
+// The oracle uses Crystal order. If Enginemon implements the wrong order
+// these tests will be RED, recording the production mismatch.
+//
+// Byte choice ensures position swap gives different results:
+//   Hit cases:   psywave=0x01(=1), acc=0x00(<204 hit). Swap: acc=0x01(hit), psy=0x00(rejected->retry).
+//   Miss case:   psywave=0x01(=1), acc=0xD0(=208>=204 miss). Swap: acc=0x01(hit), psy=0xD0->208%75=58.
+//   Rejection:   psywave=0x4B(=75>=75 reject), psywave=0x01(=1), acc=0xD0(miss)->damage=0.
+//                Swap: acc=0x4B(hit), psy=0x01->1, psy_next=0xD0 not consumed -> damage=1.
+//
+// All byte positions derived solely from Crystal source. No Enginemon trace used.
 // ============================================================================
 TEST(p_rt_psywave_exact) {
     if (!rt_init_once()) { ASSERT_TRUE(false); return; }
@@ -1554,7 +1562,7 @@ TEST(p_rt_psywave_exact) {
         ASSERT_TRUE(false); return;
     }
 
-    // ── Assert move metadata matches Crystal source ───────────────────────────
+    // Metadata: constant_damage_source==Psywave(4), has_standard_damage==false.
     {
         bool const_src_ok = (md->effect_desc.constant_damage_source ==
                              enginemon::ConstantDamageSource::Psywave);
@@ -1571,18 +1579,49 @@ TEST(p_rt_psywave_exact) {
         ASSERT_TRUE(meta_ok);
     }
 
-    struct PsyCase { const char* label; std::vector<uint8_t> rng; int32_t expected_damage; };
-    // [0]=accuracy_byte (0x00 < 204 = hits), then psywave damage bytes.
-    // damage = rng_byte % 75; retry if 0.
+    // All scripts use CRYSTAL order: [0]=psywave_damage_byte, [1]=accuracy_byte.
+    // acc=0xCC=204; hit if acc_byte < 204; miss if acc_byte >= 204.
+    // Psywave range at level 50: 1..74 (byte==0 or byte>=75 rejected).
+    //
+    // Position-discriminating proof: 0x01 as psywave byte, 0x00 as accuracy byte.
+    //   If order is reversed: acc=0x01<204 (still hits), psy=0x00 rejected, psy_next=0xFF->255%75=5 -> damage=5.
+    //   Different from expected damage=1.
+    struct PsyCase {
+        const char*           label;
+        std::vector<uint8_t>  rng;
+        int32_t               expected_damage;
+        const char*           note;
+    };
+    // Crystal order: [0]=psywave_byte, [1]=accuracy_byte, then remainder unused.
+    // RNG scripts:
+    //   min:       psy=0x01(accepted->1), acc=0x00(hit)         -> damage=1
+    //   max:       psy=0x4A(=74<75 accepted), acc=0x00(hit)     -> damage=74
+    //   interior:  psy=0x25(=37 accepted), acc=0x00(hit)        -> damage=37
+    //   miss:      psy=0x01(accepted->1), acc=0xD0(=208>=204 miss) -> damage=0
+    //              (Crystal computes Psywave RNG first, then misses; damage NOT applied)
+    //   rejection: psy=0x4B(=75>=75 reject), psy=0x01(->1), acc=0xD0(miss) -> damage=0
+    //              Consumes exactly 3 RNG bytes.
     static const PsyCase CASES[] = {
-        { "PSYWAVE_MIN",      {0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  1 },
-        { "PSYWAVE_MAX",      {0x00, 0x4A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 74 },
-        { "PSYWAVE_INTERIOR", {0x00, 0x25, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 37 },
-        { "PSYWAVE_REJECTION",{0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  1 },
+        { "PSYWAVE_MIN",
+          {0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  1,
+          "psy=1(accepted), acc=0x00(hit) -> damage=1" },
+        { "PSYWAVE_MAX",
+          {0x4A, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 74,
+          "psy=0x4A=74(accepted), acc=0x00(hit) -> damage=74" },
+        { "PSYWAVE_INTERIOR",
+          {0x25, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 37,
+          "psy=0x25=37(accepted), acc=0x00(hit) -> damage=37" },
+        { "PSYWAVE_MISS",
+          {0x01, 0xD0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  0,
+          "psy=1(accepted), acc=0xD0=208>=204(miss) -> damage=0 (Crystal computes psy first)" },
+        { "PSYWAVE_REJECTION_MISS",
+          {0x4B, 0x01, 0xD0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  0,
+          "psy=0x4B=75(reject), psy=0x01=1(accepted), acc=0xD0(miss) -> 3 bytes consumed, damage=0" },
     };
 
     int match = 0, mismatch = 0;
     for (const auto& c : CASES) {
+        size_t rng_calls = 0;
         enginemon::Party party;
         enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
         pm.current_hp=pm.max_hp=300; pm.friendship=200;
@@ -1592,12 +1631,13 @@ TEST(p_rt_psywave_exact) {
 
         auto pbp = rt_bp(psy_id, 300, 200);
         auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
-
         battle.player_pokemon()   = pbp;
         battle.opponent_pokemon() = obp;
-        size_t idx = 0;
+
         std::vector<uint8_t> rng_copy = c.rng;
-        battle.set_rng_callback([&rng_copy, &idx]()->uint32_t {
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_copy, &idx, &rng_calls]()->uint32_t {
+            ++rng_calls;
             return idx < rng_copy.size() ? rng_copy[idx++] : 0xFFu;
         });
         battle.set_player_action(enginemon::ActionFight{0, 0});
@@ -1610,16 +1650,22 @@ TEST(p_rt_psywave_exact) {
         std::string div;
         if (!ok) {
             div = std::string("expected=") + std::to_string(c.expected_damage)
-                + " got=" + std::to_string(damage_dealt);
+                + " got=" + std::to_string(damage_dealt)
+                + " rng_calls=" + std::to_string(rng_calls)
+                + " [" + c.note + "]"
+                + " [Crystal order used; if Enginemon reversed: production mismatch]";
         }
         rt_record(149, c.label, ok, ok ? "" : div.c_str());
         if (ok) ++match; else ++mismatch;
 
         std::cout << "\n    Psywave " << c.label << ": dmg=" << damage_dealt
                   << " (exp=" << c.expected_damage << ")"
+                  << " rng_calls=" << rng_calls
                   << (ok ? " OK" : " MISMATCH");
     }
     std::cout << "\n    psywave_exact: match=" << match << " mismatch=" << mismatch << "\n";
+    // Source-correct oracle; do NOT change expectations to match Enginemon.
+    // Production mismatches from reversed RNG order are intentional and should remain red.
     ASSERT_EQ(mismatch, 0);
 }
 
