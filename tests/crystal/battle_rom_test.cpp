@@ -8082,7 +8082,10 @@ TEST(p_ordering_thaw_fails_burnt_berry_consumed) {
     battle.execute_turn();
     // Thaw failed. Burnt Berry cured Freeze.
     ASSERT_EQ(battle.player_pokemon().status,    enginemon::Status::None);
-    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);  // consumed
+    ASSERT_EQ(battle.player_pokemon().held_item, enginemon::ITEM_NONE);  // consumed in BattlePokemon
+    const enginemon::Pokemon* pmon = es.party.get(0);
+    ASSERT_TRUE(pmon != nullptr);
+    if (pmon) ASSERT_EQ(pmon->held_item, enginemon::ITEM_NONE);          // consumed in party slot
     std::cout << "\n    ordering/thaw_fails: thaw failed, BurntBerry cured and consumed\n";
 }
 

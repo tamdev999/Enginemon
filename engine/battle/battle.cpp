@@ -1791,56 +1791,90 @@ void Battle::apply_stat_change(BattlePokemon& user, BattlePokemon& target,
 // ============================================================================
 
 void Battle::apply_end_of_turn_effects() {
-    // Tick down field timers
+    // Crystal HandleBetweenTurnEffects exact ordering (core.asm / suiCune core.c):
+    //
+    //  BEFORE HandleBetweenTurnEffects (Crystal ResidualDamage, action phase per-mon):
+    //    burn / poison / bad-poison / sandstorm
+    //    Leech Seed drain
+    //    Nightmare
+    //    Curse
+    //
+    //  HandleBetweenTurnEffects (this function, phases 1-10):
+    //    1. HandleFutureSight  -> CheckFaint
+    //    2. HandleWeather tick, ResidualDamage -> CheckFaint
+    //    3. HandleWrap         -> CheckFaint
+    //    4. HandlePerishSong   -> CheckFaint
+    //    -- .NoMoreFaintingConditions --
+    //    5. HandleLeftovers
+    //    6. HandleMysteryberry
+    //    7. HandleDefrost (natural thaw)
+    //    8. HandleHealingItems (HP/status/confusion berries)
+    //    9. HandleSafeguard (timer decrement)
+    //   10. HandleScreens (Reflect/LightScreen timer decrements)
+
+    // ── Phase 1: Future Sight ──────────────────────────────────────────────
+    hook_future_sight_tick();
+    if (player_pokemon_.is_fainted() || opponent_pokemon_.is_fainted()) goto no_more_faints;
+
+    // ── Phase 2: Action-phase residuals (Crystal ResidualDamage order) ────
+    // Crystal ResidualDamage fires per-mon from Battle_PlayerFirst/EnemyFirst,
+    // before HandleBetweenTurnEffects. Order within ResidualDamage:
+    //   burn / poison / bad-poison
+    //   sandstorm (HandleSandstorm, merged here)
+    //   Leech Seed drain
+    //   Nightmare
+    //   Curse
+    //
+    // Weather timer tick belongs to HandleWeather inside HandleBetweenTurnEffects,
+    // but in Enginemon's unified model we tick it here alongside the sandstorm damage.
     if (field_.weather_turns > 0 && --field_.weather_turns == 0) {
         field_.weather = Weather::None;
         message("The weather cleared up!");
     }
-    if (field_.reflect_player      > 0) --field_.reflect_player;
-    if (field_.reflect_opponent    > 0) --field_.reflect_opponent;
-    if (field_.light_screen_player  > 0) --field_.light_screen_player;
-    if (field_.light_screen_opponent > 0) --field_.light_screen_opponent;
-    if (field_.safeguard_player    > 0) --field_.safeguard_player;
-    if (field_.safeguard_opponent  > 0) --field_.safeguard_opponent;
-
     apply_residual(player_pokemon_,   true);
     apply_residual(opponent_pokemon_, false);
-
-    // Crystal HandleBetweenTurnEffects exact ordering (core.asm):
-    //   weather/poison/burn  (apply_residual above)
-    //   Wrap/Leech Seed drain  <- before Leftovers
-    //   Perish Song
-    //   Leftovers              <- pre-thaw held items
-    //   Mysteryberry           <- pre-thaw held items
-    //   HandleDefrost (natural thaw)
-    //   HP berry               <- post-thaw held items
-    //   major-status berries   <- post-thaw held items
-    //   confusion berry        <- post-thaw held items
-
-    // Leech Seed / Wrap drain: before Leftovers.
+    // Leech Seed, Nightmare, Curse — Crystal ResidualDamage, after burn/poison/sandstorm.
     hook_end_of_turn_leech_seed();
+    hook_end_of_turn_nightmare();
+    hook_end_of_turn_curse();
+    if (player_pokemon_.is_fainted() || opponent_pokemon_.is_fainted()) goto no_more_faints;
 
-    // Pre-thaw held items: Leftovers, Mysteryberry.
+    // ── Phase 3: Wrap / trap residual ─────────────────────────────────────
+    hook_trap_damage_tick();
+    if (player_pokemon_.is_fainted() || opponent_pokemon_.is_fainted()) goto no_more_faints;
+
+    // ── Phase 4: Perish Song ───────────────────────────────────────────────
+    hook_end_of_turn_perish_song();
+    if (player_pokemon_.is_fainted() || opponent_pokemon_.is_fainted()) goto no_more_faints;
+
+    // ── .NoMoreFaintingConditions ──────────────────────────────────────────
+    // Crystal: no CheckFaint after this point.
+
+no_more_faints:
+    // ── Phase 5-6: Pre-thaw held items: Leftovers, Mysteryberry ───────────
     // Source: Crystal HandleLeftovers -> HandleMysteryberry (before HandleDefrost).
     apply_held_item_pre_thaw(player_pokemon_,   true);
     apply_held_item_pre_thaw(opponent_pokemon_, false);
 
-    // Natural thaw: P1-Freeze. 25/256 chance per turn (after freeze_guard is consumed).
-    // Source: Crystal HandleDefrost in core.asm.
+    // ── Phase 7: Natural thaw ──────────────────────────────────────────────
+    // Source: Crystal HandleDefrost (core.asm). 25/256 chance per turn.
     hook_end_of_turn_natural_thaw(player_pokemon_,   true);
     hook_end_of_turn_natural_thaw(opponent_pokemon_, false);
 
-    // Post-thaw held items: HP berries, status-cure berries, confusion berry.
+    // ── Phase 8: Post-thaw held items: HP/status/confusion berries ─────────
     // Source: Crystal HandleHealingItems (after HandleDefrost).
     apply_held_item_post_thaw(player_pokemon_,   true);
     apply_held_item_post_thaw(opponent_pokemon_, false);
 
-    // Architecture B: remaining end-of-turn hooks.
-    hook_end_of_turn_nightmare();
-    hook_end_of_turn_curse();
-    hook_end_of_turn_perish_song();
-    hook_future_sight_tick();
-    hook_trap_damage_tick();
+    // ── Phases 9-10: Field timer decrements ────────────────────────────────
+    // Source: Crystal HandleSafeguard -> HandleScreens (after HandleHealingItems).
+    if (field_.safeguard_player    > 0) --field_.safeguard_player;
+    if (field_.safeguard_opponent  > 0) --field_.safeguard_opponent;
+    if (field_.reflect_player      > 0) --field_.reflect_player;
+    if (field_.reflect_opponent    > 0) --field_.reflect_opponent;
+    if (field_.light_screen_player  > 0) --field_.light_screen_player;
+    if (field_.light_screen_opponent > 0) --field_.light_screen_opponent;
+
     // NOTE: hook_rampage_end_check is NOT called here.
     // Rampage counter decrement and volatile clearing are handled by the Rampage gate
     // at the start of execute_program() on continuation turns. Calling the hook here
