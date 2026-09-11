@@ -760,6 +760,96 @@ TEST(b_e2e_counter_returns_double_damage) {
 
 
 // ============================================================================
+// B-path recharge consistency: actor skipped, battle turn continues.
+//
+// Architecture: recharge gate fires before B-program dispatch, same as A-path.
+// Source: Crystal DoPlayerTurn/DoEnemyTurn -- recharge clears and EndTurn fires;
+//   EndTurn only ends THIS actor's turn; battle loop calls second actor normally.
+// Expected: recharging actor does not move; recharge_turns clears; opponent acts.
+//
+// The player pokemon carries any B-path move in slot 0 (Rampage family is convenient).
+// recharge_turns is set directly to 1 -- no need to fire the move first.
+// Opponent: A-path Growl-class (Attack-down stat-only, zero RNG) in slot 0.
+// BattleType::Trainer with pre-set actions bypasses both Wild AI and Trainer AI.
+// ============================================================================
+TEST(b_e2e_bpath_recharge_skips_actor_opponent_acts) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "bpath_rchg");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    // Find any B-path move (Rampage family) for player slot 0.
+    // The move will not execute; only recharge_turns matters.
+    enginemon::MoveId b_move_id = enginemon::MOVE_NONE;
+    for (const auto& [id, md] : *r) {
+        if (md.has_program && md.effect_desc.is_rampage && md.power > 0) {
+            b_move_id = id;
+            break;
+        }
+    }
+    ASSERT_NE(b_move_id, enginemon::MOVE_NONE);
+    if (b_move_id == enginemon::MOVE_NONE) return;
+
+    // Find any A-path pure Attack-down stat move for opponent (e.g. Growl id=45).
+    // No accuracy RNG, no secondary RNG. Observable: player_atk drops by 1.
+    enginemon::MoveId atk_down_id = enginemon::MOVE_NONE;
+    for (const auto& [id, md] : *r) {
+        if (md.effect_desc.is_supported
+                && !md.has_program
+                && md.effect_desc.stat_change == enginemon::StatChangeTarget::AttackDown1
+                && md.category == enginemon::MoveCategory::Status) {
+            atk_down_id = id;
+            break;
+        }
+    }
+    ASSERT_NE(atk_down_id, enginemon::MOVE_NONE);
+    if (atk_down_id == enginemon::MOVE_NONE) return;
+
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species=1; pmon.level=50;
+    pmon.current_hp=pmon.max_hp=300; pmon.friendship=200;
+    party.add(pmon);
+    auto rules = make_rules_b();
+    auto reg   = make_b_reg(*r);
+    // Trainer type: pre-setting both actions bypasses Trainer AI block entirely.
+    enginemon::Battle battle(enginemon::BattleType::Trainer, party, reg, rules);
+
+    enginemon::BattlePokemon player_bp = make_bp_b(b_move_id, 300);
+    player_bp.stats.speed = player_bp.base_stats.speed = 200;  // player goes first
+    player_bp.recharge_turns = 1;                               // simulate post-Hyper Beam state
+
+    enginemon::BattlePokemon opp_bp = make_bp_b(atk_down_id, 300);
+    opp_bp.stats.speed = opp_bp.base_stats.speed = 1;
+    battle.player_pokemon()  = player_bp;
+    battle.opponent_pokemon() = opp_bp;
+
+    const int16_t opp_hp_before = battle.opponent_pokemon().stats.hp;
+    const int8_t  player_atk_before = battle.player_pokemon().stages.attack;
+    ASSERT_EQ(battle.player_pokemon().recharge_turns, uint8_t{1});
+
+    // Pre-set actions: player tries to use slot 0 (recharge gate fires first), opponent uses Growl.
+    battle.set_player_action(enginemon::ActionFight{0, 0});
+    battle.set_opponent_action(enginemon::ActionFight{0, 0});
+    battle.execute_turn();
+
+    const uint8_t recharge_after = battle.player_pokemon().recharge_turns;
+    const int16_t opp_hp_after   = battle.opponent_pokemon().stats.hp;
+    const int8_t  player_atk_after = battle.player_pokemon().stages.attack;
+
+    // Recharge must clear.
+    ASSERT_EQ(recharge_after, uint8_t{0});
+    // Player must NOT have attacked (opponent HP unchanged).
+    ASSERT_EQ(opp_hp_after, opp_hp_before);
+    // Opponent MUST have acted: Growl lowered player Attack by 1.
+    // This assertion fails if turn_halted_ suppressed the opponent during the recharge turn.
+    ASSERT_EQ(player_atk_after, int8_t{player_atk_before - 1});
+
+    std::cout << "\n    [B-path recharge: recharge_turns=0, opp_hp unchanged, player_atk="
+              << (int)player_atk_after << " (Growl landed) -- opponent acted during recharge turn]\n";
+}
+
+
+// ============================================================================
 // P0 BEHAVIORAL TESTS ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Protect, Endure, Substitute, damage history, secondaries
 // ROM ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ compiler ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ package ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ reader ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ runtime
 // ============================================================================
@@ -10409,6 +10499,7 @@ int main(int argc, char* argv[]) {
     RUN_TEST(b_e2e_substitute_production_dispatch);
     RUN_TEST(b_e2e_multihit_deals_damage);
     RUN_TEST(b_e2e_counter_returns_double_damage);
+    RUN_TEST(b_e2e_bpath_recharge_skips_actor_opponent_acts);
     // P0 behavioral tests
     RUN_TEST(p0_protect_blocks_second_actor_a_path);
     RUN_TEST(p0_endure_survives_lethal_a_path_hit);

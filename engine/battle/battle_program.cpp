@@ -85,7 +85,7 @@ MoveExecutionResult Battle::execute_program(BattlePokemon& user, BattlePokemon& 
     if (user.recharge_turns > 0) {
         --user.recharge_turns;
         message(md.name + " — must recharge!");
-        return MoveExecutionResult::UnsupportedSemantic;
+        return MoveExecutionResult::ActorSkipped;  // Crystal: actor skipped, battle turn continues
     }
 
     // ── PP deduction (same as A path) ────────────────────────────────────────
