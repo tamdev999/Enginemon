@@ -970,7 +970,6 @@ TEST(p_rt_drain_exact_formula) {
     static const DrainCase CASES[] = {
         { 71,  "ABSORB",     10, 5  },
         { 72,  "MEGA_DRAIN", 19, 9  },
-        {141,  "LEECH_LIFE", 10, 5  },
         {202,  "GIGA_DRAIN", 28, 14 },
     };
 
@@ -1019,6 +1018,74 @@ TEST(p_rt_drain_exact_formula) {
                   << " (exp=" << heal_expected << ")"
                   << (ok ? " OK" : " MISMATCH");
     }
+    // -- Leech Life (id=141, BUG/Physical): separate fixture with attack != special_attack ------
+    // Crystal Gen II type split: BUG byte=7 < SPECIAL_TYPES_START=0x13 -> Physical.
+    // To prove Physical (not Special) is used, attack differs from special_attack.
+    // player: attack=100, special_attack=60, defense=60, speed=200.
+    // target: defense=60, special_defense=60, hp=5000 (no overkill), speed=1.
+    // Crystal Physical formula (no STAB, neutral type, no crit, variation=0xFF):
+    //   ((2*50/5+2)*20*100/60)/50+2 = (22*20*100/60)/50+2 = (44000/60)/50+2 = 733/50+2 = 16
+    // Hypothetical Special (wrong): (22*20*60/60)/50+2 = 440/50+2 = 10  (differs -> discriminating)
+    // Expected heal = max(1, 16>>1) = 8. Player 150/300 -> final 158.
+    {
+        const auto ll_id = static_cast<enginemon::MoveId>(141);
+        const enginemon::MoveData* ll_md = s_rt_reg->get(ll_id);
+        bool ll_fixture_ok = true;
+        if (!ll_md) {
+            rt_record(141, "LEECH_LIFE", false, "fixture: not in registry");
+            ++mismatch; ll_fixture_ok = false;
+        } else if (!ll_md->effect_desc.has_drain) {
+            rt_record(141, "LEECH_LIFE", false, "fixture: has_drain not set");
+            ++mismatch; ll_fixture_ok = false;
+        } else if (ll_md->category != enginemon::MoveCategory::Physical) {
+            std::string msg = "fixture: not Physical, got=" + std::to_string((int)ll_md->category);
+            rt_record(141, "LEECH_LIFE", false, msg.c_str());
+            ++mismatch; ll_fixture_ok = false;
+        } else if (ll_md->power != 20) {
+            std::string msg = "fixture: power=" + std::to_string(ll_md->power) + " expected 20";
+            rt_record(141, "LEECH_LIFE", false, msg.c_str());
+            ++mismatch; ll_fixture_ok = false;
+        }
+        if (ll_fixture_ok) {
+            enginemon::Party ll_party;
+            enginemon::Pokemon ll_mon{}; ll_mon.species=1; ll_mon.level=50;
+            ll_mon.current_hp=150; ll_mon.max_hp=300; ll_mon.friendship=200;
+            ll_party.add(ll_mon);
+            auto ll_reg  = rt_reg();
+            enginemon::Battle ll_battle(enginemon::BattleType::Wild, ll_party, ll_reg, s_rt_rules);
+            auto ll_pbp = rt_bp_partial(ll_id, 150, 300, 200);
+            ll_pbp.stats.attack          = 100; ll_pbp.base_stats.attack          = 100;
+            ll_pbp.stats.special_attack  =  60; ll_pbp.base_stats.special_attack  =  60;
+            ll_pbp.stats.defense         =  60; ll_pbp.base_stats.defense         =  60;
+            ll_pbp.stats.special_defense =  60; ll_pbp.base_stats.special_defense =  60;
+            auto ll_obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+            ll_obp.stats.defense         =  60; ll_obp.base_stats.defense         =  60;
+            ll_obp.stats.special_defense =  60; ll_obp.base_stats.special_defense =  60;
+            ll_battle.player_pokemon()   = ll_pbp;
+            ll_battle.opponent_pokemon() = ll_obp;
+            size_t ll_idx = 0;
+            ll_battle.set_rng_callback([&rng_nocrit, &ll_idx]()->uint32_t {
+                return ll_idx < rng_nocrit.size() ? rng_nocrit[ll_idx++] : 0xFFu;
+            });
+            ll_battle.set_player_action(enginemon::ActionFight{0, 0});
+            ll_battle.set_opponent_action(enginemon::ActionFight{0, 0});
+            ll_battle.execute_turn();
+            const int32_t ll_dmg  = 5000 - (int32_t)ll_battle.opponent_pokemon().stats.hp;
+            const int32_t ll_heal = (int32_t)ll_battle.player_pokemon().stats.hp - 150;
+            const int32_t ll_ed = 16, ll_eh = 8;
+            bool ll_ok = (ll_dmg == ll_ed) && (ll_heal == ll_eh);
+            std::string ll_div;
+            if (ll_dmg  != ll_ed) ll_div  = "dmg: exp=16 got=" + std::to_string(ll_dmg);
+            if (ll_heal != ll_eh) ll_div += std::string(ll_div.empty()?"":"  ") +
+                                             "heal: exp=8 got=" + std::to_string(ll_heal);
+            rt_record(141, "LEECH_LIFE", ll_ok, ll_ok ? "" : ll_div.c_str());
+            if (ll_ok) ++match; else ++mismatch;
+            std::cout << "\n    LEECH_LIFE(Phys): dmg=" << ll_dmg
+                      << "(exp=16,hyp.spec=10) heal=" << ll_heal
+                      << "(exp=8)" << (ll_ok ? " OK" : " MISMATCH");
+        }
+    }
+
 
     // ── Clamp case: Giga Drain with player at 297/300 ──────────────────────────
     // heal=14 > missing=3 → must clamp to max_hp=300, final HP == 300.
