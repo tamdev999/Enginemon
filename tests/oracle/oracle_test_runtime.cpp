@@ -1469,9 +1469,9 @@ TEST(p_rt_branch_hyper_beam_recharge) {
     ASSERT_NE(hb_id, enginemon::MOVE_NONE);
     if (hb_id==enginemon::MOVE_NONE) return;
 
-    // Crystal order: crit(pos0) -> var(pos1) -> acc(skip for acc=0xFF)
-    // Hyper Beam acc=0xFF: crit(0x00=CRIT), var(0xFF accepted), acc=skip -> damage
-    std::vector<uint8_t> rng{0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    // Crystal order: crit(pos0) -> var(pos1) -> acc(pos2)
+    // Hyper Beam acc=90: crit(0x00=CRIT), var(0xFF accepted), acc(0x00<90=HIT) -> damage
+    std::vector<uint8_t> rng{0x00,0xFF,0x00,0xFF,0xFF,0xFF,0xFF,0xFF};
     // Turn 1: damage + recharge_turns=1 set (production uses raw field, not volatile)
     auto t1=rt_turn(hb_id,rng);
     bool dealt=(t1.opp_hp<300);
