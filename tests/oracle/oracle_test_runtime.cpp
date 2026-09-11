@@ -432,8 +432,10 @@ static void rt_record(uint16_t id, const char* name, bool match, const char* div
 // ============================================================================
 TEST(p_rt_sweep_damage) {
     if (!rt_init_once()) { ASSERT_TRUE(false); return; }
-    // RNG: [0]=player-first, [1..]=0xFF for crit/var/secondary
-    std::vector<uint8_t> rng{0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    // RNG order (Crystal): crit(pos0) -> variation(pos1) -> accuracy(pos2)
+    // {0x11=no crit (>=17), 0xFF=var accepted, 0x00=acc hit, ...}
+    // 0x11 also serves as acc hit for B-path moves (0x11=17 < any reasonable accuracy).
+    std::vector<uint8_t> rng{0x11,0xFF,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
     int match=0, mismatch=0;
     // Effects that must deal damage on one turn (player goes first, opp_hp=300)
     static const uint8_t DAM_EFFS[] = {
@@ -692,7 +694,7 @@ TEST(p_rt_sweep_constant_damage) {
 // ============================================================================
 TEST(p_rt_sweep_recoil) {
     if (!rt_init_once()) { ASSERT_TRUE(false); return; }
-    std::vector<uint8_t> rng{0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    std::vector<uint8_t> rng{0x11,0xFF,0x00,0xFF,0xFF,0xFF,0xFF,0xFF};
     int match=0, mismatch=0;
     for (const auto& m : kM) {
         if (m.eff!=EF_REC) continue;
@@ -940,9 +942,15 @@ TEST(p_rt_sweep_secondary_effect) {
         if (!st) continue;
         // Use opp_hp=5000 so the opponent survives the hit even with crit+STAB (def=1).
         // Without survival, target.is_fainted() guards the secondary check.
-        // rng: [0]=acc(0x00=hit), [1]=crit(0x00=crit, but doubles dmg not KO with 5000 HP),
-        //      [2]=var(0xFF exits), [3]=secondary_roll(0x00<effect_chance=fire)
-        std::vector<uint8_t> rng{0x00,0x00,0xFF,st->expect_rng,0xFF,0xFF,0xFF,0xFF};
+        // RNG layout depends on move accuracy:
+        //   acc=0xFF: crit(0x11) -> var(0xFF) -> secondary(st->expect_rng) -> thaw_guard(0xFF)
+        //   acc<0xFF: crit(0x11) -> var(0xFF) -> acc(0x00) -> secondary(st->expect_rng) -> thaw_guard(0xFF)
+        // thaw_guard=0xFF prevents natural thaw from clearing Freeze the same EOT.
+        const enginemon::MoveData* smdata = s_rt_reg->get(static_cast<enginemon::MoveId>(m.id));
+        const bool acc_is_0xFF = (smdata && smdata->accuracy == 0xFF);
+        const std::vector<uint8_t> rng = acc_is_0xFF
+            ? std::vector<uint8_t>{0x11,0xFF,st->expect_rng,0xFF,0xFF,0xFF,0xFF,0xFF}
+            : std::vector<uint8_t>{0x11,0xFF,0x00,st->expect_rng,0xFF,0xFF,0xFF,0xFF};
         auto mid = static_cast<enginemon::MoveId>(m.id);
         auto t = rt_turn(mid, rng, 300, 5000);
         if (!t.valid) { rt_record(m.id,m.name,false,"not compiled"); ++mismatch; continue; }
@@ -1035,7 +1043,8 @@ TEST(p_rt_branch_jump_kick_hit_and_miss) {
 
         // Branch A: Hit
         {
-            std::vector<uint8_t> rng{0x00,0x00,0xFF,0xFF,0xFF,0xFF};
+            // Crystal order: crit(0x00=crit) -> var(0xFF accepted) -> acc(0x00<0xF2=hit)
+            std::vector<uint8_t> rng{0x00,0xFF,0x00,0xFF,0xFF,0xFF};
             auto t=rt_turn(jk_id,rng);
             bool dealt=(t.opp_hp<300);
             rt_record(jkm.id,"JUMP_KICK_HIT",dealt,dealt?"":"hit: no damage");
@@ -1279,7 +1288,10 @@ TEST(p_rt_branch_snore_sleep_required) {
 // ============================================================================
 TEST(p_rt_sweep_remaining_251) {
     if (!rt_init_once()) { ASSERT_TRUE(false); return; }
-    std::vector<uint8_t> rng{0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    // RNG order (Crystal): crit(pos0) -> variation(pos1) -> accuracy(pos2)
+    // {0x11=no crit, 0xFF=var accepted, 0x00=acc hit for A-path acc<0xFF, ...}
+    // 0x11 also serves as acc hit for B-path moves (17 < any reasonable accuracy).
+    std::vector<uint8_t> rng{0x11,0xFF,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
     int match=0, mismatch=0;
 
     // Track which moves were already covered by other tests
@@ -1457,8 +1469,9 @@ TEST(p_rt_branch_hyper_beam_recharge) {
     ASSERT_NE(hb_id, enginemon::MOVE_NONE);
     if (hb_id==enginemon::MOVE_NONE) return;
 
+    // Crystal order: crit(pos0) -> var(pos1) -> acc(skip for acc=0xFF)
+    // Hyper Beam acc=0xFF: crit(0x00=CRIT), var(0xFF accepted), acc=skip -> damage
     std::vector<uint8_t> rng{0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-
     // Turn 1: damage + recharge_turns=1 set (production uses raw field, not volatile)
     auto t1=rt_turn(hb_id,rng);
     bool dealt=(t1.opp_hp<300);
@@ -1499,11 +1512,11 @@ TEST(p_rt_branch_present_variable) {
 // Diagnoses ROOT_8: traces exact RNG byte consumption for Body Slam (id=34,
 // EF_PARHIT, effect_chance=76). Prints byte positions for each phase.
 // Source: SuiCune body_slam.c; A-path execute_move secondary effect.
-// RNG sequence in A-path with accuracy != 0xFF:
-//   [0] = accuracy roll
-//   [1] = crit roll
-//   [2] = variation (rotation, must be >= 0xD9; loops if not)
-//   [3] = secondary effect roll (fires if < effect_chance)
+// RNG sequence in A-path (Crystal order), Body Slam acc=0xFF:
+//   [0] = crit roll
+//   [1] = variation (rotation, must be >= 0xD9; loops if not)
+//   acc=0xFF -> skipped (no accuracy byte)
+//   [2] = secondary effect roll (fires if < effect_chance=76)
 // ============================================================================
 TEST(p_rt_secondary_rng_diagnostic) {
     if (!rt_init_once()) { ASSERT_TRUE(false); return; }
@@ -1525,9 +1538,9 @@ TEST(p_rt_secondary_rng_diagnostic) {
 
     // Instrument RNG to trace exactly which bytes are consumed and at what position
     std::vector<uint8_t> rng_trace;
-    std::vector<uint8_t> scripted = {0x00,0x00,0xFF,0x00,0xFF,0xFF,0xFF,0xFF};
-    // [0]=accuracy=0x00 (hit), [1]=crit=0x00 (crit, 0<17), [2]=var=0xFF (exits),
-    // [3]=secondary=0x00 (<76, should fire paralysis)
+    std::vector<uint8_t> scripted = {0x00,0xFF,0x00,0xFF,0xFF,0xFF,0xFF,0xFF};
+    // Crystal order: [0]=crit=0x00 (crit, 0<17), [1]=var=0xFF (exits),
+    // acc=0xFF -> skipped, [2]=secondary=0x00 (<76, should fire paralysis)
     size_t idx=0;
 
     enginemon::Party party;
@@ -1551,9 +1564,8 @@ TEST(p_rt_secondary_rng_diagnostic) {
     int16_t opp_hp_after = opp.stats.hp;
 
     std::cout << "    RNG bytes consumed (" << rng_trace.size() << "):\n";
-    const char* labels[] = {"turn-order/wild-AI","accuracy","crit","variation","secondary","extra","extra","extra"};
-    // Wild: no turn-order byte (speeds differ). No wild-AI byte (opp has no moves).
-    // So: [0]=accuracy, [1]=crit, [2]=variation, [3]=secondary
+    const char* labels[] = {"crit","variation","secondary","extra","extra","extra","extra","extra"};
+    // Crystal order (Body Slam acc=0xFF): [0]=crit, [1]=variation, acc skipped, [2]=secondary
     for (size_t i=0; i<rng_trace.size(); ++i) {
         const char* lbl = i < 8 ? labels[i] : "extra";
         std::cout << "      [" << i << "]=0x" << std::hex << (int)rng_trace[i] << std::dec
@@ -1561,8 +1573,8 @@ TEST(p_rt_secondary_rng_diagnostic) {
     }
     std::cout << "    opp_hp_after=" << opp_hp_after << "  paralysed=" << paralysed << "\n";
     std::cout << "    effect_chance=" << (int)md->effect_chance
-              << "  secondary_byte=" << (rng_trace.size()>3?(int)rng_trace[3]:-1)
-              << "  fires_expected=" << (rng_trace.size()>3 && rng_trace[3]<md->effect_chance) << "\n";
+              << "  secondary_byte=" << (rng_trace.size()>2?(int)rng_trace[2]:-1)
+              << "  fires_expected=" << (rng_trace.size()>2 && rng_trace[2]<md->effect_chance) << "\n";
 
     // Now record for coverage (Body Slam is already covered by sweep_secondary_effect,
     // but this confirms secondary fires)
@@ -1575,8 +1587,11 @@ TEST(p_rt_secondary_rng_diagnostic) {
 // ============================================================================
 // TEST: p_rt_secondary_root8_all
 // Re-runs all 23 ROOT_8 secondary-effect moves with corrected RNG sequence.
-// Uses {0x00, 0x00, 0xFF, 0x00, ...}:
-//   [0]=accuracy(hit), [1]=crit(0<17), [2]=variation(0xFF exits), [3]=secondary(0x00<chance)
+// Crystal order: crit(pos0) -> variation(pos1) -> accuracy(pos2) -> secondary(pos3)
+// Uses {0x00, 0xFF, 0x00, 0x00, ...}:
+//   [0]=crit(0x00<17, crit), [1]=variation(0xFF exits), [2]=acc(0x00=hit), [3]=secondary(0x00<chance)
+// For acc=0xFF moves: acc byte at [2] is skipped; secondary lands at [2].
+// opp_hp=5000 so the opponent survives the hit regardless of crit (defense=1).
 // ============================================================================
 TEST(p_rt_secondary_root8_all) {
     if (!rt_init_once()) { ASSERT_TRUE(false); return; }
@@ -1585,9 +1600,10 @@ TEST(p_rt_secondary_root8_all) {
         27,29,34,40,51,67,122,123,124,125,132,146,157,158,
         188,189,211,223,231,232,246,247,249, 0xFFFF
     };
-    // Correct RNG: acc=0x00(hit), crit=0x00(crit), var=0xFF(exits), sec=0x00(fires)
+    // Correct RNG: crit=0x11(no crit), var=0xFF(exits), acc=0x00(hit), sec=0x00(fires)
+    // Using no-crit (0x11) to avoid KO-before-secondary on targets with defense=1.
     // opp_hp=5000 so the opponent survives the hit regardless of crit+STAB (defense=1).
-    std::vector<uint8_t> rng{0x00,0x00,0xFF,0x00,0xFF,0xFF,0xFF,0xFF};
+    std::vector<uint8_t> rng{0x11,0xFF,0x00,0x00,0xFF,0xFF,0xFF,0xFF};
     int match=0, mismatch=0;
     for (int i=0; ROOT8[i]!=0xFFFF; ++i) {
         uint16_t rid = ROOT8[i];

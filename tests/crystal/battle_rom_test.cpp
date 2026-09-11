@@ -9912,6 +9912,88 @@ static uint32_t run_oracle_bp(uint8_t acc_byte,
 
 } // end anonymous namespace (oracle helpers)
 
+// ── Additional oracle helper: real-move + BrightPowder (no frozen-registry issue) ──────────
+namespace {
+
+// Builds a full registry: all 251 real stock moves (from rng_oracle_shared)
+// plus real ROM item data. Populates BEFORE freeze.
+// Returns nullopt if ROM or reg not available.
+static std::optional<enginemon::Registries> make_oracle_item_reg() {
+    auto& s = rng_oracle_shared();
+    if (!s.ok || !g_rom || !g_profile) return std::nullopt;
+
+    auto item_result = crystal::extract_all_items(*g_rom, *g_profile);
+    if (!item_result.success) return std::nullopt;
+
+    crystal::PackageWriter w;
+    w.set_source_rom(std::string(40, 'a'), "oracle_item");
+    w.add_item_data(item_result.items);
+    auto pkg = std::filesystem::temp_directory_path() / "oracle_item_reg.emon";
+    if (!w.write(pkg)) return std::nullopt;
+    auto rdr = enginemon::PackageReader::open(pkg);
+    if (!rdr) { std::filesystem::remove(pkg); return std::nullopt; }
+    auto item_reg = rdr->load_item_registry();
+    std::filesystem::remove(pkg);
+    if (!item_reg) return std::nullopt;
+
+    // Build registries: types + species + all 251 real moves + real items — all before freeze
+    enginemon::Registries reg;
+    for (uint8_t t = 0; t < 20; ++t) {
+        enginemon::TypeData td; td.id = t; td.name = "T";
+        reg.types.register_entry(t, td);
+        for (uint8_t u = 0; u < 20; ++u) reg.type_chart.set_effectiveness(t, u, 10);
+    }
+    enginemon::SpeciesData sp{}; sp.id = 1; sp.name = "T"; sp.type1 = 0; sp.type2 = 0;
+    sp.base_stats = {50,60,55,55,50,50}; sp.catch_rate = 45; sp.base_exp = 64; sp.base_friendship = 70;
+    reg.species.register_entry(1, sp);
+    for (const auto& [id, md] : *s.reg_opt)
+        reg.moves.register_entry(id, md);
+    for (const auto& [id, it] : *item_reg)
+        reg.items.register_entry(id, it);
+    reg.freeze_all();
+    return reg;
+}
+
+// Run one turn with a real stock move and optional BrightPowder on opponent.
+// Uses the full oracle registry (real moves + real items).
+static uint32_t run_oracle_real_bp(enginemon::MoveId mid,
+                                    const std::vector<uint8_t>& script,
+                                    bool opp_has_bp)
+{
+    static std::optional<enginemon::Registries> s_reg = make_oracle_item_reg();
+    if (!s_reg) return 0;
+
+    enginemon::BattleRules rules = make_rules_b();
+    enginemon::Party party;
+    enginemon::Pokemon pmon{}; pmon.species = 1; pmon.level = 50;
+    pmon.current_hp = pmon.max_hp = 300; pmon.friendship = 200;
+    party.add(pmon);
+
+    enginemon::Battle battle(enginemon::BattleType::Wild, party, *s_reg, rules);
+
+    auto pbp = make_bp_b(mid, 300);
+    pbp.stats.speed = 200; pbp.base_stats.speed = 200;
+
+    auto obp = make_bp_b(enginemon::MOVE_NONE, 400);
+    obp.stats.speed = 1; obp.base_stats.speed = 1;
+    if (opp_has_bp) obp.held_item = ItemId::BRIGHTPOWDER;
+
+    battle.player_pokemon()   = pbp;
+    battle.opponent_pokemon() = obp;
+
+    uint32_t calls = 0; size_t idx = 0;
+    battle.set_rng_callback([&]() -> uint32_t {
+        ++calls;
+        return (idx < script.size()) ? script[idx++] : uint32_t{0xFF};
+    });
+    battle.set_player_action(enginemon::ActionFight{0, 0});
+    battle.set_opponent_action(enginemon::ActionFight{0, 0});
+    battle.execute_turn();
+    return calls;
+}
+
+} // end anonymous namespace (oracle real-bp helper)
+
 // ── Test 1: crit@pos0, variation@pos1, accuracy@pos2 ─────────────────────────
 //
 // Fixture: TACKLE id=33, EFFECT_NORMAL_HIT, raw_acc=0xF2=242.
@@ -10115,6 +10197,7 @@ TEST(p_rng_oracle_effect_always_hit_no_bp) {
         const enginemon::MoveData* md = s.reg_opt->get(static_cast<enginemon::MoveId>(129));
         ASSERT_TRUE(md != nullptr); if (!md) return;
         ASSERT_EQ(md->accuracy, uint8_t{0xFF}); // 100 percent stored in ROM
+        ASSERT_TRUE(md->effect_desc.is_always_hit); // compiled semantic: EFFECT_ALWAYS_HIT
         ASSERT_TRUE(md->effect_desc.is_supported || md->has_program);
     }
     // Both Pound and Swift: no BP -> 2 calls each (crit + variation, no accuracy byte)
@@ -10152,26 +10235,40 @@ TEST(p_rng_oracle_brightpowder_reduces_ordinary_0xff) {
 }
 
 TEST(p_rng_oracle_always_hit_brightpowder_mismatch) {
-    // Swift id=129 (EFFECT_ALWAYS_HIT) + BrightPowder:
-    //   Crystal expectation: 2 calls (ALWAYS_HIT exits before BrightPowder; no acc RNG).
-    //   Enginemon: 3 calls (no ALWAYS_HIT gate; BP reduces acc to 235, acc RNG consumed).
-    //   *** THIS TEST IS EXPECTED RED — DOCUMENTS PRODUCTION MISMATCH ***
+    // Fixture: SWIFT id=129, EFFECT_ALWAYS_HIT (raw crystal effect = 17).
+    //   Source: constants/move_effect_constants.asm: EFFECT_ALWAYS_HIT = 17
+    //   Crystal: CheckHit exits cp EFFECT_ALWAYS_HIT; ret z BEFORE BrightPowder path.
+    //   Enginemon: is_always_hit=true gate added in execute_move; BrightPowder bypassed.
     //
-    // We use acc=0xFF (the actual compiled value for Swift) via run_oracle_bp.
-    // The test asserts Crystal's 2-call expectation.
-    // If Enginemon ever gains a proper ALWAYS_HIT gate, this will turn green.
-    const uint32_t calls_no_bp = run_oracle_bp(0xFF, {0x11, 0xFF, 0xAA}, false);
-    const uint32_t calls_bp    = run_oracle_bp(0xFF, {0x11, 0xFF, 0x00, 0xAA}, true);
+    // Assert fixture metadata from compiled registry:
+    auto& s = rng_oracle_shared();
+    ASSERT_TRUE(s.ok); if (!s.ok) return;
+    {
+        const enginemon::MoveData* md = s.reg_opt->get(static_cast<enginemon::MoveId>(129));
+        ASSERT_TRUE(md != nullptr); if (!md) return;
+        ASSERT_EQ(md->accuracy, uint8_t{0xFF});          // 100 percent = 0xFF
+        ASSERT_TRUE(md->effect_desc.is_always_hit);       // EFFECT_ALWAYS_HIT semantic flag
+        ASSERT_TRUE(md->effect_desc.is_supported || md->has_program);
+    }
 
-    std::cout << "\n    p_rng_oracle_always_hit_brightpowder_mismatch:"
+    // Crystal expectation:
+    //   No BrightPowder: 2 calls (crit + variation; is_always_hit bypasses acc block entirely)
+    //   With BrightPowder: still 2 calls (ALWAYS_HIT exits BEFORE BrightPowder path)
+    //
+    // If Enginemon's is_always_hit gate is correct: both = 2. Test passes.
+    // If the gate is broken (BP still forces acc RNG): bp = 3. Test fails.
+    const uint32_t calls_no_bp = run_oracle_real_bp(static_cast<enginemon::MoveId>(129),
+                                                     {0x11, 0xFF, 0xAA}, false);
+    const uint32_t calls_bp    = run_oracle_real_bp(static_cast<enginemon::MoveId>(129),
+                                                     {0x11, 0xFF, 0xAA}, true);
+
+    std::cout << "\n    p_rng_oracle_always_hit_brightpowder_mismatch: SWIFT id=129"
               << " no_bp=" << calls_no_bp << " bp=" << calls_bp
-              << " (Crystal: bp==2; mismatch if bp==3)\n";
+              << " (Crystal: both==2; is_always_hit gate)\n";
 
-    // no_bp must always be 2 (passes for both ordinary and always-hit)
+    // Crystal: ALWAYS_HIT bypasses BrightPowder -> no acc RNG in either case.
     ASSERT_EQ(calls_no_bp, uint32_t{2});
-    // Crystal: bp should also be 2 (ALWAYS_HIT bypasses BrightPowder).
-    // Enginemon: bp == 3 (no ALWAYS_HIT gate). This assertion is RED until fixed.
-    ASSERT_EQ(calls_bp, uint32_t{2});
+    ASSERT_EQ(calls_bp,    uint32_t{2});  // fails if is_always_hit gate broken
 }
 
 // ── Test 7: secondary proc — exact crit/var/acc/effectchance order ────────────
