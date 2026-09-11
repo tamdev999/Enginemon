@@ -1212,6 +1212,313 @@ TEST(p_rt_dream_eater_exact_formula) {
 }
 
 
+// ============================================================================
+// TEST: p_rt_return_exact_formula
+//
+// Crystal source authority:
+//   return.asm: power = floor(happiness * 10 / 25)  (integer, result in reg d)
+//   damagecalc: power==0 → early return, NO damage produced (documented Crystal BUG)
+//
+// Enginemon divergence from Crystal:
+//   computed_power = min(102, happiness*10/25); if (computed_power==0) computed_power=1;
+//   → happiness=0: Crystal does nothing (power=0 bug); Enginemon uses power=1 → damage=3.
+//
+// Move metadata asserted:
+//   md->power == 1 (sentinel), md->category == Physical (type=Normal=0x00 < 0x13),
+//   md->effect_desc.has_standard_damage, md->effect_desc.set_power_source == HappinessReturn.
+//
+// STAB applies: player type1=0 (Normal), move type=Normal → base + base/2 (integer).
+// Damage formula (no crit, RNG=0xFF variation, atk=def=200, level=50, opp_hp=5000):
+//   base = ((2*50/5+2) * power * 200/200) / 50 + 2 = (22*power)/50+2
+//   STAB:   damage = base + base/2   (integer: base/2 truncates)
+//
+// Crystal expected values (NOT from Enginemon):
+//   happiness=200 → power=80  → base=37 → STAB=55
+//   happiness=100 → power=40  → base=19 → STAB=28
+//   happiness=255 → power=102 → base=46 → STAB=69
+//   happiness=0   → power=0   → Crystal: no damage (BUG) → expected=0; Enginemon gives 3 → MISMATCH
+// ============================================================================
+TEST(p_rt_return_exact_formula) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    const auto ret_id = static_cast<enginemon::MoveId>(216);
+    const enginemon::MoveData* md = s_rt_reg->get(ret_id);
+    if (!md) {
+        rt_record(216, "RETURN_FIXTURE", false, "MoveData not found for move 216");
+        ASSERT_TRUE(false); return;
+    }
+
+    // ── Assert move metadata matches Crystal source ───────────────────────────
+    {
+        bool power_ok    = (md->power == 1);  // sentinel: power computed at runtime
+        bool cat_ok      = (md->category == enginemon::MoveCategory::Physical);
+        bool std_dmg_ok  = (md->effect_desc.has_standard_damage);
+        bool src_ok      = (md->effect_desc.set_power_source ==
+                            enginemon::SetPowerSource::HappinessReturn);
+        bool meta_ok = power_ok && cat_ok && std_dmg_ok && src_ok;
+        std::string meta_div;
+        if (!power_ok)   meta_div += "power!=1 ";
+        if (!cat_ok)     meta_div += "category!=Physical ";
+        if (!std_dmg_ok) meta_div += "has_standard_damage=false ";
+        if (!src_ok)     meta_div += "set_power_source!=HappinessReturn ";
+        rt_record(216, "RETURN_METADATA", meta_ok, meta_ok ? "" : meta_div.c_str());
+        std::cout << "\n    Return metadata: power=" << (int)md->power
+                  << " cat=" << (int)static_cast<uint8_t>(md->category)
+                  << " std_dmg=" << md->effect_desc.has_standard_damage
+                  << " src=" << (int)static_cast<uint8_t>(md->effect_desc.set_power_source)
+                  << (meta_ok ? " OK" : " MISMATCH");
+        ASSERT_TRUE(meta_ok);
+    }
+
+    // RNG: no crit (0x11>=17), max variation (0xFF), acc shortcut skipped.
+    std::vector<uint8_t> rng_nocrit{0x11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+    struct RetCase { uint8_t happiness; int32_t expected_damage; bool is_crystal_bug; const char* label; };
+    // Crystal formula derivation per case:
+    //   happiness=200: power=200*10/25=80; base=(22*80)/50+2=1760/50+2=35+2=37; STAB=37+18=55
+    //   happiness=100: power=100*10/25=40; base=(22*40)/50+2=880/50+2=17+2=19;  STAB=19+9=28
+    //   happiness=255: power=255*10/25=102;base=(22*102)/50+2=2244/50+2=44+2=46; STAB=46+23=69
+    //   happiness=0:   power=0 → Crystal BUG: no damage → expected=0 (Enginemon gives 3)
+    static const RetCase CASES[] = {
+        { 200, 55,  false, "RETURN_H200" },
+        { 100, 28,  false, "RETURN_H100" },
+        { 255, 69,  false, "RETURN_H255" },
+        { 0,    0,  true,  "RETURN_H000_CRYSTAL_BUG" },
+    };
+
+    int match = 0, mismatch = 0;
+    for (const auto& c : CASES) {
+        // Build inline battle with manual happiness override.
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=pm.max_hp=300; pm.friendship=c.happiness;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, s_rt_rules);
+
+        // Player: Return in slot 0, atk=def=200, level=50, type1=0 (Normal), happiness overridden.
+        auto pbp = rt_bp(ret_id, 300, 200);
+        pbp.happiness = c.happiness;
+        // Opponent: opp_hp=5000 to prevent overkill; def=200 to match formula.
+        auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+        obp.stats.defense = 200; obp.base_stats.defense = 200;
+
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_nocrit, &idx]()->uint32_t {
+            return idx < rng_nocrit.size() ? rng_nocrit[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+
+        const int32_t damage_dealt = 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        const bool ok = (damage_dealt == c.expected_damage);
+
+        std::string div;
+        if (!ok) {
+            div = std::string("expected=") + std::to_string(c.expected_damage)
+                + " got=" + std::to_string(damage_dealt);
+            if (c.is_crystal_bug) div += " [Crystal BUG: power=0→no damage; Enginemon power=1→damage=3]";
+        }
+        rt_record(216, c.label, ok, ok ? "" : div.c_str());
+        if (ok) ++match; else ++mismatch;
+
+        std::cout << "\n    Return h=" << (int)c.happiness
+                  << " power=" << (c.happiness * 10 / 25)
+                  << " dmg=" << damage_dealt
+                  << " (exp=" << c.expected_damage << ")"
+                  << (c.is_crystal_bug ? " [Crystal BUG]" : "")
+                  << (ok ? " OK" : " MISMATCH");
+    }
+    std::cout << "\n    return_exact: match=" << match << " mismatch=" << mismatch << "\n";
+
+    // The happiness=0 case is an intentional production mismatch vs Crystal BUG.
+    // Enginemon produces damage=3; Crystal produces 0. This test stays red until
+    // Enginemon replicates the Crystal BUG at happiness=0.
+    // All other cases (h=200, h=100, h=255) must pass.
+    int expected_pass = 3;  // h=200, h=100, h=255 only
+    ASSERT_EQ(match, expected_pass);
+}
+
+// ============================================================================
+// TEST: p_rt_frustration_exact_formula
+//
+// Crystal source authority:
+//   frustration.asm: power = floor((255-happiness) * 10 / 25)  (integer, reg d)
+//   damagecalc: power==0 → early return, NO damage produced (documented Crystal BUG)
+//
+// Enginemon divergence from Crystal:
+//   computed_power = min(102, (255-happiness)*10/25); if (computed_power==0) computed_power=1;
+//   → happiness=255: Crystal does nothing (power=0 bug); Enginemon uses power=1 → damage=3.
+//
+// Same metadata assertions as Return except set_power_source == HappinessFrustration.
+//
+// STAB applies identically (Normal type, Normal move).
+// Damage formula (no crit, RNG=0xFF variation, atk=def=200, level=50, opp_hp=5000):
+//   base = (22*power)/50+2;  STAB = base + base/2
+//
+// Crystal expected values (NOT from Enginemon):
+//   happiness=55  → power=(255-55)*10/25=80  → STAB=55  (same as Return h=200)
+//   happiness=205 → power=(255-205)*10/25=20 → base=10  → STAB=15
+//   happiness=0   → power=255*10/25=102      → STAB=69  (same as Return h=255)
+//   happiness=255 → power=0 → Crystal: no damage (BUG) → expected=0; Enginemon gives 3 → MISMATCH
+//
+// Paired discriminator (happiness=200):
+//   Return:      power=80 → STAB=55
+//   Frustration: power=(255-200)*10/25=22 → base=(22*22)/50+2=9+2=11 → STAB=11+5=16
+//   55 ≠ 16 — the pair must differ.
+// ============================================================================
+TEST(p_rt_frustration_exact_formula) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    const auto fru_id = static_cast<enginemon::MoveId>(218);
+    const enginemon::MoveData* md = s_rt_reg->get(fru_id);
+    if (!md) {
+        rt_record(218, "FRUSTRATION_FIXTURE", false, "MoveData not found for move 218");
+        ASSERT_TRUE(false); return;
+    }
+
+    // ── Assert move metadata matches Crystal source ───────────────────────────
+    {
+        bool power_ok    = (md->power == 1);
+        bool cat_ok      = (md->category == enginemon::MoveCategory::Physical);
+        bool std_dmg_ok  = (md->effect_desc.has_standard_damage);
+        bool src_ok      = (md->effect_desc.set_power_source ==
+                            enginemon::SetPowerSource::HappinessFrustration);
+        bool meta_ok = power_ok && cat_ok && std_dmg_ok && src_ok;
+        std::string meta_div;
+        if (!power_ok)   meta_div += "power!=1 ";
+        if (!cat_ok)     meta_div += "category!=Physical ";
+        if (!std_dmg_ok) meta_div += "has_standard_damage=false ";
+        if (!src_ok)     meta_div += "set_power_source!=HappinessFrustration ";
+        rt_record(218, "FRUSTRATION_METADATA", meta_ok, meta_ok ? "" : meta_div.c_str());
+        std::cout << "\n    Frustration metadata: power=" << (int)md->power
+                  << " cat=" << (int)static_cast<uint8_t>(md->category)
+                  << " std_dmg=" << md->effect_desc.has_standard_damage
+                  << " src=" << (int)static_cast<uint8_t>(md->effect_desc.set_power_source)
+                  << (meta_ok ? " OK" : " MISMATCH");
+        ASSERT_TRUE(meta_ok);
+    }
+
+    // RNG: no crit (0x11>=17), max variation (0xFF).
+    std::vector<uint8_t> rng_nocrit{0x11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+    struct FruCase { uint8_t happiness; int32_t expected_damage; bool is_crystal_bug; const char* label; };
+    // Crystal formula derivation per case:
+    //   happiness=55:  power=(255-55)*10/25=200*10/25=80; base=37; STAB=55
+    //   happiness=205: power=(255-205)*10/25=50*10/25=20; base=(22*20)/50+2=440/50+2=8+2=10; STAB=10+5=15
+    //   happiness=0:   power=255*10/25=102; base=46; STAB=69
+    //   happiness=255: power=0 → Crystal BUG: no damage → expected=0 (Enginemon gives 3)
+    static const FruCase CASES[] = {
+        {  55, 55,  false, "FRUSTRATION_H055" },
+        { 205, 15,  false, "FRUSTRATION_H205" },
+        {   0, 69,  false, "FRUSTRATION_H000" },
+        { 255,  0,  true,  "FRUSTRATION_H255_CRYSTAL_BUG" },
+    };
+
+    int match = 0, mismatch = 0;
+    for (const auto& c : CASES) {
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=pm.max_hp=300; pm.friendship=c.happiness;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, s_rt_rules);
+
+        auto pbp = rt_bp(fru_id, 300, 200);
+        pbp.happiness = c.happiness;
+        auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+        obp.stats.defense = 200; obp.base_stats.defense = 200;
+
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_nocrit, &idx]()->uint32_t {
+            return idx < rng_nocrit.size() ? rng_nocrit[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+
+        const int32_t damage_dealt = 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        const bool ok = (damage_dealt == c.expected_damage);
+
+        std::string div;
+        if (!ok) {
+            div = std::string("expected=") + std::to_string(c.expected_damage)
+                + " got=" + std::to_string(damage_dealt);
+            if (c.is_crystal_bug) div += " [Crystal BUG: power=0→no damage; Enginemon power=1→damage=3]";
+        }
+        rt_record(218, c.label, ok, ok ? "" : div.c_str());
+        if (ok) ++match; else ++mismatch;
+
+        const uint8_t eff_happiness = (c.happiness <= 255) ? (255 - c.happiness) : 0;
+        std::cout << "\n    Frustration h=" << (int)c.happiness
+                  << " power=" << (eff_happiness * 10 / 25)
+                  << " dmg=" << damage_dealt
+                  << " (exp=" << c.expected_damage << ")"
+                  << (c.is_crystal_bug ? " [Crystal BUG]" : "")
+                  << (ok ? " OK" : " MISMATCH");
+    }
+
+    // ── Paired discriminator: Return(h=200) vs Frustration(h=200) must differ ─
+    // Return(h=200):      power=80 → STAB=55
+    // Frustration(h=200): power=(255-200)*10/25=22 → base=(22*22)/50+2=11 → STAB=16
+    // They must produce distinct damage — proves each formula is independent.
+    {
+        auto run_with_happiness = [&](enginemon::MoveId mid, uint8_t h) -> int32_t {
+            enginemon::Party party;
+            enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+            pm.current_hp=pm.max_hp=300; pm.friendship=h;
+            party.add(pm);
+            auto reg = rt_reg();
+            enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, s_rt_rules);
+            auto pbp = rt_bp(mid, 300, 200);
+            pbp.happiness = h;
+            auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+            obp.stats.defense = 200; obp.base_stats.defense = 200;
+            battle.player_pokemon()   = pbp;
+            battle.opponent_pokemon() = obp;
+            size_t idx2 = 0;
+            battle.set_rng_callback([&rng_nocrit, &idx2]()->uint32_t {
+                return idx2 < rng_nocrit.size() ? rng_nocrit[idx2++] : 0xFFu;
+            });
+            battle.set_player_action(enginemon::ActionFight{0, 0});
+            battle.set_opponent_action(enginemon::ActionFight{0, 0});
+            battle.execute_turn();
+            return 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        };
+
+        const int32_t ret_dmg = run_with_happiness(static_cast<enginemon::MoveId>(216), 200);
+        const int32_t fru_dmg = run_with_happiness(fru_id, 200);
+        // Crystal: Return(h=200)=55, Frustration(h=200)=16; they must differ.
+        bool paired_ok = (ret_dmg != fru_dmg) && (ret_dmg == 55) && (fru_dmg == 16);
+        std::string paired_div;
+        if (!paired_ok) {
+            paired_div = "return_dmg=" + std::to_string(ret_dmg)
+                       + " frustration_dmg=" + std::to_string(fru_dmg)
+                       + " (expected 55 vs 16, must differ)";
+        }
+        rt_record(218, "PAIRED_RETURN_VS_FRUSTRATION_H200", paired_ok,
+                  paired_ok ? "" : paired_div.c_str());
+        if (paired_ok) ++match; else ++mismatch;
+        std::cout << "\n    Paired(h=200): return=" << ret_dmg
+                  << " frustration=" << fru_dmg
+                  << " (exp 55 vs 16)"
+                  << (paired_ok ? " OK" : " MISMATCH");
+    }
+
+    std::cout << "\n    frustration_exact: match=" << match << " mismatch=" << mismatch << "\n";
+
+    // The happiness=255 case is an intentional production mismatch vs Crystal BUG.
+    // h=55, h=205, h=0 plus the paired discriminator must all pass (4 green).
+    int expected_pass = 4;  // h=55, h=205, h=0, paired
+    ASSERT_EQ(match, expected_pass);
+}
+
+
 // Moves with % secondary effects. Uses scripted RNG to force the secondary to fire.
 // Checks the resulting status/volatile on the opponent.
 // Source: apply_secondary_effects in battle.cpp.

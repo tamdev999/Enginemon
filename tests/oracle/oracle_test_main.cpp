@@ -143,6 +143,8 @@ void test_p_rt_sweep_multi_hit();
 void test_p_rt_sweep_drain();
 void test_p_rt_drain_exact_formula();
 void test_p_rt_dream_eater_exact_formula();
+void test_p_rt_return_exact_formula();
+void test_p_rt_frustration_exact_formula();
 void test_p_rt_sweep_secondary_effect();
 void test_p_rt_branch_belly_drum_vanilla_bug();
 void test_p_rt_branch_jump_kick_hit_and_miss();
@@ -475,6 +477,8 @@ int main(int argc, char* argv[]) {
         RUN_TEST(p_rt_sweep_drain);
         RUN_TEST(p_rt_drain_exact_formula);
         RUN_TEST(p_rt_dream_eater_exact_formula);
+        RUN_TEST(p_rt_return_exact_formula);
+        RUN_TEST(p_rt_frustration_exact_formula);
         RUN_TEST(p_rt_sweep_secondary_effect);
         RUN_TEST(p_rt_branch_belly_drum_vanilla_bug);
         RUN_TEST(p_rt_branch_jump_kick_hit_and_miss);
