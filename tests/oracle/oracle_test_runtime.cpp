@@ -4257,3 +4257,268 @@ TEST(p_rt_recovery_exact) {
 
     std::cout << "  p_rt_recovery_exact done\n";
 }
+
+// ============================================================================
+// TEST: p_rt_rest_e2e_real
+//
+// Real Rest id 156 — four-turn sequence through real Battle::execute_turn.
+// This is the TRUE Rest E2E oracle, distinct from the generic sleep-counter
+// regression (p_rt_recovery_exact section 4b which seeds status_turns=3 directly).
+//
+// Crystal source authority:
+//   effect_commands.asm BattleCommand_Heal — REST branch (line ~6033)
+//   effect_commands.asm hook_pre_move_check — sleep counter decrement (confirmed in
+//     engine/battle/battle_program.cpp which mirrors exact Crystal semantics)
+//   REST_SLEEP_TURNS EQU 2 -> stored byte = REST_SLEEP_TURNS + 1 = 3
+//
+// Test design:
+//   Player slot 0 = Rest (id 156)
+//   Player slot 1 = Scratch (id 10, power=40, acc=0xFF, guaranteed hit with RNG=0xFF)
+//   Opponent: MOVE_NONE, HP=300 (cannot faint before T4 assert)
+//   Player: start_hp=40, max_hp=100, init_status=Burn (existing non-sleep status)
+//   No RNG bytes allocated for sleep duration (Crystal uses fixed counter, 0 calls).
+//
+// Crystal expected chain (ALL expectations from Crystal source, NOT Enginemon):
+//
+//   T1 — player uses Rest (slot 0):
+//     Crystal: GetMaxHP -> hp=100, Burn cleared, status=Sleep, status_turns=3
+//     End-of-turn: player has Sleep -> no Burn chip. hp stays 100.
+//     Expected: player_hp==100, status==Sleep, status_turns==3, opp_hp==300
+//
+//   T2 — player attempts Scratch (slot 1):
+//     Crystal: counter 3->2, still asleep (>0), cannot act. Scratch does NOT fire.
+//     Expected: opp_hp==300 (no damage), status_turns==2
+//
+//   T3 — player attempts Scratch (slot 1):
+//     Crystal: counter 2->1, still asleep (>0), cannot act.
+//     Expected: opp_hp==300, status_turns==1
+//
+//   T4 — player attempts Scratch (slot 1):
+//     Crystal: counter 1->0, woke up (status cleared), falls through, CAN act.
+//     Scratch fires. Deals nonzero damage.
+//     Expected: status==None, status_turns==0, opp_hp<300
+//
+// KNOWN PRODUCTION MISMATCHES (all assertions kept RED):
+//   T1: Enginemon uses HalfMaxHP (hp=78 after half-heal and Burn chip), no sleep set
+//   T2: Enginemon player is Burn (not Sleep) -> hook allows acting -> opp_hp<300 (WRONG)
+//   T3: same as T2, player acts again
+//   T4: same (player has been acting all along; no meaningful distinction from T2-T3)
+//
+// Anti-fitting: all expected values derivable from Crystal source alone.
+// With Enginemon deleted, every expected value would remain identical.
+// ============================================================================
+TEST(p_rt_rest_e2e_real) {
+    if (!rt_init_once()) {
+        std::cerr << "  SKIP: RT oracle not initialized\n";
+        g_current_test_failed = true;
+        return;
+    }
+
+    const enginemon::MoveId rest_id    = 156;
+    const enginemon::MoveId scratch_id = 10;   // NormalHit, power=40, acc=0xFF
+
+    for (enginemon::MoveId mid : {rest_id, scratch_id}) {
+        if (!s_rt_reg->get(mid)) {
+            std::cerr << "  SKIP: rest_e2e move id=" << mid << " not in registry\n";
+            g_current_test_failed = true;
+            return;
+        }
+    }
+
+    std::cout << "\n=== p_rt_rest_e2e_real ===\n";
+
+    // ----------------------------------------------------------------
+    // Build persistent Battle for all 4 turns.
+    // Player: Rest in slot 0, Scratch in slot 1.
+    //         start_hp=40, max_hp=100, status=Burn (existing non-sleep status).
+    // Opponent: MOVE_NONE, HP=300. speed=1 so player always goes first.
+    // ----------------------------------------------------------------
+    const int16_t MAX_HP   = 100;
+    const int16_t START_HP = 40;
+
+    enginemon::BattleRules rules = s_rt_rules;
+    enginemon::Party party;
+    enginemon::Pokemon pm{};
+    pm.species=1; pm.level=50;
+    pm.current_hp=START_HP; pm.max_hp=MAX_HP; pm.friendship=200;
+    party.add(pm);
+    auto reg = rt_reg();
+    enginemon::Battle bat(enginemon::BattleType::Trainer, party, reg, rules);
+
+    const enginemon::MoveData* rest_md    = s_rt_reg->get(rest_id);
+    const enginemon::MoveData* scratch_md = s_rt_reg->get(scratch_id);
+
+    enginemon::BattlePokemon pbp{};
+    pbp.species=1; pbp.type1=0; pbp.type2=0; pbp.level=50;
+    pbp.stats.hp=START_HP; pbp.stats.max_hp=MAX_HP;
+    pbp.stats.attack=pbp.stats.defense=pbp.stats.speed=200;
+    pbp.stats.special_attack=pbp.stats.special_defense=60;
+    pbp.base_stats=pbp.stats; pbp.base_stats.hp=MAX_HP; pbp.base_stats.max_hp=MAX_HP;
+    pbp.happiness=200;
+    pbp.status = enginemon::Status::Burn;   // existing non-sleep status
+    pbp.status_turns = 0;
+    pbp.moves[0].move=rest_id;    pbp.moves[0].pp=pbp.moves[0].max_pp=(rest_md?rest_md->pp:10);
+    pbp.moves[1].move=scratch_id; pbp.moves[1].pp=pbp.moves[1].max_pp=(scratch_md?scratch_md->pp:10);
+
+    enginemon::BattlePokemon obp{};
+    obp.species=2; obp.type1=0; obp.type2=0; obp.level=50;
+    obp.stats.hp=obp.stats.max_hp=300;
+    obp.stats.attack=obp.stats.defense=obp.stats.speed=1;
+    obp.stats.special_attack=obp.stats.special_defense=1;
+    obp.base_stats=obp.stats;
+    obp.moves[0].move=enginemon::MOVE_NONE; obp.moves[0].pp=10;
+
+    bat.player_pokemon()  = pbp;
+    bat.opponent_pokemon()= obp;
+
+    // RNG: all 0xFF. No sleep-duration RNG consumed by Crystal (fixed counter).
+    // Scratch acc=0xFF means no accuracy byte needed; RNG is used for damage
+    // variation and crit check but exact values don't affect our assertions.
+    const std::vector<uint8_t> rng_ff = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+    // ================================================================
+    // TURN 1: player uses Rest (slot 0)
+    // Crystal: HP -> GetMaxHP=100, status=Sleep, counter=3, Burn cleared, 0 RNG for sleep
+    // ================================================================
+    {
+        size_t r=0;
+        bat.set_rng_callback([&rng_ff,&r]()->uint32_t{return r<rng_ff.size()?rng_ff[r++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{0,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+    }
+
+    const int16_t t1_hp     = bat.player_pokemon().stats.hp;
+    const auto    t1_status = bat.player_pokemon().status;
+    const int16_t t1_turns  = bat.player_pokemon().status_turns;
+    const int16_t t1_opp    = bat.opponent_pokemon().stats.hp;
+
+    // Crystal source: GetMaxHP -> hp=MAX_HP. No end-of-turn chip (Sleep clears Burn first).
+    // Opponent: MOVE_NONE, untouched = 300.
+    const int16_t exp_t1_hp    = MAX_HP;   // Crystal: full heal
+    const int16_t exp_t1_turns = 3;        // REST_SLEEP_TURNS + 1 = 3
+    const int16_t exp_t1_opp   = 300;
+
+    bool t1_hp_ok     = (t1_hp    == exp_t1_hp);
+    bool t1_sleep_ok  = (t1_status == enginemon::Status::Sleep);
+    bool t1_turns_ok  = (t1_turns  == exp_t1_turns);
+    bool t1_opp_ok    = (t1_opp   == exp_t1_opp);
+
+    rt_record(rest_id, "REST_E2E_T1_hp",     t1_hp_ok,
+              t1_hp_ok   ? "" : ("crystal="+std::to_string(exp_t1_hp)+" got="+std::to_string(t1_hp)).c_str());
+    rt_record(rest_id, "REST_E2E_T1_sleep",  t1_sleep_ok,
+              t1_sleep_ok? "" : ("crystal=Sleep got="+std::to_string((int)(uint8_t)t1_status)).c_str());
+    rt_record(rest_id, "REST_E2E_T1_turns3", t1_turns_ok,
+              t1_turns_ok? "" : ("crystal=3 got="+std::to_string(t1_turns)).c_str());
+    rt_record(rest_id, "REST_E2E_T1_opp",    t1_opp_ok,
+              t1_opp_ok  ? "" : ("opp_hp changed unexpectedly: got="+std::to_string(t1_opp)).c_str());
+
+    std::cout << "  T1 Rest:\n"
+              << "    hp: crystal=" << exp_t1_hp << " got=" << t1_hp
+              << (t1_hp_ok   ? " OK" : " MISMATCH") << "\n"
+              << "    sleep: " << (t1_sleep_ok ? "OK" : "MISMATCH(status="+std::to_string((int)(uint8_t)t1_status)+")") << "\n"
+              << "    turns: crystal=3 got=" << t1_turns << (t1_turns_ok ? " OK" : " MISMATCH") << "\n"
+              << "    opp_hp: " << t1_opp << (t1_opp_ok ? " OK" : " MISMATCH") << "\n";
+
+    // ================================================================
+    // TURN 2: player attempts Scratch (slot 1) — asleep, counter 3->2
+    // Crystal: hook_pre_move_check status==Sleep, turns=3->dec->2. Still >0. Cannot act.
+    // Expected: opp_hp==300, status_turns==2
+    // ================================================================
+    {
+        size_t r=0;
+        bat.set_rng_callback([&rng_ff,&r]()->uint32_t{return r<rng_ff.size()?rng_ff[r++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{1,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+    }
+
+    const int16_t t2_opp   = bat.opponent_pokemon().stats.hp;
+    const int16_t t2_turns = bat.player_pokemon().status_turns;
+
+    bool t2_cant_act = (t2_opp   == 300);
+    bool t2_turns_ok = (t2_turns == 2);
+
+    rt_record(rest_id, "REST_E2E_T2_cant_act",  t2_cant_act,
+              t2_cant_act? "" : ("player dealt damage T2 while counter should be 3->2; opp_hp="+std::to_string(t2_opp)).c_str());
+    rt_record(rest_id, "REST_E2E_T2_counter2",  t2_turns_ok,
+              t2_turns_ok? "" : ("crystal=2 got="+std::to_string(t2_turns)).c_str());
+
+    std::cout << "  T2 asleep(3->2):\n"
+              << "    cant_act: opp_hp=" << t2_opp
+              << (t2_cant_act ? " OK" : " MISMATCH(acted)") << "\n"
+              << "    turns: crystal=2 got=" << t2_turns << (t2_turns_ok ? " OK" : " MISMATCH") << "\n";
+
+    // ================================================================
+    // TURN 3: player attempts Scratch (slot 1) — asleep, counter 2->1
+    // Crystal: turns=2->dec->1. Still >0. Cannot act.
+    // Expected: opp_hp==300 (or whatever it was after T2, but still unchanged by player)
+    // ================================================================
+    {
+        size_t r=0;
+        bat.set_rng_callback([&rng_ff,&r]()->uint32_t{return r<rng_ff.size()?rng_ff[r++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{1,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+    }
+
+    const int16_t t3_opp   = bat.opponent_pokemon().stats.hp;
+    const int16_t t3_turns = bat.player_pokemon().status_turns;
+
+    // Crystal: opp still 300 (player can't act). Note: if T2 already caused
+    // a mismatch (player acted), opp_hp may be <300 here due to production bug.
+    // Oracle asserts Crystal truth: opp == 300.
+    bool t3_cant_act = (t3_opp   == 300);
+    bool t3_turns_ok = (t3_turns == 1);
+
+    rt_record(rest_id, "REST_E2E_T3_cant_act",  t3_cant_act,
+              t3_cant_act? "" : ("player dealt damage T3 while counter should be 2->1; opp_hp="+std::to_string(t3_opp)).c_str());
+    rt_record(rest_id, "REST_E2E_T3_counter1",  t3_turns_ok,
+              t3_turns_ok? "" : ("crystal=1 got="+std::to_string(t3_turns)).c_str());
+
+    std::cout << "  T3 asleep(2->1):\n"
+              << "    cant_act: opp_hp=" << t3_opp
+              << (t3_cant_act ? " OK" : " MISMATCH(acted)") << "\n"
+              << "    turns: crystal=1 got=" << t3_turns << (t3_turns_ok ? " OK" : " MISMATCH") << "\n";
+
+    // ================================================================
+    // TURN 4: player attempts Scratch (slot 1) — wake turn, counter 1->0
+    // Crystal: turns=1->dec->0. Woke up: status=None. Falls through to .not_asleep.
+    // Player CAN act. Scratch fires. opp_hp decreases.
+    // Expected: status==None, status_turns==0, opp_hp < 300
+    // ================================================================
+    {
+        size_t r=0;
+        bat.set_rng_callback([&rng_ff,&r]()->uint32_t{return r<rng_ff.size()?rng_ff[r++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{1,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+    }
+
+    const int16_t t4_opp    = bat.opponent_pokemon().stats.hp;
+    const auto    t4_status = bat.player_pokemon().status;
+    const int16_t t4_turns  = bat.player_pokemon().status_turns;
+
+    bool t4_woke   = (t4_status == enginemon::Status::None);
+    bool t4_acted  = (t4_opp   <  300);
+    bool t4_turns_ok = (t4_turns == 0);
+
+    rt_record(rest_id, "REST_E2E_T4_wake",     t4_woke,
+              t4_woke  ? "" : ("crystal=None got="+std::to_string((int)(uint8_t)t4_status)).c_str());
+    rt_record(rest_id, "REST_E2E_T4_acted",    t4_acted,
+              t4_acted ? "" : ("Scratch did not fire on wake turn; opp_hp="+std::to_string(t4_opp)).c_str());
+    rt_record(rest_id, "REST_E2E_T4_counter0", t4_turns_ok,
+              t4_turns_ok? "" : ("crystal=0 got="+std::to_string(t4_turns)).c_str());
+
+    std::cout << "  T4 wake+act(1->0):\n"
+              << "    wake: status=" << (int)(uint8_t)t4_status
+              << (t4_woke ? " OK" : " MISMATCH") << "\n"
+              << "    acted: opp_hp=" << t4_opp
+              << (t4_acted ? " OK" : " MISMATCH(did not act)") << "\n"
+              << "    turns: crystal=0 got=" << t4_turns << (t4_turns_ok ? " OK" : " MISMATCH") << "\n";
+
+    std::cout << "  Rest E2E summary: T1_sleep=" << t1_sleep_ok
+              << " T2_cant_act=" << t2_cant_act
+              << " T3_cant_act=" << t3_cant_act
+              << " T4_acted=" << t4_acted << "\n";
+}
