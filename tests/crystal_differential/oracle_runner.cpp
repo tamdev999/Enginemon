@@ -16,17 +16,63 @@
 //
 // --- RNG INTERCEPTION -------------------------------------------------------
 //   Crystal BattleRandom (00:2F9F) returns its result via a temporary store
-//   at wPredefHL+1 (0xCFB6). The stub writes the result there, restores the
-//   ROM bank, then reads it back before returning to the caller.
+//   at wPredefHL+1 (0xCFB6). The stub flow is:
+//     2FA8: LD (0xCFB6), A    -- write result from _BattleRandom
+//     2FAB: POP AF
+//     2FAC: RST $10            -- restore ROM bank (writes 0xFF9D, 0x2000)
+//     2FAD: LD A,(0xCFB6)     -- READ BACK the result  ← INTERCEPTION POINT
+//     2FB0: RET
 //
-//   Interception: GB_set_read_memory_callback intercepts the read from 0xCFB6.
-//   When addr==0xCFB6, the callback returns tape[idx++] instead of the real
-//   value. Crystal's caller receives the tape byte in A. This is transparent --
-//   no Crystal code is modified or bypassed; only the return value changes.
+//   Interception: execution callback fires when PC == 0x2FAD (the exact
+//   instruction that reads back the BattleRandom result). At that point:
+//     GB_write_memory(gb, 0xCFB6, tape[idx++])
+//   Then LD A,(0xCFB6) executes and naturally loads our tape byte into A.
 //
-//   The same tape is supplied to Enginemon's set_rng_callback.
-//   Tape exhaustion = HARNESS_ERROR. No RNG algorithm reimplementation.
-//   No move-specific RNG logic in this harness.
+//   This is the ONLY interception point for BattleRandom. Other code that
+//   reads 0xCFB6 (Predef at 0x2DA1, 0x2DB5) is unaffected because they
+//   fire at different PCs and we only intercept at PC == 0x2FAD.
+//
+//   Trace format: {index, byte, "BattleRandom", PC=0x2FAD}
+//   Tape exhaustion = HARNESS_ERROR.
+//
+// --- PRESENT FULL PATH ------------------------------------------------------
+//   Entry: BattleCommand_Present (0D:7874) -- entered directly, not via DoMove.
+//   BattleCommand_Present first calls BattleCommand_Stab to compute wTypeMatchup,
+//   then checks:
+//     [wTypeMatchup == 0]   → jp AnimateFailedMove  (type immune)
+//     [wAttackMissed != 0]  → jp AnimateFailedMove  (missed / failed)
+//   Then calls BattleRandom once for power/heal selection:
+//     byte < 0x66  → power 40 (wBattleAnimParam=0), call AnimateCurrentMoveEitherSide, ret
+//     byte < 0xB4  → power 80 (wBattleAnimParam=1), call AnimateCurrentMoveEitherSide, ret
+//     byte < 0xCC  → power 120 (wBattleAnimParam=2), call AnimateCurrentMoveEitherSide, ret
+//     byte == 0xFF/table end → heal (wBattleAnimParam=3), call AnimateCurrentMove,
+//                               ... hp restore logic ... jp EndMoveEffect
+//
+//   Since we enter at BattleCommand_Present directly (not DoMove), CheckHit and
+//   Critical are NOT run -- those are earlier commands in the DoMove script.
+//   DamageVariation IS called after Present returns to the DoMove script (damage
+//   path only); it runs via the script engine, not directly from Present.
+//   For the damage path we stop at AnimateCurrentMoveEitherSide (called inside
+//   Present, before ret). The tape only needs the Present power-selection byte
+//   plus the DamageVariation byte.
+//
+//   BattleRandom bytes consumed per path (entering at BattleCommand_Present):
+//     damage: 1 (Present power) -- AnimateCurrentMoveEitherSide is the sink
+//     heal:   1 (Present power = 0xFF/table-end sentinel)
+//     miss:   0 (wAttackMissed=1 set in fixture, Present branches before BattleRandom)
+//
+//   NOTE: DamageVariation (the next script command after Present ret) also
+//   consumes 1 byte, but it runs AFTER AnimateCurrentMoveEitherSide is called
+//   (our sink fires before DamageVariation executes). So DamageVariation byte
+//   is NOT needed in the tape when sinking at AnimateCurrentMoveEitherSide.
+//
+//   Sinks:
+//     AnimateCurrentMoveEitherSide (0D:7DE9) -- damage path
+//     AnimateCurrentMove           (0D:7E01) -- heal path (first call in heal block,
+//                                               before HP change logic runs; captured
+//                                               here to avoid animation engine loops
+//                                               on uninitialized graphics state)
+//     AnimateFailedMove            (0D:7E77) -- miss / immune path
 //
 // --- WALL-CLOCK TIMEOUT -----------------------------------------------------
 //   Each future has WALL_CLOCK_TIMEOUT_S seconds. On expiry an atomic stop
@@ -203,12 +249,14 @@ struct SymCache {
     Sym wInBattleTowerBattle;
     Sym wJohtoBadges;
     Sym AnimateCurrentMove;
-    // RNG (shared)
-    Sym wPredefHL;               // 0x00:CFB5 -- +1 = CFB6 = BattleRandom return path
-    Sym BattleRandom;            // 00:2F9F
-    // Present
-    Sym BattleCommand_Present;   // 0D:7874
-    Sym AnimateCurrentMoveEitherSide; // 0D:7DE9
+    // RNG (shared) -- BattleRandom result is read at PC=0x2FAD (fixed address in bank 0)
+    Sym BattleRandom;            // 00:2F9F -- entry of the stub; 0x2FAD is the result-read PC
+    // Present -- entry is BattleCommand_Present directly (not DoMove)
+    Sym DoMove;                  // 0D:402C -- kept for reference; not used as entry
+    Sym BattleCommand_Present;   // 0D:7874 -- direct entry for all Present cases
+    Sym AnimateCurrentMoveEitherSide; // 0D:7DE9 -- damage path sink (called inside Present, before ret)
+    Sym EndMoveEffect;           // 0D:52A3 -- heal path sink (jp at end of heal block)
+    Sym AnimateFailedMove;       // 0D:7E77 -- miss/immune path sink
     Sym wTypeMatchup;            // 01:D265
     Sym wAttackMissed;           // 00:C667
     Sym wBattleAnimParam;        // 00:C689
@@ -225,6 +273,24 @@ struct SymCache {
     Sym wEnemyMonType2;          // 01:D225
     Sym wCurPlayerMove;          // 00:C6E3
     Sym wCriticalHit;            // 00:C666
+    // DoMove extra fields
+    Sym wBattleMode;             // 01:D22D
+    Sym wBattleMonMoves;         // 00:C62E
+    Sym wBattleMonPP;            // 00:C634
+    Sym wCurMoveNum;             // 01:D0D5
+    Sym wTurnEnded;              // 00:C6B4
+    Sym wPlayerSubStatus3;       // 00:C66A
+    Sym wEnemySubStatus3;        // 00:C66F
+    Sym wCurBattleMon;           // 01:D0D4
+    Sym wBattleMonSpecies;       // 00:C62C
+    Sym wEnemyMonSpecies;        // 01:D206
+    Sym wBattleMonItem;          // 00:C62D
+    Sym wEnemyMonItem;           // 01:D207
+    Sym wPlayerMoveStruct;       // 00:C60F
+    Sym wPlayerTurnsTaken;       // 00:C6DD
+    Sym wEnemyTurnsTaken;        // 00:C6DC
+    Sym wBattlePlayerAction;     // 01:D0EC
+    Sym wBattleAction;           // 01:D430
 
     static std::string load(const std::string& sym_path, SymCache* out,
                              std::string* sym_sha_out = nullptr)
@@ -264,10 +330,12 @@ struct SymCache {
             {"wInBattleTowerBattle",           &out->wInBattleTowerBattle},
             {"wJohtoBadges",                   &out->wJohtoBadges},
             {"AnimateCurrentMove",             &out->AnimateCurrentMove},
-            {"wPredefHL",                      &out->wPredefHL},
             {"BattleRandom",                   &out->BattleRandom},
+            {"DoMove",                         &out->DoMove},
             {"BattleCommand_Present",          &out->BattleCommand_Present},
             {"AnimateCurrentMoveEitherSide",   &out->AnimateCurrentMoveEitherSide},
+            {"EndMoveEffect",                  &out->EndMoveEffect},
+            {"AnimateFailedMove",              &out->AnimateFailedMove},
             {"wTypeMatchup",                   &out->wTypeMatchup},
             {"wAttackMissed",                  &out->wAttackMissed},
             {"wBattleAnimParam",               &out->wBattleAnimParam},
@@ -284,6 +352,23 @@ struct SymCache {
             {"wEnemyMonType2",                 &out->wEnemyMonType2},
             {"wCurPlayerMove",                 &out->wCurPlayerMove},
             {"wCriticalHit",                   &out->wCriticalHit},
+            {"wBattleMode",                    &out->wBattleMode},
+            {"wBattleMonMoves",                &out->wBattleMonMoves},
+            {"wBattleMonPP",                   &out->wBattleMonPP},
+            {"wCurMoveNum",                    &out->wCurMoveNum},
+            {"wTurnEnded",                     &out->wTurnEnded},
+            {"wPlayerSubStatus3",              &out->wPlayerSubStatus3},
+            {"wEnemySubStatus3",               &out->wEnemySubStatus3},
+            {"wCurBattleMon",                  &out->wCurBattleMon},
+            {"wBattleMonSpecies",              &out->wBattleMonSpecies},
+            {"wEnemyMonSpecies",               &out->wEnemyMonSpecies},
+            {"wBattleMonItem",                 &out->wBattleMonItem},
+            {"wEnemyMonItem",                  &out->wEnemyMonItem},
+            {"wPlayerMoveStruct",              &out->wPlayerMoveStruct},
+            {"wPlayerTurnsTaken",              &out->wPlayerTurnsTaken},
+            {"wEnemyTurnsTaken",               &out->wEnemyTurnsTaken},
+            {"wBattlePlayerAction",            &out->wBattlePlayerAction},
+            {"wBattleAction",                  &out->wBattleAction},
         };
         for(const auto& r : required)
             if(!sym_get(sym_path,r.name,r.dst))
@@ -339,77 +424,88 @@ static uint32_t sb_rgb_nop(GB_gameboy_t*, uint8_t r, uint8_t g, uint8_t b){
 // RNG tape and trace
 //
 // Crystal BattleRandom return contract:
-//   - Executes at 00:2F9F (BattleRandom stub)
-//   - Calls _BattleRandom (0F:6DD8) which for non-link (wLinkMode=0) calls
-//     Random (00:2F8C) and returns hRandomSub in A
-//   - Stub saves A to wPredefHL+1 (0xCFB6), restores ROM bank, reloads A
-//   - Returns A to caller
+//   Returns A = one byte (0x00-0xFF). For non-link battles:
+//   A = result of hRandomSub + hRandomAdd (via the hardware RNG).
+//   The stub saves A to wPredefHL+1 (0xCFB6), restores ROM bank, re-reads A.
 //
-// Interception: read callback on 0xCFB6 (wPredefHL+1).
-// When Crystal reads back the saved RNG result, we substitute tape[idx++].
-// Crystal's caller sees the tape byte in A -- same as if Crystal had generated it.
-// The actual Crystal RNG machinery ran fully; we only replace the final read.
+// Interception at PC == 0x2FAD (the LD A,(0xCFB6) inside BattleRandom):
+//   The execution callback fires at PC=0x2FAD BEFORE the instruction executes.
+//   We write tape[idx++] to 0xCFB6 via GB_write_memory. The instruction
+//   LD A,(0xCFB6) then executes naturally and loads our tape byte into A.
+//
+//   This is the ONLY place in bank 0 where BattleRandom reads back its result.
+//   Other reads of 0xCFB6 (Predef at 0x2DA1, 0x2DB5 for banked calls) fire
+//   at different PCs and are not intercepted.
 // ============================================================================
+static constexpr uint16_t BATTLE_RANDOM_RESULT_READ_PC = 0x2FAD;
+
 struct RngEntry {
-    size_t   byte_index;   // 0-based index into the tape
-    uint8_t  tape_value;   // value from the tape that was consumed
-    uint8_t  crystal_value; // what Crystal actually had in wPredefHL+1 before substitution
-    uint16_t intercept_addr; // WRAM address of the intercept (always 0xCFB6)
+    size_t   byte_index;    // 0-based position in tape
+    uint8_t  tape_value;    // value we injected
+    uint8_t  crystal_value; // what Crystal had in 0xCFB6 before injection
+    uint16_t intercept_pc;  // always 0x2FAD
+    const char* rng_symbol; // "BattleRandom"
 };
 
 struct RngCtx {
-    const uint8_t*      tape;          // pointer to tape bytes (shared read-only)
+    const uint8_t*      tape;
     size_t              tape_len;
-    size_t              tape_idx;      // next byte to consume
-    bool                exhausted;     // tape ran out
-    uint16_t            intercept_addr; // 0xCFB6
+    size_t              tape_idx;
+    bool                exhausted;
     std::vector<RngEntry> trace;
 };
 
-// GB_set_read_memory_callback fires on every memory read.
-// We intercept reads from wPredefHL+1 (0xCFB6) to substitute the tape value.
-static uint8_t rng_read_cb(GB_gameboy_t* gb, uint16_t addr, uint8_t data){
-    if(addr != 0xCFB6) return data; // not our intercept address -- pass through
-    auto* ctx = static_cast<RngCtx*>(GB_get_user_data(gb));
-    if(!ctx) return data;
-    if(ctx->tape_idx >= ctx->tape_len){
-        ctx->exhausted = true;
-        return data; // error will be caught after execution
-    }
-    uint8_t tape_val = ctx->tape[ctx->tape_idx];
-    ctx->trace.push_back({ctx->tape_idx, tape_val, data, addr});
-    ++ctx->tape_idx;
-    return tape_val;
-}
-
+// The RNG state is now shared between exec_cb and the GB_safe_read_memory call.
+// We handle it in exec_cb at the intercept PC.
 // ============================================================================
 // Execution callback context
-// Holds both the sink-detection logic and the wall-clock stop flag.
-// The atomic stop_flag is set by the timeout handler; exec_cb forces
-// triggered=true on next tick so GB_run exits promptly.
+// Handles: sink detection, wall-clock stop, and RNG interception at 0x2FAD.
 // ============================================================================
 struct ExecCtx {
-    // Presentation sinks -- stop when PC reaches any of these
+    // Presentation sinks
     uint16_t    sink_pcs[4];
     const char* sink_names[4];
     size_t      num_sinks;
     bool        triggered;
     const char* triggered_sink;
     int         insn_count;
-    // Wall-clock preemption: timeout handler sets this flag
-    std::atomic<bool>* stop_flag; // nullable -- only set when a timeout watcher is active
+    // Wall-clock preemption
+    std::atomic<bool>* stop_flag;
+    // RNG interception — pointer to case's RngCtx (null if no RNG for this case)
+    RngCtx*     rng_ctx;
 };
 
 static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
     auto* ctx = static_cast<ExecCtx*>(GB_get_user_data(gb));
     if(!ctx || ctx->triggered) return;
     ++ctx->insn_count;
-    // Check wall-clock preemption
+
+    // Wall-clock preemption
     if(ctx->stop_flag && ctx->stop_flag->load(std::memory_order_relaxed)){
         ctx->triggered = true;
         ctx->triggered_sink = "__TIMEOUT__";
         return;
     }
+
+    // RNG interception: PC == 0x2FAD means we're about to execute LD A,(0xCFB6)
+    // inside BattleRandom. Write our tape byte to 0xCFB6 so the instruction
+    // naturally loads it into A.
+    if(ctx->rng_ctx && pc == BATTLE_RANDOM_RESULT_READ_PC){
+        RngCtx* rng = ctx->rng_ctx;
+        if(rng->tape_idx >= rng->tape_len){
+            rng->exhausted = true;
+            // Don't stop here -- let the case exhaust and we report it after
+        } else {
+            uint8_t crystal_val = GB_safe_read_memory(gb, 0xCFB6); // side-effect-free read
+            uint8_t tape_val    = rng->tape[rng->tape_idx];
+            GB_write_memory(gb, 0xCFB6, tape_val);
+            rng->trace.push_back({rng->tape_idx, tape_val, crystal_val,
+                                   BATTLE_RANDOM_RESULT_READ_PC, "BattleRandom"});
+            ++rng->tape_idx;
+        }
+    }
+
+    // Sink detection
     for(size_t i=0; i<ctx->num_sinks; ++i){
         if(pc == ctx->sink_pcs[i]){
             ctx->triggered = true;
@@ -601,18 +697,18 @@ static CrystalRunResult run_crystal_case(
     GB_set_rendering_disabled(&gb,true);
     GB_set_turbo_mode(&gb,true,true);
 
-    // RNG tape context (heap to avoid capturing large stack frame in callback)
+    // RNG tape context -- attached to exec_ctx so exec_cb handles interception
+    // at PC=0x2FAD (LD A,(0xCFB6) in BattleRandom).
     std::unique_ptr<RngCtx> rng_ctx;
     if(cfg.rng_tape && cfg.rng_tape_len > 0){
         rng_ctx = std::make_unique<RngCtx>();
-        rng_ctx->tape         = cfg.rng_tape;
-        rng_ctx->tape_len     = cfg.rng_tape_len;
-        rng_ctx->tape_idx     = 0;
-        rng_ctx->exhausted    = false;
-        rng_ctx->intercept_addr = 0xCFB6; // wPredefHL+1
+        rng_ctx->tape      = cfg.rng_tape;
+        rng_ctx->tape_len  = cfg.rng_tape_len;
+        rng_ctx->tape_idx  = 0;
+        rng_ctx->exhausted = false;
     }
 
-    // Execution context
+    // Execution context. exec_cb handles: sink detection, wall-clock stop, RNG.
     ExecCtx exec_ctx{};
     for(size_t i=0;i<cfg.num_sinks;++i){
         exec_ctx.sink_pcs[i]   = cfg.sink_pcs[i];
@@ -623,29 +719,11 @@ static CrystalRunResult run_crystal_case(
     exec_ctx.triggered_sink= nullptr;
     exec_ctx.insn_count    = 0;
     exec_ctx.stop_flag     = stop_flag;
+    exec_ctx.rng_ctx       = rng_ctx.get(); // null if no RNG for this case
 
-    // SameBoy uses a single user_data slot. We store exec_ctx there.
-    // The RNG callback (read_memory_callback) is stored separately in GB_gameboy_t.
-    // We pass exec_ctx as user_data; the rng_ctx is captured via a thread_local
-    // pointer set before registering the callback.
-    static thread_local RngCtx* tl_rng_ctx = nullptr;
-    tl_rng_ctx = rng_ctx.get();
     GB_set_user_data(&gb,&exec_ctx);
     GB_set_execution_callback(&gb,exec_cb);
-
-    if(rng_ctx){
-        GB_set_read_memory_callback(&gb, [](GB_gameboy_t*, uint16_t addr, uint8_t data) -> uint8_t {
-            if(addr != 0xCFB6 || !tl_rng_ctx) return data;
-            if(tl_rng_ctx->tape_idx >= tl_rng_ctx->tape_len){
-                tl_rng_ctx->exhausted = true;
-                return data;
-            }
-            uint8_t tape_val = tl_rng_ctx->tape[tl_rng_ctx->tape_idx];
-            tl_rng_ctx->trace.push_back({tl_rng_ctx->tape_idx, tape_val, data, addr});
-            ++tl_rng_ctx->tape_idx;
-            return tape_val;
-        });
-    }
+    // No read_memory_callback -- RNG is intercepted in exec_cb at PC=0x2FAD
 
     GB_load_rom_from_buffer(&gb,rom_bytes.data(),rom_bytes.size());
     GB_write_memory(&gb,0xFF50,1);
@@ -873,7 +951,8 @@ struct CaseResult {
 // MoveSpec -- per-move configuration
 // ============================================================================
 struct MoveSpec {
-    uint16_t    id;
+    uint16_t    id;           // unique registration ID (used for --move and dedup)
+    uint16_t    engine_id;    // Crystal move ID to pass to Enginemon (may differ from id)
     const char* name;
     int         insn_cap;
     // RNG tape: deterministic bytes supplied to both Crystal and Enginemon.
@@ -901,33 +980,124 @@ static void haze_build_config(const SymCache& sym, CrystalRunConfig* out){
 }
 
 // ============================================================================
-// Present config builder and fixture
+// Present config builders and fixtures
+//
+// Entry: BattleCommand_Present (0D:7874) -- entered directly, not via DoMove.
+//
+// What BattleCommand_Present does:
+//   1. Calls BattleCommand_Stab (computes wTypeMatchup, possibly sets wAttackMissed for
+//      immune types, applies weather/badge/STAB modifiers to wCurDamage).
+//   2. Checks wTypeMatchup == 0 → jp AnimateFailedMove (immune)
+//   3. Checks wAttackMissed != 0 → jp AnimateFailedMove (missed)
+//   4. Calls BattleRandom once → b
+//   5. Walks PresentPower table:
+//        b < 0x66          → power=40  (wBattleAnimParam=0), call AnimateCurrentMoveEitherSide, ret
+//        0x66 <= b < 0xB4  → power=80  (wBattleAnimParam=1), call AnimateCurrentMoveEitherSide, ret
+//        0xB4 <= b < 0xCC  → power=120 (wBattleAnimParam=2), call AnimateCurrentMoveEitherSide, ret
+//        table -1 sentinel → heal: wBattleAnimParam=3, call AnimateCurrentMove,
+//                            ... SwitchTurn, AICheckMaxHP, GetQuarterMaxHP,
+//                            RestoreHP, RegainedHealthText, UpdateOpponentInParty ...
+//                            jp EndMoveEffect
+//
+// Since we enter at BattleCommand_Present (not DoMove):
+//   • CheckHit and Critical (earlier in the DoMove script) are NOT executed.
+//   • wAttackMissed is set by the fixture for the miss case.
+//   • wTypeMatchup must be pre-set to 0x10 (normal) for hit cases, 0 for immune.
+//
+// BattleRandom bytes per path (entering at BattleCommand_Present):
+//   damage (any power tier): 1 byte (power selection)
+//   heal (0xFF):             1 byte (power selection = table sentinel)
+//   miss (wAttackMissed=1):  0 bytes (branches before BattleRandom)
+//
+// NOTE: The damage path calls AnimateCurrentMoveEitherSide from *inside*
+// BattleCommand_Present and then rets. DamageVariation (cmd 0x08 in the DoMove
+// script) runs after that ret -- but our sink fires at AnimateCurrentMoveEitherSide
+// so we stop there and DamageVariation does NOT consume a tape byte.
+//
+// Sinks:
+//   AnimateCurrentMoveEitherSide (0D:7DE9) -- damage path
+//   EndMoveEffect                (0D:52A3) -- heal path (jp at end of heal block)
+//   AnimateFailedMove            (0D:7E77) -- miss/immune path
+//
+// PresentPower thresholds (from data/moves/present_power.asm):
+//   0x66 = 40% (floor(255*0.40))  → power 40
+//   0xB4 = 71% (floor(255*0.70)+1) → power 80
+//   0xCC = 80% (floor(255*0.80))  → power 120
+//   0xFF (sentinel -1)            → heal
+//
+// Four deterministic tapes covering all paths:
+//   damage/power40: [0x30]        Present=0x30 < 0x66 → power 40
+//   heal:           [0xFF]        Present=0xFF = table sentinel → heal
+//   miss:           []            wAttackMissed=1 in fixture, BattleRandom not called
+//   0xFF-sentinel:  [0xFF]        Same byte, same outcome as heal (explicit 0xFF path)
 // ============================================================================
 
-// Present RNG tape -- one byte, deterministic.
-// This byte drives the PresentPower table lookup:
-//   0x00..0x65 (0..101):  power=40  (40% = 102/256)
-//   0x66..0xB2 (102..178): power=80  (30% = 77/256)
-//   0xB3..0xCB (179..203): power=120 (10% = 25/256)
-//   0xCC..0xFF (204..255): heal       (20% = 52/256)
-//
-// We use 0x30 (48) → power=40, damage path.
-// This is the only byte BattleCommand_Present consumes.
-// No handwritten damage expectation -- Crystal computes the damage live.
-static constexpr uint8_t PRESENT_RNG_TAPE[] = { 0x30 };
-static constexpr size_t  PRESENT_RNG_TAPE_LEN = 1;
+// Tape 1: damage path, power=40. Present power byte only (no CheckHit/Critical in BattleCommand_Present).
+static constexpr uint8_t PRESENT_TAPE_DAMAGE[] = { 0x30 };
+// Tape 2: heal path. 0xFF matches the PresentPower table -1 sentinel → heal.
+static constexpr uint8_t PRESENT_TAPE_HEAL[]   = { 0xFF };
+// Tape 3: miss path. wAttackMissed=1 is set in the miss fixture before entry.
+// BattleCommand_Present branches to AnimateFailedMove before calling BattleRandom.
+// No RNG bytes consumed -- tape is empty.
+// (nullptr/0 in the MoveSpec disables RNG interception for this case.)
+// Tape 4: 0xFF sentinel. Same byte as HEAL; exercises the explicit -1 table sentinel path.
+static constexpr uint8_t PRESENT_TAPE_SENTINEL[] = { 0xFF };
 
+// Common Present fixture -- sets WRAM fields read by BattleCommand_Present and
+// its sub-calls (BattleCommand_Stab, BattleRandom, heal-path HP checks).
+// Used by damage, heal, and sentinel cases (all of which have wAttackMissed=0).
 static void present_extra_fixture(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym){
-    // wCurPlayerMove = Present (217 = 0xD9)
-    // Used by BattleCommand_Stab (called inside BattleCommand_Present) to look up
-    // move type/power for damage calculation.
+    auto be16=[](uint8_t* d,uint16_t v){d[0]=(v>>8);d[1]=v&0xFF;};
+
+    // Species placeholder (Bulbasaur=1) -- BattleCommand_Stab checks for Pikachu/Marowak
+    // special crit items; species 1 has no such item. wBattleMonItem=0 confirms no item.
+    wram[wram_off(sym.wBattleMonSpecies.addr)] = 1;
+    wram[wram_off(sym.wEnemyMonSpecies.addr)]  = 1;
+    wram[wram_off(sym.wBattleMonItem.addr)]    = 0;
+    wram[wram_off(sym.wEnemyMonItem.addr)]     = 0;
+
+    // wCurPlayerMove = 217 (Present) -- used by BattleCommand_Stab for move-type lookup
     wram[wram_off(sym.wCurPlayerMove.addr)] = 217;
 
-    // Attacker types: Normal (0x00) -- Present is Normal type
-    wram[wram_off(sym.wBattleMonType1.addr)] = 0x00; // Normal
-    wram[wram_off(sym.wBattleMonType2.addr)] = 0x00; // Normal
+    // wPlayerMoveStruct (0xC60F, 6 bytes): present_extra_fixture sets all fields
+    // to avoid poison-dependent behavior in BattleCommand_Stab and AnimateCurrentMove.
+    //   byte 0: Animation/Effect ID  -- 0 → LoadMoveAnim returns early (skips PlayBattleAnim)
+    //   byte 1: Power                -- set per-case; here 0 (overridden for damage case)
+    //   byte 2: Type                 -- Normal (0x00)
+    //   byte 3: Accuracy             -- 0x5A = 90% (not used since entry is BattleCommand_Present)
+    //   byte 4: PP                   -- 0 (not read by BattleCommand_Present)
+    //   byte 5: Effect Chance        -- 0 (not used here)
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 0] = 0;    // animation=0 → skip PlayBattleAnim
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 1] = 0;    // power (damage=0 for heal/miss cases)
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 2] = 0x00; // type = Normal
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 3] = 0x5A; // accuracy = 90%
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 4] = 0;    // pp
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 5] = 0;    // effect chance
 
-    // Defender types: Normal -- Normal vs Normal = 1x effectiveness
+    // Poison-stability fields: these must be explicitly set so both poison runs agree.
+    //
+    // wOptions (0xCFCC): CheckBattleScene reads bit BATTLE_SCENE (bit 5).
+    //   If set → returns carry → heal path enters AnimateFailedMove+PresentFailedText.
+    //   If clear → returns no-carry → heal path goes directly to EndMoveEffect (our sink).
+    //   Set to 0 to keep carry clear (no battle scene, consistent both runs).
+    static constexpr uint16_t WOPTIONS_ADDR          = 0xCFCC;
+    static constexpr uint16_t WENEMYMONNICKNAME_ADDR = 0xC616;
+    static constexpr uint16_t WBATTLEMONNICKNAME_ADDR = 0xC621;
+    static constexpr uint16_t WOTPARTYCOUNT_ADDR     = 0xD280;
+    static constexpr uint8_t  CRYSTAL_STRING_END     = 0x50;  // Crystal "@" string terminator
+    // Use GB_write_memory (MMU path) to guarantee the write reaches the address
+    // Crystal will read at runtime, matching what read-back via wram[] also sees.
+    GB_write_memory(gb, WOPTIONS_ADDR, 0);  // BATTLE_SCENE bit clear → _CheckBattleScene returns nc
+    // Null-terminate nicknames: PlaceString loops until 0x50; poison=0xA5 has no 0x50.
+    GB_write_memory(gb, WENEMYMONNICKNAME_ADDR,  CRYSTAL_STRING_END);
+    GB_write_memory(gb, WBATTLEMONNICKNAME_ADDR, CRYSTAL_STRING_END);
+    // wOTPartyCount: UpdateOpponentInParty iterates this many times.
+    // Set to 1 to keep both runs identical and fast.
+    GB_write_memory(gb, WOTPARTYCOUNT_ADDR, 1);
+
+    // Types: Normal/Normal attacker, Normal/Normal defender → 1× matchup
+    wram[wram_off(sym.wBattleMonType1.addr)] = 0x00;
+    wram[wram_off(sym.wBattleMonType2.addr)] = 0x00;
     wram[wram_off(sym.wEnemyMonType1.addr)]  = 0x00;
     wram[wram_off(sym.wEnemyMonType2.addr)]  = 0x00;
 
@@ -935,18 +1105,13 @@ static void present_extra_fixture(GB_gameboy_t* gb, uint8_t* wram, const SymCach
     wram[wram_off(sym.wBattleMonLevel.addr)] = P_LEVEL;
     wram[wram_off(sym.wEnemyMonLevel.addr)]  = E_LEVEL;
 
-    // HP (set in common fixture; re-assert here for clarity)
-    {
-        auto be16=[](uint8_t* d,uint16_t v){d[0]=(v>>8);d[1]=v&0xFF;};
-        be16(wram+wram_off(sym.wBattleMonHP.addr),     P_HP);
-        be16(wram+wram_off(sym.wBattleMonMaxHP.addr),  P_HP);
-        be16(wram+wram_off(sym.wEnemyMonHP.addr),      E_HP);
-        be16(wram+wram_off(sym.wEnemyMonMaxHP.addr),   E_HP);
-    }
+    // HP (re-assert over common fixture)
+    be16(wram+wram_off(sym.wBattleMonHP.addr),    P_HP);
+    be16(wram+wram_off(sym.wBattleMonMaxHP.addr), P_HP);
+    be16(wram+wram_off(sym.wEnemyMonHP.addr),     E_HP);
+    be16(wram+wram_off(sym.wEnemyMonMaxHP.addr),  E_HP);
 
-    // BattleMonAttack area (wBattleMonAttack..SpDef at 0xC640..0xC649)
-    // These are the active battle stats used by damage calculation.
-    // Write big-endian base stats (no stage modifier yet for Present init).
+    // Active battle stats
     {
         uint8_t* p = wram + wram_off(sym.wBattleMonAttack.addr);
         auto be=[](uint8_t* d,uint16_t v){d[0]=(v>>8);d[1]=v&0xFF;};
@@ -958,31 +1123,70 @@ static void present_extra_fixture(GB_gameboy_t* gb, uint8_t* wram, const SymCach
         be(p+0,E_ATK); be(p+2,E_DEF); be(p+4,E_SPD); be(p+6,E_SATK); be(p+8,E_SDEF);
     }
 
-    // wAttackMissed = 0 (hit), wCriticalHit = 0 (no crit for clean comparison)
-    wram[wram_off(sym.wAttackMissed.addr)] = 0;
-    wram[wram_off(sym.wCriticalHit.addr)]  = 0;
+    // Pre-set type matchup to 1× (0x10), wAttackMissed=0 (hit), wCriticalHit=0
+    // BattleCommand_Stab will recompute wTypeMatchup from scratch; the pre-set
+    // wTypeMatchup=0x10 is what CheckTypeMatchup initialises wTypeMatchup to before
+    // the type-matchup loop (EFFECTIVE=0x10 in Crystal). Setting it here ensures
+    // the value is defined even if BattleCommand_Stab is somehow skipped.
+    wram[wram_off(sym.wTypeMatchup.addr)]  = 0x10;  // EFFECTIVE -- 1× damage
+    wram[wram_off(sym.wAttackMissed.addr)] = 0;     // hit
+    wram[wram_off(sym.wCriticalHit.addr)]  = 0;     // no crit
 
-    // wTypeMatchup: BattleCommand_Stab will compute this, but pre-set to 0x10
-    // (normal effectiveness) as a fallback in case type lookup fails.
-    // 0x10 = standard damage multiplier in Crystal (not NOEFFECT=0x00).
-    wram[wram_off(sym.wTypeMatchup.addr)] = 0x10;
-
-    // hROMBank must reflect entry bank for RST $08 BankSwitch
+    // hROMBank = 0x0D (BattleCommand_Present's bank)
     GB_write_memory(gb, sym.hROMBank.addr, sym.BattleCommand_Present.bank);
 }
 
-static void present_build_config(const SymCache& sym, CrystalRunConfig* out){
+// Miss fixture -- identical to present_extra_fixture but sets wAttackMissed=1.
+// BattleCommand_Present checks wAttackMissed immediately after BattleCommand_Stab
+// returns (before calling BattleRandom), so no RNG bytes are consumed.
+static void present_miss_extra_fixture(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym){
+    present_extra_fixture(gb, wram, sym);          // inherit common setup
+    wram[wram_off(sym.wAttackMissed.addr)] = 1;    // MISSED -- forces AnimateFailedMove
+}
+
+// present_build_config_impl -- used by damage, heal, and sentinel cases.
+// All three share present_extra_fixture (wAttackMissed=0, wTypeMatchup=0x10).
+static void present_build_config_impl(const SymCache& sym, CrystalRunConfig* out,
+                                       const uint8_t* tape, size_t tape_len,
+                                       FixtureFn fixture_fn = present_extra_fixture){
     out->entry         = sym.BattleCommand_Present;
-    // Damage path exits at AnimateCurrentMoveEitherSide; heal path at AnimateCurrentMove.
-    // Both are allowlisted. The exec_cb stops at whichever fires first.
+    // Four sinks covering all branches:
+    //   damage: AnimateCurrentMoveEitherSide (called inside Present before ret)
+    //   heal:   AnimateCurrentMove (first call in the heal block, before HP changes;
+    //           EndMoveEffect comes later but the animation engine may loop on uninitialized
+    //           graphics state -- AnimateCurrentMove fires before that happens)
+    //   miss:   AnimateFailedMove (jp from Present when wAttackMissed or wTypeMatchup==0)
+    //   fallback: EndMoveEffect (in case code flow reaches it via already-full-HP path
+    //             without calling AnimateCurrentMove first -- that path exists but
+    //             AnimateCurrentMove IS called at the start of the heal block for all
+    //             heal outcomes including the already-full-HP case)
     out->sink_pcs[0]   = sym.AnimateCurrentMoveEitherSide.addr;
     out->sink_names[0] = "AnimateCurrentMoveEitherSide";
     out->sink_pcs[1]   = sym.AnimateCurrentMove.addr;
     out->sink_names[1] = "AnimateCurrentMove";
-    out->num_sinks     = 2;
-    out->rng_tape      = PRESENT_RNG_TAPE;
-    out->rng_tape_len  = PRESENT_RNG_TAPE_LEN;
-    out->extra_fixture = present_extra_fixture;
+    out->sink_pcs[2]   = sym.AnimateFailedMove.addr;
+    out->sink_names[2] = "AnimateFailedMove";
+    out->sink_pcs[3]   = sym.EndMoveEffect.addr;
+    out->sink_names[3] = "EndMoveEffect";
+    out->num_sinks     = 4;
+    out->rng_tape      = tape;
+    out->rng_tape_len  = tape_len;
+    out->extra_fixture = fixture_fn;
+}
+
+static void present_damage_build_config(const SymCache& sym, CrystalRunConfig* out){
+    present_build_config_impl(sym, out, PRESENT_TAPE_DAMAGE, sizeof(PRESENT_TAPE_DAMAGE));
+}
+static void present_heal_build_config(const SymCache& sym, CrystalRunConfig* out){
+    present_build_config_impl(sym, out, PRESENT_TAPE_HEAL, sizeof(PRESENT_TAPE_HEAL));
+}
+static void present_miss_build_config(const SymCache& sym, CrystalRunConfig* out){
+    // Miss: no RNG tape (BattleRandom not reached), miss fixture sets wAttackMissed=1.
+    present_build_config_impl(sym, out, nullptr, 0, present_miss_extra_fixture);
+}
+static void present_sentinel_build_config(const SymCache& sym, CrystalRunConfig* out){
+    // 0xFF sentinel: same outcome as heal (table -1 entry), explicit 0xFF power byte.
+    present_build_config_impl(sym, out, PRESENT_TAPE_SENTINEL, sizeof(PRESENT_TAPE_SENTINEL));
 }
 
 // ============================================================================
@@ -994,12 +1198,22 @@ static void present_build_config(const SymCache& sym, CrystalRunConfig* out){
 static const MoveSpec REGISTERED_MOVES[] = {
     // 114 Haze / BattleCommand_ResetStats
     // Measured: ~13 200 insn. Cap = 50 000 (~3.8x margin). No RNG.
-    { 114, "Haze", 50000, nullptr, 0, haze_build_config, nullptr },
+    { 114, 114, "Haze",              50000,  nullptr, 0,
+                                haze_build_config, nullptr },
 
-    // 217 Present / BattleCommand_Present
-    // Measured: ~25 000 insn for damage path. Cap = 150 000 (6x margin).
-    // One BattleRandom call. Tape: { 0x30 } -> power=40 damage path.
-    { 217, "Present", 150000, PRESENT_RNG_TAPE, PRESENT_RNG_TAPE_LEN, present_build_config, nullptr },
+    // Present sub-cases. id=217x variants; engine_id=217 for all.
+    // Registration IDs: 2171=damage, 2172=heal, 2173=miss, 2174=0xFF sentinel.
+    // Entering at BattleCommand_Present (not DoMove) -- no CheckHit/Critical overhead.
+    // Cap = 100 000 for damage/heal (includes BattleCommand_Stab sub-calls).
+    // Miss path is shortest (jp AnimateFailedMove before BattleRandom); cap = 50 000.
+    { 2171, 217, "Present/damage",   100000, PRESENT_TAPE_DAMAGE,   sizeof(PRESENT_TAPE_DAMAGE),
+                                present_damage_build_config, nullptr },
+    { 2172, 217, "Present/heal",     100000, PRESENT_TAPE_HEAL,     sizeof(PRESENT_TAPE_HEAL),
+                                present_heal_build_config, nullptr },
+    { 2173, 217, "Present/miss",      50000, nullptr, 0,
+                                present_miss_build_config, nullptr },
+    { 2174, 217, "Present/0xFF",     100000, PRESENT_TAPE_SENTINEL, sizeof(PRESENT_TAPE_SENTINEL),
+                                present_sentinel_build_config, nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
@@ -1087,7 +1301,7 @@ static CaseResult run_case(
     }
 
     // Enginemon run with the same tape
-    auto eng = run_enginemon_case(spec.id, ed, spec.rng_tape, spec.rng_tape_len);
+    auto eng = run_enginemon_case(spec.engine_id, ed, spec.rng_tape, spec.rng_tape_len);
     if(!eng){
         r.detail = "Enginemon run failed (move not supported or data error)";
         return r;
@@ -1154,7 +1368,8 @@ static std::string fmt_rng_trace(const std::vector<RngEntry>& trace){
     std::ostringstream os;
     for(const auto& e : trace)
         os << "  [" << e.byte_index << "] 0x" << std::hex << std::setw(2) << std::setfill('0')
-           << (int)e.tape_value << " (intercepted at 0x" << (int)e.intercept_addr << ")\n";
+           << (int)e.tape_value << " @ " << e.rng_symbol
+           << " PC=0x" << std::setw(4) << (int)e.intercept_pc << std::dec << "\n";
     return os.str();
 }
 
@@ -1265,13 +1480,25 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
         std::cerr<<"Error: no moves selected. Use --all or --move <id>.\nRun '"<<prog<<" --help'.\n";
         return EXIT_INVALID_ARGS;
     }
-    for(uint16_t id:move_ids){
-        if(!find_move(id)){
-            std::cerr<<"Error: move "<<id<<" is not registered.  Registered:";
-            for(size_t i=0;i<NUM_REGISTERED;i++) std::cerr<<" "<<REGISTERED_MOVES[i].id;
-            std::cerr<<"\nRun '"<<prog<<" --help'.\n";
-            return EXIT_INVALID_ARGS;
+    // Expand engine_id aliases (e.g. --move 217 → all Present subcases 2171..2174)
+    {
+        std::vector<uint16_t> expanded;
+        for(uint16_t id : move_ids){
+            if(find_move(id)){ expanded.push_back(id); continue; }
+            bool found = false;
+            for(size_t i=0;i<NUM_REGISTERED;i++){
+                if(REGISTERED_MOVES[i].engine_id == id){ expanded.push_back(REGISTERED_MOVES[i].id); found=true; }
+            }
+            if(!found){
+                std::cerr<<"Error: move "<<id<<" is not registered.  Registered:";
+                for(size_t i=0;i<NUM_REGISTERED;i++) std::cerr<<" "<<REGISTERED_MOVES[i].id;
+                std::cerr<<" (or engine IDs:";
+                for(size_t i=0;i<NUM_REGISTERED;i++) std::cerr<<" "<<REGISTERED_MOVES[i].engine_id;
+                std::cerr<<")\nRun '"<<prog<<" --help'.\n";
+                return EXIT_INVALID_ARGS;
+            }
         }
+        move_ids = std::move(expanded);
     }
     std::sort(move_ids.begin(),move_ids.end());
     move_ids.erase(std::unique(move_ids.begin(),move_ids.end()),move_ids.end());
