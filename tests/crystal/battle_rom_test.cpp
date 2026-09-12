@@ -11408,6 +11408,40 @@ TEST(p_present_exact_crystal_oracle) {
     }
 
     // ================================================================
+    // BOUNDARY 3b ADDENDUM: outcome=0xFF -> heal via sentinel
+    //
+    // Source trace (present.asm .next loop with b=0xFF):
+    //   Iter 1: a=0x66; cp -1: not Z; cp b(0xFF): 0x66<0xFF -> carry -> not taken; continue
+    //   Iter 2: a=0xB3; cp -1: not Z; cp b(0xFF): 0xB3<0xFF -> carry -> not taken; continue
+    //   Iter 3: a=0xCC; cp -1: not Z; cp b(0xFF): 0xCC<0xFF -> carry -> not taken; continue
+    //   Iter 4: a=0xFF (sentinel); cp -1: Z -> jr z, .heal_effect -> HEAL
+    // Conclusion: outcome=0xFF -> HEAL via sentinel match, NOT damage, NOT invalid.
+    // Correct heal range: 0xCD..0xFF (inclusive). 0xFF is NOT excluded.
+    //
+    // Crystal sequence: [acc=0x40(hit), crit=0xFF(no_crit), outcome=0xFF(sentinel->heal)]
+    // 3 bytes. No variation byte (heal path skips damagevariation).
+    // opp_hp=50, opp_max=300. heal=max(1,300>>2)=75. Crystal final=125.
+    //
+    // Enginemon trace: pre_crit=0x40(no crit), pre_var=0xFF(accepted), acc=0xFF(255>=229->MISS)
+    // Enginemon misses: opp_hp stays at 50. ASSERT_EQ(125) -> RED.
+    // RNG calls: Crystal=3 (acc+crit+outcome). Enginemon=3 (pre_crit+pre_var+acc_miss). Same count.
+    //
+    // Discriminates: heal range ending at 0xFE, 0xFF treated as damage, 0xFF treated as no-op.
+    // ================================================================
+    {
+        // Crystal-order: [0x40=acc_hit, 0xFF=crit_no, 0xFF=outcome_heal_via_sentinel]
+        auto [p_hp, o_hp, calls] = run_present({0x40u, 0xFFu, 0xFFu}, 300, 300, 50, 300);
+        // Crystal: outcome=0xFF -> sentinel -> heal. opp_hp=50+75=125.
+        ASSERT_EQ(o_hp, int16_t{125});  // Crystal=125. Enginemon misses (acc=0xFF>=0xE5) -> 50. RED.
+        ASSERT_EQ(p_hp, int16_t{300});  // player HP unchanged.
+        ASSERT_EQ(calls, uint32_t{3});  // Crystal=3 (acc+crit+outcome). Enginemon=3 (pre_crit+pre_var+acc_miss). SAME.
+        std::cout << "  bnd_0xFF(heal-sentinel): opp_hp=" << o_hp << "(crystal=125) calls=" << calls
+                  << "(crystal=3)"
+                  << (o_hp==125 ? " OK" : " MISMATCH(RNG-order:no-heal)")
+                  << (calls==3  ? " OK" : " MISMATCH(calls)") << "\n";
+    }
+
+    // ================================================================
     // HEAL BRANCH — exact amount, opponent target, RNG count
     //
     // Crystal sequence: [acc=0x40, crit=0xFF, outcome=0xCD(>0xCC->heal)]
