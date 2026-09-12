@@ -3613,48 +3613,67 @@ TEST(p_rt_secondary_root8_all) {
 //   pokecrystal engine/battle/effect_commands.asm BattleCommand_TimeBasedHealContinue (line 6421)
 //   pokecrystal engine/battle/core.asm GetHalfMaxHP / GetQuarterMaxHP / GetEighthMaxHP (lines 1844-1908)
 //   pokecrystal constants/battle_constants.asm REST_SLEEP_TURNS EQU 2 (line 14)
-//   pokecrystal data/battle/effect_command_pointers.asm
+//   pokecrystal data/battle/effect_command_pointers.asm (command index table)
 //   suiCune engine/battle/effect_commands.c BattleCommand_TimeBasedHealContinue (line ~9630)
 //   suiCune engine/battle/core.c GetHalfMaxHP / GetQuarterMaxHP (lines 3039-3108)
+//   engine/battle/battle_program.cpp hook_pre_move_check (line 1871) — sleep counter
 //
 // Crystal source formulas:
 //   GetHalfMaxHP    = floor(maxHP / 2),  minimum 1
 //   GetQuarterMaxHP = floor(maxHP / 4),  minimum 1
-//   GetEighthMaxHP  = floor(maxHP / 8),  minimum 1   [not reached in vanilla but table entry exists]
+//   GetEighthMaxHP  = floor(maxHP / 8),  minimum 1
 //   GetMaxHP        = maxHP
 //
-//   BattleCommand_Heal:
-//     Full HP -> AnimateFailedMove + HPIsFullText (fail, no heal, no PP consumed from HP)
+//   BattleCommand_Heal (command 0x2C):
+//     Full HP -> AnimateFailedMove + HPIsFullText (fail, no heal)
 //     Not-REST: heal = GetHalfMaxHP; clamp to maxHP
 //     REST:     heal = GetMaxHP (full); clear SUBSTATUS_TOXIC; set status = REST_SLEEP_TURNS+1 = 3
-//               stored counter=3 means: T+1 -> 2 (can't act), T+2 -> 1 (can't act), T+3 -> 0 (wake, can act)
-//               two full turns unable to act; RNG NOT consumed for sleep duration
+//               stored counter = 3; RNG NOT consumed for sleep duration.
+//               counter semantics: T+1->2 (can't act), T+2->1 (can't act), T+3->0 (wake, CAN act)
 //
-//   BattleCommand_TimeBasedHealContinue (Morning Sun / Synthesis / Moonlight):
-//     b = MORN_F(1) / DAY_F(2) / NITE_F(4) depending on which move
-//     Full HP -> AnimateFailedMove + HPIsFullText (fail)
+//   BattleCommand_TimeBasedHealContinue (0x6A/0x6B/0x6C — Morning Sun / Synthesis / Moonlight):
+//     b = MORN_F(1) / DAY_F(2) / NITE_F(4)
+//     Full HP -> fail (HPIsFullText)
 //     c = 2  (default = GetHalfMaxHP)
-//     if not link battle AND wTimeOfDay == b: c--  (time matches, uses LESS: quarter)
-//     Weather adjustments (on potentially time-adjusted c):
-//       WEATHER_NONE    (=0): +0  (no change)
-//       WEATHER_SUN     (=2): c++ (->larger; +1 from time-adjusted base)
-//       WEATHER_RAIN    (=1): c++ then c-- c-- (net -1 from time-adjusted base)
-//       WEATHER_SANDSTORM(=3): same as RAIN
+//     NOT link battle: cp b; jr z,.Weather — JUMPS (skips dec c) if wTimeOfDay==b (preferred)
+//                      dec c — only executed when wTimeOfDay != b (non-preferred time)
+//     => preferred time: c stays 2 (larger heal); non-preferred: c=1 (smaller heal)
+//     Weather adjustments on c:
+//       NONE:      +0
+//       SUN:       inc c (+1)
+//       RAIN/SAND: inc c then dec c dec c (net -1)
 //     Multiplier table: [0]=GetEighthMaxHP [1]=GetQuarterMaxHP [2]=GetHalfMaxHP [3]=GetMaxHP
 //
-//   Time-does-NOT-match × weather (c starts 2):
-//     NONE:     c=2 -> GetHalfMaxHP  = floor(maxHP/2)
-//     SUN:      c=3 -> GetMaxHP      = maxHP           (Crystal: FULL)
-//     RAIN:     c=1 -> GetQuarterMaxHP = floor(maxHP/4)
-//     SANDSTORM:c=1 -> GetQuarterMaxHP = floor(maxHP/4)
+//   COMPLETE TIME × WEATHER TABLE (maxHP=100, start=10 except sandstorm start=20):
 //
-// Discriminating max HP = 100 (no two fractions round to same value):
-//   1/8 of 100 = 12, 1/4 = 25, 1/2 = 50, full = 100  -> all distinct
+//   Preferred time (c=2 entering weather):
+//     NONE:      c=2->1/2=50,  final=60
+//     SUN:       c=3->full=100,final=100 (clamped)   [MISMATCH: Enginemon sun_div=2 gives 60]
+//     RAIN:      c=1->1/4=25,  final=35
+//     SANDSTORM: c=1->1/4=25 heal, then T1+T2 chip; start=20: T1: 20-12=8; T2: 8+25=33-12=21
+//               [MISMATCH: Enginemon gives 20]
 //
-// Enginemon known mismatches (keep RED, do NOT fix production):
-//   Rest:           Crystal=full heal+sleep counter 3; Enginemon=half heal, no sleep -> MISMATCH
-//   Morning Sun/Synthesis/Moonlight + Sun:
-//                   Crystal=GetMaxHP(full); Enginemon=floor(maxHP/2)(sun_divisor=2) -> MISMATCH
+//   Non-preferred time (c=1 entering weather, after dec c):
+//     NONE:      c=1->1/4=25,  final=35   [MISMATCH: Enginemon no tod -> gives 60]
+//     SUN:       c=2->1/2=50,  final=60   [Enginemon gives 60 too — same value, wrong derivation]
+//     RAIN:      c=0->1/8=12,  final=22   [MISMATCH: Enginemon gives 35]
+//     SANDSTORM: c=0->1/8=12 heal; start=20: T1:20-12=8; T2:8+12=20-12=8
+//               [MISMATCH: Enginemon gives 20]
+//
+//   Sandstorm T1 chip: sandstorm activates and chips player at end of T1 (Normal type, not immune).
+//   Must use start=20 to survive T1 chip(12) and reach T2 with HP=8.
+//
+//   Enginemon time-of-day: not implemented. Always behaves as preferred-time path (c=2 base).
+//   Weather setup: T1=weather move (slot 0), T2=heal (slot 1). No production-API mutation.
+//   Source: established SolarBeam oracle pattern.
+//
+//   PRODUCTION MISMATCHES (all kept RED):
+//     Rest: HalfMaxHP used (wrong), no sleep counter set
+//     MornSun/Synth/Moon + pref/Sun: Crystal=full, Enginemon=half (sun_divisor=2)
+//     MornSun/Synth/Moon + pref/sandstorm: Crystal=21, Enginemon=20 (off-by-1)
+//     MornSun/Synth/Moon + nonpref/no-weather: Crystal=quarter, Enginemon=half (no time-of-day)
+//     MornSun/Synth/Moon + nonpref/rain: Crystal=eighth, Enginemon=quarter (no time-of-day)
+//     MornSun/Synth/Moon + nonpref/sandstorm (MornSun only): Crystal=8, Enginemon=20
 // ============================================================================
 TEST(p_rt_recovery_exact) {
     if (!rt_init_once()) {
@@ -3663,8 +3682,7 @@ TEST(p_rt_recovery_exact) {
         return;
     }
 
-    // Move IDs sourced from ROM: id 105 RECOVER, 135 SOFTBOILED, 156 REST,
-    //                              208 MILK_DRINK, 234 MORNING_SUN, 235 SYNTHESIS, 236 MOONLIGHT
+    // Move IDs (sourced from ROM)
     const enginemon::MoveId recover_id    = 105;
     const enginemon::MoveId softboiled_id = 135;
     const enginemon::MoveId rest_id       = 156;
@@ -3672,12 +3690,18 @@ TEST(p_rt_recovery_exact) {
     const enginemon::MoveId morningsun_id = 234;
     const enginemon::MoveId synthesis_id  = 235;
     const enginemon::MoveId moonlight_id  = 236;
+    // Weather setup moves (sourced from ROM)
+    const enginemon::MoveId sandstorm_id  = 237;
+    const enginemon::MoveId raindance_id  = 240;
+    const enginemon::MoveId sunnyday_id   = 241;
+    // Observable action for wake-turn test
+    const enginemon::MoveId scratch_id    = 10;  // NormalHit, power=40, acc=0xFF
 
-    // Verify all move IDs are present in the registry
     for (enginemon::MoveId mid : {recover_id, softboiled_id, rest_id, milkdrink_id,
-                                   morningsun_id, synthesis_id, moonlight_id}) {
+                                   morningsun_id, synthesis_id, moonlight_id,
+                                   sandstorm_id, raindance_id, sunnyday_id, scratch_id}) {
         if (!s_rt_reg->get(mid)) {
-            std::cerr << "  SKIP: recovery move id=" << mid << " not in registry\n";
+            std::cerr << "  SKIP: recovery oracle move id=" << mid << " not in registry\n";
             g_current_test_failed = true;
             return;
         }
@@ -3685,31 +3709,20 @@ TEST(p_rt_recovery_exact) {
 
     std::cout << "\n=== p_rt_recovery_exact ===\n";
 
-    // RNG bytes: recovery moves consume no RNG (no accuracy check at FF, no damage variation)
-    // Using 0xFF fallback throughout; if anything consumes RNG unexpectedly a later check catches it.
-    std::vector<uint8_t> rng_none = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-
-    // maxHP=100 discriminates all Crystal fractions: 1/8=12, 1/4=25, 1/2=50, full=100
-    const int16_t MAX_HP = 100;
+    const int16_t MAX_HP = 100;  // discriminates 1/8=12, 1/4=25, 1/2=50, full=100
 
     // -------------------------------------------------------------------------
-    // Helper lambda: build a battle with one heal move and execute one turn.
-    // player starts at start_hp / MAX_HP; opponent has MOVE_NONE.
-    // Returns player's HP after the turn.
+    // Helper: single-turn heal, no weather, no initial status.
     // -------------------------------------------------------------------------
-    auto run_heal = [&](enginemon::MoveId mid,
-                        int16_t start_hp,
-                        enginemon::Weather weath = enginemon::Weather::None,
-                        enginemon::Status init_status = enginemon::Status::None) -> int16_t
-    {
+    auto run_heal_1t = [&](enginemon::MoveId heal_mid, int16_t start_hp) -> int16_t {
         enginemon::BattleRules rules = s_rt_rules;
         enginemon::Party party;
         enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
-        pm.current_hp = start_hp; pm.max_hp = MAX_HP; pm.friendship=200;
+        pm.current_hp=start_hp; pm.max_hp=MAX_HP; pm.friendship=200;
         party.add(pm);
         auto reg = rt_reg();
         enginemon::Battle bat(enginemon::BattleType::Trainer, party, reg, rules);
-        // player: heal move; opponent: no move, low speed so player goes first
+        const enginemon::MoveData* md = s_rt_reg->get(heal_mid);
         enginemon::BattlePokemon pbp{};
         pbp.species=1; pbp.type1=0; pbp.type2=0; pbp.level=50;
         pbp.stats.hp=start_hp; pbp.stats.max_hp=MAX_HP;
@@ -3717,42 +3730,75 @@ TEST(p_rt_recovery_exact) {
         pbp.stats.special_attack=pbp.stats.special_defense=60;
         pbp.base_stats=pbp.stats; pbp.base_stats.hp=MAX_HP; pbp.base_stats.max_hp=MAX_HP;
         pbp.happiness=200;
-        pbp.status = init_status;
-        const enginemon::MoveData* md = s_rt_reg->get(mid);
-        pbp.moves[0].move=mid; pbp.moves[0].pp=pbp.moves[0].max_pp=(md?md->pp:10);
+        pbp.moves[0].move=heal_mid; pbp.moves[0].pp=pbp.moves[0].max_pp=(md?md->pp:10);
         enginemon::BattlePokemon obp{};
         obp.species=2; obp.type1=0; obp.type2=0; obp.level=50;
-        obp.stats.hp=obp.stats.max_hp=300;
-        obp.stats.attack=obp.stats.defense=obp.stats.speed=1;
-        obp.stats.special_attack=obp.stats.special_defense=1;
-        obp.base_stats=obp.stats;
+        obp.stats.hp=obp.stats.max_hp=300; obp.stats.attack=obp.stats.defense=obp.stats.speed=1;
+        obp.stats.special_attack=obp.stats.special_defense=1; obp.base_stats=obp.stats;
         obp.moves[0].move=enginemon::MOVE_NONE; obp.moves[0].pp=10;
-        bat.player_pokemon()  = pbp;
-        bat.opponent_pokemon()= obp;
-        bat.set_field_weather(weath);
+        bat.player_pokemon()=pbp; bat.opponent_pokemon()=obp;
+        const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
         size_t ri=0;
-        bat.set_rng_callback([&rng_none,&ri]()->uint32_t{
-            return ri<rng_none.size() ? rng_none[ri++] : 0xFFu;
-        });
+        bat.set_rng_callback([&rng,&ri]()->uint32_t{return ri<rng.size()?rng[ri++]:0xFFu;});
         bat.set_player_action(enginemon::ActionFight{0,0});
         bat.set_opponent_action(enginemon::ActionFight{0,0});
         bat.execute_turn();
         return bat.player_pokemon().stats.hp;
     };
 
-    // Same as run_heal but also returns the player status after the turn
-    auto run_heal_status = [&](enginemon::MoveId mid,
-                               int16_t start_hp,
-                               enginemon::Weather weath,
-                               enginemon::Status init_status) -> std::pair<int16_t, enginemon::Status>
-    {
+    // -------------------------------------------------------------------------
+    // Helper: single-turn heal with init_status. Returns {hp, status}.
+    // -------------------------------------------------------------------------
+    auto run_heal_1t_status = [&](enginemon::MoveId heal_mid, int16_t start_hp,
+                                  enginemon::Status init_status)
+                                    -> std::pair<int16_t, enginemon::Status> {
         enginemon::BattleRules rules = s_rt_rules;
         enginemon::Party party;
         enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
-        pm.current_hp = start_hp; pm.max_hp = MAX_HP; pm.friendship=200;
+        pm.current_hp=start_hp; pm.max_hp=MAX_HP; pm.friendship=200;
         party.add(pm);
         auto reg = rt_reg();
         enginemon::Battle bat(enginemon::BattleType::Trainer, party, reg, rules);
+        const enginemon::MoveData* md = s_rt_reg->get(heal_mid);
+        enginemon::BattlePokemon pbp{};
+        pbp.species=1; pbp.type1=0; pbp.type2=0; pbp.level=50;
+        pbp.stats.hp=start_hp; pbp.stats.max_hp=MAX_HP;
+        pbp.stats.attack=pbp.stats.defense=pbp.stats.speed=200;
+        pbp.stats.special_attack=pbp.stats.special_defense=60;
+        pbp.base_stats=pbp.stats; pbp.base_stats.hp=MAX_HP; pbp.base_stats.max_hp=MAX_HP;
+        pbp.happiness=200; pbp.status=init_status;
+        pbp.moves[0].move=heal_mid; pbp.moves[0].pp=pbp.moves[0].max_pp=(md?md->pp:10);
+        enginemon::BattlePokemon obp{};
+        obp.species=2; obp.type1=0; obp.type2=0; obp.level=50;
+        obp.stats.hp=obp.stats.max_hp=300; obp.stats.attack=obp.stats.defense=obp.stats.speed=1;
+        obp.stats.special_attack=obp.stats.special_defense=1; obp.base_stats=obp.stats;
+        obp.moves[0].move=enginemon::MOVE_NONE; obp.moves[0].pp=10;
+        bat.player_pokemon()=pbp; bat.opponent_pokemon()=obp;
+        const std::vector<uint8_t> rng={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        size_t ri=0;
+        bat.set_rng_callback([&rng,&ri]()->uint32_t{return ri<rng.size()?rng[ri++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{0,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+        return {bat.player_pokemon().stats.hp, bat.player_pokemon().status};
+    };
+
+    // -------------------------------------------------------------------------
+    // Helper: two-turn weather-setup + heal.
+    // T1: player uses weather_mid (slot 0). T2: player uses heal_mid (slot 1).
+    // Established SolarBeam oracle pattern. No production-API mutation.
+    // -------------------------------------------------------------------------
+    auto run_heal_weather = [&](enginemon::MoveId weather_mid, enginemon::MoveId heal_mid,
+                                int16_t start_hp) -> int16_t {
+        enginemon::BattleRules rules = s_rt_rules;
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=start_hp; pm.max_hp=MAX_HP; pm.friendship=200;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle bat(enginemon::BattleType::Trainer, party, reg, rules);
+        const enginemon::MoveData* wmd = s_rt_reg->get(weather_mid);
+        const enginemon::MoveData* hmd = s_rt_reg->get(heal_mid);
         enginemon::BattlePokemon pbp{};
         pbp.species=1; pbp.type1=0; pbp.type2=0; pbp.level=50;
         pbp.stats.hp=start_hp; pbp.stats.max_hp=MAX_HP;
@@ -3760,376 +3806,452 @@ TEST(p_rt_recovery_exact) {
         pbp.stats.special_attack=pbp.stats.special_defense=60;
         pbp.base_stats=pbp.stats; pbp.base_stats.hp=MAX_HP; pbp.base_stats.max_hp=MAX_HP;
         pbp.happiness=200;
-        pbp.status = init_status;
-        const enginemon::MoveData* md = s_rt_reg->get(mid);
-        pbp.moves[0].move=mid; pbp.moves[0].pp=pbp.moves[0].max_pp=(md?md->pp:10);
+        pbp.moves[0].move=weather_mid; pbp.moves[0].pp=pbp.moves[0].max_pp=(wmd?wmd->pp:10);
+        pbp.moves[1].move=heal_mid;    pbp.moves[1].pp=pbp.moves[1].max_pp=(hmd?hmd->pp:10);
         enginemon::BattlePokemon obp{};
         obp.species=2; obp.type1=0; obp.type2=0; obp.level=50;
-        obp.stats.hp=obp.stats.max_hp=300;
-        obp.stats.attack=obp.stats.defense=obp.stats.speed=1;
-        obp.stats.special_attack=obp.stats.special_defense=1;
-        obp.base_stats=obp.stats;
+        obp.stats.hp=obp.stats.max_hp=300; obp.stats.attack=obp.stats.defense=obp.stats.speed=1;
+        obp.stats.special_attack=obp.stats.special_defense=1; obp.base_stats=obp.stats;
         obp.moves[0].move=enginemon::MOVE_NONE; obp.moves[0].pp=10;
-        bat.player_pokemon()  = pbp;
-        bat.opponent_pokemon()= obp;
-        bat.set_field_weather(weath);
-        size_t ri=0;
-        bat.set_rng_callback([&rng_none,&ri]()->uint32_t{
-            return ri<rng_none.size() ? rng_none[ri++] : 0xFFu;
-        });
+        bat.player_pokemon()=pbp; bat.opponent_pokemon()=obp;
+        const std::vector<uint8_t> rng_ff={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        size_t r1=0;
+        bat.set_rng_callback([&rng_ff,&r1]()->uint32_t{return r1<rng_ff.size()?rng_ff[r1++]:0xFFu;});
         bat.set_player_action(enginemon::ActionFight{0,0});
         bat.set_opponent_action(enginemon::ActionFight{0,0});
         bat.execute_turn();
-        return {bat.player_pokemon().stats.hp, bat.player_pokemon().status};
+        size_t r2=0;
+        bat.set_rng_callback([&rng_ff,&r2]()->uint32_t{return r2<rng_ff.size()?rng_ff[r2++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{1,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+        return bat.player_pokemon().stats.hp;
     };
 
     // =========================================================================
-    // SECTION 1: RECOVER (id 105) — BattleCommand_Heal, not Rest
-    //   Crystal: floor(100/2)=50, min 1; full HP -> fail
-    //   Discriminates: wrong fraction (e.g. /4 or full), wrong clamp, wrong full-HP behavior
+    // SECTION 1: RECOVER (id 105) — floor(maxHP/2), min 1. Full HP -> fail.
+    // Discriminates: wrong fraction, wrong clamp, fail-at-full-HP.
     // =========================================================================
     std::cout << "  [RECOVER]\n";
     {
-        // Case A: partial HP -> exact half
-        // Crystal: start=40, heal=floor(100/2)=50, final=min(100,90)=90
-        const int16_t exp_A = 90;
-        int16_t got_A = run_heal(recover_id, 40);
+        const int16_t exp_A = 40 + (MAX_HP/2);  // 90
+        int16_t got_A = run_heal_1t(recover_id, 40);
         bool ok_A = (got_A == exp_A);
         rt_record(recover_id, "RECOVER_partial", ok_A,
-                  ok_A ? "" : ("exp="+std::to_string(exp_A)+" got="+std::to_string(got_A)).c_str());
+                  ok_A?"":("exp="+std::to_string(exp_A)+" got="+std::to_string(got_A)).c_str());
         std::cout << "    partial(40->90): exp=" << exp_A << " got=" << got_A << (ok_A?" OK":" MISMATCH") << "\n";
 
-        // Case B: near-max HP -> clamp to max
-        // Crystal: start=90, heal=floor(100/2)=50, final=min(100,140)=100
         const int16_t exp_B = MAX_HP;
-        int16_t got_B = run_heal(recover_id, 90);
+        int16_t got_B = run_heal_1t(recover_id, 90);
         bool ok_B = (got_B == exp_B);
         rt_record(recover_id, "RECOVER_clamp", ok_B,
-                  ok_B ? "" : ("exp="+std::to_string(exp_B)+" got="+std::to_string(got_B)).c_str());
-        std::cout << "    clamp(90->100):  exp=" << exp_B << " got=" << got_B << (ok_B?" OK":" MISMATCH") << "\n";
+                  ok_B?"":("exp="+std::to_string(exp_B)+" got="+std::to_string(got_B)).c_str());
+        std::cout << "    clamp(90->100): exp=" << exp_B << " got=" << got_B << (ok_B?" OK":" MISMATCH") << "\n";
 
-        // Case C: full HP -> Crystal fails (HP unchanged)
-        // Crystal: start=100==maxHP -> AnimateFailedMove + HPIsFullText, HP stays 100
         const int16_t exp_C = MAX_HP;
-        int16_t got_C = run_heal(recover_id, MAX_HP);
+        int16_t got_C = run_heal_1t(recover_id, MAX_HP);
         bool ok_C = (got_C == exp_C);
         rt_record(recover_id, "RECOVER_full_hp_fail", ok_C,
-                  ok_C ? "" : ("exp="+std::to_string(exp_C)+" got="+std::to_string(got_C)).c_str());
-        std::cout << "    full_HP_fail:    exp=" << exp_C << " got=" << got_C << (ok_C?" OK":" MISMATCH") << "\n";
-        // Note: test is only valid if we can distinguish success (hp changed) from fail (hp unchanged).
-        // With start_hp=99, success=100; with start_hp=100, success=100 too.
-        // So we use start_hp=100 and check hp is STILL 100 (not changed to some nonsense value).
-        // A broken impl that heals at full HP would also produce 100 here — undetectable.
-        // But Crystal explicitly does NOT advance HP counter; the HP should not wrap or change.
+                  ok_C?"":("exp="+std::to_string(exp_C)+" got="+std::to_string(got_C)).c_str());
+        std::cout << "    full_HP_fail: exp=" << exp_C << " got=" << got_C << (ok_C?" OK":" MISMATCH") << "\n";
     }
 
     // =========================================================================
-    // SECTION 2: SOFTBOILED (id 135) — same routine as Recover, distinct invocation
-    //   Crystal: floor(100/2)=50, min 1
-    //   Each real move must be invoked independently (not just shared-routine proof)
+    // SECTION 2: SOFTBOILED (id 135) — same routine, independent invocation.
     // =========================================================================
     std::cout << "  [SOFTBOILED]\n";
     {
-        // partial: start=30, heal=50, final=min(100,80)=80
-        const int16_t exp_A = 80;
-        int16_t got_A = run_heal(softboiled_id, 30);
+        const int16_t exp_A = 30 + (MAX_HP/2);  // 80
+        int16_t got_A = run_heal_1t(softboiled_id, 30);
         bool ok_A = (got_A == exp_A);
         rt_record(softboiled_id, "SOFTBOILED_partial", ok_A,
-                  ok_A ? "" : ("exp="+std::to_string(exp_A)+" got="+std::to_string(got_A)).c_str());
+                  ok_A?"":("exp="+std::to_string(exp_A)+" got="+std::to_string(got_A)).c_str());
         std::cout << "    partial(30->80): exp=" << exp_A << " got=" << got_A << (ok_A?" OK":" MISMATCH") << "\n";
 
-        // clamp: start=80, heal=50, final=min(100,130)=100
         const int16_t exp_B = MAX_HP;
-        int16_t got_B = run_heal(softboiled_id, 80);
+        int16_t got_B = run_heal_1t(softboiled_id, 80);
         bool ok_B = (got_B == exp_B);
         rt_record(softboiled_id, "SOFTBOILED_clamp", ok_B,
-                  ok_B ? "" : ("exp="+std::to_string(exp_B)+" got="+std::to_string(got_B)).c_str());
+                  ok_B?"":("exp="+std::to_string(exp_B)+" got="+std::to_string(got_B)).c_str());
         std::cout << "    clamp(80->100): exp=" << exp_B << " got=" << got_B << (ok_B?" OK":" MISMATCH") << "\n";
 
-        // full HP fail
         const int16_t exp_C = MAX_HP;
-        int16_t got_C = run_heal(softboiled_id, MAX_HP);
+        int16_t got_C = run_heal_1t(softboiled_id, MAX_HP);
         bool ok_C = (got_C == exp_C);
         rt_record(softboiled_id, "SOFTBOILED_full_hp_fail", ok_C,
-                  ok_C ? "" : ("exp="+std::to_string(exp_C)+" got="+std::to_string(got_C)).c_str());
+                  ok_C?"":("exp="+std::to_string(exp_C)+" got="+std::to_string(got_C)).c_str());
         std::cout << "    full_HP_fail: exp=" << exp_C << " got=" << got_C << (ok_C?" OK":" MISMATCH") << "\n";
     }
 
     // =========================================================================
-    // SECTION 3: MILK DRINK (id 208) — same routine as Recover, distinct invocation
+    // SECTION 3: MILK DRINK (id 208) — same routine, independent invocation.
     // =========================================================================
     std::cout << "  [MILK DRINK]\n";
     {
-        // partial: start=25, heal=50, final=min(100,75)=75
-        const int16_t exp_A = 75;
-        int16_t got_A = run_heal(milkdrink_id, 25);
+        const int16_t exp_A = 25 + (MAX_HP/2);  // 75
+        int16_t got_A = run_heal_1t(milkdrink_id, 25);
         bool ok_A = (got_A == exp_A);
         rt_record(milkdrink_id, "MILK_DRINK_partial", ok_A,
-                  ok_A ? "" : ("exp="+std::to_string(exp_A)+" got="+std::to_string(got_A)).c_str());
+                  ok_A?"":("exp="+std::to_string(exp_A)+" got="+std::to_string(got_A)).c_str());
         std::cout << "    partial(25->75): exp=" << exp_A << " got=" << got_A << (ok_A?" OK":" MISMATCH") << "\n";
 
-        // clamp: start=70, heal=50, final=min(100,120)=100
         const int16_t exp_B = MAX_HP;
-        int16_t got_B = run_heal(milkdrink_id, 70);
+        int16_t got_B = run_heal_1t(milkdrink_id, 70);
         bool ok_B = (got_B == exp_B);
         rt_record(milkdrink_id, "MILK_DRINK_clamp", ok_B,
-                  ok_B ? "" : ("exp="+std::to_string(exp_B)+" got="+std::to_string(got_B)).c_str());
+                  ok_B?"":("exp="+std::to_string(exp_B)+" got="+std::to_string(got_B)).c_str());
         std::cout << "    clamp(70->100): exp=" << exp_B << " got=" << got_B << (ok_B?" OK":" MISMATCH") << "\n";
 
-        // full HP fail
         const int16_t exp_C = MAX_HP;
-        int16_t got_C = run_heal(milkdrink_id, MAX_HP);
+        int16_t got_C = run_heal_1t(milkdrink_id, MAX_HP);
         bool ok_C = (got_C == exp_C);
         rt_record(milkdrink_id, "MILK_DRINK_full_hp_fail", ok_C,
-                  ok_C ? "" : ("exp="+std::to_string(exp_C)+" got="+std::to_string(got_C)).c_str());
+                  ok_C?"":("exp="+std::to_string(exp_C)+" got="+std::to_string(got_C)).c_str());
         std::cout << "    full_HP_fail: exp=" << exp_C << " got=" << got_C << (ok_C?" OK":" MISMATCH") << "\n";
     }
 
     // =========================================================================
-    // SECTION 4: REST (id 156)
-    //   Crystal source (BattleCommand_Heal, line 6033):
-    //     Full HP -> fail (HPIsFullText)
-    //     Not full HP, move == REST:
-    //       MoveDelay (animation); res SUBSTATUS_TOXIC; if status!=0 -> RestedText else WentToSleepText
-    //       status = REST_SLEEP_TURNS + 1 = 3   (stored counter; RNG NOT consumed)
-    //       CalcPlayerStats; GetMaxHP -> RestoreHP (heal to full)
-    //       RegainedHealthText
-    //     Stored counter semantics:
-    //       turn+1: counter 3->2, cannot act
-    //       turn+2: counter 2->1, cannot act
-    //       turn+3: counter 1->0, wakes AND may act
-    //       => exactly 2 turns unable to act
-    //
-    //   KNOWN MISMATCH: Enginemon maps Rest to HalfMaxHP heal source only (no sleep counter set).
-    //   Oracle encodes Crystal source truth. Mismatch = expected RED.
-    //
-    //   Anti-fitting discriminators:
-    //     wrong fraction (half not full)
-    //     no sleep counter set
-    //     old status not cleared
-    //     Rest uses random sleep duration (it does NOT in Crystal)
+    // SECTION 4: REST (id 156) — single-turn state assertions.
+    //   Source: BattleCommand_Heal REST branch (effect_commands.asm ~6057).
+    //   Full HP -> HPIsFullText fail. Not full: GetMaxHP + set status=3 + clear toxic.
+    //   RNG NOT consumed for sleep duration (fixed counter).
+    //   KNOWN MISMATCHES: Enginemon maps Rest to HalfMaxHP (no sleep set).
     // =========================================================================
     std::cout << "  [REST]\n";
     {
-        // --- Rest success: start below full HP, with Burn status ---
-        // Crystal: HP -> maxHP(100), Burn cleared, status_turns=3
-        // Enginemon: HP -> 90 (half), no sleep — MISMATCH on HP and status
-        const int16_t exp_hp_crystal = MAX_HP;     // Crystal: full heal
-        const int16_t exp_hp_eng     = 90;         // Enginemon: floor(100/2)+40=90 via HalfMaxHP
-        // start_hp=40, init_status=Burn
-        auto [got_hp, got_status] = run_heal_status(rest_id, 40, enginemon::Weather::None, enginemon::Status::Burn);
-        // Crystal truth: HP==100, status==Sleep (counter 3 — not directly readable from BattlePokemon
-        // status field which stores Sleep without counter visible externally, but status IS Sleep)
-        // Note: Crystal clears Burn BEFORE end-of-turn, so no Burn chip on Rest-success turn.
-        // Enginemon: does NOT clear Burn (uses HalfMaxHP path, not Rest path); Burn chip applies → 40+50-12=78.
-        bool hp_crystal_correct   = (got_hp == exp_hp_crystal);
-        bool hp_eng_matches       = (got_hp == exp_hp_eng);
-        bool status_is_sleep      = (got_status == enginemon::Status::Sleep);
-        bool status_is_burn_still = (got_status == enginemon::Status::Burn);
-        // Oracle: match means Crystal-source correct
-        bool ok_hp = hp_crystal_correct;
-        bool ok_status = status_is_sleep;
-        rt_record(rest_id, "REST_full_heal", ok_hp,
-                  ok_hp ? "" : (hp_eng_matches ? "Enginemon half-heal mismatch (crystal=full)" :
-                                ("exp="+std::to_string(exp_hp_crystal)+" got="+std::to_string(got_hp)).c_str()));
-        rt_record(rest_id, "REST_sleep_set", ok_status,
-                  ok_status ? "" : (status_is_burn_still ? "status still Burn (sleep not set)" :
-                                    "status not Sleep after Rest"));
-        std::cout << "    rest_full_heal: crystal_exp=" << exp_hp_crystal
-                  << " eng_exp=" << exp_hp_eng << " got=" << got_hp
-                  << (hp_crystal_correct?" MATCH(crystal)":(hp_eng_matches?" MISMATCH(eng_half)":"MISMATCH(unexpected)")) << "\n";
-        std::cout << "    rest_sleep_set: sleep=" << status_is_sleep
-                  << " burn_still=" << status_is_burn_still
-                  << (ok_status?" OK":" MISMATCH") << "\n";
-
-        // --- Rest at full HP: Crystal fails (no heal, no status change) ---
-        // start_hp=maxHP=100, status=Burn -> Crystal: fail, HP reduced by Burn chip, status=Burn unchanged
-        // Crystal BattleCommand_Heal: hp == maxHP -> AnimateFailedMove + HPIsFullText (no heal, no status change)
-        // End of turn: Burn deals floor(maxHP/8) = floor(100/8) = 12 damage.
-        // Source: pokecrystal engine/battle/core.asm BurnEffect -> GetEighthMaxHP
-        // Crystal truth: HP = 100 - 12 = 88; status = Burn (unchanged)
+        // Rest success: start=40, Burn -> Crystal: HP=100, status=Sleep, turns=3. MISMATCH.
         {
-            const int16_t exp_hp_full_fail = MAX_HP - (MAX_HP / 8);  // 100 - 12 = 88
-            auto [got_hp_f, got_status_f] = run_heal_status(rest_id, MAX_HP, enginemon::Weather::None, enginemon::Status::Burn);
-            bool ok_full_fail_hp  = (got_hp_f == exp_hp_full_fail);
-            bool ok_full_fail_sts = (got_status_f == enginemon::Status::Burn);  // status unchanged
-            rt_record(rest_id, "REST_full_hp_fail_hp", ok_full_fail_hp,
-                      ok_full_fail_hp ? "" : ("crystal_exp="+std::to_string(exp_hp_full_fail)+" got="+std::to_string(got_hp_f)).c_str());
-            rt_record(rest_id, "REST_full_hp_fail_status_unchanged", ok_full_fail_sts,
-                      ok_full_fail_sts ? "" : "status changed on full-HP fail (should not)");
-            std::cout << "    rest_full_hp_fail: exp=" << exp_hp_full_fail << " got=" << got_hp_f
-                      << " status_unchanged=" << ok_full_fail_sts
-                      << (ok_full_fail_hp&&ok_full_fail_sts?" OK":" MISMATCH") << "\n";
+            const int16_t exp_hp_crystal = MAX_HP;
+            auto [got_hp, got_status] = run_heal_1t_status(rest_id, 40, enginemon::Status::Burn);
+            bool ok_hp    = (got_hp == exp_hp_crystal);
+            bool ok_sleep = (got_status == enginemon::Status::Sleep);
+            rt_record(rest_id, "REST_full_heal", ok_hp,
+                      ok_hp?"":("crystal_exp="+std::to_string(exp_hp_crystal)+" got="+std::to_string(got_hp)).c_str());
+            rt_record(rest_id, "REST_sleep_set", ok_sleep,
+                      ok_sleep?"":"status not Sleep after Rest (crystal: Sleep counter=3)");
+            std::cout << "    heal: crystal_exp=" << exp_hp_crystal << " got=" << got_hp
+                      << (ok_hp?" MATCH(crystal)":" MISMATCH") << "\n";
+            std::cout << "    sleep_set: " << (ok_sleep?"OK":"MISMATCH (status="
+                      +std::to_string((int)(uint8_t)got_status)+")") << "\n";
         }
-    }  // [REST]
-
-    // =========================================================================
-    // SECTION 5: MORNING SUN (id 234) — BattleCommand_HealMorn (b=MORN_F=1)
-    //   Weather heal; time-of-day check present but Enginemon ignores time-of-day.
-    //   Tests assume "time does not match" (c starts at 2 = GetHalfMaxHP).
-    //   Crystal time-does-NOT-match × weather:
-    //     NONE:     c=2 -> GetHalfMaxHP  = floor(100/2) = 50  => final 10+50=60
-    //     SUN:      c=3 -> GetMaxHP      = 100             => final 10+100=110->clamped=100  (MISMATCH)
-    //     RAIN:     c=1 -> GetQuarterMaxHP = floor(100/4) = 25 => final 10+25=35
-    //     SANDSTORM:c=1 -> GetQuarterMaxHP = floor(100/4) = 25 => final 10+25=35
-    //   Anti-fitting: wrong fraction, weather ignored, Sun multiplier applied to Rain
-    // =========================================================================
-    std::cout << "  [MORNING SUN]\n";
-    {
-        const int16_t start = 10;  // low enough that all fractions raise HP noticeably
-
-        // No weather: Crystal=floor(100/2)=50, final=60
+        // Rest full-HP fail: Crystal fails (HPIsFullText); Burn chip fires end-of-turn.
+        // Source: BurnEffect -> GetEighthMaxHP -> floor(100/8)=12. HP=100-12=88. Status=Burn.
         {
-            // Crystal: c=2, NONE=+0 -> GetHalfMaxHP=50
-            const int16_t exp_crystal = 10 + (100/2);  // = 60
-            int16_t got = run_heal(morningsun_id, start, enginemon::Weather::None);
-            bool ok = (got == exp_crystal);
-            rt_record(morningsun_id, "MORNING_SUN_no_weather", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    no_weather: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
-        }
-
-        // Sun: Crystal=GetMaxHP=100, final=min(100,110)=100. Enginemon=50, final=60. MISMATCH expected.
-        {
-            // Crystal: c=2, SUN: c++ -> c=3 -> GetMaxHP -> heal=100, final=clamp(10+100,100)=100
-            const int16_t exp_crystal = MAX_HP;  // full heal
-            int16_t got = run_heal(morningsun_id, start, enginemon::Weather::Sun);
-            bool ok = (got == exp_crystal);
-            rt_record(morningsun_id, "MORNING_SUN_sun", ok,
-                      ok ? "" : (got==60?"Enginemon half-heal mismatch (crystal=full)":
-                                 ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str()));
-            std::cout << "    sun: crystal_exp=" << exp_crystal << " got=" << got
-                      << (ok?" MATCH(crystal)":" MISMATCH") << "\n";
-        }
-
-        // Rain: Crystal=GetQuarterMaxHP=25, final=35
-        {
-            // Crystal: c=2, RAIN: c++ -> 3, c-- -> 2, c-- -> 1 -> GetQuarterMaxHP=floor(100/4)=25
-            const int16_t exp_crystal = 10 + (100/4);  // = 35
-            int16_t got = run_heal(morningsun_id, start, enginemon::Weather::Rain);
-            bool ok = (got == exp_crystal);
-            rt_record(morningsun_id, "MORNING_SUN_rain", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    rain: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
-        }
-
-        // Sandstorm: Crystal=GetQuarterMaxHP=floor(100/4)=25, then sandstorm chip=GetEighthMaxHP=floor(100/8)=12.
-        // final = start(10) + heal(25) - chip(12) = 23.
-        // Source: pokecrystal engine/battle/core.asm SandstormDamage -> GetEighthMaxHP.
-        // Test type=Normal (not Rock/Ground/Steel) -> chip applies.
-        {
-            // heal(25) - chip(12) = net +13; final = 10+13 = 23
-            const int16_t exp_crystal = 10 + (100/4) - (100/8);  // = 10+25-12 = 23
-            int16_t got = run_heal(morningsun_id, start, enginemon::Weather::Sandstorm);
-            bool ok = (got == exp_crystal);
-            rt_record(morningsun_id, "MORNING_SUN_sandstorm", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    sandstorm: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+            const int16_t exp_hp_fail = MAX_HP - (MAX_HP/8);  // 88
+            auto [got_hp_f, got_sts_f] = run_heal_1t_status(rest_id, MAX_HP, enginemon::Status::Burn);
+            bool ok_f_hp  = (got_hp_f == exp_hp_fail);
+            bool ok_f_sts = (got_sts_f == enginemon::Status::Burn);
+            rt_record(rest_id, "REST_full_hp_fail_hp", ok_f_hp,
+                      ok_f_hp?"":("crystal_exp="+std::to_string(exp_hp_fail)+" got="+std::to_string(got_hp_f)).c_str());
+            rt_record(rest_id, "REST_full_hp_fail_status_unchanged", ok_f_sts,
+                      ok_f_sts?"":"status changed on full-HP fail (should stay Burn)");
+            std::cout << "    full_hp_fail: exp_hp=" << exp_hp_fail << " got=" << got_hp_f
+                      << " status_unchanged=" << ok_f_sts
+                      << ((ok_f_hp&&ok_f_sts)?" OK":" MISMATCH") << "\n";
         }
     }
 
     // =========================================================================
-    // SECTION 6: SYNTHESIS (id 235) — BattleCommand_HealDay (b=DAY_F=2)
-    //   Same weather-heal routine as Morning Sun; only b differs.
-    //   Crystal fractions identical to Morning Sun (time-doesn't-match assumed).
-    //   Each real move must be tested independently.
+    // SECTION 4b: REST MULTI-TURN SLEEP SEQUENCE
+    //   Source: hook_pre_move_check (engine/battle/battle_program.cpp line 1897).
+    //   Crystal: dec [status]; and SLP_MASK; jr z, .woke_up (falls through, CAN act).
+    //   counter=3: T+1->2 can't act, T+2->1 can't act, T+3->0 wake AND act.
+    //   Test sets status_turns=3 directly (bypasses Rest setter bug — tests duration only).
+    //   RNG calls=0 for sleep duration (Crystal fixed counter, no random).
+    // =========================================================================
+    std::cout << "  [REST MULTI-TURN SLEEP]\n";
+    {
+        enginemon::BattleRules rules = s_rt_rules;
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=MAX_HP; pm.max_hp=MAX_HP; pm.friendship=200;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle bat(enginemon::BattleType::Trainer, party, reg, rules);
+        const enginemon::MoveData* sc_md = s_rt_reg->get(scratch_id);
+        const enginemon::MoveData* rest_md = s_rt_reg->get(rest_id);
+        enginemon::BattlePokemon pbp{};
+        pbp.species=1; pbp.type1=0; pbp.type2=0; pbp.level=50;
+        pbp.stats.hp=MAX_HP; pbp.stats.max_hp=MAX_HP;
+        pbp.stats.attack=pbp.stats.defense=pbp.stats.speed=200;
+        pbp.stats.special_attack=pbp.stats.special_defense=60;
+        pbp.base_stats=pbp.stats; pbp.base_stats.hp=MAX_HP; pbp.base_stats.max_hp=MAX_HP;
+        pbp.happiness=200;
+        pbp.status = enginemon::Status::Sleep;
+        pbp.status_turns = 3;  // Crystal REST_SLEEP_TURNS+1; fixed, no RNG
+        pbp.moves[0].move=rest_id;    pbp.moves[0].pp=pbp.moves[0].max_pp=(rest_md?rest_md->pp:10);
+        pbp.moves[1].move=scratch_id; pbp.moves[1].pp=pbp.moves[1].max_pp=(sc_md?sc_md->pp:10);
+        enginemon::BattlePokemon obp{};
+        obp.species=2; obp.type1=0; obp.type2=0; obp.level=50;
+        obp.stats.hp=obp.stats.max_hp=300; obp.stats.attack=obp.stats.defense=obp.stats.speed=1;
+        obp.stats.special_attack=obp.stats.special_defense=1; obp.base_stats=obp.stats;
+        obp.moves[0].move=enginemon::MOVE_NONE; obp.moves[0].pp=10;
+        bat.player_pokemon()=pbp; bat.opponent_pokemon()=obp;
+        const std::vector<uint8_t> rng_sc={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        // T1: attempt Scratch; counter 3->2, still asleep, cannot act
+        size_t r1=0;
+        bat.set_rng_callback([&rng_sc,&r1]()->uint32_t{return r1<rng_sc.size()?rng_sc[r1++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{1,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+        int16_t opp_hp_t1 = bat.opponent_pokemon().stats.hp;
+        int16_t turns_t1  = bat.player_pokemon().status_turns;
+        bool t1_ok = (opp_hp_t1==300) && (turns_t1==2);
+        rt_record(rest_id,"REST_SLEEP_T1_cant_act",(opp_hp_t1==300),
+                  (opp_hp_t1==300)?"":"player dealt damage on T1 while counter=3->2");
+        rt_record(rest_id,"REST_SLEEP_T1_counter_2",(turns_t1==2),
+                  (turns_t1==2)?"":("counter after T1 exp=2 got="+std::to_string(turns_t1)).c_str());
+        std::cout << "    T1(counter3->2): opp_hp=" << opp_hp_t1 << " turns=" << turns_t1
+                  << (t1_ok?" OK":" MISMATCH") << "\n";
+        // T2: attempt Scratch; counter 2->1, still asleep, cannot act
+        size_t r2=0;
+        bat.set_rng_callback([&rng_sc,&r2]()->uint32_t{return r2<rng_sc.size()?rng_sc[r2++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{1,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+        int16_t opp_hp_t2 = bat.opponent_pokemon().stats.hp;
+        int16_t turns_t2  = bat.player_pokemon().status_turns;
+        bool t2_ok = (opp_hp_t2==300) && (turns_t2==1);
+        rt_record(rest_id,"REST_SLEEP_T2_cant_act",(opp_hp_t2==300),
+                  (opp_hp_t2==300)?"":"player dealt damage on T2 while counter=2->1");
+        rt_record(rest_id,"REST_SLEEP_T2_counter_1",(turns_t2==1),
+                  (turns_t2==1)?"":("counter after T2 exp=1 got="+std::to_string(turns_t2)).c_str());
+        std::cout << "    T2(counter2->1): opp_hp=" << opp_hp_t2 << " turns=" << turns_t2
+                  << (t2_ok?" OK":" MISMATCH") << "\n";
+        // T3: counter 1->0, wake up AND CAN act (falls through .not_asleep, executes move)
+        size_t r3=0;
+        bat.set_rng_callback([&rng_sc,&r3]()->uint32_t{return r3<rng_sc.size()?rng_sc[r3++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{1,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+        int16_t opp_hp_t3    = bat.opponent_pokemon().stats.hp;
+        auto player_sts_t3   = bat.player_pokemon().status;
+        int16_t turns_t3     = bat.player_pokemon().status_turns;
+        bool t3_woke  = (player_sts_t3 == enginemon::Status::None);
+        bool t3_acted = (opp_hp_t3 < 300);
+        bool t3_ok = t3_woke && (turns_t3==0) && t3_acted;
+        rt_record(rest_id,"REST_SLEEP_T3_wake",t3_woke,
+                  t3_woke?"":"status not None after wake (counter 1->0)");
+        rt_record(rest_id,"REST_SLEEP_T3_acted",t3_acted,
+                  t3_acted?"":("opp_hp="+std::to_string(opp_hp_t3)+" expected <300 (Scratch on wake turn)").c_str());
+        std::cout << "    T3(counter1->0 wake+act): opp_hp=" << opp_hp_t3
+                  << " status=" << (int)(uint8_t)player_sts_t3
+                  << " turns=" << turns_t3
+                  << (t3_ok?" OK":" MISMATCH") << "\n";
+        std::cout << "    Sleep summary: lost_turns=" << ((!t1_ok||!t2_ok)?std::string("WRONG"):"2")
+                  << " wake_acted=" << t3_acted << "\n";
+    }
+
+    // =========================================================================
+    // SECTION 5: MORNING SUN (id 234) — b=MORN_F=1
+    //   Preferred time (c=2): NONE=60, SUN=100[MISS], RAIN=35, SAND=21[MISS]
+    //   Non-pref time (c=1):  NONE=35[MISS], SUN=60, RAIN=22[MISS], SAND=8[MISS]
+    //   Enginemon: no time-of-day, always c=2; sun_div=2 wrong.
+    // =========================================================================
+    std::cout << "  [MORNING SUN]\n";
+    {
+        const int16_t start = 10;
+        // Preferred / no weather: c=2->1/2=50, final=60
+        {
+            const int16_t exp_c = start + (MAX_HP/2);
+            int16_t got = run_heal_1t(morningsun_id, start);
+            bool ok = (got==exp_c);
+            rt_record(morningsun_id,"MORN_SUN_pref_no_weather",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/no_weather: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+        }
+        // Preferred / sun: c=3->full=100 [MISMATCH: Enginemon gives 60]
+        {
+            const int16_t exp_c = MAX_HP;
+            int16_t got = run_heal_weather(sunnyday_id, morningsun_id, start);
+            bool ok = (got==exp_c);
+            rt_record(morningsun_id,"MORN_SUN_pref_sun",ok,
+                      ok?"":(got==(start+(MAX_HP/2))?"Enginemon half-heal (crystal=full)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    pref/sun: crystal_exp=" << exp_c << " got=" << got << (ok?" MATCH":" MISMATCH") << "\n";
+        }
+        // Preferred / rain: c=1->1/4=25, final=35
+        {
+            const int16_t exp_c = start + (MAX_HP/4);
+            int16_t got = run_heal_weather(raindance_id, morningsun_id, start);
+            bool ok = (got==exp_c);
+            rt_record(morningsun_id,"MORN_SUN_pref_rain",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/rain: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+        }
+        // Preferred / sandstorm: start=20; T1:20-12=8; T2: heal=25, 8+25=33-12=21.
+        // Crystal: 21. Enginemon: 20 [MISMATCH — off-by-1].
+        {
+            const int16_t sand_start = 20;
+            const int16_t exp_c = sand_start - (MAX_HP/8) + (MAX_HP/4) - (MAX_HP/8);  // 21
+            int16_t got = run_heal_weather(sandstorm_id, morningsun_id, sand_start);
+            bool ok = (got==exp_c);
+            rt_record(morningsun_id,"MORN_SUN_pref_sandstorm",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/sandstorm: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+        }
+        // Non-preferred / no weather: c=1->1/4=25, final=35 [MISMATCH: Enginemon gives 60]
+        {
+            const int16_t exp_c = start + (MAX_HP/4);
+            int16_t got = run_heal_1t(morningsun_id, start);
+            bool ok = (got==exp_c);
+            rt_record(morningsun_id,"MORN_SUN_nonpref_no_weather",ok,
+                      ok?"":(got==(start+(MAX_HP/2))?"Enginemon no time-of-day (pref/half; crystal=nonpref/quarter)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    nonpref/no_weather: crystal_exp=" << exp_c << " got=" << got
+                      << (ok?" MATCH":" MISMATCH(expected)") << "\n";
+        }
+        // Non-preferred / rain: c=0->1/8=12, final=22 [MISMATCH: Enginemon gives 35]
+        {
+            const int16_t exp_c = start + (MAX_HP/8);
+            int16_t got = run_heal_weather(raindance_id, morningsun_id, start);
+            bool ok = (got==exp_c);
+            rt_record(morningsun_id,"MORN_SUN_nonpref_rain",ok,
+                      ok?"":(got==(start+(MAX_HP/4))?"Enginemon pref/quarter (crystal=nonpref/eighth)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    nonpref/rain: crystal_exp=" << exp_c << " got=" << got
+                      << (ok?" MATCH":" MISMATCH(expected)") << "\n";
+        }
+        // Non-preferred / sandstorm: c=0->1/8=12; start=20: T1:20-12=8; T2:8+12=20-12=8. Crystal=8.
+        // [MISMATCH: Enginemon gives 20]
+        {
+            const int16_t sand_start = 20;
+            const int16_t exp_c = sand_start - (MAX_HP/8) + (MAX_HP/8) - (MAX_HP/8);  // 8
+            int16_t got = run_heal_weather(sandstorm_id, morningsun_id, sand_start);
+            bool ok = (got==exp_c);
+            rt_record(morningsun_id,"MORN_SUN_nonpref_sandstorm",ok,
+                      ok?"":(got==21?"Enginemon pref/quarter-chip (crystal=nonpref/eighth-chip=8)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    nonpref/sandstorm: crystal_exp=" << exp_c << " got=" << got
+                      << (ok?" MATCH":" MISMATCH(expected)") << "\n";
+        }
+    }
+
+    // =========================================================================
+    // SECTION 6: SYNTHESIS (id 235) — b=DAY_F=2. Identical algorithm.
     // =========================================================================
     std::cout << "  [SYNTHESIS]\n";
     {
         const int16_t start = 10;
-
-        // No weather
         {
-            const int16_t exp_crystal = 10 + (100/2);  // 60
-            int16_t got = run_heal(synthesis_id, start, enginemon::Weather::None);
-            bool ok = (got == exp_crystal);
-            rt_record(synthesis_id, "SYNTHESIS_no_weather", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    no_weather: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+            const int16_t exp_c = start + (MAX_HP/2);
+            int16_t got = run_heal_1t(synthesis_id, start);
+            bool ok = (got==exp_c);
+            rt_record(synthesis_id,"SYNTHESIS_pref_no_weather",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/no_weather: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
         }
-
-        // Sun: Crystal=full (GetMaxHP), Enginemon=half -> MISMATCH expected
         {
-            const int16_t exp_crystal = MAX_HP;
-            int16_t got = run_heal(synthesis_id, start, enginemon::Weather::Sun);
-            bool ok = (got == exp_crystal);
-            rt_record(synthesis_id, "SYNTHESIS_sun", ok,
-                      ok ? "" : (got==60?"Enginemon half-heal mismatch (crystal=full)":
-                                 ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str()));
-            std::cout << "    sun: crystal_exp=" << exp_crystal << " got=" << got
-                      << (ok?" MATCH(crystal)":" MISMATCH") << "\n";
+            const int16_t exp_c = MAX_HP;
+            int16_t got = run_heal_weather(sunnyday_id, synthesis_id, start);
+            bool ok = (got==exp_c);
+            rt_record(synthesis_id,"SYNTHESIS_pref_sun",ok,
+                      ok?"":(got==(start+(MAX_HP/2))?"Enginemon half-heal (crystal=full)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    pref/sun: crystal_exp=" << exp_c << " got=" << got << (ok?" MATCH":" MISMATCH") << "\n";
         }
-
-        // Rain: Crystal=floor(100/4)=25, final=35
         {
-            const int16_t exp_crystal = 10 + (100/4);  // 35
-            int16_t got = run_heal(synthesis_id, start, enginemon::Weather::Rain);
-            bool ok = (got == exp_crystal);
-            rt_record(synthesis_id, "SYNTHESIS_rain", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    rain: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+            const int16_t exp_c = start + (MAX_HP/4);
+            int16_t got = run_heal_weather(raindance_id, synthesis_id, start);
+            bool ok = (got==exp_c);
+            rt_record(synthesis_id,"SYNTHESIS_pref_rain",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/rain: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
         }
-
-        // Sandstorm: Crystal=GetQuarterMaxHP=floor(100/4)=25, chip=floor(100/8)=12. final=10+25-12=23.
         {
-            const int16_t exp_crystal = 10 + (100/4) - (100/8);  // 23
-            int16_t got = run_heal(synthesis_id, start, enginemon::Weather::Sandstorm);
-            bool ok = (got == exp_crystal);
-            rt_record(synthesis_id, "SYNTHESIS_sandstorm", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    sandstorm: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+            const int16_t sand_start = 20;
+            const int16_t exp_c = sand_start - (MAX_HP/8) + (MAX_HP/4) - (MAX_HP/8);  // 21
+            int16_t got = run_heal_weather(sandstorm_id, synthesis_id, sand_start);
+            bool ok = (got==exp_c);
+            rt_record(synthesis_id,"SYNTHESIS_pref_sandstorm",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/sandstorm: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+        }
+        // Non-preferred / no weather: crystal=35, Enginemon=60 [MISMATCH]
+        {
+            const int16_t exp_c = start + (MAX_HP/4);
+            int16_t got = run_heal_1t(synthesis_id, start);
+            bool ok = (got==exp_c);
+            rt_record(synthesis_id,"SYNTHESIS_nonpref_no_weather",ok,
+                      ok?"":(got==(start+(MAX_HP/2))?"Enginemon no time-of-day (pref/half; crystal=nonpref/quarter)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    nonpref/no_weather: crystal_exp=" << exp_c << " got=" << got
+                      << (ok?" MATCH":" MISMATCH(expected)") << "\n";
+        }
+        // Non-preferred / rain: crystal=22, Enginemon=35 [MISMATCH]
+        {
+            const int16_t exp_c = start + (MAX_HP/8);
+            int16_t got = run_heal_weather(raindance_id, synthesis_id, start);
+            bool ok = (got==exp_c);
+            rt_record(synthesis_id,"SYNTHESIS_nonpref_rain",ok,
+                      ok?"":(got==(start+(MAX_HP/4))?"Enginemon pref/quarter (crystal=nonpref/eighth)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    nonpref/rain: crystal_exp=" << exp_c << " got=" << got
+                      << (ok?" MATCH":" MISMATCH(expected)") << "\n";
         }
     }
 
     // =========================================================================
-    // SECTION 7: MOONLIGHT (id 236) — BattleCommand_HealNite (b=NITE_F=4)
-    //   Same weather-heal routine. b=NITE_F=4.
-    //   Crystal fractions identical (time-doesn't-match assumed for NITE_F check too).
+    // SECTION 7: MOONLIGHT (id 236) — b=NITE_F=4. Identical algorithm.
     // =========================================================================
     std::cout << "  [MOONLIGHT]\n";
     {
         const int16_t start = 10;
-
-        // No weather
         {
-            const int16_t exp_crystal = 10 + (100/2);  // 60
-            int16_t got = run_heal(moonlight_id, start, enginemon::Weather::None);
-            bool ok = (got == exp_crystal);
-            rt_record(moonlight_id, "MOONLIGHT_no_weather", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    no_weather: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+            const int16_t exp_c = start + (MAX_HP/2);
+            int16_t got = run_heal_1t(moonlight_id, start);
+            bool ok = (got==exp_c);
+            rt_record(moonlight_id,"MOONLIGHT_pref_no_weather",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/no_weather: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
         }
-
-        // Sun: Crystal=full (GetMaxHP), Enginemon=half -> MISMATCH expected
         {
-            const int16_t exp_crystal = MAX_HP;
-            int16_t got = run_heal(moonlight_id, start, enginemon::Weather::Sun);
-            bool ok = (got == exp_crystal);
-            rt_record(moonlight_id, "MOONLIGHT_sun", ok,
-                      ok ? "" : (got==60?"Enginemon half-heal mismatch (crystal=full)":
-                                 ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str()));
-            std::cout << "    sun: crystal_exp=" << exp_crystal << " got=" << got
-                      << (ok?" MATCH(crystal)":" MISMATCH") << "\n";
+            const int16_t exp_c = MAX_HP;
+            int16_t got = run_heal_weather(sunnyday_id, moonlight_id, start);
+            bool ok = (got==exp_c);
+            rt_record(moonlight_id,"MOONLIGHT_pref_sun",ok,
+                      ok?"":(got==(start+(MAX_HP/2))?"Enginemon half-heal (crystal=full)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    pref/sun: crystal_exp=" << exp_c << " got=" << got << (ok?" MATCH":" MISMATCH") << "\n";
         }
-
-        // Rain: Crystal=floor(100/4)=25, final=35
         {
-            const int16_t exp_crystal = 10 + (100/4);  // 35
-            int16_t got = run_heal(moonlight_id, start, enginemon::Weather::Rain);
-            bool ok = (got == exp_crystal);
-            rt_record(moonlight_id, "MOONLIGHT_rain", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    rain: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+            const int16_t exp_c = start + (MAX_HP/4);
+            int16_t got = run_heal_weather(raindance_id, moonlight_id, start);
+            bool ok = (got==exp_c);
+            rt_record(moonlight_id,"MOONLIGHT_pref_rain",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/rain: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
         }
-
-        // Sandstorm: Crystal=GetQuarterMaxHP=floor(100/4)=25, chip=floor(100/8)=12. final=10+25-12=23.
         {
-            const int16_t exp_crystal = 10 + (100/4) - (100/8);  // 23
-            int16_t got = run_heal(moonlight_id, start, enginemon::Weather::Sandstorm);
-            bool ok = (got == exp_crystal);
-            rt_record(moonlight_id, "MOONLIGHT_sandstorm", ok,
-                      ok ? "" : ("exp="+std::to_string(exp_crystal)+" got="+std::to_string(got)).c_str());
-            std::cout << "    sandstorm: exp=" << exp_crystal << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+            const int16_t sand_start = 20;
+            const int16_t exp_c = sand_start - (MAX_HP/8) + (MAX_HP/4) - (MAX_HP/8);  // 21
+            int16_t got = run_heal_weather(sandstorm_id, moonlight_id, sand_start);
+            bool ok = (got==exp_c);
+            rt_record(moonlight_id,"MOONLIGHT_pref_sandstorm",ok,
+                      ok?"":("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str());
+            std::cout << "    pref/sandstorm: exp=" << exp_c << " got=" << got << (ok?" OK":" MISMATCH") << "\n";
+        }
+        // Non-preferred / no weather: crystal=35, Enginemon=60 [MISMATCH]
+        {
+            const int16_t exp_c = start + (MAX_HP/4);
+            int16_t got = run_heal_1t(moonlight_id, start);
+            bool ok = (got==exp_c);
+            rt_record(moonlight_id,"MOONLIGHT_nonpref_no_weather",ok,
+                      ok?"":(got==(start+(MAX_HP/2))?"Enginemon no time-of-day (pref/half; crystal=nonpref/quarter)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    nonpref/no_weather: crystal_exp=" << exp_c << " got=" << got
+                      << (ok?" MATCH":" MISMATCH(expected)") << "\n";
+        }
+        // Non-preferred / rain: crystal=22, Enginemon=35 [MISMATCH]
+        {
+            const int16_t exp_c = start + (MAX_HP/8);
+            int16_t got = run_heal_weather(raindance_id, moonlight_id, start);
+            bool ok = (got==exp_c);
+            rt_record(moonlight_id,"MOONLIGHT_nonpref_rain",ok,
+                      ok?"":(got==(start+(MAX_HP/4))?"Enginemon pref/quarter (crystal=nonpref/eighth)":
+                             ("exp="+std::to_string(exp_c)+" got="+std::to_string(got)).c_str()));
+            std::cout << "    nonpref/rain: crystal_exp=" << exp_c << " got=" << got
+                      << (ok?" MATCH":" MISMATCH(expected)") << "\n";
         }
     }
 
