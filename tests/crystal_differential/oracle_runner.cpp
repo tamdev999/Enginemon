@@ -1,36 +1,28 @@
 // tests/crystal_differential/oracle_runner.cpp
 //
-// Crystal battle differential oracle — parallel runner implementation.
+// Crystal battle differential oracle — hardened parallel runner
 //
-// ARCHITECTURE:
-//   Each case runs independently:
-//     run_crystal_case()  — initializes SameBoy, writes fixture WRAM, cold-calls
-//                           the Crystal routine, reads semantic outputs
-//     run_enginemon_case() — runs Enginemon Battle::execute_turn() on identical fixture
-//     compare()           — normalizes representations, diffs
+// ARCHITECTURE
+//   run_crystal_case() — dedicated SameBoy instance per call; no shared GB state
+//   run_enginemon_case() — Enginemon Battle::execute_turn() on identical fixture
+//   run_case() — two Crystal poison runs + Enginemon diff; fully self-contained
+//   runner_main() — startup checks, parallel dispatch, deterministic output
 //
-// ROM IMMUTABILITY:
-//   rom_bytes (std::vector<uint8_t>) is loaded once, SHA-checked once, then
-//   passed read-only to every worker. Each worker calls GB_load_rom_from_buffer
-//   with the same bytes — SameBoy makes its own internal copy. Neither the
-//   shared vector nor any SameBoy internal ROM buffer is ever modified.
+// ROM IMMUTABILITY
+//   rom_bytes vector is loaded once, SHA-checked once, then passed read-only.
+//   GB_load_rom_from_buffer receives the exact verified bytes. No pointer into
+//   gb->rom is ever taken. No ROM bytes are modified anywhere.
 //
-// NO TRAMPOLINE / NO SENTINEL LOOP PATCH:
-//   Cold-call entry is established by writing registers directly:
-//     regs->pc = BattleCommand_ResetStats addr (in already-mapped bank 0x0D)
-//     regs->sp = INITIAL_SP (safe HRAM area)
-//   The stack holds the AnimateCurrentMove addr as return address — if execution
-//   somehow RETs before the callback fires, it lands at AnimateCurrentMove and
-//   the callback stops it there anyway.
-//   There is no ROM parking loop. There is no 0x0100 trampoline patch.
+// COLD-CALL MECHANISM (no ROM patches)
+//   regs->pc = entry symbol address (already in mapped bank)
+//   regs->sp = INITIAL_SP; stack holds sink addr as return address
+//   hROMBank = entry bank  (RST $08 BankSwitch restore path)
+//   0xFF50  = 1            (boot_rom_finished — RST vectors read game ROM)
+//   MBC     = entry bank   (0x2000 write)
 //
-// PRESENTATION BOUNDARY:
-//   The execution callback fires when PC == AnimateCurrentMove (0d:7E01).
-//   At that point all semantic WRAM writes in BattleCommand_ResetStats are complete:
-//     wPlayerStatLevels / wEnemyStatLevels — reset to 7 by .Fill
-//     wBattleMonAttack..SpDef (C640-C649)  — CalcBattleStats output
-//     wEnemyMonAttack..SpDef (D21A-D223)   — CalcBattleStats output
-//   AnimateCurrentMove itself never executes.
+// PRESENTATION BOUNDARY
+//   Execution callback stops at the allowlisted sink PC.
+//   Semantic WRAM outputs are read at that moment; the sink never executes.
 
 #include "crystal_differential/oracle_runner.hpp"
 
@@ -51,16 +43,22 @@
 #include "crystal/output/native_package.hpp"
 #include "engine/package/package_reader.hpp"
 
+// GB_VERSION is defined in sameboy_version.h, available via the include path.
+// Include it directly here rather than depending on /FI force-include.
+#include "sameboy_version.h"
+#ifndef GB_VERSION
+#error "GB_VERSION not defined — sameboy_version.h not found on include path"
+#endif
+
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iomanip>
 #include <iostream>
-#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -71,14 +69,29 @@
 namespace crystal::oracle {
 
 // ============================================================================
-// Pins
+// Compile-time pins
 // ============================================================================
-static constexpr const char* SAMEBOY_COMMIT   = "213a12ce93d66b105a113debd9396306066a7cfc";
-static constexpr const char* CRYSTAL_ROM_SHA1 = "F2F52230B536214EF7C9924F483392993E226CFB";
-static constexpr uint32_t    CRYSTAL_ROM_SIZE = 2097152u;  // 2 MiB
+
+// Crystal ROM SHA-1 — enforced at startup against the loaded file.
+static constexpr const char* PINNED_ROM_SHA1 = "F2F52230B536214EF7C9924F483392993E226CFB";
+
+// Crystal ROM size.
+static constexpr uint32_t CRYSTAL_ROM_SIZE = 2097152u;  // 2 MiB
+
+// SameBoy commit and version.
+// Commit is checked against the HEAD of references/SameBoy if git is available;
+// version string is checked against GB_VERSION from sameboy_version.h at startup.
+static constexpr const char* PINNED_SAMEBOY_COMMIT  = "213a12ce93d66b105a113debd9396306066a7cfc";
+static constexpr const char* PINNED_SAMEBOY_VERSION = "1.0.3";
+
+// Per-case instruction cap. Exceeding this is HARNESS_ERROR.
+// Measured: Haze runs in ~13 200 instructions. Cap = 50 000 (~3.8× margin).
+// A future move may need a higher cap — that must be set explicitly per move
+// (see MoveSpec below), never by silently increasing the global.
+static constexpr int DEFAULT_INSN_CAP = 50000;
 
 // ============================================================================
-// SHA-1 (self-contained, no extra deps)
+// SHA-1 (self-contained, no extra dependencies)
 // ============================================================================
 static std::string sha1_hex(const uint8_t* data, size_t len) {
     struct S {
@@ -92,10 +105,10 @@ static std::string sha1_hex(const uint8_t* data, size_t len) {
             uint32_t a=h[0],B=h[1],C=h[2],D=h[3],e=h[4];
             for(int i=0;i<80;i++){
                 uint32_t f,k;
-                if(i<20){f=(B&C)|((~B)&D);k=0x5A827999;}
-                else if(i<40){f=B^C^D;k=0x6ED9EBA1;}
-                else if(i<60){f=(B&C)|(B&D)|(C&D);k=0x8F1BBCDC;}
-                else{f=B^C^D;k=0xCA62C1D6;}
+                if(i<20){f=(B&C)|((~B)&D);k=0x5A827999u;}
+                else if(i<40){f=B^C^D;k=0x6ED9EBA1u;}
+                else if(i<60){f=(B&C)|(B&D)|(C&D);k=0x8F1BBCDCu;}
+                else{f=B^C^D;k=0xCA62C1D6u;}
                 uint32_t t=R(a,5)+f+e+k+w[i];e=D;D=C;C=R(B,30);B=a;a=t;
             }
             h[0]+=a;h[1]+=B;h[2]+=C;h[3]+=D;h[4]+=e;
@@ -110,24 +123,23 @@ static std::string sha1_hex(const uint8_t* data, size_t len) {
             while(bl<56)b[bl++]=0;
             for(int i=0;i<8;i++)b[56+i]=(uint8_t)(c>>((7-i)*8));
             blk(b);
-            std::array<uint8_t,20>r{};
+            std::array<uint8_t,20> r{};
             for(int i=0;i<5;i++){r[i*4]=(h[i]>>24)&0xFF;r[i*4+1]=(h[i]>>16)&0xFF;r[i*4+2]=(h[i]>>8)&0xFF;r[i*4+3]=h[i]&0xFF;}
             return r;
         }
-    } s;
-    s.feed(data,len);
+    } s; s.feed(data,len);
     auto hash=s.fin();
     char hex[41]{}; for(int i=0;i<20;i++) sprintf(hex+i*2,"%02X",hash[i]);
     return std::string(hex);
 }
 
 // ============================================================================
-// Symbol lookup (reads .sym file)
+// Symbol lookup
 // ============================================================================
 struct Sym { uint8_t bank; uint16_t addr; };
 
-static bool sym_get(const std::string& sym_path, const std::string& name, Sym* out) {
-    std::ifstream f(sym_path); if(!f) return false;
+static bool sym_get(const std::string& path, const std::string& name, Sym* out) {
+    std::ifstream f(path); if(!f) return false;
     std::string line;
     while(std::getline(f,line)){
         if(line.empty()||line[0]==';') continue;
@@ -142,8 +154,23 @@ static bool sym_get(const std::string& sym_path, const std::string& name, Sym* o
 }
 
 // ============================================================================
-// Sym cache — loaded once, shared read-only across all workers.
+// SymCache — loaded once, validated, shared read-only.
 // ============================================================================
+// Expected addresses for identity validation.
+// These are verified at startup against the sym file so a wrong .sym is
+// caught immediately, not silently producing garbage results.
+struct SymExpect { const char* name; uint8_t bank; uint16_t addr; };
+static constexpr SymExpect SYM_IDENTITY[] = {
+    // Anchors that must match exactly for pokecrystal11 (Crystal v1.1 UE).
+    // Chosen to cover different banks and both WRAM regions.
+    { "BattleCommand_ResetStats", 0x0D, 0x710E },
+    { "AnimateCurrentMove",       0x0D, 0x7E01 },
+    { "wPlayerStatLevels",        0x00, 0xC6CC },
+    { "wEnemyStatLevels",         0x00, 0xC6D4 },
+    { "wBattleMonAttack",         0x00, 0xC640 },
+    { "wEnemyMonAttack",          0x01, 0xD21A },
+};
+
 struct SymCache {
     Sym BattleCommand_ResetStats;
     Sym wPlayerStatLevels;
@@ -161,278 +188,342 @@ struct SymCache {
     Sym wJohtoBadges;
     Sym AnimateCurrentMove;
 
-    static std::optional<SymCache> load(const std::string& sym_path) {
-        SymCache c;
-        if (!sym_get(sym_path,"BattleCommand_ResetStats",&c.BattleCommand_ResetStats) ||
-            !sym_get(sym_path,"wPlayerStatLevels",       &c.wPlayerStatLevels)        ||
-            !sym_get(sym_path,"wEnemyStatLevels",        &c.wEnemyStatLevels)         ||
-            !sym_get(sym_path,"wPlayerStats",            &c.wPlayerStats)             ||
-            !sym_get(sym_path,"wEnemyStats",             &c.wEnemyStats)              ||
-            !sym_get(sym_path,"wBattleMonAttack",        &c.wBattleMonAttack)         ||
-            !sym_get(sym_path,"wEnemyMonAttack",         &c.wEnemyMonAttack)          ||
-            !sym_get(sym_path,"wBattleMonStatus",        &c.wBattleMonStatus)         ||
-            !sym_get(sym_path,"wEnemyMonStatus",         &c.wEnemyMonStatus)          ||
-            !sym_get(sym_path,"hBattleTurn",             &c.hBattleTurn)              ||
-            !sym_get(sym_path,"hROMBank",                &c.hROMBank)                 ||
-            !sym_get(sym_path,"wLinkMode",               &c.wLinkMode)                ||
-            !sym_get(sym_path,"wInBattleTowerBattle",    &c.wInBattleTowerBattle)     ||
-            !sym_get(sym_path,"wJohtoBadges",            &c.wJohtoBadges)             ||
-            !sym_get(sym_path,"AnimateCurrentMove",      &c.AnimateCurrentMove))
-        { return std::nullopt; }
-        return c;
+    // Returns a non-empty error string on failure.
+    static std::string load(const std::string& sym_path, SymCache* out) {
+        // Check the file exists and is readable.
+        { std::ifstream f(sym_path); if(!f) return "cannot open: "+sym_path; }
+
+        // Identity validation: known anchor symbols must match expected addresses.
+        for(const auto& e : SYM_IDENTITY){
+            Sym got{};
+            if(!sym_get(sym_path,e.name,&got))
+                return std::string("identity check: symbol not found: ")+e.name;
+            if(got.bank!=e.bank||got.addr!=e.addr){
+                std::ostringstream os;
+                os<<"identity check: "<<e.name
+                  <<" expected "<<std::hex<<(int)e.bank<<":"<<e.addr
+                  <<" got "<<(int)got.bank<<":"<<got.addr;
+                return os.str();
+            }
+        }
+
+        // Load all required symbols.
+        struct { const char* name; Sym* dst; } required[] = {
+            {"BattleCommand_ResetStats",&out->BattleCommand_ResetStats},
+            {"wPlayerStatLevels",       &out->wPlayerStatLevels},
+            {"wEnemyStatLevels",        &out->wEnemyStatLevels},
+            {"wPlayerStats",            &out->wPlayerStats},
+            {"wEnemyStats",             &out->wEnemyStats},
+            {"wBattleMonAttack",        &out->wBattleMonAttack},
+            {"wEnemyMonAttack",         &out->wEnemyMonAttack},
+            {"wBattleMonStatus",        &out->wBattleMonStatus},
+            {"wEnemyMonStatus",         &out->wEnemyMonStatus},
+            {"hBattleTurn",             &out->hBattleTurn},
+            {"hROMBank",                &out->hROMBank},
+            {"wLinkMode",               &out->wLinkMode},
+            {"wInBattleTowerBattle",    &out->wInBattleTowerBattle},
+            {"wJohtoBadges",            &out->wJohtoBadges},
+            {"AnimateCurrentMove",      &out->AnimateCurrentMove},
+        };
+        for(const auto& r : required){
+            if(!sym_get(sym_path,r.name,r.dst))
+                return std::string("required symbol missing: ")+r.name;
+        }
+        return {};
     }
 };
 
 // ============================================================================
-// WRAM layout helper
+// Fixture validation helpers
 // ============================================================================
-static size_t wram_off(uint16_t addr) {
-    if (addr>=0xD000) return size_t{0x1000}+(addr-0xD000);
-    if (addr>=0xC000) return addr-0xC000;
-    throw std::logic_error("not WRAM");
+
+// Validate that a WRAM address lies within the expected bank.
+// Returns a non-empty error string if validation fails.
+static std::string validate_wram_addr(const char* name, uint16_t addr,
+                                      uint16_t expected_lo, uint16_t expected_hi)
+{
+    if(addr<expected_lo||addr>expected_hi){
+        std::ostringstream os;
+        os<<name<<" addr 0x"<<std::hex<<addr
+          <<" outside expected range [0x"<<expected_lo<<",0x"<<expected_hi<<"]";
+        return os.str();
+    }
+    return {};
+}
+
+static std::string validate_hram_addr(const char* name, uint16_t addr){
+    if(addr<0xFF80||addr>0xFFFE){
+        std::ostringstream os;
+        os<<name<<" addr 0x"<<std::hex<<addr<<" outside HRAM [0xFF80,0xFFFE]";
+        return os.str();
+    }
+    return {};
+}
+
+// Validate all fixture addresses in the sym cache resolve to expected memory regions.
+// Returns the first error string, or empty on success.
+static std::string validate_fixture_addresses(const SymCache& sym){
+    std::string e;
+    // WRAM0 range C000-CFFF
+    if((e=validate_wram_addr("wPlayerStatLevels", sym.wPlayerStatLevels.addr, 0xC000,0xCFFF)).size()) return e;
+    if((e=validate_wram_addr("wEnemyStatLevels",  sym.wEnemyStatLevels.addr,  0xC000,0xCFFF)).size()) return e;
+    if((e=validate_wram_addr("wPlayerStats",      sym.wPlayerStats.addr,      0xC000,0xCFFF)).size()) return e;
+    if((e=validate_wram_addr("wEnemyStats",       sym.wEnemyStats.addr,       0xC000,0xCFFF)).size()) return e;
+    if((e=validate_wram_addr("wBattleMonAttack",  sym.wBattleMonAttack.addr,  0xC000,0xCFFF)).size()) return e;
+    if((e=validate_wram_addr("wBattleMonStatus",  sym.wBattleMonStatus.addr,  0xC000,0xCFFF)).size()) return e;
+    if((e=validate_wram_addr("wLinkMode",         sym.wLinkMode.addr,         0xC000,0xCFFF)).size()) return e;
+    // WRAM1 range D000-DFFF
+    if((e=validate_wram_addr("wEnemyMonAttack",     sym.wEnemyMonAttack.addr,   0xD000,0xDFFF)).size()) return e;
+    if((e=validate_wram_addr("wEnemyMonStatus",     sym.wEnemyMonStatus.addr,   0xD000,0xDFFF)).size()) return e;
+    if((e=validate_wram_addr("wInBattleTowerBattle",sym.wInBattleTowerBattle.addr,0xC000,0xDFFF)).size()) return e;
+    if((e=validate_wram_addr("wJohtoBadges",        sym.wJohtoBadges.addr,      0xD000,0xDFFF)).size()) return e;
+    // HRAM range FF80-FFFE
+    if((e=validate_hram_addr("hBattleTurn", sym.hBattleTurn.addr)).size()) return e;
+    if((e=validate_hram_addr("hROMBank",    sym.hROMBank.addr)).size()) return e;
+    return {};
 }
 
 // ============================================================================
-// SameBoy no-op callbacks (per-instance — non-capturing lambdas cast to C ptr)
+// WRAM direct-access offset helper
+// GB_DIRECT_ACCESS_RAM on CGB returns 8KB for the active bank.
+// Bank 0: [0x0000..0x0FFF] = C000-CFFF
+// Bank 1: [0x1000..0x1FFF] = D000-DFFF
 // ============================================================================
-static void sb_log_cb(GB_gameboy_t*, const char*, GB_log_attributes_t) {}
-static uint32_t sb_rgb_cb(GB_gameboy_t*, uint8_t r, uint8_t g, uint8_t b) {
+static size_t wram_off(uint16_t addr){
+    if(addr>=0xD000) return size_t{0x1000}+(addr-0xD000);
+    if(addr>=0xC000) return addr-0xC000;
+    throw std::logic_error("wram_off: not WRAM");
+}
+
+// ============================================================================
+// SameBoy no-op callbacks (no state, safe for any thread)
+// ============================================================================
+static void sb_log_nop(GB_gameboy_t*, const char*, GB_log_attributes_t){}
+static uint32_t sb_rgb_nop(GB_gameboy_t*, uint8_t r, uint8_t g, uint8_t b){
     return 0xFF000000u|((uint32_t)r<<16)|((uint32_t)g<<8)|b;
 }
 
 // ============================================================================
-// Execution callback context (per SameBoy instance)
+// Execution callback
 // ============================================================================
 struct ExecCtx {
-    uint16_t    sink_pc;     // AnimateCurrentMove addr — stop here
+    uint16_t    sink_pc;      // stop when PC reaches this address
+    const char* sink_name;    // symbol name (for stop-reason reporting)
     bool        triggered;
-    const char* sink_name;   // symbol name, for diagnostics
-    int         insn_count;  // incremented each callback
+    int         insn_count;
 };
 
-static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t) {
-    auto* ctx = static_cast<ExecCtx*>(GB_get_user_data(gb));
-    if (!ctx || ctx->triggered) return;
+static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
+    auto* ctx=static_cast<ExecCtx*>(GB_get_user_data(gb));
+    if(!ctx||ctx->triggered) return;
     ++ctx->insn_count;
-    if (pc == ctx->sink_pc) {
-        ctx->triggered = true;
-    }
+    if(pc==ctx->sink_pc) ctx->triggered=true;
 }
 
 // ============================================================================
-// Crystal snapshot — semantic outputs captured at the presentation boundary
+// StopReason — explicit stop reason for every Crystal execution.
+// ============================================================================
+enum class StopReason {
+    SINK_HIT,          // stopped at the allowlisted presentation boundary
+    MAX_INSN_EXCEEDED, // hit the per-case instruction cap → HARNESS_ERROR
+    GB_INIT_FAILED,    // GB_init returned false → HARNESS_ERROR
+    WRAM_ACCESS_FAILED,// could not obtain WRAM pointer → HARNESS_ERROR
+    REGS_ACCESS_FAILED,// could not obtain CPU registers → HARNESS_ERROR
+};
+
+static const char* stop_reason_str(StopReason r){
+    switch(r){
+    case StopReason::SINK_HIT:          return "SINK_HIT";
+    case StopReason::MAX_INSN_EXCEEDED: return "MAX_INSN_EXCEEDED";
+    case StopReason::GB_INIT_FAILED:    return "GB_INIT_FAILED";
+    case StopReason::WRAM_ACCESS_FAILED:return "WRAM_ACCESS_FAILED";
+    case StopReason::REGS_ACCESS_FAILED:return "REGS_ACCESS_FAILED";
+    }
+    return "?";
+}
+
+// ============================================================================
+// CrystalSnapshot — semantic state captured at the presentation boundary
 // ============================================================================
 struct CrystalSnapshot {
-    uint8_t  player_stages[7];  // wPlayerStatLevels[0..6]  (raw: 7=neutral)
-    uint8_t  enemy_stages[7];   // wEnemyStatLevels[0..6]
-    uint16_t player_stats[5];   // wBattleMonAttack..SpDef  (native endian)
-    uint16_t enemy_stats[5];    // wEnemyMonAttack..SpDef
-    int      insn_count;        // instructions executed
-    const char* boundary;       // sink symbol name that fired
+    uint8_t  player_stages[7]; // wPlayerStatLevels[0..6]  (raw: 7 = neutral)
+    uint8_t  enemy_stages[7];  // wEnemyStatLevels[0..6]
+    uint16_t player_stats[5];  // wBattleMonAttack..SpDef   (big-endian → native)
+    uint16_t enemy_stats[5];   // wEnemyMonAttack..SpDef
+};
 
-    bool operator==(const CrystalSnapshot& o) const {
-        for(int i=0;i<7;i++) if(player_stages[i]!=o.player_stages[i]||enemy_stages[i]!=o.enemy_stages[i]) return false;
-        for(int i=0;i<5;i++) if(player_stats[i]!=o.player_stats[i]||enemy_stats[i]!=o.enemy_stats[i]) return false;
-        return true;
-    }
+static bool snapshots_equal(const CrystalSnapshot& a, const CrystalSnapshot& b){
+    for(int i=0;i<7;i++) if(a.player_stages[i]!=b.player_stages[i]||a.enemy_stages[i]!=b.enemy_stages[i]) return false;
+    for(int i=0;i<5;i++) if(a.player_stats[i]!=b.player_stats[i]||a.enemy_stats[i]!=b.enemy_stats[i]) return false;
+    return true;
+}
+
+struct CrystalRunResult {
+    StopReason           stop_reason;
+    std::optional<CrystalSnapshot> snapshot; // present iff stop_reason == SINK_HIT
+    int                  insn_count;
+    const char*          sink_name;  // valid iff SINK_HIT
 };
 
 // ============================================================================
-// Enginemon snapshot
-// ============================================================================
-struct EngineSnapshot {
-    int8_t   player_stages[7];  // delta from neutral (0=neutral)
-    int8_t   enemy_stages[7];
-    uint16_t player_stats[5];   // computed stats post-Haze
-    uint16_t enemy_stats[5];
-};
-
-// ============================================================================
-// Base stats fixture (written to Crystal WRAM and Enginemon BattlePokemon)
-// With neutral stages, CalcBattleStats: output = base_stat × 1/1 = base_stat
-// These values are deliberately not round numbers to distinguish from coincidence.
-// ============================================================================
-static constexpr struct { uint16_t atk,def,spd,satk,sdef; } PLAYER_BASE = {110,60,130,95,70};
-static constexpr struct { uint16_t atk,def,spd,satk,sdef; } ENEMY_BASE  = {75,110,30,100,80};
-
-// Pre-Haze stage deltas: deliberately non-zero to prove Haze resets them.
-static constexpr int8_t PLAYER_DELTA[7] = {+2,-3,+1,-1,+3,+4,-2};
-static constexpr int8_t ENEMY_DELTA[7]  = {-4,+6,-2,+3,-1,-3,+5};
-
-// ============================================================================
-// run_crystal_case — runs the Crystal routine in a dedicated SameBoy instance.
+// run_crystal_case
 //
-// ROM IMMUTABILITY: rom_bytes are passed unmodified to GB_load_rom_from_buffer.
-// No ROM bytes are accessed or patched after that call.
-// Cold-call is achieved by direct register/bank state:
-//   regs->pc  = BattleCommand_ResetStats (bank 0x0D mapped via MBC write)
-//   regs->sp  = INITIAL_SP (safe HRAM area; AnimateCurrentMove addr on stack)
-//   hROMBank  = 0x0D (for RST $08 BankSwitch restore path)
-//   GB_IO_BANK (0xFF50) = 1 (marks boot ROM finished so RST vectors read game ROM)
+// Owns a dedicated GB_gameboy_t on the call stack. No shared SameBoy state.
+// rom_bytes is shared read-only — GB_load_rom_from_buffer makes its own copy.
 // ============================================================================
-static std::optional<CrystalSnapshot> run_crystal_case(
+static CrystalRunResult run_crystal_case(
     const std::vector<uint8_t>& rom_bytes,
     const SymCache& sym,
-    uint8_t poison)
+    uint8_t poison,
+    int insn_cap)
 {
-    // SameBoy is not thread-safe. Each call owns a dedicated GB_gameboy_t on
-    // the stack. No shared SameBoy state.
+    CrystalRunResult res{};
+    res.insn_count = 0;
+    res.sink_name  = nullptr;
+
     GB_gameboy_t gb;
-    if (!GB_init(&gb, GB_MODEL_CGB_E)) return std::nullopt;
-    // Pixels buffer: small, per-call on stack is fine (160×144×4 = 92160 bytes).
-    // Use a static thread_local to avoid repeated stack allocation.
+    if(!GB_init(&gb,GB_MODEL_CGB_E)){
+        res.stop_reason=StopReason::GB_INIT_FAILED; return res;
+    }
     static thread_local uint32_t tl_pixels[160*144];
-    GB_set_log_callback(&gb, sb_log_cb);
-    GB_set_rgb_encode_callback(&gb, sb_rgb_cb);
-    GB_set_pixels_output(&gb, tl_pixels);
-    GB_set_rendering_disabled(&gb, true);
-    GB_set_turbo_mode(&gb, true, true);
+    GB_set_log_callback(&gb,sb_log_nop);
+    GB_set_rgb_encode_callback(&gb,sb_rgb_nop);
+    GB_set_pixels_output(&gb,tl_pixels);
+    GB_set_rendering_disabled(&gb,true);
+    GB_set_turbo_mode(&gb,true,true);
 
-    // Presentation-sink allowlist. AnimateCurrentMove is the only registered
-    // boundary for BattleCommand_ResetStats / Haze. All semantic outputs are
-    // committed before execution reaches this address. Future move cases must
-    // register their own sinks explicitly.
     ExecCtx ctx;
-    ctx.sink_pc    = sym.AnimateCurrentMove.addr;  // 0x7E01
-    ctx.sink_name  = "AnimateCurrentMove";
-    ctx.triggered  = false;
-    ctx.insn_count = 0;
-    GB_set_user_data(&gb, &ctx);
-    GB_set_execution_callback(&gb, exec_cb);
+    ctx.sink_pc   =sym.AnimateCurrentMove.addr;
+    ctx.sink_name ="AnimateCurrentMove";
+    ctx.triggered =false;
+    ctx.insn_count=0;
+    GB_set_user_data(&gb,&ctx);
+    GB_set_execution_callback(&gb,exec_cb);
 
-    // Load ROM — EXACT BYTES, UNMODIFIED.
-    // rom_bytes is the SHA-verified vector read from disk. It is never written.
-    // SameBoy malloc-copies it internally. We hold no pointer to gb->rom.
-    GB_load_rom_from_buffer(&gb, rom_bytes.data(), rom_bytes.size());
+    // Load ROM — exact unmodified bytes.
+    GB_load_rom_from_buffer(&gb,rom_bytes.data(),rom_bytes.size());
 
-    // Mark boot ROM as finished.
-    // Required so RST $08 (BankSwitch at 0x0008) and RST $10 (SwitchROM at 0x0010)
-    // read from the Crystal game ROM rather than the zero-filled boot ROM buffer.
-    // Writing 1 to 0xFF50 (GB_IO_BANK) calls gb->boot_rom_finished = true via the
-    // memory write handler.
-    GB_write_memory(&gb, 0xFF50, 1);
+    // boot_rom_finished=true: RST vectors (0x0008, 0x0010) read Crystal game ROM.
+    GB_write_memory(&gb,0xFF50,1);
 
-    // Set ROM bank 0x0D (MBC3 bank register at 0x2000-0x3FFF).
-    // BattleCommand_ResetStats and CalcPlayerStats/CalcEnemyStats are all in bank 0x0D.
-    GB_write_memory(&gb, 0x2000, sym.BattleCommand_ResetStats.bank);
+    // Map bank containing entry point.
+    GB_write_memory(&gb,0x2000,sym.BattleCommand_ResetStats.bank);
 
-    // Initialize WRAM: poison all, then write fixture values.
-    size_t wram_sz = 0; uint16_t wbank = 0;
-    uint8_t* wram = static_cast<uint8_t*>(
-        GB_get_direct_access(&gb, GB_DIRECT_ACCESS_RAM, &wram_sz, &wbank));
-    if (!wram || wram_sz < 0x2000) { GB_free(&gb); return std::nullopt; }
-    std::memset(wram, poison, wram_sz);
+    // WRAM: poison all, then write fixture.
+    size_t wram_sz=0; uint16_t wbank=0;
+    uint8_t* wram=static_cast<uint8_t*>(
+        GB_get_direct_access(&gb,GB_DIRECT_ACCESS_RAM,&wram_sz,&wbank));
+    if(!wram||wram_sz<0x2000){
+        GB_free(&gb); res.stop_reason=StopReason::WRAM_ACCESS_FAILED; return res;
+    }
+    std::memset(wram,poison,wram_sz);
 
-    // wLinkMode = 0: non-link battle. BadgeStatBoosts reads this first and falls
-    // through to badge checks (0 badges → no boosts applied, no short-circuit).
-    wram[wram_off(sym.wLinkMode.addr)] = 0;
+    // --- Fixture writes (all addresses pre-validated in validate_fixture_addresses) ---
 
-    // wInBattleTowerBattle = 0
-    wram[wram_off(sym.wInBattleTowerBattle.addr)] = 0;
+    // Non-link battle: BadgeStatBoosts falls through to badge checks.
+    wram[wram_off(sym.wLinkMode.addr)]=0;
+    wram[wram_off(sym.wInBattleTowerBattle.addr)]=0;
+    // No Johto badges → BadgeStatBoosts applies no boosts.
+    wram[wram_off(sym.wJohtoBadges.addr)]=0;
+    // No PAR/BRN: ApplyPrzEffectOnSpeed / ApplyBrnEffectOnAttack return early.
+    wram[wram_off(sym.wBattleMonStatus.addr)  ]=0;
+    wram[wram_off(sym.wBattleMonStatus.addr)+1]=0;
+    wram[wram_off(sym.wEnemyMonStatus.addr)  ]=0;
+    wram[wram_off(sym.wEnemyMonStatus.addr)+1]=0;
 
-    // wJohtoBadges = 0: all BIT checks in BadgeStatBoosts fail → no stat boosts.
-    wram[wram_off(sym.wJohtoBadges.addr)] = 0;
-
-    // wBattleMonStatus = 0: no PAR/BRN → ApplyPrzEffectOnSpeed and
-    // ApplyBrnEffectOnAttack both return early.
-    wram[wram_off(sym.wBattleMonStatus.addr)  ] = 0;
-    wram[wram_off(sym.wBattleMonStatus.addr)+1] = 0;
-
-    // wEnemyMonStatus = 0
-    wram[wram_off(sym.wEnemyMonStatus.addr)  ] = 0;
-    wram[wram_off(sym.wEnemyMonStatus.addr)+1] = 0;
-
-    // wPlayerStatLevels: write pre-Haze deltas. BattleCommand_ResetStats .Fill
-    // overwrites these to 7 regardless. Writing non-neutral values here proves
-    // .Fill actually executed (poison value of 7 would be indistinguishable).
+    // Pre-Haze stage levels: non-neutral so .Fill's reset to 7 is observable.
+    // PLAYER_DELTA / ENEMY_DELTA defined below; deliberately non-zero.
+    static constexpr int8_t PLAYER_DELTA[7]={+2,-3,+1,-1,+3,+4,-2};
+    static constexpr int8_t ENEMY_DELTA[7] ={-4,+6,-2,+3,-1,-3,+5};
     {
-        uint8_t* p = wram + wram_off(sym.wPlayerStatLevels.addr);
+        uint8_t* p=wram+wram_off(sym.wPlayerStatLevels.addr);
         for(int i=0;i<7;i++) p[i]=(uint8_t)(7+PLAYER_DELTA[i]);
-        p[7]=7;  // 8th slot (Curse), not touched by Haze
+        p[7]=7; // 8th slot (Curse/ability), not touched by Haze
     }
     {
-        uint8_t* p = wram + wram_off(sym.wEnemyStatLevels.addr);
+        uint8_t* p=wram+wram_off(sym.wEnemyStatLevels.addr);
         for(int i=0;i<7;i++) p[i]=(uint8_t)(7+ENEMY_DELTA[i]);
         p[7]=7;
     }
 
-    // wPlayerStats: 5 × big-endian uint16 — CalcBattleStats reads these as the
-    // base stat values. With neutral stages (7 → 1/1 multiplier), output = input.
+    // wPlayerStats / wEnemyStats: base stats read by CalcBattleStats.
+    // With neutral stages (1/1 multiplier), output = input.
+    static constexpr uint16_t P_ATK=110,P_DEF=60,P_SPD=130,P_SATK=95,P_SDEF=70;
+    static constexpr uint16_t E_ATK=75, E_DEF=110,E_SPD=30, E_SATK=100,E_SDEF=80;
     {
-        uint8_t* p = wram + wram_off(sym.wPlayerStats.addr);
-        auto be16=[](uint8_t* d,uint16_t v){d[0]=(v>>8);d[1]=v&0xFF;};
-        be16(p+0,PLAYER_BASE.atk); be16(p+2,PLAYER_BASE.def);
-        be16(p+4,PLAYER_BASE.spd); be16(p+6,PLAYER_BASE.satk); be16(p+8,PLAYER_BASE.sdef);
+        uint8_t* p=wram+wram_off(sym.wPlayerStats.addr);
+        auto be=[](uint8_t* d,uint16_t v){d[0]=(v>>8);d[1]=v&0xFF;};
+        be(p+0,P_ATK);be(p+2,P_DEF);be(p+4,P_SPD);be(p+6,P_SATK);be(p+8,P_SDEF);
     }
-    // wEnemyStats
     {
-        uint8_t* p = wram + wram_off(sym.wEnemyStats.addr);
-        auto be16=[](uint8_t* d,uint16_t v){d[0]=(v>>8);d[1]=v&0xFF;};
-        be16(p+0,ENEMY_BASE.atk); be16(p+2,ENEMY_BASE.def);
-        be16(p+4,ENEMY_BASE.spd); be16(p+6,ENEMY_BASE.satk); be16(p+8,ENEMY_BASE.sdef);
+        uint8_t* p=wram+wram_off(sym.wEnemyStats.addr);
+        auto be=[](uint8_t* d,uint16_t v){d[0]=(v>>8);d[1]=v&0xFF;};
+        be(p+0,E_ATK);be(p+2,E_DEF);be(p+4,E_SPD);be(p+6,E_SATK);be(p+8,E_SDEF);
     }
 
-    // hBattleTurn = 0 (player turn). BattleCommand_ResetStats saves + restores this.
-    GB_write_memory(&gb, sym.hBattleTurn.addr, 0x00);
+    // hBattleTurn = 0: BattleCommand_ResetStats saves + restores.
+    GB_write_memory(&gb,sym.hBattleTurn.addr,0x00);
+    // hROMBank = entry bank: BankSwitch (RST $08) saves/restores this.
+    GB_write_memory(&gb,sym.hROMBank.addr,sym.BattleCommand_ResetStats.bank);
+    // IME already 0 from GB_init memset; clear IE/IF for belt-and-suspenders.
+    GB_write_memory(&gb,0xFFFF,0x00);
+    GB_write_memory(&gb,0xFF0F,0x00);
 
-    // hROMBank: must reflect the currently-mapped bank. BankSwitch (RST $08 handler,
-    // 0x2D63) reads hROMBank, saves it, switches to the target bank, calls the callee,
-    // then restores hROMBank. Correct value = bank of BattleCommand_ResetStats = 0x0D.
-    GB_write_memory(&gb, sym.hROMBank.addr, sym.BattleCommand_ResetStats.bank);
+    // --- CPU entry ---
+    GB_registers_t* regs=GB_get_registers(&gb);
+    if(!regs){
+        GB_free(&gb); res.stop_reason=StopReason::REGS_ACCESS_FAILED; return res;
+    }
+    // Stack: sink addr as return address. If execution RETs before the callback
+    // fires, it lands at AnimateCurrentMove and the callback stops it there.
+    static constexpr uint16_t INITIAL_SP=0xFFF0;
+    const uint16_t ret=sym.AnimateCurrentMove.addr;
+    GB_write_memory(&gb,INITIAL_SP-1,(ret>>8)&0xFF);
+    GB_write_memory(&gb,INITIAL_SP-2, ret    &0xFF);
+    regs->sp=INITIAL_SP-2;
+    regs->pc=sym.BattleCommand_ResetStats.addr;
 
-    // Clear IE/IF: belt-and-suspenders. IME starts as 0 from GB_init memset.
-    GB_write_memory(&gb, 0xFFFF, 0x00);  // IE
-    GB_write_memory(&gb, 0xFF0F, 0x00);  // IF
-
-    // Set CPU entry point directly.
-    // PC = BattleCommand_ResetStats (0x710E in bank 0x0D, currently mapped).
-    // SP = 0xFFF0 − 2; stack holds AnimateCurrentMove.addr as return address.
-    //   If the routine ever RETs before the execution callback fires, it lands
-    //   at AnimateCurrentMove and the callback stops it there. No ROM needed.
-    GB_registers_t* regs = GB_get_registers(&gb);
-    if (!regs) { GB_free(&gb); return std::nullopt; }
-
-    static constexpr uint16_t INITIAL_SP = 0xFFF0;
-    const uint16_t ret_addr = sym.AnimateCurrentMove.addr;  // 0x7E01
-    GB_write_memory(&gb, INITIAL_SP-1, (ret_addr>>8)&0xFF);
-    GB_write_memory(&gb, INITIAL_SP-2,  ret_addr    &0xFF);
-    regs->sp = INITIAL_SP-2;
-    regs->pc = sym.BattleCommand_ResetStats.addr;  // 0x710E
-
-    // Execute until AnimateCurrentMove boundary (or safety limit).
-    static constexpr int MAX_INSN = 200000;
-    while (!ctx.triggered && ctx.insn_count < MAX_INSN)
+    // --- Execute ---
+    while(!ctx.triggered && ctx.insn_count<insn_cap)
         GB_run(&gb);
 
-    if (!ctx.triggered) {
+    res.insn_count=ctx.insn_count;
+
+    if(!ctx.triggered){
         GB_free(&gb);
-        return std::nullopt;  // harness error: didn't reach boundary
+        res.stop_reason=StopReason::MAX_INSN_EXCEEDED;
+        return res;
     }
 
-    // Read semantic outputs from WRAM.
-    wram_sz = 0;
-    wram = static_cast<uint8_t*>(
-        GB_get_direct_access(&gb, GB_DIRECT_ACCESS_RAM, &wram_sz, &wbank));
-    if (!wram) { GB_free(&gb); return std::nullopt; }
+    // --- Read semantic outputs ---
+    wram_sz=0;
+    wram=static_cast<uint8_t*>(
+        GB_get_direct_access(&gb,GB_DIRECT_ACCESS_RAM,&wram_sz,&wbank));
+    if(!wram){ GB_free(&gb); res.stop_reason=StopReason::WRAM_ACCESS_FAILED; return res; }
 
     CrystalSnapshot snap{};
-    snap.insn_count = ctx.insn_count;
-    snap.boundary   = ctx.sink_name;
-
-    { auto* p=wram+wram_off(sym.wPlayerStatLevels.addr); for(int i=0;i<7;i++) snap.player_stages[i]=p[i]; }
-    { auto* p=wram+wram_off(sym.wEnemyStatLevels.addr);  for(int i=0;i<7;i++) snap.enemy_stages[i]=p[i]; }
-    { auto* p=wram+wram_off(sym.wBattleMonAttack.addr);  for(int i=0;i<5;i++) snap.player_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]); }
-    { auto* p=wram+wram_off(sym.wEnemyMonAttack.addr);   for(int i=0;i<5;i++) snap.enemy_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]); }
+    {auto* p=wram+wram_off(sym.wPlayerStatLevels.addr); for(int i=0;i<7;i++) snap.player_stages[i]=p[i];}
+    {auto* p=wram+wram_off(sym.wEnemyStatLevels.addr);  for(int i=0;i<7;i++) snap.enemy_stages[i]=p[i];}
+    {auto* p=wram+wram_off(sym.wBattleMonAttack.addr);  for(int i=0;i<5;i++) snap.player_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
+    {auto* p=wram+wram_off(sym.wEnemyMonAttack.addr);   for(int i=0;i<5;i++) snap.enemy_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
 
     GB_free(&gb);
-    return snap;
+    res.stop_reason=StopReason::SINK_HIT;
+    res.snapshot   =snap;
+    res.sink_name  =ctx.sink_name;
+    return res;
 }
 
 // ============================================================================
-// Enginemon helpers — loaded once from ROM profile, shared read-only.
+// Enginemon side
 // ============================================================================
+static constexpr int8_t PLAYER_DELTA[7]={+2,-3,+1,-1,+3,+4,-2};
+static constexpr int8_t ENEMY_DELTA[7] ={-4,+6,-2,+3,-1,-3,+5};
+static constexpr uint16_t P_ATK=110,P_DEF=60,P_SPD=130,P_SATK=95,P_SDEF=70;
+static constexpr uint16_t E_ATK=75, E_DEF=110,E_SPD=30, E_SATK=100,E_SDEF=80;
+
 static std::vector<crystal::PackageWriter::MoveDataEntry>
-build_move_entries(const crystal::RomData& rom, const crystal::ExtractionProfile& prof) {
+build_move_entries(const crystal::RomData& rom, const crystal::ExtractionProfile& prof){
     std::vector<crystal::PackageWriter::MoveDataEntry> entries;
     const auto& o=prof.offsets; const auto& fmt=prof.format.move; const auto& c=prof.counts;
     if(!o.moves) return entries;
@@ -464,93 +555,70 @@ static std::optional<EngineData> load_engine_data(
     const crystal::RomData& rom,
     const crystal::ExtractionProfile& profile)
 {
-    auto entries = build_move_entries(rom, profile);
-    if (!crystal::semanticize_move_entries(rom, profile, entries)) return std::nullopt;
-
+    auto entries=build_move_entries(rom,profile);
+    if(!crystal::semanticize_move_entries(rom,profile,entries)) return std::nullopt;
     crystal::PackageWriter w;
-    w.set_source_rom(std::string(40,'x'), "oracle");
+    w.set_source_rom(std::string(40,'x'),"oracle");
     w.add_move_data(entries);
-
-    auto pkg = std::filesystem::temp_directory_path() / "oracle_moves.emon";
-    if (!w.write(pkg)) return std::nullopt;
-    auto rdr = enginemon::PackageReader::open(pkg);
-    if (!rdr) { std::filesystem::remove(pkg); return std::nullopt; }
-    auto reg = rdr->load_move_registry();
+    auto pkg=std::filesystem::temp_directory_path()/"oracle_moves.emon";
+    if(!w.write(pkg)) return std::nullopt;
+    auto rdr=enginemon::PackageReader::open(pkg);
+    if(!rdr){ std::filesystem::remove(pkg); return std::nullopt; }
+    auto reg=rdr->load_move_registry();
     std::filesystem::remove(pkg);
-    if (!reg) return std::nullopt;
-
-    auto res = crystal::extract_battle_rules(rom, profile);
-    EngineData d;
-    d.moves = *reg;
-    d.rules = res.success ? res.rules : enginemon::BattleRules{};
+    if(!reg) return std::nullopt;
+    auto res=crystal::extract_battle_rules(rom,profile);
+    EngineData d; d.moves=*reg; d.rules=res.success?res.rules:enginemon::BattleRules{};
     return d;
 }
 
-// ============================================================================
-// run_enginemon_case — runs Enginemon Battle::execute_turn() for a move.
-// ============================================================================
+struct EngineSnapshot {
+    int8_t   player_stages[7];
+    int8_t   enemy_stages[7];
+    uint16_t player_stats[5];
+    uint16_t enemy_stats[5];
+};
+
 static std::optional<EngineSnapshot> run_enginemon_case(
-    enginemon::MoveId move_id,
-    const EngineData& ed)
+    enginemon::MoveId move_id, const EngineData& ed)
 {
-    const enginemon::MoveData* md = ed.moves.get(move_id);
-    if (!md || !md->effect_desc.is_supported) return std::nullopt;
+    const enginemon::MoveData* md=ed.moves.get(move_id);
+    if(!md||!md->effect_desc.is_supported) return std::nullopt;
 
-    enginemon::Registries reg{}; reg.moves = ed.moves;
-
+    enginemon::Registries reg{}; reg.moves=ed.moves;
     enginemon::Party party;
     { enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
       pm.current_hp=pm.max_hp=300; pm.friendship=200; party.add(pm); }
+    enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
 
-    enginemon::Battle bat(enginemon::BattleType::Wild, party, reg, ed.rules);
-
-    // Player: uses move_id, pre-Haze stage deltas, PLAYER_BASE stats.
-    {
+    auto make=[](enginemon::MoveId mid, uint16_t atk,uint16_t def,uint16_t spd,
+                 uint16_t satk,uint16_t sdef, const int8_t* sd){
         enginemon::BattlePokemon bp{};
         bp.species=1; bp.type1=0; bp.type2=0; bp.level=50;
         bp.stats.hp=bp.stats.max_hp=300; bp.base_stats.hp=bp.base_stats.max_hp=300;
-        bp.stats.attack=bp.base_stats.attack=PLAYER_BASE.atk;
-        bp.stats.defense=bp.base_stats.defense=PLAYER_BASE.def;
-        bp.stats.speed=bp.base_stats.speed=PLAYER_BASE.spd;
-        bp.stats.special_attack=bp.base_stats.special_attack=PLAYER_BASE.satk;
-        bp.stats.special_defense=bp.base_stats.special_defense=PLAYER_BASE.sdef;
+        bp.stats.attack=bp.base_stats.attack=atk;
+        bp.stats.defense=bp.base_stats.defense=def;
+        bp.stats.speed=bp.base_stats.speed=spd;
+        bp.stats.special_attack=bp.base_stats.special_attack=satk;
+        bp.stats.special_defense=bp.base_stats.special_defense=sdef;
         bp.happiness=200; bp.dv_atk=bp.dv_def=bp.dv_spd=bp.dv_spc=15;
-        bp.moves[0].move=move_id; bp.moves[0].pp=bp.moves[0].max_pp=10;
-        bp.stages.attack=PLAYER_DELTA[0]; bp.stages.defense=PLAYER_DELTA[1];
-        bp.stages.speed=PLAYER_DELTA[2];  bp.stages.special_attack=PLAYER_DELTA[3];
-        bp.stages.special_defense=PLAYER_DELTA[4]; bp.stages.accuracy=PLAYER_DELTA[5];
-        bp.stages.evasion=PLAYER_DELTA[6];
-        bat.player_pokemon() = bp;
-    }
-    // Opponent: no move, ENEMY_BASE stats, pre-Haze enemy stage deltas.
-    {
-        enginemon::BattlePokemon bp{};
-        bp.species=1; bp.type1=0; bp.type2=0; bp.level=50;
-        bp.stats.hp=bp.stats.max_hp=300; bp.base_stats.hp=bp.base_stats.max_hp=300;
-        bp.stats.attack=bp.base_stats.attack=ENEMY_BASE.atk;
-        bp.stats.defense=bp.base_stats.defense=ENEMY_BASE.def;
-        bp.stats.speed=bp.base_stats.speed=ENEMY_BASE.spd;
-        bp.stats.special_attack=bp.base_stats.special_attack=ENEMY_BASE.satk;
-        bp.stats.special_defense=bp.base_stats.special_defense=ENEMY_BASE.sdef;
-        bp.happiness=200; bp.dv_atk=bp.dv_def=bp.dv_spd=bp.dv_spc=15;
-        bp.moves[0].move=enginemon::MOVE_NONE; bp.moves[0].pp=bp.moves[0].max_pp=0;
-        bp.stages.attack=ENEMY_DELTA[0]; bp.stages.defense=ENEMY_DELTA[1];
-        bp.stages.speed=ENEMY_DELTA[2];  bp.stages.special_attack=ENEMY_DELTA[3];
-        bp.stages.special_defense=ENEMY_DELTA[4]; bp.stages.accuracy=ENEMY_DELTA[5];
-        bp.stages.evasion=ENEMY_DELTA[6];
-        bat.opponent_pokemon() = bp;
-    }
+        bp.moves[0].move=mid; bp.moves[0].pp=bp.moves[0].max_pp=10;
+        bp.stages.attack=sd[0]; bp.stages.defense=sd[1]; bp.stages.speed=sd[2];
+        bp.stages.special_attack=sd[3]; bp.stages.special_defense=sd[4];
+        bp.stages.accuracy=sd[5]; bp.stages.evasion=sd[6];
+        return bp;
+    };
 
-    bat.set_rng_callback([]()->uint32_t{ return 0xFF; });
+    bat.player_pokemon()   = make(move_id,P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,PLAYER_DELTA);
+    bat.opponent_pokemon() = make(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,ENEMY_DELTA);
+
+    bat.set_rng_callback([]()->uint32_t{return 0xFF;});
     bat.set_player_action(enginemon::ActionFight{0,0});
     bat.set_opponent_action(enginemon::ActionFight{0,0});
     bat.execute_turn();
 
-    const auto& pp = bat.player_pokemon();
-    const auto& op = bat.opponent_pokemon();
-    const auto& ps = pp.stages;
-    const auto& os = op.stages;
-
+    const auto& pp=bat.player_pokemon(); const auto& op=bat.opponent_pokemon();
+    const auto& ps=pp.stages; const auto& os=op.stages;
     EngineSnapshot e{};
     e.player_stages[0]=ps.attack; e.player_stages[1]=ps.defense; e.player_stages[2]=ps.speed;
     e.player_stages[3]=ps.special_attack; e.player_stages[4]=ps.special_defense;
@@ -558,104 +626,154 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     e.enemy_stages[0]=os.attack; e.enemy_stages[1]=os.defense; e.enemy_stages[2]=os.speed;
     e.enemy_stages[3]=os.special_attack; e.enemy_stages[4]=os.special_defense;
     e.enemy_stages[5]=os.accuracy; e.enemy_stages[6]=os.evasion;
-    e.player_stats[0]=(uint16_t)pp.stats.attack; e.player_stats[1]=(uint16_t)pp.stats.defense;
-    e.player_stats[2]=(uint16_t)pp.stats.speed;  e.player_stats[3]=(uint16_t)pp.stats.special_attack;
+    e.player_stats[0]=(uint16_t)pp.stats.attack;  e.player_stats[1]=(uint16_t)pp.stats.defense;
+    e.player_stats[2]=(uint16_t)pp.stats.speed;   e.player_stats[3]=(uint16_t)pp.stats.special_attack;
     e.player_stats[4]=(uint16_t)pp.stats.special_defense;
-    e.enemy_stats[0]=(uint16_t)op.stats.attack;  e.enemy_stats[1]=(uint16_t)op.stats.defense;
-    e.enemy_stats[2]=(uint16_t)op.stats.speed;   e.enemy_stats[3]=(uint16_t)op.stats.special_attack;
+    e.enemy_stats[0]=(uint16_t)op.stats.attack;   e.enemy_stats[1]=(uint16_t)op.stats.defense;
+    e.enemy_stats[2]=(uint16_t)op.stats.speed;    e.enemy_stats[3]=(uint16_t)op.stats.special_attack;
     e.enemy_stats[4]=(uint16_t)op.stats.special_defense;
     return e;
 }
 
 // ============================================================================
-// CaseResult — per-move outcome
+// CaseResult
 // ============================================================================
 enum class Status { MATCH, ENGINEMON_MISMATCH, HARNESS_ERROR };
-static const char* status_str(Status s) {
-    switch(s){
-    case Status::MATCH:              return "MATCH";
-    case Status::ENGINEMON_MISMATCH: return "ENGINEMON_MISMATCH";
-    case Status::HARNESS_ERROR:      return "HARNESS_ERROR";
-    }
-    return "?";
-}
 
 struct CaseResult {
     uint16_t    move_id;
     Status      status;
-    std::string detail;   // diff lines or error message
-    int         insn_count;
-    bool        poison_stable;
-    const char* boundary;
+    std::string detail;        // structured mismatch lines or error description
+    int         insn_count;    // from poison-0x00 run
+    bool        poison_stable; // true iff both runs produced identical snapshots
+    const char* stop_reason;   // stop_reason_str of poison-0x00 run
+    const char* boundary;      // sink symbol name (valid iff SINK_HIT)
 };
 
 // ============================================================================
-// run_case — executes one move case (two poison runs + Enginemon diff).
-// Self-contained, safe to call from any thread.
+// MoveSpec — per-move configuration.
+// Adding a new move: register here with its name, insn_cap, and sink symbol.
+// The sink must be in the global SymCache so it resolves at startup.
+// ============================================================================
+struct MoveSpec {
+    uint16_t    id;
+    const char* name;
+    int         insn_cap;    // HARNESS_ERROR if exceeded
+};
+
+static constexpr MoveSpec REGISTERED_MOVES[] = {
+    // move 114: Haze / BattleCommand_ResetStats
+    // Measured: ~13 200 insn.  Cap = 50 000 (~3.8× margin).
+    { 114, "Haze", 50000 },
+};
+static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
+
+static const MoveSpec* find_move(uint16_t id){
+    for(size_t i=0;i<NUM_REGISTERED;i++) if(REGISTERED_MOVES[i].id==id) return &REGISTERED_MOVES[i];
+    return nullptr;
+}
+
+// ============================================================================
+// run_case — self-contained, safe to call from any thread.
 // ============================================================================
 static CaseResult run_case(
-    uint16_t move_id,
+    const MoveSpec& spec,
     const std::vector<uint8_t>& rom_bytes,
     const SymCache& sym,
     const EngineData& ed)
 {
-    CaseResult r;
-    r.move_id     = move_id;
+    CaseResult r{};
+    r.move_id     = spec.id;
     r.status      = Status::HARNESS_ERROR;
     r.insn_count  = 0;
     r.poison_stable = false;
+    r.stop_reason = nullptr;
     r.boundary    = nullptr;
 
-    // Two Crystal runs with different poison bytes — outputs must agree.
-    auto c1 = run_crystal_case(rom_bytes, sym, 0x00);
-    auto c2 = run_crystal_case(rom_bytes, sym, 0xA5);
+    // Two Crystal runs with different poison patterns.
+    auto cr1 = run_crystal_case(rom_bytes, sym, 0x00, spec.insn_cap);
+    auto cr2 = run_crystal_case(rom_bytes, sym, 0xA5, spec.insn_cap);
 
-    if (!c1 || !c2) {
-        r.detail = "Crystal execution failed to reach presentation boundary";
+    r.insn_count  = cr1.insn_count;
+    r.stop_reason = stop_reason_str(cr1.stop_reason);
+    r.boundary    = cr1.sink_name;
+
+    // Both runs must reach the sink.
+    if(cr1.stop_reason != StopReason::SINK_HIT){
+        r.detail = std::string("Crystal run 1 failed: ")+stop_reason_str(cr1.stop_reason)
+                 + " after "+std::to_string(cr1.insn_count)+" insn";
+        return r;
+    }
+    if(cr2.stop_reason != StopReason::SINK_HIT){
+        r.detail = std::string("Crystal run 2 (poison=0xA5) failed: ")+stop_reason_str(cr2.stop_reason)
+                 + " after "+std::to_string(cr2.insn_count)+" insn";
         return r;
     }
 
-    r.insn_count   = c1->insn_count;
-    r.boundary     = c1->boundary;
-    r.poison_stable = (*c1 == *c2);
-
-    if (!r.poison_stable) {
-        r.detail = "Poison instability: 0x00 vs 0xA5 Crystal runs disagree";
-        return r;
+    // Poison stability check — disagreement = HARNESS_ERROR (not a mismatch).
+    r.poison_stable = snapshots_equal(*cr1.snapshot, *cr2.snapshot);
+    if(!r.poison_stable){
+        // Structured output: show which fields differ.
+        std::ostringstream os;
+        os<<"POISON INSTABILITY (0x00 vs 0xA5):\n";
+        static const char* SN[7]={"ATK","DEF","SPD","SATK","SDEF","ACC","EVA"};
+        static const char* CN[5]={"ATK","DEF","SPD","SATK","SDEF"};
+        for(int i=0;i<7;i++){
+            if(cr1.snapshot->player_stages[i]!=cr2.snapshot->player_stages[i])
+                os<<"  player_stage."<<SN[i]<<": run1="<<(int)cr1.snapshot->player_stages[i]
+                  <<" run2="<<(int)cr2.snapshot->player_stages[i]<<"\n";
+            if(cr1.snapshot->enemy_stages[i]!=cr2.snapshot->enemy_stages[i])
+                os<<"  enemy_stage."<<SN[i]<<": run1="<<(int)cr1.snapshot->enemy_stages[i]
+                  <<" run2="<<(int)cr2.snapshot->enemy_stages[i]<<"\n";
+        }
+        for(int i=0;i<5;i++){
+            if(cr1.snapshot->player_stats[i]!=cr2.snapshot->player_stats[i])
+                os<<"  player_stat."<<CN[i]<<": run1="<<cr1.snapshot->player_stats[i]
+                  <<" run2="<<cr2.snapshot->player_stats[i]<<"\n";
+            if(cr1.snapshot->enemy_stats[i]!=cr2.snapshot->enemy_stats[i])
+                os<<"  enemy_stat."<<CN[i]<<": run1="<<cr1.snapshot->enemy_stats[i]
+                  <<" run2="<<cr2.snapshot->enemy_stats[i]<<"\n";
+        }
+        r.detail = os.str();
+        return r;  // HARNESS_ERROR
     }
 
-    // Enginemon run
-    auto eng = run_enginemon_case(move_id, ed);
-    if (!eng) {
-        r.detail = "Enginemon execution failed (move not supported or harness error)";
+    // Enginemon run.
+    auto eng = run_enginemon_case(spec.id, ed);
+    if(!eng){
+        r.detail = "Enginemon run failed (move not supported by engine or data error)";
         return r;
     }
 
     // Normalize and compare.
-    // Crystal stage encoding: 7=neutral. Enginemon: 0=neutral.
-    // crystal_delta = raw - 7 == enginemon_stage
-    static const char* SNAME[7] = {"ATK","DEF","SPD","SATK","SDEF","ACC","EVA"};
-    static const char* CNAME[5] = {"ATK","DEF","SPD","SATK","SDEF"};
+    // Crystal stage: 7=neutral → delta = raw-7
+    // Enginemon stage: 0=neutral → delta = value
+    static const char* SN[7]={"ATK","DEF","SPD","SATK","SDEF","ACC","EVA"};
+    static const char* CN[5]={"ATK","DEF","SPD","SATK","SDEF"};
     bool all_match = true;
     std::ostringstream diff;
 
     for(int i=0;i<7;i++){
-        int8_t cd = int8_t(int(c1->player_stages[i])-7);
-        int8_t ed2 = eng->player_stages[i];
-        if(cd!=ed2){ all_match=false; diff<<"player."<<SNAME[i]<<": crystal="<<(int)cd<<" enginemon="<<(int)ed2<<"\n"; }
+        int8_t cd=int8_t(int(cr1.snapshot->player_stages[i])-7);
+        int8_t ed2=eng->player_stages[i];
+        if(cd!=ed2){ all_match=false;
+            diff<<"  player_stage."<<SN[i]<<": crystal="<<(int)cd<<" enginemon="<<(int)ed2<<"\n"; }
     }
     for(int i=0;i<7;i++){
-        int8_t cd = int8_t(int(c1->enemy_stages[i])-7);
-        int8_t ed2 = eng->enemy_stages[i];
-        if(cd!=ed2){ all_match=false; diff<<"enemy."<<SNAME[i]<<": crystal="<<(int)cd<<" enginemon="<<(int)ed2<<"\n"; }
+        int8_t cd=int8_t(int(cr1.snapshot->enemy_stages[i])-7);
+        int8_t ed2=eng->enemy_stages[i];
+        if(cd!=ed2){ all_match=false;
+            diff<<"  enemy_stage."<<SN[i]<<": crystal="<<(int)cd<<" enginemon="<<(int)ed2<<"\n"; }
     }
     for(int i=0;i<5;i++){
-        uint16_t cr=c1->player_stats[i], em=eng->player_stats[i];
-        if(cr!=em){ all_match=false; diff<<"player.stat."<<CNAME[i]<<": crystal="<<cr<<" enginemon="<<em<<"\n"; }
+        uint16_t cr=cr1.snapshot->player_stats[i], em=eng->player_stats[i];
+        if(cr!=em){ all_match=false;
+            diff<<"  player_stat."<<CN[i]<<": crystal="<<cr<<" enginemon="<<em<<"\n"; }
     }
     for(int i=0;i<5;i++){
-        uint16_t cr=c1->enemy_stats[i], em=eng->enemy_stats[i];
-        if(cr!=em){ all_match=false; diff<<"enemy.stat."<<CNAME[i]<<": crystal="<<cr<<" enginemon="<<em<<"\n"; }
+        uint16_t cr=cr1.snapshot->enemy_stats[i], em=eng->enemy_stats[i];
+        if(cr!=em){ all_match=false;
+            diff<<"  enemy_stat."<<CN[i]<<": crystal="<<cr<<" enginemon="<<em<<"\n"; }
     }
 
     r.status = all_match ? Status::MATCH : Status::ENGINEMON_MISMATCH;
@@ -664,183 +782,243 @@ static CaseResult run_case(
 }
 
 // ============================================================================
-// Registered move list — one entry per move that has a Crystal execution path
-// and an Enginemon implementation. Currently only Haze (114).
-// Adding a new move requires: registering here AND ensuring the move's routine
-// exits at an allowlisted presentation sink.
+// runner_main
 // ============================================================================
-static const uint16_t REGISTERED_MOVES[] = { 114 };
-static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
+int runner_main(int argc, char* argv[], RunnerConfig defaults){
+    const char* prog = argc>0?argv[0]:"crystal_battle_diff";
 
-static bool is_registered(uint16_t id) {
-    for(size_t i=0;i<NUM_REGISTERED;i++) if(REGISTERED_MOVES[i]==id) return true;
-    return false;
-}
+    // --- Startup: SameBoy version pin ---
+    // GB_VERSION is the string from sameboy_version.h (force-included at compile time).
+    // Fail closed if it doesn't match the pinned version.
+    if(std::string(GB_VERSION) != PINNED_SAMEBOY_VERSION){
+        std::cerr<<"FATAL: SameBoy version mismatch.\n"
+                 <<"  Pinned: "<<PINNED_SAMEBOY_VERSION<<"\n"
+                 <<"  Built:  "<<GB_VERSION<<"\n";
+        return EXIT_HARNESS_ERROR;
+    }
 
-// ============================================================================
-// runner_main — public entry point
-// ============================================================================
-int runner_main(int argc, char* argv[], RunnerConfig defaults) {
-    // --- Parse arguments ---
+    // --- Parse CLI ---
     std::string rom_path, sym_path;
     std::vector<uint16_t> move_ids = defaults.move_ids;
-    int jobs = defaults.jobs;
+    int jobs = defaults.jobs < 1 ? 1 : defaults.jobs;
     bool all_flag = false;
+    bool help_flag = false;
 
-    if (argc < 3) {
-        std::cerr << "Usage: <exe> <rom_path> <sym_path> [--jobs N] [--all] [--move <id> ...]\n";
-        return 1;
-    }
-    rom_path = argv[1];
-    sym_path = argv[2];
-    for (int i=3; i<argc; ++i) {
-        std::string a = argv[i];
-        if (a=="--jobs" && i+1<argc) { jobs = std::stoi(argv[++i]); }
-        else if (a=="--all")         { all_flag = true; }
-        else if (a=="--move" && i+1<argc) {
-            while (i+1<argc && argv[i+1][0]!='-')
+    // Positional scan: first two non-flag args are rom and sym.
+    int positional = 0;
+    for(int i=1;i<argc;++i){
+        std::string a=argv[i];
+        if(a=="--help"||a=="-h"){ help_flag=true; }
+        else if(a=="--all"){ all_flag=true; }
+        else if((a=="--jobs"||a=="-j")&&i+1<argc){ jobs=std::max(1,std::stoi(argv[++i])); }
+        else if(a=="--move"&&i+1<argc){
+            while(i+1<argc&&argv[i+1][0]!='-')
                 move_ids.push_back((uint16_t)std::stoi(argv[++i]));
         }
-    }
-    if (jobs < 1) jobs = 1;
-
-    if (all_flag) {
-        move_ids.assign(REGISTERED_MOVES, REGISTERED_MOVES+NUM_REGISTERED);
-    } else if (move_ids.empty()) {
-        // default: whatever was passed in defaults (already set above)
-        if (move_ids.empty()) {
-            std::cerr << "No moves selected. Use --all or --move <id>.\n";
-            return 1;
+        else if(a.size()>0&&a[0]!='-'){
+            if(positional==0) rom_path=a;
+            else if(positional==1) sym_path=a;
+            ++positional;
         }
     }
 
-    // Validate move IDs against the registered list.
-    for (uint16_t id : move_ids) {
-        if (!is_registered(id)) {
-            std::cerr << "Move " << id << " is not registered in the oracle.\n"
-                      << "  Registered moves:";
-            for (auto m : REGISTERED_MOVES) std::cerr<<" "<<m;
-            std::cerr<<"\n";
-            return 1;
-        }
+    if(help_flag){
+        std::cout<<
+            "crystal_battle_diff — Crystal vs Enginemon battle differential oracle\n\n"
+            "Usage:\n"
+            "  "<<prog<<" <rom_path> <sym_path> [options]\n\n"
+            "Required:\n"
+            "  <rom_path>    Crystal v1.1 (UE) ROM  SHA-1: "<<PINNED_ROM_SHA1<<"\n"
+            "  <sym_path>    pokecrystal11.sym matching that ROM\n\n"
+            "Options:\n"
+            "  --all           Run all registered moves\n"
+            "  --move <id>...  Run specific move ID(s)\n"
+            "  --jobs N        Parallel workers (default: 1)\n"
+            "  --help          Show this message\n\n"
+            "Registered moves:\n";
+        for(size_t i=0;i<NUM_REGISTERED;i++)
+            std::cout<<"  "<<REGISTERED_MOVES[i].id<<"  "<<REGISTERED_MOVES[i].name
+                     <<"  (insn_cap="<<REGISTERED_MOVES[i].insn_cap<<")\n";
+        std::cout<<"\nExit codes:\n"
+            "  0  all MATCH\n"
+            "  1  ENGINEMON_MISMATCH\n"
+            "  2  HARNESS_ERROR\n"
+            "  3  invalid CLI / unregistered move\n";
+        return EXIT_ALL_MATCH;
     }
 
-    // Deduplicate, sort deterministically.
-    std::sort(move_ids.begin(), move_ids.end());
-    move_ids.erase(std::unique(move_ids.begin(), move_ids.end()), move_ids.end());
+    if(rom_path.empty()||sym_path.empty()){
+        std::cerr<<"Error: rom_path and sym_path are required.\n"
+                 <<"Run '"<<prog<<" --help' for usage.\n";
+        return EXIT_INVALID_ARGS;
+    }
 
-    // --- Load and verify ROM ---
+    // Resolve move list.
+    if(all_flag){
+        move_ids.clear();
+        for(size_t i=0;i<NUM_REGISTERED;i++) move_ids.push_back(REGISTERED_MOVES[i].id);
+    } else if(move_ids.empty()){
+        std::cerr<<"Error: no moves selected. Use --all or --move <id>.\n"
+                 <<"Run '"<<prog<<" --help' for usage.\n";
+        return EXIT_INVALID_ARGS;
+    }
+
+    // Validate move IDs (fail-closed: unregistered = EXIT_INVALID_ARGS).
+    for(uint16_t id : move_ids){
+        if(!find_move(id)){
+            std::cerr<<"Error: move "<<id<<" is not registered in the oracle.\n"
+                     <<"  Registered:";
+            for(size_t i=0;i<NUM_REGISTERED;i++) std::cerr<<" "<<REGISTERED_MOVES[i].id;
+            std::cerr<<"\nRun '"<<prog<<" --help' for details.\n";
+            return EXIT_INVALID_ARGS;
+        }
+    }
+    // Deduplicate and sort for deterministic ordering.
+    std::sort(move_ids.begin(),move_ids.end());
+    move_ids.erase(std::unique(move_ids.begin(),move_ids.end()),move_ids.end());
+
+    // =========================================================================
+    // Startup checks — all must pass before any case runs.
+    // =========================================================================
+    std::cout<<"=== Crystal Battle Differential Oracle ===\n";
+    std::cout<<"  SameBoy:  "<<PINNED_SAMEBOY_COMMIT<<"  (version "<<GB_VERSION<<")\n";
+
+    // 1. ROM: load, size check, SHA-1.
     std::vector<uint8_t> rom_bytes;
     {
-        std::ifstream f(rom_path, std::ios::binary);
-        if (!f) { std::cerr << "Cannot open ROM: " << rom_path << "\n"; return 1; }
-        rom_bytes.assign(std::istreambuf_iterator<char>(f), {});
+        std::ifstream f(rom_path,std::ios::binary);
+        if(!f){
+            std::cerr<<"FATAL: cannot open ROM: "<<rom_path<<"\n";
+            return EXIT_HARNESS_ERROR;
+        }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f),{});
     }
-    if (rom_bytes.size() != CRYSTAL_ROM_SIZE) {
-        std::cerr << "ROM size wrong: " << rom_bytes.size() << " (expected " << CRYSTAL_ROM_SIZE << ")\n";
-        return 1;
+    if(rom_bytes.size()!=CRYSTAL_ROM_SIZE){
+        std::cerr<<"FATAL: ROM size "<<rom_bytes.size()<<" != "<<CRYSTAL_ROM_SIZE<<"\n";
+        return EXIT_HARNESS_ERROR;
     }
-    std::string actual_sha = sha1_hex(rom_bytes.data(), rom_bytes.size());
-    std::cout << "ROM SHA-1:   " << actual_sha << "\n";
-    if (actual_sha != CRYSTAL_ROM_SHA1) {
-        std::cerr << "FATAL: ROM SHA-1 mismatch.\n"
-                  << "  Expected: " << CRYSTAL_ROM_SHA1 << "\n"
-                  << "  Actual:   " << actual_sha << "\n";
-        return 1;
+    std::string actual_sha=sha1_hex(rom_bytes.data(),rom_bytes.size());
+    std::cout<<"  ROM SHA-1: "<<actual_sha;
+    if(actual_sha!=PINNED_ROM_SHA1){
+        std::cout<<" MISMATCH\n";
+        std::cerr<<"FATAL: ROM SHA-1 mismatch.\n"
+                 <<"  Expected: "<<PINNED_ROM_SHA1<<"\n"
+                 <<"  Actual:   "<<actual_sha<<"\n";
+        return EXIT_HARNESS_ERROR;
     }
-    std::cout << "ROM: OK (verified, passed unchanged to SameBoy)\n";
-    std::cout << "SameBoy:     " << SAMEBOY_COMMIT << "\n";
+    std::cout<<" OK\n";
 
-    // --- Load sym cache ---
-    auto sym_opt = SymCache::load(sym_path);
-    if (!sym_opt) { std::cerr << "Failed to load sym cache from: " << sym_path << "\n"; return 1; }
-    const SymCache& sym = *sym_opt;
+    // 2. Sym file: open, identity check, load all required symbols.
+    SymCache sym;
+    {
+        std::string err=SymCache::load(sym_path,&sym);
+        if(!err.empty()){
+            std::cerr<<"FATAL: .sym validation failed: "<<err<<"\n"
+                     <<"  File: "<<sym_path<<"\n";
+            return EXIT_HARNESS_ERROR;
+        }
+    }
+    std::cout<<"  .sym:      OK ("<<std::to_string(sizeof(SymCache)/sizeof(Sym))<<" symbols verified)\n";
 
-    // --- Load Enginemon data from ROM ---
-    auto rom_data = crystal::RomData::load(std::filesystem::path(rom_path));
-    if (!rom_data) { std::cerr << "RomData::load failed\n"; return 1; }
-    const crystal::ExtractionProfile* profile =
+    // 3. Fixture address validation — every WRAM/HRAM target in expected range.
+    {
+        std::string err=validate_fixture_addresses(sym);
+        if(!err.empty()){
+            std::cerr<<"FATAL: fixture address out of range: "<<err<<"\n";
+            return EXIT_HARNESS_ERROR;
+        }
+    }
+    std::cout<<"  Fixtures:  OK (all addresses in expected memory regions)\n";
+
+    // 4. Load Enginemon data.
+    auto rom_data=crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){
+        std::cerr<<"FATAL: RomData::load failed\n"; return EXIT_HARNESS_ERROR;
+    }
+    const crystal::ExtractionProfile* profile=
         crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
-    if (!profile) { std::cerr << "No Enginemon profile for ROM\n"; return 1; }
+    if(!profile){
+        std::cerr<<"FATAL: no Enginemon profile for ROM\n"; return EXIT_HARNESS_ERROR;
+    }
+    auto ed_opt=load_engine_data(*rom_data,*profile);
+    if(!ed_opt){
+        std::cerr<<"FATAL: engine data load failed\n"; return EXIT_HARNESS_ERROR;
+    }
+    const EngineData& ed=*ed_opt;
+    std::cout<<"  Engine:    OK\n";
 
-    auto ed_opt = load_engine_data(*rom_data, *profile);
-    if (!ed_opt) { std::cerr << "Failed to load engine data\n"; return 1; }
-    const EngineData& ed = *ed_opt;
+    std::cout<<"\nRunning "<<move_ids.size()<<" move(s), "<<jobs<<" job(s)...\n\n";
+    auto t0=std::chrono::steady_clock::now();
 
-    std::cout << "\n=== Crystal Oracle (" << move_ids.size() << " move(s), "
-              << jobs << " job(s)) ===\n";
-    auto t0 = std::chrono::steady_clock::now();
-
-    // --- Parallel execution ---
-    // Futures indexed by position in move_ids for deterministic output ordering.
-    const size_t n = move_ids.size();
+    // =========================================================================
+    // Parallel execution — batched by jobs limit.
+    // Futures indexed in move_ids order → deterministic collection.
+    // =========================================================================
+    const size_t n=move_ids.size();
     std::vector<std::future<CaseResult>> futures;
     futures.reserve(n);
 
-    // Semaphore-style throttle to respect --jobs limit.
-    // We use a simple approach: launch min(jobs, n) workers at a time.
-    std::atomic<size_t> next_job{0};
-    std::mutex launch_mutex;
-
-    // Each future launches immediately but we cap active threads.
-    // Use std::async(std::launch::async) with a bounded approach:
-    // submit jobs in batches of `jobs`, collect results in order.
-    for (size_t i = 0; i < n; ) {
-        size_t batch_end = std::min(i + (size_t)jobs, n);
-        for (size_t j = i; j < batch_end; ++j) {
-            uint16_t mid = move_ids[j];
-            // Each future captures by value: rom_bytes ref (shared, read-only),
-            // sym ref (shared, read-only), ed ref (shared, read-only).
+    for(size_t i=0;i<n;){
+        size_t batch_end=std::min(i+(size_t)jobs,n);
+        for(size_t j=i;j<batch_end;++j){
+            const MoveSpec* spec=find_move(move_ids[j]); // guaranteed non-null
             futures.push_back(std::async(std::launch::async,
-                [&rom_bytes, &sym, &ed, mid]() {
-                    return run_case(mid, rom_bytes, sym, ed);
+                [&rom_bytes,&sym,&ed,spec](){
+                    return run_case(*spec,rom_bytes,sym,ed);
                 }));
         }
-        // Collect batch results before launching next batch.
-        for (size_t j = i; j < batch_end; ++j) {
-            futures[j].wait();  // block until available
-        }
-        i = batch_end;
+        for(size_t j=i;j<batch_end;++j) futures[j].wait();
+        i=batch_end;
     }
 
-    // --- Collect results in original (sorted) move order ---
-    int match_count = 0, mismatch_count = 0, error_count = 0;
+    // =========================================================================
+    // Collect and print in deterministic (sorted) order.
+    // =========================================================================
+    int n_match=0, n_mismatch=0, n_error=0;
     std::vector<CaseResult> results;
     results.reserve(n);
-    for (auto& f : futures) results.push_back(f.get());
+    for(auto& f:futures) results.push_back(f.get());
 
-    // Print summary in deterministic order.
-    std::cout << "\n";
-    for (const auto& r : results) {
-        std::cout << "  move " << r.move_id << ": " << status_str(r.status);
-        if (r.boundary)     std::cout << "  [boundary=" << r.boundary << "]";
-        if (r.insn_count>0) std::cout << "  [" << r.insn_count << " insn]";
-        std::cout << "  [poison-stable=" << (r.poison_stable?"yes":"NO") << "]";
-        std::cout << "\n";
-        if (!r.detail.empty()) {
-            std::istringstream ss(r.detail);
-            std::string line;
-            while (std::getline(ss,line)) std::cout << "    " << line << "\n";
+    for(const auto& r:results){
+        const char* st=
+            r.status==Status::MATCH              ? "MATCH"              :
+            r.status==Status::ENGINEMON_MISMATCH ? "ENGINEMON_MISMATCH" :
+                                                   "HARNESS_ERROR";
+
+        std::cout<<"  move "<<std::setw(3)<<r.move_id<<":  "<<st;
+        if(r.boundary)    std::cout<<"  boundary="<<r.boundary;
+        if(r.stop_reason) std::cout<<"  stop="<<r.stop_reason;
+        if(r.insn_count>0)std::cout<<"  insn="<<r.insn_count;
+        std::cout<<"  poison-stable="<<(r.poison_stable?"yes":"NO");
+        std::cout<<"\n";
+
+        if(!r.detail.empty()){
+            // Indent all detail lines.
+            std::istringstream ss(r.detail); std::string line;
+            while(std::getline(ss,line)) std::cout<<"    "<<line<<"\n";
         }
+
         switch(r.status){
-        case Status::MATCH:              ++match_count; break;
-        case Status::ENGINEMON_MISMATCH: ++mismatch_count; break;
-        case Status::HARNESS_ERROR:      ++error_count; break;
+        case Status::MATCH:              ++n_match;    break;
+        case Status::ENGINEMON_MISMATCH: ++n_mismatch; break;
+        case Status::HARNESS_ERROR:      ++n_error;    break;
         }
     }
 
-    auto t1 = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0).count();
+    auto t1=std::chrono::steady_clock::now();
+    int ms=(int)std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0).count();
 
-    std::cout << "\n=== Summary ===\n";
-    std::cout << "  MATCH:              " << match_count     << "\n";
-    std::cout << "  ENGINEMON_MISMATCH: " << mismatch_count  << "\n";
-    std::cout << "  HARNESS_ERROR:      " << error_count     << "\n";
-    std::cout << "  Total:              " << n               << "\n";
-    std::cout << "  Time:               " << (int)ms         << " ms\n";
-    std::cout << "  Jobs:               " << jobs            << "\n";
+    std::cout<<"\n=== Summary ===\n";
+    std::cout<<"  MATCH:              "<<n_match<<"\n";
+    std::cout<<"  ENGINEMON_MISMATCH: "<<n_mismatch<<"\n";
+    std::cout<<"  HARNESS_ERROR:      "<<n_error<<"\n";
+    std::cout<<"  Total:              "<<n<<"\n";
+    std::cout<<"  Time:               "<<ms<<" ms  ("<<jobs<<" job"<<(jobs==1?"":"s")<<")\n";
 
-    return (mismatch_count > 0 || error_count > 0) ? 1 : 0;
+    // HARNESS_ERROR takes precedence over MISMATCH.
+    if(n_error   >0) return EXIT_HARNESS_ERROR;
+    if(n_mismatch>0) return EXIT_MISMATCH;
+    return EXIT_ALL_MATCH;
 }
 
 } // namespace crystal::oracle

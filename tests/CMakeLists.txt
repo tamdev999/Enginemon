@@ -128,7 +128,7 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
 
     # ============================================================================
     # oracle_runner_lib — shared oracle runner (SameBoy + Enginemon integration)
-    # Used by crystal_haze_diff_test and crystal_diff_runner.
+    # Used by crystal_battle_diff, crystal_haze_diff_test, and crystal_diff_runner.
     # ============================================================================
     add_library(oracle_runner_lib STATIC
         crystal_differential/oracle_runner.cpp
@@ -148,7 +148,27 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # crystal_battle_diff — primary oracle entry point
+    #   crystal_battle_diff <rom> <sym> --all --jobs 16
+    #   crystal_battle_diff <rom> <sym> --move 114
+    #   crystal_battle_diff --help
+    # Exit codes: 0=MATCH  1=MISMATCH  2=HARNESS_ERROR  3=INVALID_ARGS
+    # ============================================================================
+    add_executable(crystal_battle_diff
+        crystal_differential/crystal_battle_diff.cpp
+    )
+    target_link_libraries(crystal_battle_diff PRIVATE oracle_runner_lib)
+    target_include_directories(crystal_battle_diff PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(crystal_battle_diff PRIVATE /bigobj)
+    endif()
+    # Not added to ctest — requires ROM+sym path arguments
+
+    # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
+    # Legacy entry point kept for compatibility.
     # Requires: <rom_path> <sym_path> [--jobs N]
     # ============================================================================
     add_executable(crystal_haze_diff_test
@@ -164,7 +184,7 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     # Not added to ctest — requires ROM+sym path arguments
 
     # ============================================================================
-    # crystal_diff_runner — parallel multi-move oracle runner
+    # crystal_diff_runner — legacy parallel multi-move runner (delegates to runner)
     # Requires: <rom_path> <sym_path> [--jobs N] [--all] [--move <id> ...]
     # ============================================================================
     add_executable(crystal_diff_runner

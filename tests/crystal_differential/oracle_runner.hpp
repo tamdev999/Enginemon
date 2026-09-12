@@ -1,29 +1,19 @@
 // tests/crystal_differential/oracle_runner.hpp
 //
-// Crystal battle differential oracle — public API.
+// Crystal battle differential oracle — public API
 //
-// Runs selected move(s) through the full semantic Crystal machine code path
-// via SameBoy, normalizes outputs, and diffs against Enginemon live execution.
-//
-// ROM IMMUTABILITY CONTRACT:
+// ROM IMMUTABILITY CONTRACT
 //   The exact SHA-verified Crystal ROM bytes are passed to GB_load_rom_from_buffer
-//   unmodified. No ROM bytes are read back or patched at any point. Entry into
-//   each routine is established via CPU register/bank state only.
+//   unmodified. No ROM bytes are read back or patched after that call. Entry into
+//   each routine is established via CPU register and bank-state writes only.
 //
-// PRESENTATION INTERCEPT:
-//   Each move case registers an allowlisted presentation sink (e.g. AnimateCurrentMove).
-//   When the SM83 execution callback fires at that PC, the GB_run loop exits.
-//   The semantic Crystal WRAM outputs are read at that boundary.
-//   No Crystal ROM bytes are modified to achieve this.
-//
-// PARALLELISM:
-//   Each worker owns a dedicated SameBoy GB_gameboy_t + all associated state.
-//   Workers share only: the read-only ROM byte vector, the sym cache, and the
-//   Enginemon move/rules data loaded once from the profile.
-//   Result ordering is deterministic regardless of --jobs value.
+// EXIT CODES
+//   0  all selected cases MATCH
+//   1  one or more ENGINEMON_MISMATCH (harness ran correctly, Crystal != Enginemon)
+//   2  HARNESS_ERROR / startup / oracle failure (takes precedence over code 1)
+//   3  invalid CLI / unregistered move / bad arguments
 
 #pragma once
-
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -31,34 +21,39 @@
 namespace crystal::oracle {
 
 // ============================================================================
-// RunnerConfig — build the set of cases to execute.
+// Exit codes — returned by runner_main, used as process exit code.
 // ============================================================================
-struct RunnerConfig {
-    std::vector<uint16_t> move_ids;  // empty = all registered moves
-    int jobs = 1;
-
-    RunnerConfig& with_moves(std::vector<uint16_t> ids) {
-        move_ids = std::move(ids);
-        return *this;
-    }
-    RunnerConfig& with_jobs(int n) {
-        jobs = n;
-        return *this;
-    }
+enum ExitCode : int {
+    EXIT_ALL_MATCH        = 0,
+    EXIT_MISMATCH         = 1,
+    EXIT_HARNESS_ERROR    = 2,
+    EXIT_INVALID_ARGS     = 3,
 };
 
 // ============================================================================
-// runner_main — parse argv and run.
+// RunnerConfig — specifies which moves to run and how many parallel workers.
+// move_ids: empty means the caller controls selection via CLI flags.
+// ============================================================================
+struct RunnerConfig {
+    std::vector<uint16_t> move_ids;
+    int jobs = 1;
+
+    RunnerConfig& with_moves(std::vector<uint16_t> ids) {
+        move_ids = std::move(ids); return *this;
+    }
+    RunnerConfig& with_jobs(int n) { jobs = n; return *this; }
+};
+
+// ============================================================================
+// runner_main
 //
-// argv format (after exe name):
-//   <rom_path> <sym_path> [--jobs N] [--all] [--move <id> ...]
+// Positional: <rom_path> <sym_path>  (both required)
+// Options:    --jobs N | --all | --move <id>... | --help
 //
-// If a RunnerConfig is passed in, its move_ids are used as defaults
-// (--all or --move on the command line overrides).
+// If a RunnerConfig is passed in, its move_ids are used as the default selection
+// when no --all / --move flags are present on the command line.
 //
-// Exit codes:
-//   0  — all cases MATCH
-//   1  — at least one ENGINEMON_MISMATCH or HARNESS_ERROR
+// Returns one of the ExitCode values above.
 // ============================================================================
 int runner_main(int argc, char* argv[], RunnerConfig defaults = {});
 
