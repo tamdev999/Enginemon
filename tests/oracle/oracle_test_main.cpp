@@ -167,6 +167,7 @@ void test_p_rt_branch_hyper_beam_recharge_two_turn();
 void test_p_rt_branch_present_variable();
 void test_p_rt_secondary_rng_diagnostic();
 void test_p_rt_secondary_root8_all();
+void test_p_rt_recovery_exact();
 void test_p_rt_master_report();
 
 int main(int argc, char* argv[]) {
@@ -506,6 +507,7 @@ int main(int argc, char* argv[]) {
         RUN_TEST(p_rt_branch_present_variable);
         RUN_TEST(p_rt_secondary_rng_diagnostic);
         RUN_TEST(p_rt_secondary_root8_all);
+        RUN_TEST(p_rt_recovery_exact);
         RUN_TEST(p_rt_master_report);
     } else {
         std::cerr << "[Move Oracle] SKIP: no ROM/profile available.\n";

@@ -407,6 +407,13 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         field_.spikes_opponent = opponent_side;
     }
 
+    // Set field weather directly.
+    // Used to test weather-conditional moves (Morning Sun, Synthesis, Moonlight)
+    // without executing a full weather-setup turn.
+    void set_field_weather(Weather w) {
+        field_.weather = w;
+    }
+
     // Registry access for AI and other consumers
     const Registries& registries() const { return registries_; }
 
