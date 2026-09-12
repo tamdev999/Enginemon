@@ -127,25 +127,55 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     # Not added to ctest
 
     # ============================================================================
-    # crystal_haze_diff_test — live Crystal Haze differential oracle
-    # Executes actual BattleCommand_ResetStats machine code through SameBoy Core,
-    # compares normalized result against Enginemon's live Battle::execute_turn().
-    # Requires: <rom_path> <sym_path>
+    # oracle_runner_lib — shared oracle runner (SameBoy + Enginemon integration)
+    # Used by crystal_haze_diff_test and crystal_diff_runner.
     # ============================================================================
-    add_executable(crystal_haze_diff_test
-        crystal_differential/crystal_haze_diff_test.cpp
+    add_library(oracle_runner_lib STATIC
+        crystal_differential/oracle_runner.cpp
     )
-    target_link_libraries(crystal_haze_diff_test PRIVATE
+    target_link_libraries(oracle_runner_lib PUBLIC
         sameboy_core
         enginemon_crystal
         enginemon_engine
     )
-    target_include_directories(crystal_haze_diff_test PRIVATE
+    target_include_directories(oracle_runner_lib PUBLIC
         ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/tests
         ${SAMEBOY_ROOT}
     )
     if(MSVC)
+        target_compile_options(oracle_runner_lib PRIVATE /bigobj)
+    endif()
+
+    # ============================================================================
+    # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
+    # Requires: <rom_path> <sym_path> [--jobs N]
+    # ============================================================================
+    add_executable(crystal_haze_diff_test
+        crystal_differential/crystal_haze_diff_test.cpp
+    )
+    target_link_libraries(crystal_haze_diff_test PRIVATE oracle_runner_lib)
+    target_include_directories(crystal_haze_diff_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
         target_compile_options(crystal_haze_diff_test PRIVATE /bigobj)
+    endif()
+    # Not added to ctest — requires ROM+sym path arguments
+
+    # ============================================================================
+    # crystal_diff_runner — parallel multi-move oracle runner
+    # Requires: <rom_path> <sym_path> [--jobs N] [--all] [--move <id> ...]
+    # ============================================================================
+    add_executable(crystal_diff_runner
+        crystal_differential/crystal_diff_runner.cpp
+    )
+    target_link_libraries(crystal_diff_runner PRIVATE oracle_runner_lib)
+    target_include_directories(crystal_diff_runner PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(crystal_diff_runner PRIVATE /bigobj)
     endif()
     # Not added to ctest — requires ROM+sym path arguments
 endif()
