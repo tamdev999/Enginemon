@@ -149,6 +149,7 @@ void test_p_rt_psywave_exact();
 void test_p_rt_flail_exact();
 void test_p_rt_reversal_exact();
 void test_p_rt_multihit_generic_exact();
+void test_p_rt_charge_exact();
 void test_p_rt_sweep_secondary_effect();
 void test_p_rt_branch_belly_drum_vanilla_bug();
 void test_p_rt_branch_jump_kick_hit_and_miss();
@@ -487,6 +488,7 @@ int main(int argc, char* argv[]) {
         RUN_TEST(p_rt_flail_exact);
         RUN_TEST(p_rt_reversal_exact);
         RUN_TEST(p_rt_multihit_generic_exact);
+        RUN_TEST(p_rt_charge_exact);
         RUN_TEST(p_rt_sweep_secondary_effect);
         RUN_TEST(p_rt_branch_belly_drum_vanilla_bug);
         RUN_TEST(p_rt_branch_jump_kick_hit_and_miss);

@@ -2367,6 +2367,292 @@ TEST(p_rt_multihit_generic_exact) {
     ASSERT_EQ(mismatch_c, 0);
 }
 
+// ============================================================================
+// TEST: p_rt_charge_exact
+//
+// Crystal script order per data/moves/effects.asm (attack turn):
+//   critical -> damagestats -> damagecalc -> stab(+weather) ->
+//   damagevariation -> checkhit -> [effectchance for SkyAttack]
+//
+// Crystal RNG on attack turn (NOT Enginemon B-path order acc->crit->var):
+//   [0] = crit byte       (critical command)
+//   [1] = variation byte  (damagevariation, rrca >= 0xD9)
+//   [2] = accuracy byte   (checkhit, only if acc != 0xFF)
+//   [3] = effectchance    (SkyAttack only, consumed even if ec=0)
+//
+// Expected damages (Crystal formula; NOT from Enginemon):
+//   atk=def=200, spa=spdef=60, opp def=200, opp spdef=200, level=50
+//   RAZOR_WIND  Normal/Phys/STAB: base=37 STAB=55
+//   FLY         Flying/Phys/NoSTAB: base=32
+//   SOLARBEAM   Grass/Spec/NoSTAB: spa=60 vs spdef=200: 17; rain: floor(17*5/10)=8
+//   DIG         Ground/Phys/NoSTAB: base=28
+//   SKULL_BASH  Normal/Phys/STAB: base=46 STAB=69; +1 Def on T1 only
+//   SKY_ATTACK  Flying/Phys/NoSTAB: base=63; ec=0 but ec byte consumed
+//
+// Each section owns its own BattleRules+Party+Battle in one block scope.
+// No lambdas/unique_ptr that could cause dangling BattleRules reference.
+// ============================================================================
+TEST(p_rt_charge_exact) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    const auto razor_id  = static_cast<enginemon::MoveId>(13);
+    const auto fly_id    = static_cast<enginemon::MoveId>(19);
+    const auto solar_id  = static_cast<enginemon::MoveId>(76);
+    const auto rdance_id = static_cast<enginemon::MoveId>(240);
+    const auto dig_id    = static_cast<enginemon::MoveId>(91);
+    const auto skull_id  = static_cast<enginemon::MoveId>(130);
+    const auto sky_id    = static_cast<enginemon::MoveId>(143);
+    int total_mismatch = 0;
+
+    // ---- Section A: RAZOR_WIND (acc=0xBF=191, Normal/Physical, STAB) ----
+    // T1: charge. T2 Crystal: [0]=0x11(no crit),[1]=0xFF(var),[2]=0x00(acc<191=hit). Exp=55.
+    std::cout << "\n  [A] RAZOR_WIND\n";
+    {
+        enginemon::BattleRules rules_a = s_rt_rules;
+        enginemon::Party party_a;
+        enginemon::Pokemon pm_a{}; pm_a.species=1; pm_a.level=50;
+        pm_a.current_hp=pm_a.max_hp=300; pm_a.friendship=200;
+        party_a.add(pm_a);
+        auto reg_a = rt_reg();
+        enginemon::Battle bat_a(enginemon::BattleType::Trainer, party_a, reg_a, rules_a);
+        auto pbp_a = rt_bp(razor_id, 300, 200);
+        auto obp_a = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+        obp_a.stats.defense=200; obp_a.base_stats.defense=200;
+        bat_a.player_pokemon()=pbp_a; bat_a.opponent_pokemon()=obp_a;
+        // T1 no RNG
+        size_t ai=0; std::vector<uint8_t> ra={0xCC,0xCC,0xCC,0xCC};
+        bat_a.set_rng_callback([&ra,&ai]()->uint32_t{return ai<ra.size()?ra[ai++]:0xFFu;});
+        bat_a.set_player_action(enginemon::ActionFight{0,0}); bat_a.set_opponent_action(enginemon::ActionFight{0,0}); bat_a.execute_turn();
+        bool t1c=(bat_a.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging));
+        bool t1h=(bat_a.opponent_pokemon().stats.hp==5000);
+        rt_record(razor_id,"RAZOR_T1_CHARGE",t1c&&t1h,(t1c&&t1h)?"":("T1 charged="+std::to_string(t1c)+" hp="+std::to_string(bat_a.opponent_pokemon().stats.hp)).c_str());
+        if(!(t1c&&t1h)) ++total_mismatch;
+        // T2 Crystal RNG: crit->var->acc
+        size_t ai2=0; std::vector<uint8_t> ra2={0x11,0xFF,0x00,0xFF,0xFF};
+        bat_a.set_rng_callback([&ra2,&ai2]()->uint32_t{return ai2<ra2.size()?ra2[ai2++]:0xFFu;});
+        bat_a.set_player_action(enginemon::ActionFight{0,0}); bat_a.set_opponent_action(enginemon::ActionFight{0,0}); bat_a.execute_turn();
+        int32_t d_a=5000-(int32_t)bat_a.opponent_pokemon().stats.hp;
+        bool t2ok=(d_a==55)&&!bat_a.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging);
+        rt_record(razor_id,"RAZOR_T2_DAMAGE",t2ok,t2ok?"":("exp=55 got="+std::to_string(d_a)).c_str());
+        if(!t2ok) ++total_mismatch;
+        std::cout << "    T1 charged=" << t1c << " T2 dmg=" << d_a << " charged_after=" << bat_a.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging) << "\n";
+    }
+
+    // ---- Section B1: FLY hit (acc=0xF2=242, Flying/Phys, no STAB) ----
+    // T2 Crystal: [0]=0x11,[1]=0xFF,[2]=0x00(hit<242). Exp=32.
+    std::cout << "  [B1] FLY hit\n";
+    {
+        enginemon::BattleRules rules_b1 = s_rt_rules;
+        enginemon::Party party_b1;
+        enginemon::Pokemon pm_b1{}; pm_b1.species=1; pm_b1.level=50;
+        pm_b1.current_hp=pm_b1.max_hp=300; pm_b1.friendship=200;
+        party_b1.add(pm_b1);
+        auto reg_b1 = rt_reg();
+        enginemon::Battle bat_b1(enginemon::BattleType::Trainer, party_b1, reg_b1, rules_b1);
+        auto pbp_b1=rt_bp(fly_id,300,200); auto obp_b1=rt_bp(enginemon::MOVE_NONE,5000,1);
+        obp_b1.stats.defense=200; obp_b1.base_stats.defense=200;
+        bat_b1.player_pokemon()=pbp_b1; bat_b1.opponent_pokemon()=obp_b1;
+        size_t bi1=0; std::vector<uint8_t> rb1={0xCC,0xCC,0xCC,0xCC};
+        bat_b1.set_rng_callback([&rb1,&bi1]()->uint32_t{return bi1<rb1.size()?rb1[bi1++]:0xFFu;});
+        bat_b1.set_player_action(enginemon::ActionFight{0,0}); bat_b1.set_opponent_action(enginemon::ActionFight{0,0}); bat_b1.execute_turn();
+        size_t bi2=0; std::vector<uint8_t> rb2={0x11,0xFF,0x00,0xFF};
+        bat_b1.set_rng_callback([&rb2,&bi2]()->uint32_t{return bi2<rb2.size()?rb2[bi2++]:0xFFu;});
+        bat_b1.set_player_action(enginemon::ActionFight{0,0}); bat_b1.set_opponent_action(enginemon::ActionFight{0,0}); bat_b1.execute_turn();
+        int32_t d_b1=5000-(int32_t)bat_b1.opponent_pokemon().stats.hp;
+        bool b1ok=(d_b1==32); rt_record(fly_id,"FLY_HIT",b1ok,b1ok?"":("exp=32 got="+std::to_string(d_b1)).c_str());
+        if(!b1ok) ++total_mismatch;
+        std::cout << "    FLY hit dmg=" << d_b1 << "\n";
+    }
+
+    // ---- Section B2: FLY miss (acc_byte=0xF2>=242) ----
+    // T2 Crystal: [0]=0x11,[1]=0xFF,[2]=0xF2(miss). Exp=0.
+    std::cout << "  [B2] FLY miss\n";
+    {
+        enginemon::BattleRules rules_b2 = s_rt_rules;
+        enginemon::Party party_b2;
+        enginemon::Pokemon pm_b2{}; pm_b2.species=1; pm_b2.level=50;
+        pm_b2.current_hp=pm_b2.max_hp=300; pm_b2.friendship=200;
+        party_b2.add(pm_b2);
+        auto reg_b2 = rt_reg();
+        enginemon::Battle bat_b2(enginemon::BattleType::Trainer, party_b2, reg_b2, rules_b2);
+        auto pbp_b2=rt_bp(fly_id,300,200); auto obp_b2=rt_bp(enginemon::MOVE_NONE,5000,1);
+        obp_b2.stats.defense=200; obp_b2.base_stats.defense=200;
+        bat_b2.player_pokemon()=pbp_b2; bat_b2.opponent_pokemon()=obp_b2;
+        size_t bm1=0; std::vector<uint8_t> rbm={0xCC,0xCC,0xCC,0xCC};
+        bat_b2.set_rng_callback([&rbm,&bm1]()->uint32_t{return bm1<rbm.size()?rbm[bm1++]:0xFFu;});
+        bat_b2.set_player_action(enginemon::ActionFight{0,0}); bat_b2.set_opponent_action(enginemon::ActionFight{0,0}); bat_b2.execute_turn();
+        size_t bm2=0; std::vector<uint8_t> rbm2={0x11,0xFF,0xF2,0xFF};
+        bat_b2.set_rng_callback([&rbm2,&bm2]()->uint32_t{return bm2<rbm2.size()?rbm2[bm2++]:0xFFu;});
+        bat_b2.set_player_action(enginemon::ActionFight{0,0}); bat_b2.set_opponent_action(enginemon::ActionFight{0,0}); bat_b2.execute_turn();
+        int32_t d_b2=5000-(int32_t)bat_b2.opponent_pokemon().stats.hp;
+        bool b2ok=(d_b2==0)&&!bat_b2.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging);
+        rt_record(fly_id,"FLY_MISS",b2ok,b2ok?"":("dmg="+std::to_string(d_b2)+" charged="+std::to_string(bat_b2.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging))).c_str());
+        if(!b2ok) ++total_mismatch;
+        std::cout << "    FLY miss dmg=" << d_b2 << "\n";
+    }
+
+    // ---- Section C1: SOLARBEAM normal weather (acc=0xFF, Grass/Special, no STAB) ----
+    // T2 Crystal: [0]=0x11,[1]=0xFF (no acc byte). Exp=17.
+    std::cout << "  [C1] SOLARBEAM normal weather\n";
+    {
+        enginemon::BattleRules rules_c1 = s_rt_rules;
+        enginemon::Party party_c1;
+        enginemon::Pokemon pm_c1{}; pm_c1.species=1; pm_c1.level=50;
+        pm_c1.current_hp=pm_c1.max_hp=300; pm_c1.friendship=200;
+        party_c1.add(pm_c1);
+        auto reg_c1 = rt_reg();
+        enginemon::Battle bat_c1(enginemon::BattleType::Trainer, party_c1, reg_c1, rules_c1);
+        auto pbp_c1=rt_bp(solar_id,300,200); auto obp_c1=rt_bp(enginemon::MOVE_NONE,5000,1);
+        obp_c1.stats.special_defense=200; obp_c1.base_stats.special_defense=200;
+        bat_c1.player_pokemon()=pbp_c1; bat_c1.opponent_pokemon()=obp_c1;
+        size_t ci1=0; std::vector<uint8_t> rc1={0xCC,0xCC,0xCC,0xCC};
+        bat_c1.set_rng_callback([&rc1,&ci1]()->uint32_t{return ci1<rc1.size()?rc1[ci1++]:0xFFu;});
+        bat_c1.set_player_action(enginemon::ActionFight{0,0}); bat_c1.set_opponent_action(enginemon::ActionFight{0,0}); bat_c1.execute_turn();
+        size_t ci2=0; std::vector<uint8_t> rc2={0x11,0xFF,0xFF,0xFF};
+        bat_c1.set_rng_callback([&rc2,&ci2]()->uint32_t{return ci2<rc2.size()?rc2[ci2++]:0xFFu;});
+        bat_c1.set_player_action(enginemon::ActionFight{0,0}); bat_c1.set_opponent_action(enginemon::ActionFight{0,0}); bat_c1.execute_turn();
+        int32_t d_c1=5000-(int32_t)bat_c1.opponent_pokemon().stats.hp;
+        bool c1ok=(d_c1==17); rt_record(solar_id,"SOLARBEAM_NORMAL",c1ok,c1ok?"":("exp=17 got="+std::to_string(d_c1)).c_str());
+        if(!c1ok) ++total_mismatch;
+        std::cout << "    SOLARBEAM normal dmg=" << d_c1 << "\n";
+    }
+
+    // ---- Section C2: SOLARBEAM in rain (3 turns: RainDance->charge->fire) ----
+    // Rain halves SOLARBEAM: Crystal WeatherMoveModifiers {Rain,EFFECT_SOLARBEAM,5/10}. Exp=8.
+    std::cout << "  [C2] SOLARBEAM rain (3-turn)\n";
+    {
+        enginemon::BattleRules rules_c2 = s_rt_rules;
+        enginemon::Party party_c2;
+        enginemon::Pokemon pm_c2{}; pm_c2.species=1; pm_c2.level=50;
+        pm_c2.current_hp=pm_c2.max_hp=300; pm_c2.friendship=200;
+        party_c2.add(pm_c2);
+        auto reg_c2 = rt_reg();
+        enginemon::Battle bat_c2(enginemon::BattleType::Trainer, party_c2, reg_c2, rules_c2);
+        auto pbp_c2=rt_bp(rdance_id,300,200);
+        const enginemon::MoveData* sb_md2=s_rt_reg->get(solar_id);
+        pbp_c2.moves[1].move=solar_id;
+        pbp_c2.moves[1].pp=pbp_c2.moves[1].max_pp=(sb_md2?sb_md2->pp:10);
+        auto obp_c2=rt_bp(enginemon::MOVE_NONE,5000,1);
+        obp_c2.stats.special_defense=200; obp_c2.base_stats.special_defense=200;
+        bat_c2.player_pokemon()=pbp_c2; bat_c2.opponent_pokemon()=obp_c2;
+        // T1: RAIN_DANCE (slot 0)
+        size_t cr1=0; std::vector<uint8_t> rr1={0xFF,0xFF,0xFF,0xFF};
+        bat_c2.set_rng_callback([&rr1,&cr1]()->uint32_t{return cr1<rr1.size()?rr1[cr1++]:0xFFu;});
+        bat_c2.set_player_action(enginemon::ActionFight{0,0}); bat_c2.set_opponent_action(enginemon::ActionFight{0,0}); bat_c2.execute_turn();
+        bool rain_ok=(bat_c2.field().weather==enginemon::Weather::Rain);
+        std::cout << "    T1 weather=" << (int)(uint8_t)bat_c2.field().weather << " (2=Rain expected)\n";
+        if(!rain_ok){ rt_record(solar_id,"SOLARBEAM_RAIN_SETUP",false,"weather not Rain after RainDance"); ++total_mismatch; }
+        // T2: SOLARBEAM (slot 1) charges
+        size_t cr2=0; std::vector<uint8_t> rr2={0xCC,0xCC,0xCC,0xCC};
+        bat_c2.set_rng_callback([&rr2,&cr2]()->uint32_t{return cr2<rr2.size()?rr2[cr2++]:0xFFu;});
+        bat_c2.set_player_action(enginemon::ActionFight{1,0}); bat_c2.set_opponent_action(enginemon::ActionFight{0,0}); bat_c2.execute_turn();
+        // T3: SOLARBEAM fires
+        size_t cr3=0; std::vector<uint8_t> rr3={0x11,0xFF,0xFF,0xFF};
+        bat_c2.set_rng_callback([&rr3,&cr3]()->uint32_t{return cr3<rr3.size()?rr3[cr3++]:0xFFu;});
+        bat_c2.set_player_action(enginemon::ActionFight{1,0}); bat_c2.set_opponent_action(enginemon::ActionFight{0,0}); bat_c2.execute_turn();
+        int32_t d_c2=5000-(int32_t)bat_c2.opponent_pokemon().stats.hp;
+        bool c2ok=(d_c2==8); rt_record(solar_id,"SOLARBEAM_RAIN",c2ok,c2ok?"":("exp=8 got="+std::to_string(d_c2)).c_str());
+        if(!c2ok) ++total_mismatch;
+        std::cout << "    SOLARBEAM rain dmg=" << d_c2 << "\n";
+    }
+
+    // ---- Section D: DIG (acc=0xFF, Ground/Physical, no STAB) ----
+    // T2 Crystal: [0]=0x11,[1]=0xFF. Exp=28. Underground cleared.
+    std::cout << "  [D] DIG\n";
+    {
+        enginemon::BattleRules rules_d = s_rt_rules;
+        enginemon::Party party_d;
+        enginemon::Pokemon pm_d{}; pm_d.species=1; pm_d.level=50;
+        pm_d.current_hp=pm_d.max_hp=300; pm_d.friendship=200;
+        party_d.add(pm_d);
+        auto reg_d = rt_reg();
+        enginemon::Battle bat_d(enginemon::BattleType::Trainer, party_d, reg_d, rules_d);
+        auto pbp_d=rt_bp(dig_id,300,200); auto obp_d=rt_bp(enginemon::MOVE_NONE,5000,1);
+        obp_d.stats.defense=200; obp_d.base_stats.defense=200;
+        bat_d.player_pokemon()=pbp_d; bat_d.opponent_pokemon()=obp_d;
+        size_t di1=0; std::vector<uint8_t> rd1={0xCC,0xCC,0xCC,0xCC};
+        bat_d.set_rng_callback([&rd1,&di1]()->uint32_t{return di1<rd1.size()?rd1[di1++]:0xFFu;});
+        bat_d.set_player_action(enginemon::ActionFight{0,0}); bat_d.set_opponent_action(enginemon::ActionFight{0,0}); bat_d.execute_turn();
+        bool d_t1c=bat_d.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging);
+        bool d_t1u=bat_d.player_pokemon().has_volatile(enginemon::VolatileStatus::Underground);
+        rt_record(dig_id,"DIG_T1_CHARGE",d_t1c&&d_t1u,(d_t1c&&d_t1u)?"":("charged="+std::to_string(d_t1c)+" underground="+std::to_string(d_t1u)).c_str());
+        if(!(d_t1c&&d_t1u)) ++total_mismatch;
+        size_t di2=0; std::vector<uint8_t> rd2={0x11,0xFF,0xFF,0xFF};
+        bat_d.set_rng_callback([&rd2,&di2]()->uint32_t{return di2<rd2.size()?rd2[di2++]:0xFFu;});
+        bat_d.set_player_action(enginemon::ActionFight{0,0}); bat_d.set_opponent_action(enginemon::ActionFight{0,0}); bat_d.execute_turn();
+        int32_t d_dg=5000-(int32_t)bat_d.opponent_pokemon().stats.hp;
+        bool d_u2c=!bat_d.player_pokemon().has_volatile(enginemon::VolatileStatus::Underground);
+        bool dok=(d_dg==28)&&d_u2c;
+        rt_record(dig_id,"DIG_T2_DAMAGE",dok,dok?"":("exp=28 got="+std::to_string(d_dg)+" ug_cleared="+std::to_string(d_u2c)).c_str());
+        if(!dok) ++total_mismatch;
+        std::cout << "    DIG T1 charged=" << d_t1c << " underground=" << d_t1u << " T2 dmg=" << d_dg << "\n";
+    }
+
+    // ---- Section E: SKULL_BASH (acc=0xFF, Normal/Physical, STAB, +1 Def T1 only) ----
+    // T1: +1 Defense from charge. T2: damage=69, Defense still +1 (no second boost).
+    std::cout << "  [E] SKULL_BASH\n";
+    {
+        enginemon::BattleRules rules_e = s_rt_rules;
+        enginemon::Party party_e;
+        enginemon::Pokemon pm_e{}; pm_e.species=1; pm_e.level=50;
+        pm_e.current_hp=pm_e.max_hp=300; pm_e.friendship=200;
+        party_e.add(pm_e);
+        auto reg_e = rt_reg();
+        enginemon::Battle bat_e(enginemon::BattleType::Trainer, party_e, reg_e, rules_e);
+        auto pbp_e=rt_bp(skull_id,300,200); auto obp_e=rt_bp(enginemon::MOVE_NONE,5000,1);
+        obp_e.stats.defense=200; obp_e.base_stats.defense=200;
+        bat_e.player_pokemon()=pbp_e; bat_e.opponent_pokemon()=obp_e;
+        size_t ei1=0; std::vector<uint8_t> re1={0xCC,0xCC,0xCC,0xCC};
+        bat_e.set_rng_callback([&re1,&ei1]()->uint32_t{return ei1<re1.size()?re1[ei1++]:0xFFu;});
+        bat_e.set_player_action(enginemon::ActionFight{0,0}); bat_e.set_opponent_action(enginemon::ActionFight{0,0}); bat_e.execute_turn();
+        int8_t def_t1=bat_e.player_pokemon().stages.defense;
+        bool e_t1c=bat_e.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging);
+        bool e_t1d=(def_t1==1);
+        rt_record(skull_id,"SKULL_T1_DEF_BOOST",e_t1c&&e_t1d,(e_t1c&&e_t1d)?"":("charging="+std::to_string(e_t1c)+" def_stage="+std::to_string(def_t1)).c_str());
+        if(!(e_t1c&&e_t1d)) ++total_mismatch;
+        size_t ei2=0; std::vector<uint8_t> re2={0x11,0xFF,0xFF,0xFF};
+        bat_e.set_rng_callback([&re2,&ei2]()->uint32_t{return ei2<re2.size()?re2[ei2++]:0xFFu;});
+        bat_e.set_player_action(enginemon::ActionFight{0,0}); bat_e.set_opponent_action(enginemon::ActionFight{0,0}); bat_e.execute_turn();
+        int32_t d_sk=5000-(int32_t)bat_e.opponent_pokemon().stats.hp;
+        int8_t def_t2=bat_e.player_pokemon().stages.defense;
+        bool e_t2ok=(d_sk==69)&&(def_t2==1);
+        rt_record(skull_id,"SKULL_T2_NO_DEF_REPEAT",e_t2ok,e_t2ok?"":("dmg="+std::to_string(d_sk)+" def_t2="+std::to_string(def_t2)+" exp def=1 dmg=69").c_str());
+        if(!e_t2ok) ++total_mismatch;
+        std::cout << "    SKULL T1 charged=" << e_t1c << " def=" << (int)def_t1 << " T2 dmg=" << d_sk << " def=" << (int)def_t2 << "\n";
+    }
+
+    // ---- Section F: SKY_ATTACK (acc=0xE5=229, Flying/Phys, no STAB, ec=0 but ec-byte consumed) ----
+    // Crystal: [0]=0x11,[1]=0xFF,[2]=0x00(acc hit<229),[3]=ec-byte (consumed with ec=0). Exp=63.
+    std::cout << "  [F] SKY_ATTACK\n";
+    {
+        enginemon::BattleRules rules_f = s_rt_rules;
+        enginemon::Party party_f;
+        enginemon::Pokemon pm_f{}; pm_f.species=1; pm_f.level=50;
+        pm_f.current_hp=pm_f.max_hp=300; pm_f.friendship=200;
+        party_f.add(pm_f);
+        auto reg_f = rt_reg();
+        enginemon::Battle bat_f(enginemon::BattleType::Trainer, party_f, reg_f, rules_f);
+        auto pbp_f=rt_bp(sky_id,300,200); auto obp_f=rt_bp(enginemon::MOVE_NONE,5000,1);
+        obp_f.stats.defense=200; obp_f.base_stats.defense=200;
+        bat_f.player_pokemon()=pbp_f; bat_f.opponent_pokemon()=obp_f;
+        size_t fi1=0; std::vector<uint8_t> rf1={0xCC,0xCC,0xCC,0xCC};
+        bat_f.set_rng_callback([&rf1,&fi1]()->uint32_t{return fi1<rf1.size()?rf1[fi1++]:0xFFu;});
+        bat_f.set_player_action(enginemon::ActionFight{0,0}); bat_f.set_opponent_action(enginemon::ActionFight{0,0}); bat_f.execute_turn();
+        // T2 RNG: crit->var->acc->ec (4 bytes in Crystal order)
+        size_t fi2=0; std::vector<uint8_t> rf2={0x11,0xFF,0x00,0x00,0xFF,0xFF};
+        bat_f.set_rng_callback([&rf2,&fi2]()->uint32_t{return fi2<rf2.size()?rf2[fi2++]:0xFFu;});
+        bat_f.set_player_action(enginemon::ActionFight{0,0}); bat_f.set_opponent_action(enginemon::ActionFight{0,0}); bat_f.execute_turn();
+        int32_t d_f=5000-(int32_t)bat_f.opponent_pokemon().stats.hp;
+        bool fok=(d_f==63);
+        rt_record(sky_id,"SKY_ATTACK_T2",fok,fok?"":("exp=63 got="+std::to_string(d_f)).c_str());
+        if(!fok) ++total_mismatch;
+        std::cout << "    SKY_ATTACK dmg=" << d_f << "\n";
+    }
+
+    std::cout << "\n  charge_exact total_mismatch=" << total_mismatch << "\n";
+    ASSERT_EQ(total_mismatch, 0);
+}
+
 
 // Moves with % secondary effects. Uses scripted RNG to force the secondary to fire.
 // Checks the resulting status/volatile on the opponent.
