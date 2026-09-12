@@ -2009,6 +2009,364 @@ TEST(p_rt_reversal_exact) {
     ASSERT_EQ(mismatch, 0);
 }
 
+// ============================================================================
+// TEST: p_rt_multihit_generic_exact
+//
+// Crystal source authority:
+//   data/moves/effects.asm MultiHit script order (per hit):
+//     checkhit → critical → damagestats → damagecalc → stab → damagevariation →
+//     clearmissdamage → moveanimnosub → failuretext → applydamage → criticaltext →
+//     cleartext → supereffectivelooptext → checkfaint → buildopponentrage → endloop
+//   effect_commands.asm BattleCommand_EndLoop .not_triple_kick:
+//     r1 = BattleRandom() & 3
+//     if r1 < 2: a = r1+1   (1 RNG byte consumed)
+//     else:      r2 = BattleRandom() & 3; a = r2+1  (2 RNG bytes consumed)
+//     counter = a; total_hits = a+1
+//
+// Hit-count mapping (Crystal source):
+//   r1&3=0 → 2 hits (1 byte)
+//   r1&3=1 → 3 hits (1 byte)
+//   r1&3>=2, r2&3=0 → 2 hits (2 bytes)
+//   r1&3>=2, r2&3=1 → 3 hits (2 bytes)
+//   r1&3>=2, r2&3=2 → 4 hits (2 bytes)
+//   r1&3>=2, r2&3=3 → 5 hits (2 bytes)
+//
+// KEY ORDERING:
+//   1. checkhit is INSIDE the loop, FIRST per hit
+//   2. critical RNG is per hit, AFTER checkhit
+//   3. damagevariation RNG is per hit, AFTER critical
+//   4. hit-count RNG (endloop) consumed after hit 1's full sequence
+//   5. Miss (failuretext) on EFFECT_MULTI_HIT → EndMoveEffect → move ends, no endloop
+//   6. checkfaint: faint mid-loop → loop exits via endmove (no further hits)
+//
+// Representative move: SPIKE_CANNON (id=131)
+//   power=20, Normal type, Physical (type_byte<0x13), acc=0xFF (no accuracy byte per hit)
+//   Player type1=0=Normal → STAB applies
+//   Stats: player attack=defense=200, opp defense=200 (explicitly set)
+//   Per-hit damage: base=(22*20*200/200)/50+2=10, STAB=10+5=15, var=0xFF→15*255/255=15
+//   Per-hit damage = 15
+//
+// DOUBLESLAP (id=3): acc=0xD8=216. RNG byte for acc checked FIRST per hit (in checkhit).
+//   Miss: acc_byte>=216. After miss, crit and var ARE consumed (script continues to failuretext).
+//   Then failuretext → EndMoveEffect → move ends. No endloop hit-count RNG consumed.
+//
+// SECTION A: SPIKE_CANNON exact hit-count / damage / RNG consumption
+// SECTION B: Miss case with DOUBLESLAP
+// SECTION C: Per-move sweep — all 8 EFFECT_MULTI_HIT moves, 2-hit vector, exact damage
+// ============================================================================
+TEST(p_rt_multihit_generic_exact) {
+    if (!rt_init_once()) { ASSERT_TRUE(false); return; }
+
+    const auto spike_id    = static_cast<enginemon::MoveId>(131); // SPIKE_CANNON
+    const auto dslap_id    = static_cast<enginemon::MoveId>(3);   // DOUBLESLAP
+
+    // Verify SPIKE_CANNON is in registry and is multi-hit
+    {
+        const enginemon::MoveData* md = s_rt_reg->get(spike_id);
+        if (!md) {
+            rt_record(131, "SPIKE_CANNON_REGISTRY", false, "MoveData not found for id 131");
+            ASSERT_TRUE(false); return;
+        }
+        bool is_mh = md->has_program || md->effect_desc.is_multi_hit;
+        rt_record(131, "SPIKE_CANNON_IS_MULTIHIT", is_mh,
+                  is_mh ? "" : "has_program=false && is_multi_hit=false");
+        std::cout << "\n    SPIKE_CANNON metadata: has_program=" << md->has_program
+                  << " is_multi_hit=" << md->effect_desc.is_multi_hit;
+        ASSERT_TRUE(is_mh);
+    }
+
+    // Helper: build a Battle with spike_cannon player (attack=200) and opp (hp=opp_hp, defense=200)
+    // RNG sequence provided. Returns total damage dealt to opponent.
+    auto run_spike = [&](const std::vector<uint8_t>& rng_bytes, int16_t opp_hp) -> int32_t {
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=300; pm.max_hp=300; pm.friendship=200;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, s_rt_rules);
+
+        auto pbp = rt_bp(spike_id, 300, 200);
+        auto obp = rt_bp(enginemon::MOVE_NONE, opp_hp, 1);
+        obp.stats.defense       = 200;
+        obp.base_stats.defense  = 200;
+
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_bytes, &idx]()->uint32_t {
+            return idx < rng_bytes.size() ? rng_bytes[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+        return static_cast<int32_t>(opp_hp) -
+               static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+    };
+
+    // Helper: build a Battle with doubleslap player and opp (hp=300, defense=200)
+    auto run_dslap = [&](const std::vector<uint8_t>& rng_bytes) -> int32_t {
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=300; pm.max_hp=300; pm.friendship=200;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, s_rt_rules);
+
+        auto pbp = rt_bp(dslap_id, 300, 200);
+        auto obp = rt_bp(enginemon::MOVE_NONE, 300, 1);
+        obp.stats.defense       = 200;
+        obp.base_stats.defense  = 200;
+
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_bytes, &idx]()->uint32_t {
+            return idx < rng_bytes.size() ? rng_bytes[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+        return static_cast<int32_t>(300) -
+               static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+    };
+
+    int mismatch_a = 0, mismatch_b = 0, mismatch_c = 0;
+
+    // ── SECTION A: SPIKE_CANNON exact hit-count / damage ─────────────────────
+    // SPIKE_CANNON acc=0xFF → shortcut hit, NO accuracy byte per hit.
+    // Per-hit RNG: [crit_byte, var_byte]
+    // Endloop RNG: [r1_byte] (if r1&3<2) or [r1_byte, r2_byte] (if r1&3>=2)
+    // Consumed AFTER hit-1's full sequence (before hit-2).
+    //
+    // 2-hit: r1=0x00 (0&3=0 → total=2, 1 byte)
+    //   [0]=crit=0x11(no crit), [1]=var=0xFF, [2]=r1=0x00(→2hits), [3]=crit=0x11, [4]=var=0xFF
+    //   Expected: damage=30, 5 bytes consumed
+    {
+        std::vector<uint8_t> rng{0x11, 0xFF, 0x00, 0x11, 0xFF, 0xFF, 0xFF, 0xFF};
+        int32_t dmg = run_spike(rng, 5000);
+        bool ok = (dmg == 30);
+        std::string div;
+        if (!ok) div = "2-hit: expected=30 got=" + std::to_string(dmg);
+        rt_record(131, "SPIKE_2HIT_r1=0x00", ok, ok ? "" : div.c_str());
+        std::cout << "\n    2-hit(r1=0x00): dmg=" << dmg << (ok?" OK":" MISMATCH(exp=30)");
+        if (!ok) ++mismatch_a;
+    }
+
+    // 3-hit: r1=0x01 (1&3=1 → total=3, 1 byte)
+    //   [0]=0x11, [1]=0xFF, [2]=0x01, [3]=0x11, [4]=0xFF, [5]=0x11, [6]=0xFF
+    //   Expected: damage=45, 7 bytes consumed
+    {
+        std::vector<uint8_t> rng{0x11, 0xFF, 0x01, 0x11, 0xFF, 0x11, 0xFF, 0xFF, 0xFF};
+        int32_t dmg = run_spike(rng, 5000);
+        bool ok = (dmg == 45);
+        std::string div;
+        if (!ok) div = "3-hit: expected=45 got=" + std::to_string(dmg);
+        rt_record(131, "SPIKE_3HIT_r1=0x01", ok, ok ? "" : div.c_str());
+        std::cout << "\n    3-hit(r1=0x01): dmg=" << dmg << (ok?" OK":" MISMATCH(exp=45)");
+        if (!ok) ++mismatch_a;
+    }
+
+    // 4-hit: r1=0x02 (2&3=2>=2 → use r2), r2=0x02 (2&3=2 → total=4, 2 bytes)
+    //   [0]=0x11, [1]=0xFF, [2]=r1=0x02, [3]=r2=0x02, [4..9]=(0x11,0xFF)*3
+    //   Expected: damage=60, 10 bytes consumed
+    {
+        std::vector<uint8_t> rng{0x11, 0xFF, 0x02, 0x02, 0x11, 0xFF, 0x11, 0xFF, 0x11, 0xFF, 0xFF};
+        int32_t dmg = run_spike(rng, 5000);
+        bool ok = (dmg == 60);
+        std::string div;
+        if (!ok) div = "4-hit: expected=60 got=" + std::to_string(dmg);
+        rt_record(131, "SPIKE_4HIT_r1=0x02_r2=0x02", ok, ok ? "" : div.c_str());
+        std::cout << "\n    4-hit(r1=0x02,r2=0x02): dmg=" << dmg << (ok?" OK":" MISMATCH(exp=60)");
+        if (!ok) ++mismatch_a;
+    }
+
+    // 5-hit: r1=0x03 (3&3=3>=2 → use r2), r2=0x03 (3&3=3 → total=5, 2 bytes)
+    //   [0]=0x11, [1]=0xFF, [2]=r1=0x03, [3]=r2=0x03, [4..13]=(0x11,0xFF)*5
+    //   Expected: damage=75, 12 bytes consumed
+    {
+        std::vector<uint8_t> rng{0x11, 0xFF, 0x03, 0x03, 0x11, 0xFF, 0x11, 0xFF, 0x11, 0xFF, 0x11, 0xFF, 0xFF};
+        int32_t dmg = run_spike(rng, 5000);
+        bool ok = (dmg == 75);
+        std::string div;
+        if (!ok) div = "5-hit: expected=75 got=" + std::to_string(dmg);
+        rt_record(131, "SPIKE_5HIT_r1=0x03_r2=0x03", ok, ok ? "" : div.c_str());
+        std::cout << "\n    5-hit(r1=0x03,r2=0x03): dmg=" << dmg << (ok?" OK":" MISMATCH(exp=75)");
+        if (!ok) ++mismatch_a;
+    }
+
+    // Boundary pair: r1=0x05 (5&3=1 → 3 hits, no r2) vs r1=0x06 (6&3=2 → needs r2)
+    // r1=0x05: same as 3-hit case. Expected damage=45.
+    {
+        std::vector<uint8_t> rng{0x11, 0xFF, 0x05, 0x11, 0xFF, 0x11, 0xFF, 0xFF, 0xFF};
+        int32_t dmg = run_spike(rng, 5000);
+        bool ok = (dmg == 45);
+        std::string div;
+        if (!ok) div = "boundary-3hit(r1=0x05): expected=45 got=" + std::to_string(dmg);
+        rt_record(131, "SPIKE_3HIT_r1=0x05_boundary", ok, ok ? "" : div.c_str());
+        std::cout << "\n    boundary-3hit(r1=0x05): dmg=" << dmg << (ok?" OK":" MISMATCH(exp=45)");
+        if (!ok) ++mismatch_a;
+    }
+    // r1=0x06 (6&3=2>=2 → use r2), r2=0x02 (2&3=2 → total=4): expected damage=60
+    {
+        std::vector<uint8_t> rng{0x11, 0xFF, 0x06, 0x02, 0x11, 0xFF, 0x11, 0xFF, 0x11, 0xFF, 0xFF};
+        int32_t dmg = run_spike(rng, 5000);
+        bool ok = (dmg == 60);
+        std::string div;
+        if (!ok) div = "boundary-4hit(r1=0x06,r2=0x02): expected=60 got=" + std::to_string(dmg);
+        rt_record(131, "SPIKE_4HIT_r1=0x06_r2=0x02_boundary", ok, ok ? "" : div.c_str());
+        std::cout << "\n    boundary-4hit(r1=0x06,r2=0x02): dmg=" << dmg << (ok?" OK":" MISMATCH(exp=60)");
+        if (!ok) ++mismatch_a;
+    }
+
+    // Early-faint case: opp_hp=26, r1=0x01 (→3 hits selected), but opp faints after hit 2
+    //   hit1: 15 → opp at 11; endloop picks 3 hits; hit2: 15 → opp at max(0,11-15)=0
+    //   checkfaint fires → loop exits. hit3 never executes.
+    //   Expected: damage_dealt=26 (actual HP removed = 26), opp_hp=0
+    {
+        std::vector<uint8_t> rng{0x11, 0xFF, 0x01, 0x11, 0xFF, 0xFF, 0xFF, 0xFF};
+        int32_t dmg = run_spike(rng, 26);
+        bool ok = (dmg == 26);
+        std::string div;
+        if (!ok) div = "early-faint: expected=26 got=" + std::to_string(dmg);
+        rt_record(131, "SPIKE_EARLY_FAINT_OPP_HP26", ok, ok ? "" : div.c_str());
+        std::cout << "\n    early-faint(opp_hp=26,r1=0x01): dmg=" << dmg << (ok?" OK":" MISMATCH(exp=26)");
+        if (!ok) ++mismatch_a;
+    }
+
+    std::cout << "\n    multihit_section_A(SPIKE_CANNON exact): mismatch=" << mismatch_a << "\n";
+
+    // ── SECTION B: Miss case with DOUBLESLAP (id=3, acc=0xD8=216) ─────────────
+    // Crystal source (checkhit → failuretext → EndMoveEffect):
+    //   acc_byte=0xD8=216 >= 216 → miss.
+    //   crit and var ARE consumed after miss (script does checkhit, then sets wAttackMissed,
+    //   continues through critical/damagecalc/damagevariation to failuretext).
+    //   failuretext on miss for EFFECT_MULTI_HIT calls EndMoveEffect → move ends entirely.
+    //   NO endloop hit-count RNG is consumed.
+    //   Expected: damage=0, 3 bytes consumed ([0]=0xD8 miss-acc, [1]=0x11 crit, [2]=0xFF var)
+    {
+        std::vector<uint8_t> rng{0xD8, 0x11, 0xFF, 0x99, 0x99, 0xFF, 0xFF};
+        int32_t dmg = run_dslap(rng);
+        bool ok = (dmg == 0);
+        std::string div;
+        if (!ok) div = "miss: expected=0 got=" + std::to_string(dmg);
+        rt_record(3, "DSLAP_MISS_ACC_0xD8_NO_ENDLOOP", ok, ok ? "" : div.c_str());
+        std::cout << "\n    miss(DOUBLESLAP,acc_byte=0xD8): dmg=" << dmg << (ok?" OK":" MISMATCH(exp=0)");
+        if (!ok) ++mismatch_b;
+    }
+
+    std::cout << "\n    multihit_section_B(DOUBLESLAP miss): mismatch=" << mismatch_b << "\n";
+
+    // ── SECTION C: Per-move sweep — all 8 EFFECT_MULTI_HIT moves, 2-hit, exact damage ──
+    // All 8 moves: ids 3,4,31,42,131,140,154,198
+    // Stats: player attack=200, opp defense=200 (explicitly set in each Battle).
+    // 2-hit vector: r1=0x00 (→2 hits, 1 byte).
+    //
+    // For moves with acc != 0xFF: acc byte is consumed FIRST per hit (0x00 < any threshold → hit).
+    // RNG for acc=0xD8 / acc=0xCC moves:
+    //   [0]=acc_hit=0x00, [1]=crit=0x11, [2]=var=0xFF, [3]=r1=0x00(→2hits), [4]=acc_hit=0x00, [5]=crit=0x11, [6]=var=0xFF
+    // RNG for acc=0xFF (SPIKE_CANNON, id=131): already tested above.
+    //   [0]=crit=0x11, [1]=var=0xFF, [2]=r1=0x00, [3]=crit=0x11, [4]=var=0xFF
+    //
+    // Per-hit damage formula (no crit, max variation, stats: attack=200, opp_def=200):
+    //   base = floor((22*power*200/200)/50)+2 = floor(22*power/50)+2
+    //   STAB if player_type==move_type (player type1=0=Normal; Normal moves → STAB)
+    //   STAB: dmg = base + base/2   (integer division)
+    //
+    // Per-hit expected values (Crystal source — NOT derived from Enginemon):
+    //   id=3  DOUBLESLAP  power=15 Normal  STAB: floor(22*15/50)+2=floor(330/50)+2=6+2=8, STAB=8+4=12  2-hit=24
+    //   id=4  COMET_PUNCH power=18 Normal  STAB: floor(396/50)+2=7+2=9, STAB=9+4=13                    2-hit=26
+    //   id=31 FURY_ATTACK power=15 Normal  STAB: same as id=3=12 per hit                               2-hit=24
+    //   id=42 PIN_MISSILE power=14 Bug     NO STAB(Bug≠Normal): floor(308/50)+2=6+2=8                  2-hit=16
+    //   id=131 SPIKE_CANNON power=20 Normal STAB: 10+5=15 per hit                                      2-hit=30
+    //   id=140 BARRAGE     power=15 Normal  STAB: same as id=3=12 per hit                              2-hit=24
+    //   id=154 FURY_SWIPES power=18 Normal  STAB: same as id=4=13 per hit                              2-hit=26
+    //   id=198 BONE_RUSH   power=25 Ground  NO STAB(Ground≠Normal): floor(550/50)+2=11+2=13            2-hit=26
+    struct SweepCase {
+        uint16_t id;
+        const char* name;
+        uint8_t acc;        // raw accuracy from Crystal (used to size RNG vector)
+        int32_t expected_2hit_damage;
+    };
+    static const SweepCase SWEEP[] = {
+        {   3, "DOUBLESLAP",   0xD8,  24 },
+        {   4, "COMET_PUNCH",  0xD8,  26 },
+        {  31, "FURY_ATTACK",  0xD8,  24 },
+        {  42, "PIN_MISSILE",  0xD8,  16 },
+        { 131, "SPIKE_CANNON", 0xFF,  30 },
+        { 140, "BARRAGE",      0xD8,  24 },
+        { 154, "FURY_SWIPES",  0xCC,  26 },
+        { 198, "BONE_RUSH",    0xCC,  26 },
+    };
+
+    for (const auto& sc : SWEEP) {
+        auto mid = static_cast<enginemon::MoveId>(sc.id);
+        const enginemon::MoveData* md = s_rt_reg->get(mid);
+        if (!md || (!md->has_program && !md->effect_desc.is_multi_hit)) {
+            rt_record(sc.id, sc.name, false, "not compiled / not multi-hit");
+            ++mismatch_c;
+            std::cout << "\n    sweep[" << sc.id << " " << sc.name << "]: NOT COMPILED";
+            continue;
+        }
+
+        // Build RNG: for acc=0xFF no acc byte, for others prepend 0x00 per hit.
+        // 2-hit: hit1=[acc?,crit,var], endloop=[r1=0x00], hit2=[acc?,crit,var]
+        std::vector<uint8_t> rng_vec;
+        if (sc.acc == 0xFF) {
+            // no acc byte per hit
+            rng_vec = {0x11, 0xFF, 0x00, 0x11, 0xFF, 0xFF, 0xFF};
+        } else {
+            // acc byte first per hit (0x00 < any threshold → hit)
+            rng_vec = {0x00, 0x11, 0xFF, 0x00, 0x00, 0x11, 0xFF, 0xFF, 0xFF};
+        }
+
+        enginemon::Party party;
+        enginemon::Pokemon pm{}; pm.species=1; pm.level=50;
+        pm.current_hp=300; pm.max_hp=300; pm.friendship=200;
+        party.add(pm);
+        auto reg = rt_reg();
+        enginemon::Battle battle(enginemon::BattleType::Wild, party, reg, s_rt_rules);
+
+        auto pbp = rt_bp(mid, 300, 200);
+        auto obp = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+        obp.stats.defense             = 200;
+        obp.base_stats.defense        = 200;
+        obp.stats.special_defense     = 200;
+        obp.base_stats.special_defense = 200;
+
+        battle.player_pokemon()   = pbp;
+        battle.opponent_pokemon() = obp;
+        size_t idx = 0;
+        battle.set_rng_callback([&rng_vec, &idx]()->uint32_t {
+            return idx < rng_vec.size() ? rng_vec[idx++] : 0xFFu;
+        });
+        battle.set_player_action(enginemon::ActionFight{0, 0});
+        battle.set_opponent_action(enginemon::ActionFight{0, 0});
+        battle.execute_turn();
+
+        const int32_t dmg = 5000 - static_cast<int32_t>(battle.opponent_pokemon().stats.hp);
+        const bool ok = (dmg == sc.expected_2hit_damage);
+        std::string div;
+        if (!ok) {
+            div = "expected=" + std::to_string(sc.expected_2hit_damage)
+                + " got=" + std::to_string(dmg);
+        }
+        rt_record(sc.id, sc.name, ok, ok ? "" : div.c_str());
+        std::cout << "\n    sweep[" << sc.id << " " << sc.name << "]: dmg=" << dmg
+                  << " (exp=" << sc.expected_2hit_damage << ")"
+                  << (ok ? " OK" : " MISMATCH");
+        if (!ok) ++mismatch_c;
+    }
+
+    std::cout << "\n    multihit_section_C(per-move sweep): mismatch=" << mismatch_c << "\n";
+
+    // ── Final gates ───────────────────────────────────────────────────────────
+    int total_mismatch = mismatch_a + mismatch_b + mismatch_c;
+    std::cout << "\n    multihit_generic_exact: total mismatch=" << total_mismatch << "\n";
+    ASSERT_EQ(mismatch_a, 0);
+    ASSERT_EQ(mismatch_b, 0);
+    ASSERT_EQ(mismatch_c, 0);
+}
+
 
 // Moves with % secondary effects. Uses scripted RNG to force the secondary to fire.
 // Checks the resulting status/volatile on the opponent.
