@@ -10640,6 +10640,223 @@ TEST(p_encore_exact_crystal_oracle) {
 
     std::cout<<"  p_encore_exact_crystal_oracle done\n";
 }
+
+// ============================================================================
+// HAZE EXACT CRYSTAL ORACLE
+//
+// Source authority:
+//   pokecrystal engine/battle/effect_commands.asm BattleCommand_ResetStats
+//   suiCune engine/battle/effect_commands.c BattleCommand_ResetStats
+//
+// Crystal source (BattleCommand_ResetStats, line 6002):
+//   ld a, BASE_STAT_LEVEL (=7); fills wPlayerStatLevels[0..7] and wEnemyStatLevels[0..7] with 7.
+//   Both sides (player AND opponent) reset.
+//   Fields reset (NUM_LEVEL_STATS=8): ATK,DEF,SPD,SPATK,SPDEF,ACC,EVA,ABILITY(Curse)
+//   Neutral value: BASE_STAT_LEVEL=7 (maps to Enginemon stages=0).
+//   No RNG consumed (acc=0xFF, stat_change only).
+//   NOT cleared: status conditions, volatile statuses (Mist/Substitute/etc.), screens.
+//   Mist (SubStatus1 bit) confirmed not touched by BattleCommand_ResetStats.
+//
+// Stage setup (asymmetric, covers all 7 fields, non-neutral on both sides):
+//   player:  atk=+2, def=-1, spd=+3, spatk=-2, spdef=+1, acc=+4, eva=-3
+//   opp:     atk=-3, def=+2, spd=-1, spatk=+4, spdef=-2, acc=+1, eva=+3
+//   Mist volatile on player: must survive Haze.
+// Discriminates: one-sided reset, partial reset, forgot acc/eva, over-broad volatile clear.
+// ============================================================================
+TEST(p_haze_exact_crystal_oracle) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "haze_exact");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    constexpr enginemon::MoveId HAZE_ID = 114;
+    const enginemon::MoveData* haze_md = r->get(HAZE_ID);
+    ASSERT_TRUE(haze_md != nullptr && haze_md->effect_desc.is_supported);
+    if (!haze_md) return;
+
+    auto rules = make_rules_b();
+    auto reg   = make_b_reg(*r);
+
+    enginemon::Party party;
+    { enginemon::Pokemon pm{}; pm.species=1; pm.level=50; pm.current_hp=pm.max_hp=300; pm.friendship=200; party.add(pm); }
+    enginemon::Battle bat(enginemon::BattleType::Wild, party, reg, rules);
+
+    enginemon::BattlePokemon pbp = make_bp2(HAZE_ID, 300, 200);
+    pbp.moves[0].move = HAZE_ID; pbp.moves[0].pp = pbp.moves[0].max_pp = haze_md->pp;
+    pbp.stages.attack=+2; pbp.stages.defense=-1; pbp.stages.speed=+3;
+    pbp.stages.special_attack=-2; pbp.stages.special_defense=+1;
+    pbp.stages.accuracy=+4; pbp.stages.evasion=-3;
+    pbp.set_volatile(enginemon::VolatileStatus::Mist);  // must NOT be cleared by Haze
+
+    enginemon::BattlePokemon obp = make_bp2(enginemon::MOVE_NONE, 300, 1);
+    obp.stages.attack=-3; obp.stages.defense=+2; obp.stages.speed=-1;
+    obp.stages.special_attack=+4; obp.stages.special_defense=-2;
+    obp.stages.accuracy=+1; obp.stages.evasion=+3;
+
+    bat.player_pokemon()=pbp; bat.opponent_pokemon()=obp;
+    std::cout<<"\n=== p_haze_exact_crystal_oracle ===\n";
+
+    const std::vector<uint8_t> rff={0xFF,0xFF,0xFF,0xFF};
+    size_t ri=0; bat.set_rng_callback([&rff,&ri]()->uint32_t{return ri<rff.size()?rff[ri++]:0xFFu;});
+    bat.set_player_action(enginemon::ActionFight{0,0});
+    bat.set_opponent_action(enginemon::ActionFight{0,0});
+    bat.execute_turn();
+
+    const auto& ps = bat.player_pokemon().stages;
+    const auto& os = bat.opponent_pokemon().stages;
+
+    // Crystal: fills both StatLevels arrays with BASE_STAT_LEVEL=7 (neutral).
+    // Enginemon neutral = 0. All 7 fields must be 0 on BOTH sides.
+    ASSERT_EQ(ps.attack,           int8_t{0});
+    ASSERT_EQ(ps.defense,          int8_t{0});
+    ASSERT_EQ(ps.speed,            int8_t{0});
+    ASSERT_EQ(ps.special_attack,   int8_t{0});
+    ASSERT_EQ(ps.special_defense,  int8_t{0});
+    ASSERT_EQ(ps.accuracy,         int8_t{0});
+    ASSERT_EQ(ps.evasion,          int8_t{0});
+    ASSERT_EQ(os.attack,           int8_t{0});
+    ASSERT_EQ(os.defense,          int8_t{0});
+    ASSERT_EQ(os.speed,            int8_t{0});
+    ASSERT_EQ(os.special_attack,   int8_t{0});
+    ASSERT_EQ(os.special_defense,  int8_t{0});
+    ASSERT_EQ(os.accuracy,         int8_t{0});
+    ASSERT_EQ(os.evasion,          int8_t{0});
+    // Mist volatile must remain (Crystal BattleCommand_ResetStats does not touch SubStatus).
+    ASSERT_TRUE(bat.player_pokemon().has_volatile(enginemon::VolatileStatus::Mist));
+
+    std::cout<<"  player: atk="<<(int)ps.attack<<" def="<<(int)ps.defense<<" spd="<<(int)ps.speed
+              <<" spatk="<<(int)ps.special_attack<<" spdef="<<(int)ps.special_defense
+              <<" acc="<<(int)ps.accuracy<<" eva="<<(int)ps.evasion<<" (all must=0)\n";
+    std::cout<<"  opp:    atk="<<(int)os.attack<<" def="<<(int)os.defense<<" spd="<<(int)os.speed
+              <<" spatk="<<(int)os.special_attack<<" spdef="<<(int)os.special_defense
+              <<" acc="<<(int)os.accuracy<<" eva="<<(int)os.evasion<<" (all must=0)\n";
+    std::cout<<"  Mist preserved="<<bat.player_pokemon().has_volatile(enginemon::VolatileStatus::Mist)<<"\n";
+    std::cout<<"  p_haze_exact_crystal_oracle done\n";
+}
+
+// ============================================================================
+// PSYCH UP EXACT CRYSTAL ORACLE
+//
+// Source authority:
+//   pokecrystal engine/battle/move_effects/psych_up.asm BattleCommand_PsychUp
+//   suiCune engine/battle/move_effects/psych_up.c BattleCommand_PsychUp
+//
+// Crystal source (psych_up.asm):
+//   Copies wEnemyStatLevels[0..NUM_LEVEL_STATS-1] -> wPlayerStatLevels[0..NUM_LEVEL_STATS-1].
+//   Fields copied: ATK,DEF,SPD,SPATK,SPDEF,ACC,EVA,ABILITY = 8 bytes wholesale.
+//   Neutral-target failure: if ALL target stages==BASE_STAT_LEVEL, AnimateFailedMove+PrintButItFailed.
+//   Direction: target->user (user becomes identical to target).
+//   No RNG consumed.
+//   Non-stage state NOT copied: Mist, Substitute, status, etc.
+//
+// Section A: mixed-stage copy.
+//   opp stages: atk=+2,def=-1,spd=+3,spatk=-2,spdef=+1,acc=+4,eva=-3
+//   player before: atk=+1,def=+1,spd=-1,spatk=+1,spdef=-1,acc=+1,eva=-1
+//   After Psych Up: player must exactly equal opp stages.
+//   Opp has Mist volatile: must NOT be copied to player.
+//
+// Section B: neutral-target failure.
+//   Crystal: all target stages neutral -> fail. Player stages unchanged (atk=+2 stays).
+//   Enginemon: no neutral-fail in SC::CopyOpponent -> copies zeros -> atk becomes 0. RED.
+//   ASSERT_EQ(user_atk_after, +2) -> RED in Enginemon.
+//
+// Discriminates: copies only positive stages, adds instead of replaces,
+//   wrong direction (copies user->target), omits acc/eva, copies non-stage volatile.
+// ============================================================================
+TEST(p_psych_up_exact_crystal_oracle) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "psy_up_exact");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    constexpr enginemon::MoveId PSYCH_UP_ID = 244;
+    const enginemon::MoveData* pu_md = r->get(PSYCH_UP_ID);
+    ASSERT_TRUE(pu_md != nullptr && pu_md->effect_desc.is_supported);
+    if (!pu_md) return;
+
+    auto rules = make_rules_b();
+    auto reg   = make_b_reg(*r);
+    std::cout<<"\n=== p_psych_up_exact_crystal_oracle ===\n";
+
+    // Section A: mixed-stage copy + Mist non-copy verification.
+    {
+        enginemon::Party party;
+        { enginemon::Pokemon pm{}; pm.species=1; pm.level=50; pm.current_hp=pm.max_hp=300; pm.friendship=200; party.add(pm); }
+        enginemon::Battle bat(enginemon::BattleType::Wild, party, reg, rules);
+
+        enginemon::BattlePokemon pbp = make_bp2(PSYCH_UP_ID, 300, 200);
+        pbp.moves[0].move=PSYCH_UP_ID; pbp.moves[0].pp=pbp.moves[0].max_pp=pu_md->pp;
+        pbp.stages.attack=+1; pbp.stages.defense=+1; pbp.stages.speed=-1;
+        pbp.stages.special_attack=+1; pbp.stages.special_defense=-1;
+        pbp.stages.accuracy=+1; pbp.stages.evasion=-1;
+
+        enginemon::BattlePokemon obp = make_bp2(enginemon::MOVE_NONE, 300, 1);
+        obp.stages.attack=+2; obp.stages.defense=-1; obp.stages.speed=+3;
+        obp.stages.special_attack=-2; obp.stages.special_defense=+1;
+        obp.stages.accuracy=+4; obp.stages.evasion=-3;
+        obp.set_volatile(enginemon::VolatileStatus::Mist);  // opp has Mist; must NOT be copied
+
+        bat.player_pokemon()=pbp; bat.opponent_pokemon()=obp;
+
+        const std::vector<uint8_t> rff={0xFF,0xFF,0xFF,0xFF};
+        size_t ri=0; bat.set_rng_callback([&rff,&ri]()->uint32_t{return ri<rff.size()?rff[ri++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{0,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+
+        const auto& us = bat.player_pokemon().stages;
+        // Crystal: user stages become exact copy of target stages.
+        ASSERT_EQ(us.attack,          int8_t{+2});
+        ASSERT_EQ(us.defense,         int8_t{-1});
+        ASSERT_EQ(us.speed,           int8_t{+3});
+        ASSERT_EQ(us.special_attack,  int8_t{-2});
+        ASSERT_EQ(us.special_defense, int8_t{+1});
+        ASSERT_EQ(us.accuracy,        int8_t{+4});
+        ASSERT_EQ(us.evasion,         int8_t{-3});
+        // Mist from opponent must NOT be on user after Psych Up.
+        ASSERT_TRUE(!bat.player_pokemon().has_volatile(enginemon::VolatileStatus::Mist));
+
+        std::cout<<"  A: user stages: atk="<<(int)us.attack<<" def="<<(int)us.defense
+                  <<" spd="<<(int)us.speed<<" spatk="<<(int)us.special_attack
+                  <<" spdef="<<(int)us.special_defense<<" acc="<<(int)us.accuracy
+                  <<" eva="<<(int)us.evasion<<" (must match target)\n";
+        std::cout<<"  A: Mist not copied="<<(!bat.player_pokemon().has_volatile(enginemon::VolatileStatus::Mist))<<"\n";
+    }
+
+    // Section B: neutral-target failure.
+    // Crystal: all target stages neutral -> fail -> user stages unchanged.
+    // Enginemon: copies unconditionally -> user atk 0. ASSERT_EQ(atk,+2) -> RED.
+    {
+        enginemon::Party party_b;
+        { enginemon::Pokemon pm{}; pm.species=1; pm.level=50; pm.current_hp=pm.max_hp=300; pm.friendship=200; party_b.add(pm); }
+        enginemon::Battle bat(enginemon::BattleType::Wild, party_b, reg, rules);
+
+        enginemon::BattlePokemon pbp_b = make_bp2(PSYCH_UP_ID, 300, 200);
+        pbp_b.moves[0].move=PSYCH_UP_ID; pbp_b.moves[0].pp=pbp_b.moves[0].max_pp=pu_md->pp;
+        pbp_b.stages.attack=+2;  // user has non-neutral attack
+
+        // Opponent: all stages neutral (=0)
+        enginemon::BattlePokemon obp_b = make_bp2(enginemon::MOVE_NONE, 300, 1);
+        // obp_b.stages all default 0 = neutral in Enginemon = BASE_STAT_LEVEL in Crystal
+
+        bat.player_pokemon()=pbp_b; bat.opponent_pokemon()=obp_b;
+
+        const std::vector<uint8_t> rff={0xFF,0xFF,0xFF,0xFF};
+        size_t ri=0; bat.set_rng_callback([&rff,&ri]()->uint32_t{return ri<rff.size()?rff[ri++]:0xFFu;});
+        bat.set_player_action(enginemon::ActionFight{0,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+
+        const int8_t atk_after = bat.player_pokemon().stages.attack;
+        // Crystal: fail at neutral target -> user atk unchanged = +2.
+        // Enginemon: copies 0 -> atk=0. RED.
+        ASSERT_EQ(atk_after, int8_t{+2});
+        std::cout<<"  B: neutral-target fail: crystal=+2 got="<<(int)atk_after
+                  <<(atk_after==+2?" OK":" MISMATCH(no neutral fail)")<<"\n";
+    }
+
+    std::cout<<"  p_psych_up_exact_crystal_oracle done\n";
+}
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: battle_rom_test <rom_path>\n";
@@ -10901,6 +11118,10 @@ int main(int argc, char* argv[]) {
     // Disable / Encore exact Crystal oracle
     RUN_TEST(p_disable_exact_crystal_oracle);
     RUN_TEST(p_encore_exact_crystal_oracle);
+
+    // Haze / Psych Up exact Crystal oracle
+    RUN_TEST(p_haze_exact_crystal_oracle);
+    RUN_TEST(p_psych_up_exact_crystal_oracle);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";
