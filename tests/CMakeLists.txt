@@ -164,7 +164,24 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     if(MSVC)
         target_compile_options(crystal_battle_diff PRIVATE /bigobj)
     endif()
-    # Not added to ctest — requires ROM+sym path arguments
+    # CTest registration for crystal_battle_diff.
+    # Requires: ENGINEMON_ROM_PATH (ROM file) and ENGINEMON_SYM_PATH (sym file).
+    # Label: oracle-diff (matches the oracle-diff test preset in CMakePresets.json).
+    # Usage:
+    #   cmake --preset oracle-diff
+    #   cmake --build --preset oracle-diff
+    #   ctest --preset oracle-diff
+    if(ENGINEMON_ROM_PATH AND ENGINEMON_SYM_PATH)
+        add_test(NAME crystal_battle_diff
+            COMMAND $<TARGET_FILE:crystal_battle_diff>
+                    "${ENGINEMON_ROM_PATH}" "${ENGINEMON_SYM_PATH}"
+                    --all --jobs 4
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(crystal_battle_diff
+            PROPERTIES
+                LABELS  "oracle-diff"
+                TIMEOUT 120)
+    endif()
 
     # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)

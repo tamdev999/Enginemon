@@ -51,6 +51,25 @@
         "ENGINEMON_BUILD_TESTS":     "ON",
         "ENGINEMON_ROM_PATH":        "$env{ENGINEMON_ROM}"
       }
+    },
+    {
+      "name": "oracle-diff",
+      "displayName": "Crystal Battle Differential Oracle (clang-cl / Ninja / SAMEBOY_ORACLE=ON)",
+      "description": "Standalone oracle build. Adds SameBoy Core + differential runner targets. Requires ENGINEMON_ROM and ENGINEMON_SYM to run CTest.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build_clang",
+      "toolchainFile": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/clang-cl-msvc.cmake",
+        "CMAKE_BUILD_TYPE":              "Release",
+        "ENGINEMON_ENABLE_ENGINE":       "ON",
+        "ENGINEMON_ENABLE_VULKAN":       "OFF",
+        "ENGINEMON_BUILD_TOOLS":         "ON",
+        "ENGINEMON_BUILD_TESTS":         "ON",
+        "SAMEBOY_ORACLE":                "ON",
+        "ENGINEMON_ROM_PATH":            "$env{ENGINEMON_ROM}",
+        "ENGINEMON_SYM_PATH":            "$env{ENGINEMON_SYM}"
+      }
     }
   ],
 
@@ -118,6 +137,14 @@
       "configurePreset": "default",
       "nativeToolOptions": ["-j12"],
       "targets": ["crystal_save_test", "sprite_money_test"]
+    },
+    {
+      "name": "oracle-diff",
+      "displayName": "Build Crystal battle differential oracle (clang-cl / SAMEBOY_ORACLE=ON)",
+      "description": "Builds crystal_battle_diff and its SameBoy Core + oracle_runner_lib dependencies.",
+      "configurePreset": "oracle-diff",
+      "nativeToolOptions": ["-j8"],
+      "targets": ["crystal_battle_diff"]
     }
   ],
 
@@ -194,6 +221,15 @@
       "filter": { "include": { "name": "crystal_save_test" } },
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 1, "timeout": 60 }
+    },
+    {
+      "name": "oracle-diff",
+      "displayName": "Crystal battle differential oracle tests",
+      "description": "Runs crystal_battle_diff --all against the pinned Crystal ROM+sym. Requires ENGINEMON_ROM and ENGINEMON_SYM environment variables.",
+      "configurePreset": "oracle-diff",
+      "filter": { "include": { "label": "oracle-diff" } },
+      "output": { "outputOnFailure": true, "shortProgress": false },
+      "execution": { "jobs": 1, "timeout": 120, "stopOnFailure": false }
     }
   ]
 }
