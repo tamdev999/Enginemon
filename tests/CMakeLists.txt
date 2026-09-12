@@ -21,9 +21,12 @@ target_link_libraries(golden_test PRIVATE
 # Windows/ shims (part of SameBoy tree, unmodified) provide vasprintf and alloca.
 # GB_VERSION requires escaped string literal: \"1.0.3\" in compile definitions.
 # ============================================================================
-if(ENGINEMON_ENABLE_ENGINE AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    # Enable C language for SameBoy Core (project() only enabled CXX).
-    enable_language(C)
+# SameBoy Core: built when SAMEBOY_ORACLE=ON (clang-cl build tree only).
+# Gate on an explicit option so the condition doesn't depend on compiler-detection
+# timing under VCPKG chainload, where CMAKE_C_COMPILER may not be populated yet.
+# ============================================================================
+option(SAMEBOY_ORACLE "Build SameBoy Core oracle targets (clang-cl build tree only)" OFF)
+if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     set(SAMEBOY_ROOT "${CMAKE_SOURCE_DIR}/references/SameBoy")
 
     add_library(sameboy_core STATIC
@@ -70,7 +73,7 @@ if(ENGINEMON_ENABLE_ENGINE AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         ${SAMEBOY_ROOT}/Windows/math.c
         ${SAMEBOY_ROOT}/Windows/stdio.c
         ${SAMEBOY_ROOT}/Windows/utf8_compat.c
-        PROPERTIES LANGUAGE C
+        PROPERTIES LANGUAGE CXX  # Force CXX compiler (clang-cl); /TC in compile options forces C parsing
     )
     target_include_directories(sameboy_core
         PUBLIC  ${SAMEBOY_ROOT}           # consumers: #include "Core/gb.h"
@@ -93,8 +96,10 @@ if(ENGINEMON_ENABLE_ENGINE AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         # clang-cl: /TC = treat as C, /std:c11. Suppress warnings from SameBoy internals.
         # /FI: force-include sameboy_version.h which defines GB_VERSION and GB_COPYRIGHT_YEAR
         #      as proper C string literals (safer than -D with escaped quotes).
+        # NOTE: sources are marked LANGUAGE CXX so clang-cl is used (not cl.exe).
+        # /TC overrides /TP; -clang:-std=c11 overrides -clang:-std=c++23 from global CXX flags.
         target_compile_options(sameboy_core PRIVATE
-            /TC /std:c11
+            /TC /std:c11 -clang:-std=c11
             "/FI${CMAKE_SOURCE_DIR}/tests/crystal_differential/sameboy_version.h"
             /wd4244 /wd4267 /wd4200 /wd4146 /wd4018 /wd4996 /wd4133
             /wd4090 /wd4101 /wd4047 /wd4028 /wd4245 /wd4005 /wd4715 /wd4334
@@ -120,6 +125,29 @@ if(ENGINEMON_ENABLE_ENGINE AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         target_compile_options(sameboy_link_smoke PRIVATE /bigobj)
     endif()
     # Not added to ctest
+
+    # ============================================================================
+    # crystal_haze_diff_test — live Crystal Haze differential oracle
+    # Executes actual BattleCommand_ResetStats machine code through SameBoy Core,
+    # compares normalized result against Enginemon's live Battle::execute_turn().
+    # Requires: <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(crystal_haze_diff_test
+        crystal_differential/crystal_haze_diff_test.cpp
+    )
+    target_link_libraries(crystal_haze_diff_test PRIVATE
+        sameboy_core
+        enginemon_crystal
+        enginemon_engine
+    )
+    target_include_directories(crystal_haze_diff_test PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${SAMEBOY_ROOT}
+    )
+    if(MSVC)
+        target_compile_options(crystal_haze_diff_test PRIVATE /bigobj)
+    endif()
+    # Not added to ctest — requires ROM+sym path arguments
 endif()
 
 # Lua Runtime tests (end-to-end script execution)
