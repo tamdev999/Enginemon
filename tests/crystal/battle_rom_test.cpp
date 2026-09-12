@@ -10857,6 +10857,611 @@ TEST(p_psych_up_exact_crystal_oracle) {
 
     std::cout<<"  p_psych_up_exact_crystal_oracle done\n";
 }
+
+// ============================================================================
+// PAIN SPLIT EXACT CRYSTAL ORACLE
+//
+// Source authority:
+//   pokecrystal engine/battle/move_effects/pain_split.asm BattleCommand_PainSplit
+//   suiCune engine/battle/move_effects/pain_split.c BattleCommand_PainSplit
+//
+// Crystal source (.PlayerShareHP / .EnemyShareHP):
+//   shared = (user_hp + target_hp) >> 1   [16-bit SRL+RR = floor division]
+//   user  gets min(shared, user_max_hp)    [.EnemyShareHP clamp on user side]
+//   target gets min(shared, target_max_hp) [second call with swapped args]
+//   Substitute on TARGET: jp PrintDidntAffect2 (fail).
+//   No BattleRandom consumed anywhere in the equalizes_hp path.
+//   Minimum: none documented — shared can be 0 in theory; clamp is only max_hp.
+//
+// Cases:
+//   A: interior  — player_hp=30, opp_hp=100, player_max=200, opp_max=150
+//      shared=floor(130/2)=65. player→65, opp→65.
+//      Discriminates: average of max_hp, ceiling, only-one-side change.
+//
+//   B: odd sum   — player_hp=31, opp_hp=100, sum=131, shared=floor(131/2)=65.
+//      Both get 65.  Discriminates: ceiling rounding.
+//
+//   C: one-side clamp — player_hp=10, opp_hp=300, player_max=50, opp_max=400.
+//      shared=floor(310/2)=155.
+//      player → min(155,50)=50 (CLAMPED).  opp → min(155,400)=155 (not clamped).
+//      Discriminates: single shared clamp based on either battler, wrong clamp side.
+//
+//   D: Substitute fail — target has Substitute → HP unchanged, fail.
+//      Discriminates: ignoring Substitute interaction.
+//
+//   E: RNG = 0 bytes — no BattleRandom call in equalizes_hp path.
+//      Discriminates: any spurious RNG consumption.
+//
+// Wrong implementations rejected:
+//   - average of max_hp instead of current HP
+//   - ceiling instead of floor (odd-sum case)
+//   - half-the-difference formula
+//   - only changing one battler
+//   - single shared clamp based on either battler
+//   - wrong clamp order (clamp before assignment)
+//   - ignoring Substitute
+//   - consuming RNG bytes
+// ============================================================================
+TEST(p_pain_split_exact_crystal_oracle) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "pain_split_exact");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    constexpr enginemon::MoveId PAIN_SPLIT_ID = 220;
+    const enginemon::MoveData* ps_md = r->get(PAIN_SPLIT_ID);
+    ASSERT_TRUE(ps_md != nullptr && ps_md->effect_desc.is_supported);
+    if (!ps_md) return;
+
+    // Use extract_battle_rules for proper rules (needed for accuracy threshold).
+    auto rules_res = crystal::extract_battle_rules(*g_rom, *g_profile);
+    ASSERT_TRUE(rules_res.success);
+    if (!rules_res.success) return;
+    auto rules = rules_res.rules;
+    auto reg   = make_b_reg(*r);
+
+    std::cout << "\n=== p_pain_split_exact_crystal_oracle ===\n";
+
+    // ----------------------------------------------------------------
+    // Helper lambda: run one Pain Split turn, return rng call count.
+    // player goes first (speed=200), opponent goes second (speed=1).
+    // ----------------------------------------------------------------
+    auto run_pain_split = [&](enginemon::BattlePokemon pbp,
+                               enginemon::BattlePokemon obp,
+                               uint32_t* rng_calls_out) -> std::pair<int16_t,int16_t> {
+        pbp.moves[0].move = PAIN_SPLIT_ID;
+        pbp.moves[0].pp = pbp.moves[0].max_pp = ps_md->pp;
+        pbp.stats.speed = pbp.base_stats.speed = 200;  // player goes first
+        obp.stats.speed = obp.base_stats.speed = 1;
+
+        enginemon::Party party;
+        {enginemon::Pokemon pm{}; pm.species=1; pm.level=50; pm.current_hp=pm.max_hp=300; pm.friendship=200; party.add(pm);}
+        enginemon::Battle bat(enginemon::BattleType::Wild, party, reg, rules);
+        bat.player_pokemon()  = pbp;
+        bat.opponent_pokemon() = obp;
+
+        uint32_t calls = 0;
+        bat.set_rng_callback([&calls]()->uint32_t{ ++calls; return 0xFFu; });
+        bat.set_player_action(enginemon::ActionFight{0,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+
+        if (rng_calls_out) *rng_calls_out = calls;
+        return {bat.player_pokemon().stats.hp, bat.opponent_pokemon().stats.hp};
+    };
+
+    // ----------------------------------------------------------------
+    // Case A: interior — player_hp=30, opp_hp=100, maxes=200/150.
+    //   shared = floor((30+100)/2) = floor(130/2) = 65.
+    //   player → min(65,200) = 65.
+    //   opp    → min(65,150) = 65.
+    // ----------------------------------------------------------------
+    {
+        enginemon::BattlePokemon pbp = make_bp_b(PAIN_SPLIT_ID, 30);
+        pbp.stats.max_hp = pbp.base_stats.max_hp = 200;
+        enginemon::BattlePokemon obp = make_bp_b(enginemon::MOVE_NONE, 100);
+        obp.stats.max_hp = obp.base_stats.max_hp = 150;
+
+        uint32_t calls = 0;
+        auto [p_hp, o_hp] = run_pain_split(pbp, obp, &calls);
+
+        // Crystal: shared=65, both get 65.
+        ASSERT_EQ(p_hp, int16_t{65});
+        ASSERT_EQ(o_hp, int16_t{65});
+
+        std::cout << "  A: interior: player=" << p_hp << "(crystal=65) opp=" << o_hp << "(crystal=65)"
+                  << (p_hp==65&&o_hp==65?" OK":" MISMATCH") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Case B: odd sum — player_hp=31, opp_hp=100, sum=131.
+    //   shared = floor(131/2) = 65 (floor, not ceil=66).
+    //   player → 65.  opp → 65.
+    // ----------------------------------------------------------------
+    {
+        enginemon::BattlePokemon pbp = make_bp_b(PAIN_SPLIT_ID, 31);
+        pbp.stats.max_hp = pbp.base_stats.max_hp = 200;
+        enginemon::BattlePokemon obp = make_bp_b(enginemon::MOVE_NONE, 100);
+        obp.stats.max_hp = obp.base_stats.max_hp = 200;
+
+        auto [p_hp, o_hp] = run_pain_split(pbp, obp, nullptr);
+
+        // Crystal: floor(131/2)=65, NOT 66. Both get 65.
+        ASSERT_EQ(p_hp, int16_t{65});
+        ASSERT_EQ(o_hp, int16_t{65});
+
+        std::cout << "  B: odd-sum: player=" << p_hp << "(crystal=65) opp=" << o_hp << "(crystal=65)"
+                  << (p_hp==65&&o_hp==65?" OK":" MISMATCH(ceil?)") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Case C: one-side clamp — player_hp=10, opp_hp=300, player_max=50, opp_max=400.
+    //   shared = floor((10+300)/2) = floor(310/2) = 155.
+    //   player → min(155, 50) = 50  (CLAMPED to player_max).
+    //   opp    → min(155,400) = 155 (NOT clamped, within opp_max).
+    // ----------------------------------------------------------------
+    {
+        enginemon::BattlePokemon pbp = make_bp_b(PAIN_SPLIT_ID, 10);
+        pbp.stats.max_hp = pbp.base_stats.max_hp = 50;
+        enginemon::BattlePokemon obp = make_bp_b(enginemon::MOVE_NONE, 300);
+        obp.stats.max_hp = obp.base_stats.max_hp = 400;
+
+        auto [p_hp, o_hp] = run_pain_split(pbp, obp, nullptr);
+
+        // Crystal: player clamped to 50, opp gets 155.
+        ASSERT_EQ(p_hp, int16_t{50});
+        ASSERT_EQ(o_hp, int16_t{155});
+
+        std::cout << "  C: one-side-clamp: player=" << p_hp << "(crystal=50) opp=" << o_hp << "(crystal=155)"
+                  << (p_hp==50&&o_hp==155?" OK":" MISMATCH") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Case D: Substitute on target → fail, HP unchanged.
+    //   Crystal: CheckSubstituteOpp → nz → jp PrintDidntAffect2.
+    // ----------------------------------------------------------------
+    {
+        enginemon::BattlePokemon pbp = make_bp_b(PAIN_SPLIT_ID, 30);
+        pbp.stats.max_hp = pbp.base_stats.max_hp = 200;
+        enginemon::BattlePokemon obp = make_bp_b(enginemon::MOVE_NONE, 100);
+        obp.stats.max_hp = obp.base_stats.max_hp = 150;
+        obp.set_volatile(enginemon::VolatileStatus::Substitute);
+        obp.substitute_hp = 50;
+
+        auto [p_hp, o_hp] = run_pain_split(pbp, obp, nullptr);
+
+        // Crystal: fail → HP unchanged. player stays at 30, opp stays at 100.
+        ASSERT_EQ(p_hp, int16_t{30});
+        ASSERT_EQ(o_hp, int16_t{100});
+
+        std::cout << "  D: substitute-fail: player=" << p_hp << "(crystal=30) opp=" << o_hp << "(crystal=100)"
+                  << (p_hp==30&&o_hp==100?" OK":" MISMATCH(sub not checked?)") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Case E: RNG = 0 bytes consumed.
+    //   Crystal: no BattleRandom call in equalizes_hp path.
+    //   Pain Split acc=0xFF → checkhit skips RNG (0xFF shortcut, no BrightPowder).
+    //   equalizes_hp path: no crit, no variation, no effectchance.
+    // ----------------------------------------------------------------
+    {
+        enginemon::BattlePokemon pbp = make_bp_b(PAIN_SPLIT_ID, 50);
+        pbp.stats.max_hp = pbp.base_stats.max_hp = 200;
+        enginemon::BattlePokemon obp = make_bp_b(enginemon::MOVE_NONE, 100);
+        obp.stats.max_hp = obp.base_stats.max_hp = 200;
+
+        uint32_t calls = 0;
+        run_pain_split(pbp, obp, &calls);
+
+        // Crystal: 0 BattleRandom calls.
+        ASSERT_EQ(calls, uint32_t{0});
+
+        std::cout << "  E: RNG-zero: calls=" << calls << "(crystal=0)"
+                  << (calls==0?" OK":" MISMATCH(spurious RNG)") << "\n";
+    }
+
+    std::cout << "  p_pain_split_exact_crystal_oracle done\n";
+}
+
+// ============================================================================
+// PRESENT EXACT CRYSTAL ORACLE
+//
+// Source authority:
+//   pokecrystal engine/battle/move_effects/present.asm BattleCommand_Present
+//   pokecrystal data/moves/present_power.asm PresentPower
+//   pokecrystal data/moves/effects.asm Present: (effect script)
+//   pokecrystal macros/data.asm: percent EQUS "* $ff / 100" = X*255/100
+//   suiCune engine/battle/move_effects/present.c BattleCommand_Present
+//
+// Crystal RNG order (from effect script):
+//   checkhit[byte0=acc] → critical[byte1=crit] → present[byte2=outcome] → damagevariation[byte3=var]
+//
+// Enginemon RNG order (pre-rolls before checkhit):
+//   [byte0=crit] → [byte1=var_raw] → [byte2=acc] → [byte3=outcome]
+//   This is a KNOWN MISMATCH. Assertions use Crystal-source expectations; RED where order matters.
+//
+// PresentPower table (percent=X*255/100):
+//   threshold=0x66(102), power=40  → b in 0..102  (40% chance)
+//   threshold=0xB3(179), power=80  → b in 103..179 (30% chance)
+//   threshold=0xCC(204), power=120 → b in 180..204 (10% chance)
+//   0xFF sentinel                  → b in 205..254 heal (20% chance)
+//   comparison: table[i] >= b  (jr nc = jump if a>=b, i.e. threshold>=random)
+//
+// Heal: GetQuarterMaxHP = max(1, target_max_hp >> 2). Targets OPPONENT (after BattleCommand_SwitchTurn).
+// Full-HP heal: AnimateFailedMove + PresentFailedText (heal outcome, not normal miss).
+//
+// Miss RNG: Crystal consumes 1 byte (acc only). Enginemon consumes 3 (crit+var+acc). RED.
+// Heal RNG: Crystal consumes 3 bytes (acc+crit+outcome). Enginemon consumes 4 (crit+var+acc+outcome). RED.
+// Hit  RNG: Crystal consumes 4 bytes (acc+crit+outcome+var). Enginemon consumes 4. Same count, wrong order.
+//
+// Damage formula (level=50, atk=60, def=60, STAB Normal/Normal, var=0xFF, type_eff=100):
+//   power=40  → base = floor(22*40*60/60/50)+2 = floor(880/50)+2 = 17+2=19; +STAB=28+2? No:
+//              → n=17, STAB: n+=n/2=8, n=25, +2=27. final=floor(27*255/255)=27.
+//   power=80  → n=35, STAB: n+=17, n=52, +2=54. final=54.
+//   power=120 → n=52, STAB: n+=26, n=78, +2=80. final=80.
+//
+// Wrong implementations rejected:
+//   - wrong threshold boundary (< vs <=)
+//   - wrong selected power for tier
+//   - heal targets user instead of opponent
+//   - wrong heal fraction (1/3 or 1/2 instead of 1/4)
+//   - wrong RNG ordering (assertions on call counts prove order mismatch)
+//   - damage branch used for heal outcome
+//   - heal branch runs damage calculation
+//   - off-by-one threshold (0x67 in tier 1 instead of 0x66)
+// ============================================================================
+TEST(p_present_exact_crystal_oracle) {
+    auto entries = extract_move_entries(*g_rom, *g_profile);
+    ASSERT_TRUE(semanticize_move_entries(*g_rom, *g_profile, entries));
+    auto r = mvdt_roundtrip(entries, "present_exact");
+    ASSERT_TRUE(r.has_value()); if (!r) return;
+
+    constexpr enginemon::MoveId PRESENT_ID = 217;
+    const enginemon::MoveData* pr_md = r->get(PRESENT_ID);
+    ASSERT_TRUE(pr_md != nullptr && pr_md->effect_desc.is_supported);
+    if (!pr_md) return;
+
+    // Must use extract_battle_rules to populate present_table from ROM.
+    // make_rules_b() leaves present_table zero-initialized (fallback behavior).
+    auto rules_res = crystal::extract_battle_rules(*g_rom, *g_profile);
+    ASSERT_TRUE(rules_res.success);
+    if (!rules_res.success) return;
+    auto rules = rules_res.rules;
+    auto reg   = make_b_reg(*r);
+
+    std::cout << "\n=== p_present_exact_crystal_oracle ===\n";
+
+    // Verify the ROM-extracted present table matches Crystal source.
+    // Crystal PresentPower: {0x66,40}, {0xB3,80}, {0xCC,120}, {0xFF,heal}
+    // percent = X*255/100:  40%=102=0x66, 70%+1=179=0xB3, 80%=204=0xCC
+    {
+        const auto& tbl = rules.present_table;
+        ASSERT_EQ(tbl[0].rng_threshold, uint8_t{0x66});
+        ASSERT_EQ(tbl[0].power,         uint8_t{40});
+        ASSERT_FALSE(tbl[0].is_heal);
+        ASSERT_EQ(tbl[1].rng_threshold, uint8_t{0xB3});
+        ASSERT_EQ(tbl[1].power,         uint8_t{80});
+        ASSERT_FALSE(tbl[1].is_heal);
+        ASSERT_EQ(tbl[2].rng_threshold, uint8_t{0xCC});
+        ASSERT_EQ(tbl[2].power,         uint8_t{120});
+        ASSERT_FALSE(tbl[2].is_heal);
+        ASSERT_TRUE(tbl[3].is_heal);
+        std::cout << "  table: {0x" << std::hex << (int)tbl[0].rng_threshold << ",pw=" << std::dec << (int)tbl[0].power
+                  << "} {0x" << std::hex << (int)tbl[1].rng_threshold << ",pw=" << std::dec << (int)tbl[1].power
+                  << "} {0x" << std::hex << (int)tbl[2].rng_threshold << ",pw=" << std::dec << (int)tbl[2].power
+                  << "} {heal=" << tbl[3].is_heal << "}"
+                  << ((tbl[0].rng_threshold==0x66&&tbl[1].rng_threshold==0xB3&&tbl[2].rng_threshold==0xCC&&tbl[3].is_heal)?" OK":" MISMATCH") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Helper: run one Present turn (player goes first, uses Present).
+    // RNG bytes fed in Enginemon consumption order: [crit][var_raw][acc][outcome]
+    // Returns {player_hp, opp_hp, rng_calls}.
+    // ----------------------------------------------------------------
+    auto run_present = [&](const std::vector<uint8_t>& rng_script,
+                           int16_t player_hp, int16_t player_max,
+                           int16_t opp_hp,    int16_t opp_max)
+        -> std::tuple<int16_t,int16_t,uint32_t>
+    {
+        enginemon::BattlePokemon pbp = make_bp_b(PRESENT_ID, player_hp);
+        pbp.stats.max_hp = pbp.base_stats.max_hp = player_max;
+        pbp.moves[0].move = PRESENT_ID;
+        pbp.moves[0].pp = pbp.moves[0].max_pp = pr_md->pp;
+        pbp.stats.speed = pbp.base_stats.speed = 200;  // player goes first
+
+        enginemon::BattlePokemon obp = make_bp_b(enginemon::MOVE_NONE, opp_hp);
+        obp.stats.max_hp = obp.base_stats.max_hp = opp_max;
+        obp.stats.speed = obp.base_stats.speed = 1;
+
+        enginemon::Party party;
+        {enginemon::Pokemon pm{}; pm.species=1; pm.level=50; pm.current_hp=pm.max_hp=300; pm.friendship=200; party.add(pm);}
+        enginemon::Battle bat(enginemon::BattleType::Wild, party, reg, rules);
+        bat.player_pokemon()  = pbp;
+        bat.opponent_pokemon() = obp;
+
+        size_t ri = 0; uint32_t calls = 0;
+        bat.set_rng_callback([&]()->uint32_t{
+            ++calls;
+            return ri < rng_script.size() ? rng_script[ri++] : uint32_t{0xFF};
+        });
+        bat.set_player_action(enginemon::ActionFight{0,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+        return {bat.player_pokemon().stats.hp, bat.opponent_pokemon().stats.hp, calls};
+    };
+
+    // ----------------------------------------------------------------
+    // RNG vector notes for all damage-tier tests:
+    //   Enginemon consumes: [0]=crit, [1]=var_raw, [2]=acc, [3]=outcome
+    //   Crystal expects:    [0]=acc,  [1]=crit,    [2]=outcome, [3]=var
+    //
+    //   For a clean hit with no crit and max variation:
+    //     Enginemon[0]=crit: 0x50(80>=17→no crit)
+    //     Enginemon[1]=var_raw: 0xFF(rrca(0xFF)=0xFF>=0xD9→accepted, 1 byte)
+    //     Enginemon[2]=acc: 0x00(0<0xE5→hit)
+    //     Enginemon[3]=outcome: tier-specific byte
+    //
+    //   Crystal would consume same bytes as:
+    //     Crystal[0]=acc: 0x50(80<229→hit)
+    //     Crystal[1]=crit: 0xFF(255>=17→no crit)
+    //     Crystal[2]=outcome: 0x00(0<=0x66→power=40)
+    //     Crystal[3]=var: 0xFF(rrca(0xFF)=0xFF>=0xD9→accepted)
+    //
+    //   RNG order MISMATCH means the specific outcome byte positions differ.
+    //   For tier tests we need outcome at Enginemon position [3] = Crystal position [2].
+    //   We choose bytes so that BOTH orderings hit and select same tier to get same damage.
+    //   This allows tier damage tests to PASS even with the ordering mismatch.
+    //   The ordering mismatch is proven separately by the miss and heal call-count tests.
+    // ----------------------------------------------------------------
+
+    // ----------------------------------------------------------------
+    // Tier tests: scripted so both Crystal and Enginemon ordering agree on tier + hit.
+    //   Enginemon: [crit=0x50, var=0xFF, acc=0x00, outcome=X]
+    //   Crystal reads same 4 bytes as: [acc=0x50, crit=0xFF, outcome=0x00, var=X]
+    //   Crystal acc=0x50(80<229→hit), crit=0xFF(no crit), outcome=0x00(<=0x66→power=40)
+    //   Crystal var=X: must be a valid accepted variation byte.
+    //   BUT Crystal var position is byte[3]=Enginemon[3]=outcome_byte.
+    //   If outcome_byte=0x00, Crystal var=rrca(0x00)=(0>>1)|(0<<7)=0 < 0xD9 → rejected!
+    //   Crystal would retry, but we have no more scripted bytes.
+    //
+    //   Solution: choose outcome/tier byte that is also a valid variation (rrca(b)>=0xD9).
+    //   rrca(b)>=0xD9: b such that (b>>1)|(b<<7) >= 0xD9=217.
+    //   Test: b=0x00→rrca=0x00(fail). b=0x66→rrca(0x66)=(0x33)|(0xCC)=0xFF(ok!).
+    //   0x66=102: rrca(0x66) = (0x66>>1)|(0x66<<7 & 0xFF) = 0x33 | 0xCC = 0xFF >= 0xD9. ACCEPTED.
+    //   0xB3=179: rrca(0xB3) = (0xB3>>1)|(0xB3<<7 & 0xFF) = 0x59 | 0x80 = 0xD9 >= 0xD9. ACCEPTED.
+    //   0xCC=204: rrca(0xCC) = (0xCC>>1)|(0xCC<<7 & 0xFF) = 0x66 | 0x00 = 0x66 < 0xD9. REJECTED.
+    //
+    //   For power=40: use outcome=0x66(Crystal: <=0x66→power=40, var=rrca(0x66)=0xFF).
+    //   For power=80: use outcome=0xB3(Crystal: <=0xB3→power=80, var=rrca(0xB3)=0xD9).
+    //   For power=120: outcome=0xCC won't work (bad var). Use different approach for 120.
+    //     For 120: need Crystal[2]=outcome byte in 0xB4..0xCC AND Crystal[3]=var >=0xD9.
+    //     Enginemon[3]=outcome: choose 0xC0=192 (<=0xCC→120). rrca(0xC0)=(0x60)|(0x00)=0x60<0xD9. Still bad.
+    //     Need rrca(X)>=0xD9 AND X in 0xB4..0xCC:
+    //     X=0xB5: rrca=(0x5A)|(0x80)=0xDA>=0xD9. ACCEPTED. And 0xB5=181 is in (0xB3,0xCC]. pow=120.
+    //     X=0xBA: rrca=(0x5D)|(0x00)? No: (0xBA>>1)|(0xBA<<7&0xFF)=(0x5D)|(0x00)=0x5D<0xD9. No.
+    //     X=0xB5=181: (181>>1)|(181<<7&255)=90|128=218=0xDA>=0xD9. YES. 0xB5>0xB3 and 0xB5<=0xCC. pow=120.
+    //
+    //   Summary of 4-byte vectors [crit=0x50, var=0xFF, acc=0x00, outcome]:
+    //     power=40:  outcome=0x66  → Crystal var=rrca(0x66)=0xFF.  dmg=27.
+    //     power=80:  outcome=0xB3  → Crystal var=rrca(0xB3)=0xD9.  need dmg for var=0xD9.
+    //     power=120: outcome=0xB5  → Crystal var=rrca(0xB5)=0xDA.  need dmg for var=0xDA.
+    //
+    //   Damage with var=0xD9 (power=80): floor(54*0xD9/255)=floor(54*217/255)=floor(11718/255)=45.
+    //   Damage with var=0xDA (power=120): floor(80*0xDA/255)=floor(80*218/255)=floor(17440/255)=68.
+    //   (minimum 2 applied after, both > 2.)
+    // ----------------------------------------------------------------
+
+    // ----------------------------------------------------------------
+    // Tier A: power=40 (outcome=0x66, in range 0..0x66).
+    //   Enginemon: [crit=0x50, var=0xFF, acc=0x00, outcome=0x66]
+    //   Crystal:   acc=0x50(hit), crit=0xFF(no crit), outcome=0x66(<=0x66→power=40), var=rrca(0x66)=0xFF
+    //   Expected damage (STAB Normal/Normal, level=50, atk=60, def=60, var=0xFF):
+    //     n=floor(22*40*60/60/50)=17; STAB: n+=8=25; +2=27; var=0xFF: floor(27*255/255)=27.
+    // ----------------------------------------------------------------
+    {
+        const std::vector<uint8_t> rng = {0x50u, 0xFFu, 0x00u, 0x66u};
+        auto [p_hp, o_hp, calls] = run_present(rng, 300,300, 300,300);
+        const int16_t dmg = int16_t{300} - o_hp;
+        // Crystal: power=40, var=rrca(0x66)=0xFF, damage=(n+2)+floor((n+2)/2)=19+9=28, var=0xFF: 28.
+        // Enginemon: same pre_variation=0xFF. Both agree at 28 coincidentally.
+        ASSERT_EQ(dmg, int16_t{28});
+        ASSERT_EQ(calls, uint32_t{4});  // Crystal: 4 bytes (acc+crit+outcome+var). Enginemon: 4. Same count.
+        std::cout << "  tierA pow=40: dmg=" << dmg << "(crystal=28) calls=" << calls
+                  << (dmg==28?" OK":" MISMATCH") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Tier B: power=80 (outcome=0xB3, in range 0x67..0xB3).
+    //   Enginemon: [crit=0x50, var=0xFF, acc=0x00, outcome=0xB3]
+    //   Crystal:   acc=0x50(hit), crit=0xFF(no crit), outcome=0xB3(>0x66,<=0xB3→power=80), var=rrca(0xB3)=0xD9
+    //   Expected damage: n=floor(22*80*60/60/50)=35; STAB: n+=17=52; +2=54; var=0xD9=217: floor(54*217/255)=45.
+    //   (floor(11718/255)=45 remainder 213)
+    // ----------------------------------------------------------------
+    {
+        const std::vector<uint8_t> rng = {0x50u, 0xFFu, 0x00u, 0xB3u};
+        auto [p_hp, o_hp, calls] = run_present(rng, 300,300, 300,300);
+        const int16_t dmg = int16_t{300} - o_hp;
+        // Crystal: power=80, var=rrca(0xB3)=0xD9=217, damage=55; var=217: floor(55*217/255)=46.
+        // Enginemon: pre_variation=0xFF (from RNG position [1]), damage=55: floor(55*255/255)=55. RED.
+        ASSERT_EQ(dmg, int16_t{46});  // Crystal=46. Enginemon=55. RED.
+        ASSERT_EQ(calls, uint32_t{4});
+        std::cout << "  tierB pow=80: dmg=" << dmg << "(crystal=46) calls=" << calls
+                  << (dmg==46?" OK":" MISMATCH(RNG-order)") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Tier C: power=120 (outcome=0xB5, in range 0xB4..0xCC).
+    //   Enginemon: [crit=0x50, var=0xFF, acc=0x00, outcome=0xB5]
+    //   Crystal:   acc=0x50(hit), crit=0xFF(no crit), outcome=0xB5(>0xB3,<=0xCC→power=120), var=rrca(0xB5)=0xDA
+    //   rrca(0xB5)=(0xB5>>1)|(0xB5<<7&0xFF)=(0x5A)|(0x80)=0xDA=218>=0xD9. Accepted.
+    //   Expected damage: n=floor(22*120*60/60/50)=52; STAB: n+=26=78; +2=80; var=0xDA=218: floor(80*218/255)=68.
+    //   (floor(17440/255)=68 remainder 80)
+    // ----------------------------------------------------------------
+    {
+        const std::vector<uint8_t> rng = {0x50u, 0xFFu, 0x00u, 0xB5u};
+        auto [p_hp, o_hp, calls] = run_present(rng, 300,300, 300,300);
+        const int16_t dmg = int16_t{300} - o_hp;
+        // Crystal: power=120, var=rrca(0xB5)=0xDA=218, damage=81; var=218: floor(81*218/255)=69.
+        // Enginemon: pre_variation=0xFF, damage=81: floor(81*255/255)=81. RED.
+        ASSERT_EQ(dmg, int16_t{69});  // Crystal=69. Enginemon=81. RED.
+        ASSERT_EQ(calls, uint32_t{4});
+        std::cout << "  tierC pow=120: dmg=" << dmg << "(crystal=69) calls=" << calls
+                  << (dmg==69?" OK":" MISMATCH(RNG-order)") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Boundary tests: both sides of every threshold.
+    //   We test Crystal outcome byte positions using the same Enginemon-ordered vector.
+    //   For boundary tests we just care about WHICH tier is selected (HP delta).
+    //   Use the same [crit=0x50, var=0xFF, acc=0x00, outcome=X] structure.
+    //   For outcome bytes that produce bad var in Crystal, we accept that Enginemon
+    //   and Crystal may disagree on variation, but the TIER selection is what we assert.
+    //   We assert target HP was REDUCED (any damage) to prove damage vs heal.
+    //   For precise power proof we use the same accepted-variation approach.
+    // ----------------------------------------------------------------
+
+    // Boundary 1a: outcome=0x65 (< 0x66) → power=40. dmg > 0.
+    // Boundary 1b: outcome=0x66 (==0x66, <=0x66) → power=40. dmg > 0.  (already tier A)
+    // Boundary 1c: outcome=0x67 (> 0x66, <=0xB3) → power=80. dmg > 0 and dmg != power=40 dmg.
+    // All use [crit=0x50, var=0xFF, acc=0x00] + outcome byte. var in Crystal = rrca(outcome).
+    // For 0x65: rrca(0x65)=(0x32)|(0x80)=0xB2<0xD9 → bad Crystal variation (retry). Enginemon is fine.
+    // Since RNG is mismatched anyway, we just assert TIER SELECTION (damage range) not exact damage.
+    {
+        // 1a: 0x65 → power=40 tier. In Crystal: outcome=0x65<=0x66. In Enginemon: same (0x65<=0x66).
+        // Both select power=40. Damage must be in [2..53] (less than power=80 minimum).
+        auto [p_a, o_a, c_a] = run_present({0x50u,0xFFu,0x00u,0x65u}, 300,300,300,300);
+        int16_t d_a = int16_t{300}-o_a;
+        ASSERT_TRUE(d_a >= int16_t{2} && d_a <= int16_t{53});  // power=40 produces max 40 dmg
+        std::cout << "  bnd1a 0x65(pow=40): dmg=" << d_a << (d_a>=2&&d_a<=53?" OK":" MISMATCH(wrong tier)") << "\n";
+
+        // 1b: 0x66 → power=40 tier. Already asserted exactly in tier A (dmg=27).
+        std::cout << "  bnd1b 0x66(pow=40): see tierA (dmg=27)\n";
+
+        // 1c: 0x67 → power=80 tier. Damage must be > power=40 max (~40) i.e. >=40.
+        auto [p_c, o_c, c_c] = run_present({0x50u,0xFFu,0x00u,0x67u}, 300,300,300,300);
+        int16_t d_c = int16_t{300}-o_c;
+        ASSERT_TRUE(d_c >= int16_t{40});  // power=80 deals at least ~40 with any valid variation
+        std::cout << "  bnd1c 0x67(pow=80): dmg=" << d_c << (d_c>=40?" OK":" MISMATCH(wrong tier)") << "\n";
+    }
+
+    // Boundary 2: 0xB3(power=80 last) vs 0xB4(power=120 first).
+    {
+        // 2a: 0xB3 exactly: already asserted in tier B (dmg=45, power=80).
+        std::cout << "  bnd2a 0xB3(pow=80): see tierB (dmg=45)\n";
+
+        // 2b: 0xB4 → power=120.
+        // rrca(0xB4)=(0x5A)|(0x00)=0x5A<0xD9: bad Crystal var → Enginemon and Crystal disagree.
+        // Just assert dmg > tierB max (~77) using Enginemon result vs tierB expectation.
+        auto [p_b, o_b, c_b] = run_present({0x50u,0xFFu,0x00u,0xB4u}, 300,300,300,300);
+        int16_t d_b = int16_t{300}-o_b;
+        // power=120 must produce more damage than power=80 max (~77 at var=0xFF).
+        // Enginemon uses pre_variation=0xFF (from position [1]), so dmg=floor(80*255/255)=80.
+        ASSERT_TRUE(d_b > int16_t{54});   // must be power=120 (> any power=80 result)
+        std::cout << "  bnd2b 0xB4(pow=120): dmg=" << d_b << (d_b>54?" OK":" MISMATCH(wrong tier)") << "\n";
+    }
+
+    // Boundary 3: 0xCC(power=120 last) vs 0xCD(heal first).
+    {
+        // 3a: 0xCC → power=120.
+        // rrca(0xCC)=(0x66)|(0x00)=0x66<0xD9: bad Crystal var → Enginemon uses pre_variation=0xFF.
+        // Enginemon: power=120, var=0xFF. dmg=80.
+        auto [p_a, o_a, c_a] = run_present({0x50u,0xFFu,0x00u,0xCCu}, 300,300,300,300);
+        int16_t d_a = int16_t{300}-o_a;
+        // Crystal: outcome=0xCC<=0xCC→power=120. Damage > 0.
+        ASSERT_TRUE(d_a > int16_t{0});
+        ASSERT_TRUE(o_a < int16_t{300});  // opp HP decreased (damage, not heal)
+        std::cout << "  bnd3a 0xCC(pow=120): dmg=" << d_a << (d_a>0?" OK":" MISMATCH(heal instead?)") << "\n";
+
+        // 3b: 0xCD → heal branch. opp HP must INCREASE (not decrease).
+        // Set opp_hp=100, opp_max=300. Heal=max(1,300>>2)=75. Expected opp_hp=175.
+        // Crystal: outcome=0xCD>0xCC→falls to sentinel 0xFF→heal.
+        // Enginemon: outcome=0xCD>0xCC→heal. Crystal agrees on tier selection.
+        auto [p_b, o_b, c_b] = run_present({0x50u,0xFFu,0x00u,0xCDu}, 300,300,100,300);
+        // Crystal: opp_hp=100+75=175.
+        ASSERT_EQ(o_b, int16_t{175});
+        // Crystal RNG calls: acc(1)+crit(1)+outcome(1)=3. Enginemon: crit(1)+var(1)+acc(1)+outcome(1)=4. RED.
+        ASSERT_EQ(c_b, uint32_t{3});   // Crystal=3. Enginemon=4. RED.
+        std::cout << "  bnd3b 0xCD(heal): opp_hp=" << o_b << "(crystal=175) calls=" << c_b
+                  << "(crystal=3)" << (o_b==175?" OK":" MISMATCH(wrong hp)")
+                  << (c_b==3?" OK":" MISMATCH(RNG-order)") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Heal case: exact heal amount verification.
+    //   opp_hp=50, opp_max=300. Heal=max(1,300>>2)=75. Expected opp_hp=125.
+    //   Crystal: heal targets OPPONENT (after BattleCommand_SwitchTurn before GetQuarterMaxHP).
+    //   Player HP must be unchanged.
+    // ----------------------------------------------------------------
+    {
+        const std::vector<uint8_t> rng = {0x50u,0xFFu,0x00u,0xCDu};
+        auto [p_hp, o_hp, calls] = run_present(rng, 300,300, 50,300);
+        const int16_t heal_amt = o_hp - int16_t{50};
+        // Crystal: heal=max(1,300>>2)=max(1,75)=75. opp_hp=125.
+        ASSERT_EQ(o_hp, int16_t{125});
+        ASSERT_EQ(heal_amt, int16_t{75});
+        ASSERT_EQ(p_hp, int16_t{300});  // player HP unchanged (heal targets opp, not user)
+        std::cout << "  heal: opp_hp=" << o_hp << "(crystal=125) heal=" << heal_amt
+                  << "(crystal=75) player_hp=" << p_hp << "(unchanged)"
+                  << (o_hp==125?" OK":" MISMATCH") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Heal near-max clamp: opp_hp=280, opp_max=300.
+    //   Heal=75. 280+75=355 > 300 → clamped to 300.
+    //   Crystal: RestoreHP clamps to max_hp.
+    // ----------------------------------------------------------------
+    {
+        const std::vector<uint8_t> rng = {0x50u,0xFFu,0x00u,0xCDu};
+        auto [p_hp, o_hp, calls] = run_present(rng, 300,300, 280,300);
+        // Crystal: min(280+75, 300) = 300.
+        ASSERT_EQ(o_hp, int16_t{300});
+        std::cout << "  heal-clamp: opp_hp=" << o_hp << "(crystal=300, clamped)"
+                  << (o_hp==300?" OK":" MISMATCH") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Full-HP heal: opp already at max HP.
+    //   Crystal: AICheckEnemyMaxHP returns carry (fully healed) → .already_fully_healed
+    //     → BattleCommand_SwitchTurn → _CheckBattleScene → if nc: AnimateFailedMove + PresentFailedText.
+    //   opp HP must remain at max_hp (300).
+    // ----------------------------------------------------------------
+    {
+        const std::vector<uint8_t> rng = {0x50u,0xFFu,0x00u,0xCDu};
+        auto [p_hp, o_hp, calls] = run_present(rng, 300,300, 300,300);
+        // Crystal: full-HP → fail. opp_hp unchanged = 300. player_hp unchanged = 300.
+        ASSERT_EQ(o_hp, int16_t{300});
+        ASSERT_EQ(p_hp, int16_t{300});
+        std::cout << "  full-HP-heal: opp_hp=" << o_hp << "(crystal=300, unchanged)"
+                  << (o_hp==300?" OK":" MISMATCH(healed above max?)") << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // Miss case: prove RNG ordering mismatch.
+    //   Provide [acc=0xE5(miss), ...] in CRYSTAL byte order.
+    //   In Enginemon vector position: [crit=0xE5, var=0xFF, acc=0xE5, ...]
+    //     Enginemon: crit=0xE5(no crit), var=0xFF(accepted), acc=0xE5(>=0xE5→miss). 3 bytes consumed.
+    //   In Crystal byte order: [acc=0xE5(>=0xE5→miss)]. 1 byte consumed.
+    //   ASSERT_EQ(calls, 1) → RED (Enginemon consumes 3).
+    //   opp HP must be unchanged (miss → no damage/heal).
+    // ----------------------------------------------------------------
+    {
+        // Miss vector: Enginemon sees [crit=0xE5, var=0xFF, acc=0xE5].
+        // Crystal would see: acc=0xE5(miss, 0xE5 not < 0xE5). Consumes 1 byte.
+        const std::vector<uint8_t> rng = {0xE5u, 0xFFu, 0xE5u, 0xFFu};
+        auto [p_hp, o_hp, calls] = run_present(rng, 300,300, 300,300);
+        // Crystal: miss → opp HP unchanged.
+        ASSERT_EQ(o_hp, int16_t{300});
+        ASSERT_EQ(p_hp, int16_t{300});
+        // Crystal: consumes 1 RNG byte (acc only, miss before crit). Enginemon: consumes 3. RED.
+        ASSERT_EQ(calls, uint32_t{1});  // Crystal=1. Enginemon=3. RED.
+        std::cout << "  miss: opp_hp=" << o_hp << "(unchanged) calls=" << calls
+                  << "(crystal=1)" << (o_hp==300?" OK":" MISMATCH(took damage on miss?)")
+                  << (calls==1?" OK":" MISMATCH(RNG-order,crystal=1)")  << "\n";
+    }
+
+    std::cout << "  p_present_exact_crystal_oracle done\n";
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: battle_rom_test <rom_path>\n";
@@ -11122,6 +11727,10 @@ int main(int argc, char* argv[]) {
     // Haze / Psych Up exact Crystal oracle
     RUN_TEST(p_haze_exact_crystal_oracle);
     RUN_TEST(p_psych_up_exact_crystal_oracle);
+
+    // Pain Split / Present exact Crystal oracle
+    RUN_TEST(p_pain_split_exact_crystal_oracle);
+    RUN_TEST(p_present_exact_crystal_oracle);
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << g_passed << "\n";
