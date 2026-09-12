@@ -55,7 +55,7 @@
     {
       "name": "oracle-diff",
       "displayName": "Crystal Battle Differential Oracle (clang-cl / Ninja / SAMEBOY_ORACLE=ON)",
-      "description": "Standalone oracle build. Adds SameBoy Core + differential runner targets. Requires ENGINEMON_ROM and ENGINEMON_SYM to run CTest.",
+      "description": "Standalone oracle build. ROM and sym default to canonical repo paths (references/). Override by setting ENGINEMON_ROM_PATH / ENGINEMON_SYM_PATH cache variables or ENGINEMON_ROM / ENGINEMON_SYM env vars.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build_clang",
       "toolchainFile": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
@@ -67,8 +67,8 @@
         "ENGINEMON_BUILD_TOOLS":         "ON",
         "ENGINEMON_BUILD_TESTS":         "ON",
         "SAMEBOY_ORACLE":                "ON",
-        "ENGINEMON_ROM_PATH":            "$env{ENGINEMON_ROM}",
-        "ENGINEMON_SYM_PATH":            "$env{ENGINEMON_SYM}"
+        "ENGINEMON_ROM_PATH":            "${sourceDir}/references/Pokemon - Crystal Version (UE) (V1.1) [C][!].gbc",
+        "ENGINEMON_SYM_PATH":            "${sourceDir}/references/pokecrystal-symbols/pokecrystal11.sym"
       }
     }
   ],
