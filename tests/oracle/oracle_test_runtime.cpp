@@ -2649,6 +2649,112 @@ TEST(p_rt_charge_exact) {
         std::cout << "    SKY_ATTACK dmg=" << d_f << "\n";
     }
 
+    // ---- Section G: SOLARBEAM in Sun (skipsuncharge → fires immediately on turn 1) ----
+    // Crystal source BattleCommand_SkipSunCharge: if weather==Sun, SkipToBattleCommand(charge_command)
+    // i.e. the charge command is SKIPPED → SolarBeam fires on turn 1 directly, Charging NOT set.
+    // Sun setup: execute Sunny Day (id=241) first, then SolarBeam fires immediately on next turn.
+    // T1: Sunny Day sets Sun. T2: SolarBeam → skipsuncharge skips charge → fires immediately.
+    // T2 Crystal RNG: [0]=crit=0x11(no crit), [1]=var=0xFF (acc=0xFF no byte, same as normal case).
+    // Expected: damage=17 (same as non-weather; Sun has no modifier for SOLARBEAM in WeatherTypeModifiers).
+    // Charging volatile must NOT be set (no charge turn occurred).
+    std::cout << "  [G] SOLARBEAM Sun\n";
+    {
+        enginemon::BattleRules rules_g = s_rt_rules;
+        enginemon::Party party_g;
+        enginemon::Pokemon pm_g{}; pm_g.species=1; pm_g.level=50;
+        pm_g.current_hp=pm_g.max_hp=300; pm_g.friendship=200;
+        party_g.add(pm_g);
+        auto reg_g = rt_reg();
+        enginemon::Battle bat_g(enginemon::BattleType::Trainer, party_g, reg_g, rules_g);
+
+        // Player: Sunny Day in slot 0, SolarBeam in slot 1
+        auto pbp_g = rt_bp(static_cast<enginemon::MoveId>(241), 300, 200); // SUNNY_DAY
+        const enginemon::MoveData* sg_md = s_rt_reg->get(solar_id);
+        pbp_g.moves[1].move = solar_id;
+        pbp_g.moves[1].pp = pbp_g.moves[1].max_pp = (sg_md ? sg_md->pp : 10);
+        auto obp_g = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+        obp_g.stats.special_defense = 200; obp_g.base_stats.special_defense = 200;
+        bat_g.player_pokemon() = pbp_g; bat_g.opponent_pokemon() = obp_g;
+
+        // T1: Sunny Day (slot 0). No relevant RNG.
+        size_t gi1=0; std::vector<uint8_t> rg1={0xFF,0xFF,0xFF,0xFF};
+        bat_g.set_rng_callback([&rg1,&gi1]()->uint32_t{return gi1<rg1.size()?rg1[gi1++]:0xFFu;});
+        bat_g.set_player_action(enginemon::ActionFight{0,0}); bat_g.set_opponent_action(enginemon::ActionFight{0,0}); bat_g.execute_turn();
+        bool g_sun=(bat_g.field().weather==enginemon::Weather::Sun);
+        std::cout << "    T1 weather=" << (int)(uint8_t)bat_g.field().weather << " (Sun=2 expected)\n";
+        if (!g_sun) { rt_record(solar_id,"SOLARBEAM_SUN_SETUP",false,"Sun not set after SunnyDay"); ++total_mismatch; }
+
+        // T2: SolarBeam (slot 1). Under Sun: skipsuncharge skips charge → fires immediately.
+        // Crystal RNG: [0]=crit=0x11(no crit), [1]=var=0xFF. No acc byte (acc=0xFF).
+        // Expected: Charging NOT set after turn, damage=17.
+        size_t gi2=0; std::vector<uint8_t> rg2={0x11,0xFF,0xFF,0xFF};
+        bat_g.set_rng_callback([&rg2,&gi2]()->uint32_t{return gi2<rg2.size()?rg2[gi2++]:0xFFu;});
+        bat_g.set_player_action(enginemon::ActionFight{1,0}); bat_g.set_opponent_action(enginemon::ActionFight{0,0}); bat_g.execute_turn();
+        int32_t g_dmg = 5000-(int32_t)bat_g.opponent_pokemon().stats.hp;
+        bool g_nocharge = !bat_g.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging);
+        bool g_ok = (g_dmg==17) && g_nocharge;
+        rt_record(solar_id,"SOLARBEAM_SUN",g_ok,g_ok?"":("exp_dmg=17 got="+std::to_string(g_dmg)+" charging="+std::to_string(!g_nocharge)).c_str());
+        if (!g_ok) ++total_mismatch;
+        std::cout << "    T2 SolarBeam(Sun) dmg=" << g_dmg << " charging_set=" << !g_nocharge << "\n";
+    }
+
+    // ---- Section H: Forced continuation (Razor Wind) ----
+    // Crystal source: core.asm CheckPlayerLockedIn checks SUBSTATUS_CHARGED and forces
+    // the player to re-use the charging move on turn 2. No alternative move can be selected.
+    //
+    // Test: Razor Wind in slot 0, Splash in slot 1.
+    // Turn 1: player selects slot 0 (Razor Wind) → charges.
+    // Turn 2: player attempts slot 1 (Splash) via ActionFight{1,0}.
+    // Crystal expected: Razor Wind fires (charge continuation), NOT Splash.
+    //   Discriminator: Splash deals 0 damage; Razor Wind deals 55 damage.
+    //   If continuation is forced: damage=55. If Splash executes: damage=0.
+    // NOTE: Enginemon may not enforce the continuation lock (no enforce_charge in execute_turn).
+    //   If production executes Splash instead: KEEP RED.
+    std::cout << "  [H] Forced continuation (Razor Wind)\n";
+    {
+        enginemon::BattleRules rules_h = s_rt_rules;
+        enginemon::Party party_h;
+        enginemon::Pokemon pm_h{}; pm_h.species=1; pm_h.level=50;
+        pm_h.current_hp=pm_h.max_hp=300; pm_h.friendship=200;
+        party_h.add(pm_h);
+        auto reg_h = rt_reg();
+        enginemon::Battle bat_h(enginemon::BattleType::Trainer, party_h, reg_h, rules_h);
+
+        // Player: Razor Wind(13) slot 0, Splash(150) slot 1
+        auto pbp_h = rt_bp(razor_id, 300, 200);
+        const enginemon::MoveData* sp_md = s_rt_reg->get(static_cast<enginemon::MoveId>(150));
+        pbp_h.moves[1].move = static_cast<enginemon::MoveId>(150);
+        pbp_h.moves[1].pp = pbp_h.moves[1].max_pp = (sp_md ? sp_md->pp : 10);
+        auto obp_h = rt_bp(enginemon::MOVE_NONE, 5000, 1);
+        obp_h.stats.defense=200; obp_h.base_stats.defense=200;
+        bat_h.player_pokemon()=pbp_h; bat_h.opponent_pokemon()=obp_h;
+
+        // T1: Razor Wind charges (slot 0)
+        size_t hi1=0; std::vector<uint8_t> rh1={0xCC,0xCC,0xCC,0xCC};
+        bat_h.set_rng_callback([&rh1,&hi1]()->uint32_t{return hi1<rh1.size()?rh1[hi1++]:0xFFu;});
+        bat_h.set_player_action(enginemon::ActionFight{0,0}); bat_h.set_opponent_action(enginemon::ActionFight{0,0}); bat_h.execute_turn();
+        bool h_t1c=bat_h.player_pokemon().has_volatile(enginemon::VolatileStatus::Charging);
+        rt_record(razor_id,"FORCED_CONT_T1_CHARGE",h_t1c,h_t1c?"":"T1: Charging not set");
+        if(!h_t1c) ++total_mismatch;
+
+        // T2: Player attempts Splash (slot 1).
+        // Crystal source: SUBSTATUS_CHARGED locks player into Razor Wind continuation.
+        // Expected: Razor Wind fires → damage=55. Splash does not execute.
+        // Crystal RNG for Razor Wind attack: [0]=crit=0x11,[1]=var=0xFF,[2]=acc=0x00(<191=hit).
+        size_t hi2=0; std::vector<uint8_t> rh2={0x11,0xFF,0x00,0xFF,0xFF};
+        bat_h.set_rng_callback([&rh2,&hi2]()->uint32_t{return hi2<rh2.size()?rh2[hi2++]:0xFFu;});
+        bat_h.set_player_action(enginemon::ActionFight{1,0}); // attempt Splash (slot 1)
+        bat_h.set_opponent_action(enginemon::ActionFight{0,0}); bat_h.execute_turn();
+        int32_t h_dmg=5000-(int32_t)bat_h.opponent_pokemon().stats.hp;
+        // Crystal: forced continuation → Razor Wind fires → 55 damage.
+        // Splash: no damage (Splash does nothing, opp_hp unchanged).
+        bool h_ok=(h_dmg==55);
+        rt_record(razor_id,"FORCED_CONT_T2_RAZORWIND",h_ok,h_ok?"":
+            std::string("exp=55(Razor Wind continuation) got="+std::to_string(h_dmg)+"(0=Splash fired=production mismatch)").c_str());
+        if(!h_ok) ++total_mismatch;
+        std::cout << "    T2 attempt Splash: dmg=" << h_dmg << " (exp=55 if continuation forced, 0 if Splash)\n";
+    }
+
     std::cout << "\n  charge_exact total_mismatch=" << total_mismatch << "\n";
     ASSERT_EQ(total_mismatch, 0);
 }
