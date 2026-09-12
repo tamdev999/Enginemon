@@ -1,4 +1,4 @@
-﻿# Test suite
+# Test suite
 
 # Golden tests (Crystal ROM extraction validation)
 # These run without GTest - they just need the ROM
@@ -8,6 +8,51 @@ add_executable(golden_test
 target_link_libraries(golden_test PRIVATE
     enginemon_crystal
 )
+
+# ============================================================================
+# live_diff_haze_test — TRUE LIVE DIFFERENTIAL ORACLE (pilot)
+#
+# Compiles SuiCune's BattleCommand_ResetStats and friends as C99 source.
+# Runs SuiCune's actual Haze logic live against Enginemon's live execution.
+# Asserts normalized outputs are equal — no handwritten expected values.
+#
+# SuiCune source used (verbatim functions in suicune_haze_driver.c):
+#   BattleCommand_ResetStats, CalcBattleStats, CalcPlayerStats, CalcEnemyStats,
+#   BattleCommand_SwitchTurn, BadgeStatBoosts, ApplyPrzEffectOnSpeed,
+#   ApplyBrnEffectOnAttack, SetPlayerTurn, SetEnemyTurn, StatLevelMultipliers,
+#   NativeToBigEndian16, IsLittleEndian.
+#
+# suicune_haze_driver.c is a self-contained C99 file — no peanut_gb.h dependency,
+# no SDL, no rendering. It provides a minimal wram/hram environment sufficient
+# for the stat-reset code path.
+# ============================================================================
+if(ENGINEMON_ENABLE_ENGINE)
+    add_executable(live_diff_haze_test
+        battle_differential/live_diff_haze_test.cpp
+        battle_differential/suicune_haze_driver.c
+    )
+    # C++ side links against Enginemon
+    target_link_libraries(live_diff_haze_test PRIVATE
+        enginemon_crystal
+        enginemon_engine
+    )
+    # Include path so the C++ side can find the driver header
+    target_include_directories(live_diff_haze_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests/battle_differential
+        ${CMAKE_SOURCE_DIR}
+    )
+    # suicune_haze_driver.c: compile as C99 with MSVC-compatible flags
+    set_source_files_properties(
+        battle_differential/suicune_haze_driver.c
+        PROPERTIES
+            LANGUAGE C
+            COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/TC;/std:c11,>"
+    )
+    if(MSVC)
+        target_compile_options(live_diff_haze_test PRIVATE /bigobj)
+    endif()
+    # Not added to ctest — requires ROM path argument
+endif()
 # Not added to ctest - requires ROM path argument
 
 # Lua Runtime tests (end-to-end script execution)
@@ -264,7 +309,7 @@ if(MSVC)
     target_compile_options(compiler_integrity_test PRIVATE /bigobj)
 endif()
 
-# Battle ROM propagation tests — true ROM→extractor→BRLS→runtime pipeline proof
+# Battle ROM propagation tests — true ROM?extractor?BRLS?runtime pipeline proof
 add_executable(battle_rom_test
     crystal/battle_rom_test.cpp
 )
@@ -532,7 +577,7 @@ if(ENGINEMON_ENABLE_ENGINE)
         set_tests_properties(trainer_verify
             PROPERTIES LABELS "rom-required" TIMEOUT 30)
 
-        # ── All ROM-dependent tests must run from the repo source root ──────
+        # -- All ROM-dependent tests must run from the repo source root ------
         # The ROM path argument ("references/...") is relative to the source
         # tree, not the build directory.  Without WORKING_DIRECTORY the test
         # process inherits the build dir as its working directory (CTest
@@ -559,4 +604,3 @@ if(ENGINEMON_ENABLE_ENGINE)
             "CTest: ROM-dependent tests not registered (set -DENGINEMON_ROM_PATH=... to enable)")
     endif()
 endif()
-
