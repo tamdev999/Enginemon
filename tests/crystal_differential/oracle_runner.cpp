@@ -255,6 +255,7 @@ struct SymCache {
     Sym wLinkMode;
     Sym wInBattleTowerBattle;
     Sym wJohtoBadges;
+    Sym wKantoBadges;             // 01:D858 -- badge boosts in DoBadgeTypeBoosts
     Sym AnimateCurrentMove;
     // RNG (shared) -- BattleRandom result is read at PC=0x2FAD (fixed address in bank 0)
     Sym BattleRandom;            // 00:2F9F -- entry of the stub; 0x2FAD is the result-read PC
@@ -369,6 +370,7 @@ struct SymCache {
             {"wLinkMode",                      &out->wLinkMode},
             {"wInBattleTowerBattle",           &out->wInBattleTowerBattle},
             {"wJohtoBadges",                   &out->wJohtoBadges},
+            {"wKantoBadges",                   &out->wKantoBadges},
             {"AnimateCurrentMove",             &out->AnimateCurrentMove},
             {"BattleRandom",                   &out->BattleRandom},
             {"DoMove",                         &out->DoMove},
@@ -477,6 +479,7 @@ static std::string validate_fixture_addresses(const SymCache& sym){
     if((e=validate_wram_addr("wEnemyMonStatus",    sym.wEnemyMonStatus.addr,    0xD000,0xDFFF)).size()) return e;
     if((e=validate_wram_addr("wInBattleTowerBattle",sym.wInBattleTowerBattle.addr,0xC000,0xDFFF)).size()) return e;
     if((e=validate_wram_addr("wJohtoBadges",       sym.wJohtoBadges.addr,       0xD000,0xDFFF)).size()) return e;
+    if((e=validate_wram_addr("wKantoBadges",       sym.wKantoBadges.addr,       0xD000,0xDFFF)).size()) return e;
     if((e=validate_hram_addr("hBattleTurn",        sym.hBattleTurn.addr)).size()) return e;
     if((e=validate_hram_addr("hROMBank",           sym.hROMBank.addr)).size()) return e;
     return {};
@@ -852,6 +855,7 @@ static void fixture_common(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
     wram[wram_off(sym.wLinkMode.addr)]          = 0;
     wram[wram_off(sym.wInBattleTowerBattle.addr)]= 0;
     wram[wram_off(sym.wJohtoBadges.addr)]        = 0;
+    wram[wram_off(sym.wKantoBadges.addr)]        = 0;  // no Kanto badge boosts
     wram[wram_off(sym.wBattleMonStatus.addr)  ]  = 0;
     wram[wram_off(sym.wBattleMonStatus.addr)+1]  = 0;
     wram[wram_off(sym.wEnemyMonStatus.addr)  ]   = 0;
@@ -895,6 +899,7 @@ static void fixture_common(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
     wram[wram_off(sym.wEnemyMonHP.addr)  ]  = 0x01;
     wram[wram_off(sym.wEnemyMonHP.addr)+1]  = 0x2C;
     wram[wram_off(sym.wCriticalHit.addr)]   = 0;
+    wram[wram_off(0xC665u)]                 = 0;  // wTypeModifier: bit7=STAB must be 0 for poison stability
 
     // Fields required for initial snapshot equivalence (read by capture_crystal_initial).
     // Set universally so every case starts with a defined semantic state that
@@ -1314,6 +1319,13 @@ static CrystalRunResult run_crystal_case(
             // is cleaner and equivalent to skipping at WaitBGMap depth.
             else if(pc == 0x4F57 && bank == 0x0D){
                 emulate_ret(r, "BattleCommand_MoveAnim(0D:4F57)");
+                did_skip = true;
+            }
+            // BattleCommand_MoveAnimNoSub (0D:4F60) — move animation without substitute.
+            // Used by multi-hit move scripts (startloop/endloop) as the per-hit animation
+            // command. Same presentation content as MoveAnim; no battle state writes.
+            else if(pc == 0x4F60 && bank == 0x0D){
+                emulate_ret(r, "BattleCommand_MoveAnimNoSub(0D:4F60)");
                 did_skip = true;
             }
             // BattleCommand_MoveDelay (0D:7E80) — delay 40 frames between HP bar anim.
@@ -1873,6 +1885,7 @@ static void generic_fullscript_fixture(
     wram[wram_off(sym.wAttackMissed.addr)]       = 0;
     wram[wram_off(sym.wCriticalHit.addr)]        = 0;
     wram[wram_off(sym.wTypeMatchup.addr)]        = 0x10;  // EFFECTIVE (1×)
+    wram[wram_off(0xC665u)]                      = 0;     // wTypeModifier: bit7=STAB, rest=type multiplier
     wram[wram_off(sym.wBattleWeather.addr)]      = 0;
     wram[wram_off(sym.wPlayerScreens.addr)]      = 0;
     wram[wram_off(sym.wEnemyScreens.addr)]       = 0;
@@ -2266,6 +2279,94 @@ static void reversal_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 179, nullptr, 0); }
 
 // ============================================================================
+// Batch 2: Softboiled, MilkDrink, Frustration, Flail, Psywave,
+//          DoubleKick (EFFECT_DOUBLE_HIT), Twineedle (EFFECT_POISON_MULTI_HIT),
+//          Magnitude
+//
+// All use generic_fullscript_config (DoMove entry, EndMoveEffect sink).
+//
+// RNG notes:
+//   Softboiled/MilkDrink (IDs 0x87/0xD0, EFFECT_HEAL=0x20): same script as
+//     Recover/Heal. No BattleRandom. 0 bytes.
+//
+//   Frustration (ID 0xDA, EFFECT_FRUSTRATION=0x7B): critical(1) +
+//     damagevariation(2). Same tape structure as Return. acc=0xFF auto-hit.
+//     Frustration power = (255-happiness)*10/25 = (255-200)*10/25 = 22.
+//
+//   Flail (ID 0xAF, EFFECT_REVERSAL=0x63): shares Reversal script.
+//     constantdamage computes HP-ratio power (no BattleRandom). acc=0xFF.
+//     0 bytes.
+//
+//   Psywave (ID 0x95, EFFECT_PSYWAVE=0x58): constantdamage path .psywave loops
+//     until 1 <= BattleRandom < level*3/2. With P_LEVEL=50: max=75 (0x4B).
+//     Tape byte 0x30=48: 1<=48<75 → exits first call. 1 byte.
+//
+//   DoubleKick (ID 0x18, EFFECT_DOUBLE_HIT=0x2C): 2 hits via startloop/endloop.
+//     endloop for EFFECT_DOUBLE_HIT: always exactly 2 hits, no BattleRandom for
+//     hit count. Per hit: critical(1) + damagevariation(2). 6 bytes total.
+//
+//   Twineedle (ID 0x29, EFFECT_POISON_MULTI_HIT=0x4D): 2 hits. endloop for
+//     EFFECT_POISON_MULTI_HIT: always 2 hits, no BattleRandom for hit count.
+//     Per hit: effectchance(1, 0xFF>51 → no poison) + critical(1) +
+//     damagevariation(2). 8 bytes total.
+//
+//   Magnitude (ID 0xDE, EFFECT_MAGNITUDE=0x7E): getmagnitude(1, 0x50=80<131=65%+1
+//     → magnitude 7, power 70) + critical(1) + damagevariation(2). 4 bytes total.
+//     getmagnitude also calls MoveDelay(skipped) and StdBattleTextbox(skipped).
+// ============================================================================
+
+// DamageVariation thresholds: exits when rrca(byte) >= 85*256/100+1 = 218.
+// 0xB2 → rrca=0x59=89 < 218 → LOOPS. 0xFF → rrca=0xFF=255 >= 218 → EXIT.
+// Each damage-dealing hit therefore needs 2 variation bytes: 0xB2 then 0xFF.
+
+// Frustration: critical(no-crit) + damagevariation(loop+exit) = 3 bytes
+static constexpr uint8_t TAPE_FRUSTRATION[] = { 0x80, 0xB2, 0xFF };
+
+// Psywave: constantdamage(.psywave) uses 1 byte (0x30: 1<=48<75 exits first try),
+// then checkhit uses 1 byte (acc=0xCC=204, 0x30=48<204 → hits). Total: 2 bytes.
+static constexpr uint8_t TAPE_PSYWAVE[]     = { 0x30, 0x30 };
+
+// DoubleKick: 2 hits × (critical + damagevar×2) = 6 bytes
+static constexpr uint8_t TAPE_DOUBLEKICK[]  = {
+    0x80, 0xB2, 0xFF,   // hit 1: no-crit, var-loop, var-exit
+    0x80, 0xB2, 0xFF    // hit 2: no-crit, var-loop, var-exit
+};
+
+// Twineedle: 2 hits × (effectchance + critical + damagevar×2) = 8 bytes
+// effectchance: 0xFF > 51 (Twineedle poison chance) → no secondary effect
+static constexpr uint8_t TAPE_TWINEEDLE[]   = {
+    0xFF, 0x80, 0xB2, 0xFF,   // hit 1: no-poison, no-crit, var-loop, var-exit
+    0xFF, 0x80, 0xB2, 0xFF    // hit 2: no-poison, no-crit, var-loop, var-exit
+};
+
+// Magnitude: getmagnitude(0x50→tier7 power70) + critical + damagevar×2 = 4 bytes
+static constexpr uint8_t TAPE_MAGNITUDE[]   = { 0x50, 0x80, 0xB2, 0xFF };
+
+static void softboiled_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x87, nullptr, 0); }
+
+static void milkdrink_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xD0, nullptr, 0); }
+
+static void frustration_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xDA, TAPE_FRUSTRATION, sizeof(TAPE_FRUSTRATION)); }
+
+static void flail_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xAF, nullptr, 0); }
+
+static void psywave_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x95, TAPE_PSYWAVE, sizeof(TAPE_PSYWAVE)); }
+
+static void doublekick_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x18, TAPE_DOUBLEKICK, sizeof(TAPE_DOUBLEKICK)); }
+
+static void twineedle_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x29, TAPE_TWINEEDLE, sizeof(TAPE_TWINEEDLE)); }
+
+static void magnitude_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xDE, TAPE_MAGNITUDE, sizeof(TAPE_MAGNITUDE)); }
+
+// ============================================================================
 // Registered moves -- adding a move requires:
 //   1. Registering here with name, insn_cap, rng_tape, build_config
 //   2. build_config sets entry, sinks, rng_tape, extra_fixture
@@ -2331,6 +2432,18 @@ static const MoveSpec REGISTERED_MOVES[] = {
     // Reversal (ID 179): EFFECT_REVERSAL. Script: checkobedience usedmovetext doturn constantdamage stab checkhit moveanim failuretext applydamage supereffectivetext checkfaint buildopponentrage kingsrock endmove.
     // No RNG. acc=0xFF → automatic hit. Damage = current_hp * 48 / max_hp (approx 8 at 300/300).
     { 179,  179, "Reversal",       100000, nullptr, 0, reversal_config,  nullptr },
+    // ========================================================================
+    // Batch 2: Softboiled, MilkDrink, Frustration, Flail, Psywave,
+    //          DoubleKick, Twineedle, Magnitude
+    // ========================================================================
+    { 0x87, 0x87, "Softboiled",    100000, nullptr, 0, softboiled_config,  nullptr },
+    { 0xD0, 0xD0, "MilkDrink",     100000, nullptr, 0, milkdrink_config,   nullptr },
+    { 0xDA, 0xDA, "Frustration",   100000, TAPE_FRUSTRATION, sizeof(TAPE_FRUSTRATION), frustration_config, nullptr },
+    { 0xAF, 0xAF, "Flail",         100000, nullptr, 0, flail_config,       nullptr },
+    { 0x95, 0x95, "Psywave",       100000, TAPE_PSYWAVE,     sizeof(TAPE_PSYWAVE),     psywave_config,     nullptr },
+    { 0x18, 0x18, "DoubleKick",    200000, TAPE_DOUBLEKICK,  sizeof(TAPE_DOUBLEKICK),  doublekick_config,  nullptr },
+    { 0x29, 0x29, "Twineedle",     200000, TAPE_TWINEEDLE,   sizeof(TAPE_TWINEEDLE),   twineedle_config,   nullptr },
+    { 0xDE, 0xDE, "Magnitude",     100000, TAPE_MAGNITUDE,   sizeof(TAPE_MAGNITUDE),   magnitude_config,   nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
