@@ -499,6 +499,21 @@ static size_t wram_off(uint16_t addr){
     throw std::logic_error("wram_off: not WRAM");
 }
 
+// Validate a return address popped during a presentation-skip emulated RET.
+// Returns "" (valid) or a HARNESS_ERROR string (invalid).
+// Valid range: 0x0000–0x7FFF (executable ROM space).
+// Rejects 0x8000–0xBFFF (VRAM, cart RAM) and higher (WRAM, HRAM, IO).
+static std::string validate_emulate_ret_pc(uint16_t ret_pc, const char* skip_name, uint16_t sp_before){
+    if(ret_pc > 0x7FFF){
+        char buf[192];
+        snprintf(buf, sizeof(buf),
+            "__HARNESS_ERROR__ %s: invalid return addr 0x%04X outside ROM [0x0000,0x7FFF] (SP was 0x%04X)",
+            skip_name, ret_pc, sp_before);
+        return std::string(buf);
+    }
+    return {};
+}
+
 // Normalize Crystal's raw status byte (wBattleMonStatus / wEnemyMonStatus) to the
 // canonical comparison schema shared with the Enginemon side:
 //   0x01 = poisoned (regular PSN)
@@ -1174,16 +1189,20 @@ static CrystalRunResult run_crystal_case(
     auto emulate_ret = [&](GB_registers_t* r, const char* skip_name) -> uint16_t {
         uint16_t ret_pc = read_word(r->sp);
         r->sp += 2;
-        // Valid return destinations are ROM (0x0000–0x7FFF).
-        // Popping an address in WRAM/HRAM/IO means the stack is corrupt.
-        if(ret_pc > 0x7FFF){
-            static char bad_ret[128];
-            snprintf(bad_ret, sizeof(bad_ret),
-                "__HARNESS_ERROR__ %s: invalid return addr 0x%04X (SP was 0x%04X)",
-                skip_name, ret_pc, (uint16_t)(r->sp - 2));
-            exec_ctx.triggered      = true;
-            exec_ctx.triggered_sink = bad_ret;
-            return 0xFFFF;
+        // Valid return destinations are executable ROM space: 0x0000–0x7FFF.
+        // Any address >= 0x8000 (VRAM 0x8000–0x9FFF, cart RAM 0xA000–0xBFFF,
+        // WRAM 0xC000–0xDFFF, echo/OAM/IO 0xE000–0xFEFF, HRAM/IE 0xFF00–0xFFFF)
+        // is not legitimate ROM code and indicates a corrupt presentation-skip call frame.
+        {
+            std::string err = validate_emulate_ret_pc(ret_pc, skip_name, (uint16_t)(r->sp - 2));
+            if(!err.empty()){
+                static char bad_ret[192];
+                std::memcpy(bad_ret, err.c_str(), std::min(err.size()+1, sizeof(bad_ret)-1));
+                bad_ret[sizeof(bad_ret)-1] = '\0';
+                exec_ctx.triggered      = true;
+                exec_ctx.triggered_sink = bad_ret;
+                return 0xFFFF;
+            }
         }
         r->pc = ret_pc;
         return ret_pc;
@@ -3075,6 +3094,74 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
     // 3. Fixture addresses
     { std::string err=validate_fixture_addresses(sym); if(!err.empty()) return startup_fail("FIXTURES",err); }
     std::cout << "  Fixtures:  OK\n";
+
+    // 3a. emulate_ret bad-return negative test:
+    //   Proves that a presentation-skip emulated-RET with a return address in
+    //   0x8000–0xBFFF (VRAM/cart-RAM) is rejected as HARNESS_ERROR.
+    //   Tests the validate_emulate_ret_pc() helper directly with boundary values.
+    {
+        // Valid boundary: 0x7FFF must be accepted (last ROM address).
+        {
+            std::string e = validate_emulate_ret_pc(0x7FFF, "TestSkip", 0xC0FD);
+            if(!e.empty()){
+                return startup_fail("SELF_TEST",
+                    "emulate_ret valid addr 0x7FFF incorrectly rejected: "+e);
+            }
+        }
+        // Invalid boundary: 0x8000 must be rejected (first VRAM address).
+        {
+            std::string e = validate_emulate_ret_pc(0x8000, "TestSkip", 0xC0FD);
+            if(e.empty() || e.find("__HARNESS_ERROR__") != 0
+               || e.find("0x8000") == std::string::npos
+               || e.find("outside ROM") == std::string::npos){
+                return startup_fail("SELF_TEST",
+                    "emulate_ret invalid addr 0x8000 not rejected or wrong msg: '"+e+"'");
+            }
+        }
+        // Invalid: 0x8800 (VRAM) — the specific address from the audit report.
+        {
+            std::string e = validate_emulate_ret_pc(0x8800, "DelayFrame(00:045A)", 0xC0FD);
+            if(e.empty() || e.find("0x8800") == std::string::npos){
+                return startup_fail("SELF_TEST",
+                    "emulate_ret invalid addr 0x8800 not rejected: '"+e+"'");
+            }
+        }
+        // Invalid: 0xA000 (cart RAM).
+        {
+            std::string e = validate_emulate_ret_pc(0xA000, "TestSkip", 0xC0FD);
+            if(e.empty()){
+                return startup_fail("SELF_TEST","emulate_ret 0xA000 not rejected");
+            }
+        }
+        // Invalid: 0xC000 (WRAM).
+        {
+            std::string e = validate_emulate_ret_pc(0xC000, "TestSkip", 0xC0FD);
+            if(e.empty()){
+                return startup_fail("SELF_TEST","emulate_ret 0xC000 not rejected");
+            }
+        }
+        // Invalid: 0xFFFF (IE register).
+        {
+            std::string e = validate_emulate_ret_pc(0xFFFF, "TestSkip", 0xC0FD);
+            if(e.empty()){
+                return startup_fail("SELF_TEST","emulate_ret 0xFFFF not rejected");
+            }
+        }
+        // Valid: 0x0000 (ROM bank 0 start).
+        {
+            std::string e = validate_emulate_ret_pc(0x0000, "TestSkip", 0xC0FD);
+            if(!e.empty()){
+                return startup_fail("SELF_TEST",
+                    "emulate_ret valid addr 0x0000 incorrectly rejected: "+e);
+            }
+        }
+        // Confirm exact error text for the 0x8800 case used in the audit report.
+        {
+            std::string e = validate_emulate_ret_pc(0x8800, "DelayFrame(00:045A)", 0xC0FD);
+            std::cout << "  emulate_ret bad-return [0x8800]: "
+                      << e.substr(0, 80) << "...\n";
+        }
+    }
 
     // 4. Engine data
     auto rom_data=crystal::RomData::load(std::filesystem::path(rom_path));
