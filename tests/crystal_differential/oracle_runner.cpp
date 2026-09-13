@@ -604,6 +604,8 @@ struct CrystalRunResult {
     // RNG trace
     std::vector<RngEntry> rng_trace;
     size_t   rng_bytes_consumed;
+    // Stack low-water mark -- minimum SP observed during the run
+    uint16_t min_sp;
 };
 
 static bool crystal_run_results_equal(const CrystalRunResult& a, const CrystalRunResult& b){
@@ -619,6 +621,7 @@ static bool crystal_run_results_equal(const CrystalRunResult& a, const CrystalRu
     if(a.rng_bytes_consumed != b.rng_bytes_consumed) return false;
     for(size_t i=0; i<a.rng_trace.size() && i<b.rng_trace.size(); ++i)
         if(a.rng_trace[i].tape_value != b.rng_trace[i].tape_value) return false;
+    // min_sp is structural, not semantic -- intentionally NOT compared for poison stability
     return true;
 }
 
@@ -633,6 +636,7 @@ struct EngineSnapshot {
     uint16_t player_hp;
     uint16_t enemy_hp;
     size_t   rng_bytes_consumed;
+    std::vector<uint8_t> rng_trace; // byte values consumed in order
 };
 
 // ============================================================================
@@ -730,6 +734,7 @@ static CrystalRunResult run_crystal_case(
     res.sink_name      = nullptr;
     res.has_snapshot   = false;
     res.rng_bytes_consumed = 0;
+    res.min_sp         = 0xFFFF;
 
     GB_gameboy_t gb;
     if(!GB_init(&gb,GB_MODEL_CGB_E)) return res;
@@ -808,6 +813,9 @@ static CrystalRunResult run_crystal_case(
     regs->sp = W_STACK_TOP - 2;
     regs->pc = cfg.entry.addr;
 
+    // Track minimum SP observed across the entire run.
+    uint16_t observed_min_sp = W_STACK_TOP;
+
     // -------------------------------------------------------------------------
     // Pre-step execution loop.
     //
@@ -885,10 +893,12 @@ static CrystalRunResult run_crystal_case(
         const uint16_t sp  = r->sp;
         const uint8_t  bank = GB_safe_read_memory(&gb, 0xFF9D); // hROMBank
 
-        // --- Stack bounds check -------------------------------------------
-        // SP is allowed to be below W_STACK_BOTTOM only if it is in HRAM
-        // (0xFF80–0xFFFE); HRAM is always valid stack territory for Crystal.
-        // A SP escaping below 0xFF80 into Echo RAM is always an error.
+        // --- Stack min-SP tracking and bounds check -----------------------
+        // Record low-water mark. SP is allowed anywhere in HRAM (0xFF80–0xFFFE);
+        // the Crystal stack region is 0xFFEC–0xFFFE but during deep call chains
+        // SP may descend into 0xFF80–0xFFEB (also HRAM, safe). SP escaping below
+        // 0xFF80 into Echo RAM is always an error.
+        if(sp < observed_min_sp) observed_min_sp = sp;
         if(sp < 0xFF80){
             static char sp_err[64];
             snprintf(sp_err, sizeof(sp_err),
@@ -988,6 +998,13 @@ static CrystalRunResult run_crystal_case(
                 emulate_ret(r, "RefreshBattleHuds(00:39C9)");
                 did_skip = true;
             }
+            // UpdateBattleHuds (00:39D4) — updates HP bars and HUD tiles; no game state.
+            // Called from UpdateHPBarBattleHuds (0F:4D36) which is called from RestoreHP
+            // during the Present heal path. Pure display; no battle state written.
+            else if(pc == 0x39D4){
+                emulate_ret(r, "UpdateBattleHuds(00:39D4)");
+                did_skip = true;
+            }
             // AnimateHPBar (03:46E0) — bank-guarded; HP bar animation
             else if(pc == 0x46E0 && bank == 0x03){
                 emulate_ret(r, "AnimateHPBar(03:46E0)");
@@ -1009,6 +1026,42 @@ static CrystalRunResult run_crystal_case(
                     did_skip = true;
                 }
             }
+            // AnimateCurrentMoveEitherSide (0D:7DE9) — CALL-entered damage anim.
+            // Skipped only when NOT a registered sink (full-script cases 2176-2180
+            // need execution to continue past it to EndMoveEffect).
+            else if(pc == 0x7DE9 && bank == 0x0D){
+                bool is_sink = false;
+                for(size_t i = 0; i < cfg.num_sinks; ++i)
+                    if(cfg.sink_pcs[i] == 0x7DE9){ is_sink = true; break; }
+                if(!is_sink){
+                    emulate_ret(r, "AnimateCurrentMoveEitherSide(0D:7DE9)");
+                    did_skip = true;
+                }
+            }
+            // AnimateCurrentMove (0D:7E01) — CALL-entered heal/general anim.
+            // Skipped only when NOT a registered sink.
+            else if(pc == 0x7E01 && bank == 0x0D){
+                bool is_sink = false;
+                for(size_t i = 0; i < cfg.num_sinks; ++i)
+                    if(cfg.sink_pcs[i] == 0x7E01){ is_sink = true; break; }
+                if(!is_sink){
+                    emulate_ret(r, "AnimateCurrentMove(0D:7E01)");
+                    did_skip = true;
+                }
+            }
+            // AnimateFailedMove (0D:7E77) — miss/immune animation.
+            // Reached via `jp AnimateFailedMove` (tail jump) from BattleCommand_Present.
+            // At that point the stack top holds the DoMove dispatcher return (0x4081).
+            // Skipped only when NOT a registered sink.
+            else if(pc == 0x7E77 && bank == 0x0D){
+                bool is_sink = false;
+                for(size_t i = 0; i < cfg.num_sinks; ++i)
+                    if(cfg.sink_pcs[i] == 0x7E77){ is_sink = true; break; }
+                if(!is_sink){
+                    emulate_ret(r, "AnimateFailedMove(0D:7E77)");
+                    did_skip = true;
+                }
+            }
 
             if(exec_ctx.triggered) break; // emulate_ret set HARNESS_ERROR
             if(did_skip) continue;        // skip GB_run() for this step
@@ -1020,6 +1073,7 @@ static CrystalRunResult run_crystal_case(
 
     res.insn_count = exec_ctx.insn_count;
     res.sink_name  = exec_ctx.triggered_sink;
+    res.min_sp     = observed_min_sp;
 
     // Check termination cause
     if(!exec_ctx.triggered){
@@ -1149,12 +1203,14 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     // Feed tape to Enginemon's RNG (same bytes, same order)
     size_t rng_idx = 0;
     size_t rng_consumed = 0;
+    std::vector<uint8_t> eng_rng_trace;
     if(rng_tape && rng_tape_len > 0){
-        bat.set_rng_callback([rng_tape, rng_tape_len, &rng_idx, &rng_consumed]()->uint32_t{
+        bat.set_rng_callback([rng_tape, rng_tape_len, &rng_idx, &rng_consumed, &eng_rng_trace]()->uint32_t{
             if(rng_idx >= rng_tape_len) return 0xFF; // exhaustion is caught separately
-            uint32_t val = rng_tape[rng_idx++];
+            uint8_t val = rng_tape[rng_idx++];
             ++rng_consumed;
-            return val;
+            eng_rng_trace.push_back(val);
+            return (uint32_t)val;
         });
     } else {
         bat.set_rng_callback([]()->uint32_t{ return 0xFF; });
@@ -1182,6 +1238,7 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     e.player_hp = (uint16_t)pp.stats.hp;
     e.enemy_hp  = (uint16_t)op.stats.hp;
     e.rng_bytes_consumed = rng_consumed;
+    e.rng_trace = eng_rng_trace;
     return e;
 }
 
@@ -1684,6 +1741,70 @@ static void present_fullscript_damage_build_config(const SymCache& sym, CrystalR
 }
 
 // ============================================================================
+// Full-script Present: additional cases
+//
+// All enter at DoMove (0D:402C), run the complete Present effect script, and
+// sink at EndMoveEffect (0D:52A3). No handwritten expected values -- the
+// Crystal oracle is the ground truth. Enginemon is compared live.
+//
+// Tape layout for all full-script cases (DoMove dispatches in order):
+//   [0] CheckHit byte   (0x00 → hit   since acc=0xE5=229; 0xF0 → miss)
+//   [1] Critical byte   (0x80 → no crit at L50 with P_SPD=130, thresh~32)
+//   [2] PresentPower    (0x30 → tier0=40; 0x90 → tier1=80; 0xFF → heal)
+//   [3] DamageVariation byte 1 (multiplier for damage calc)
+//   [4] DamageVariation byte 2 (second variation roll)
+//
+// On miss (CheckHit[0] > 0xE5): Critical still consumes 1 byte (script runs
+// sequentially). DamageStats/DamageCalc still compute, Present's internal
+// BattleCommand_Stab check sets wTypeMatchup, then Present checks wAttackMissed
+// and jumps to AnimateFailedMove (skipped here, not a sink). ClearMissDamage
+// zeros wCurDamage. ApplyDamage becomes a no-op (wCurDamage=0). The full
+// script still reaches EndMoveEffect.
+//
+// DamageVariation (script cmd 0x08, after stab):
+//   Reads wCurDamage -- if 0, returns immediately (0 RNG bytes consumed).
+//   Only consumes 2 bytes when wCurDamage > 0 after damagecalc+stab.
+// ============================================================================
+
+// Tape: CheckHit hit, no-crit, heal (power = 0xFF sentinel)
+static constexpr uint8_t PRESENT_TAPE_FULLSCRIPT_HEAL[]   = { 0x00, 0x80, 0xFF };
+// Tape: CheckHit miss (0xF0 > 0xE5), no-crit, power=40 (unused; DamVar also unused on miss)
+static constexpr uint8_t PRESENT_TAPE_FULLSCRIPT_MISS[]   = { 0xF0, 0x80, 0x30, 0xB2, 0xFF };
+// Tape: CheckHit hit, no-crit, power tier 1 (power=80, 0x90 in [0x66,0xB4))
+// DamageVariation bytes chosen so rrca(b) >= 86: 0xB2 → rrca = 0x59 = 89 ✓
+static constexpr uint8_t PRESENT_TAPE_FULLSCRIPT_POWER80[]= { 0x00, 0x80, 0x90, 0xB2, 0xFF };
+// Tape: CheckHit hit, crit (0x10 < threshold~32), power tier 0 (power=40)
+static constexpr uint8_t PRESENT_TAPE_FULLSCRIPT_CRIT[]   = { 0x00, 0x10, 0x30, 0xB2, 0xFF };
+
+static void fullscript_endmove_config(const SymCache& sym, CrystalRunConfig* out,
+                                       const uint8_t* tape, size_t tape_len){
+    out->entry         = sym.DoMove;
+    out->sink_pcs[0]   = sym.EndMoveEffect.addr;
+    out->sink_names[0] = "EndMoveEffect";
+    out->num_sinks     = 1;
+    out->rng_tape      = tape;
+    out->rng_tape_len  = tape_len;
+    out->extra_fixture = present_fullscript_fixture_adapter;
+}
+
+static void present_fullscript_heal_build_config(const SymCache& sym, CrystalRunConfig* out){
+    fullscript_endmove_config(sym, out, PRESENT_TAPE_FULLSCRIPT_HEAL,
+                              sizeof(PRESENT_TAPE_FULLSCRIPT_HEAL));
+}
+static void present_fullscript_miss_build_config(const SymCache& sym, CrystalRunConfig* out){
+    fullscript_endmove_config(sym, out, PRESENT_TAPE_FULLSCRIPT_MISS,
+                              sizeof(PRESENT_TAPE_FULLSCRIPT_MISS));
+}
+static void present_fullscript_power80_build_config(const SymCache& sym, CrystalRunConfig* out){
+    fullscript_endmove_config(sym, out, PRESENT_TAPE_FULLSCRIPT_POWER80,
+                              sizeof(PRESENT_TAPE_FULLSCRIPT_POWER80));
+}
+static void present_fullscript_crit_build_config(const SymCache& sym, CrystalRunConfig* out){
+    fullscript_endmove_config(sym, out, PRESENT_TAPE_FULLSCRIPT_CRIT,
+                              sizeof(PRESENT_TAPE_FULLSCRIPT_CRIT));
+}
+
+// ============================================================================
 // Registered moves -- adding a move requires:
 //   1. Registering here with name, insn_cap, rng_tape, build_config
 //   2. build_config sets entry, sinks, rng_tape, extra_fixture
@@ -1717,6 +1838,22 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 2176, 217, "Present/damage-full", 50000, PRESENT_TAPE_FULLSCRIPT_DAMAGE,
                                 sizeof(PRESENT_TAPE_FULLSCRIPT_DAMAGE),
                                 present_fullscript_damage_build_config, nullptr },
+    // Full-script heal: CheckHit hit, no-crit, heal (0xFF sentinel).
+    { 2177, 217, "Present/heal-full",   25000, PRESENT_TAPE_FULLSCRIPT_HEAL,
+                                sizeof(PRESENT_TAPE_FULLSCRIPT_HEAL),
+                                present_fullscript_heal_build_config, nullptr },
+    // Full-script miss: CheckHit miss (0xF0 > acc=229), script continues to EndMoveEffect.
+    { 2178, 217, "Present/miss-full",   50000, PRESENT_TAPE_FULLSCRIPT_MISS,
+                                sizeof(PRESENT_TAPE_FULLSCRIPT_MISS),
+                                present_fullscript_miss_build_config, nullptr },
+    // Full-script power-80 tier: different Present power bucket + damage variation.
+    { 2179, 217, "Present/power80-full",50000, PRESENT_TAPE_FULLSCRIPT_POWER80,
+                                sizeof(PRESENT_TAPE_FULLSCRIPT_POWER80),
+                                present_fullscript_power80_build_config, nullptr },
+    // Full-script crit: critical hit path.
+    { 2180, 217, "Present/crit-full",   50000, PRESENT_TAPE_FULLSCRIPT_CRIT,
+                                sizeof(PRESENT_TAPE_FULLSCRIPT_CRIT),
+                                present_fullscript_crit_build_config, nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
@@ -1856,6 +1993,25 @@ static CaseResult run_case(
         all_match=false;
         diff<<"rng_bytes_consumed Crystal="<<cr1.rng_bytes_consumed<<" Enginemon="<<eng->rng_bytes_consumed<<"\n";
     }
+    // RNG byte sequence must match (order matters)
+    {
+        const size_t clen = cr1.rng_trace.size();
+        const size_t elen = eng->rng_trace.size();
+        const size_t n    = std::min(clen, elen);
+        for(size_t i = 0; i < n; ++i){
+            if(cr1.rng_trace[i].tape_value != eng->rng_trace[i]){
+                all_match = false;
+                diff << "rng_trace[" << i << "] Crystal=0x"
+                     << std::hex << (int)cr1.rng_trace[i].tape_value
+                     << " Enginemon=0x" << (int)eng->rng_trace[i]
+                     << std::dec << "\n";
+            }
+        }
+        if(clen != elen){
+            all_match = false;
+            diff << "rng_trace_length Crystal=" << clen << " Enginemon=" << elen << "\n";
+        }
+    }
 
     r.status = all_match ? Status::MATCH : Status::ENGINEMON_MISMATCH;
     r.detail = diff.str();
@@ -1882,6 +2038,15 @@ static std::string fmt_rng_trace(const std::vector<RngEntry>& trace){
         os << "  [" << e.byte_index << "] 0x" << std::hex << std::setw(2) << std::setfill('0')
            << (int)e.tape_value << " @ " << e.rng_symbol
            << " PC=0x" << std::setw(4) << (int)e.intercept_pc << std::dec << "\n";
+    return os.str();
+}
+
+static std::string fmt_eng_rng_trace(const std::vector<uint8_t>& trace){
+    if(trace.empty()) return "(none)";
+    std::ostringstream os;
+    for(size_t i = 0; i < trace.size(); ++i)
+        os << "  [" << i << "] 0x" << std::hex << std::setw(2) << std::setfill('0')
+           << (int)trace[i] << std::dec << "\n";
     return os.str();
 }
 
@@ -2135,7 +2300,8 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
                      << "  stop=" << (r.stop_reason?r.stop_reason:"?")
                      << "  insn=" << r.insn_count
                      << "  poison-stable=yes"
-                     << "  rng=" << (r.has_crystal ? r.crystal_res.rng_bytes_consumed : 0) << " bytes";
+                     << "  rng=" << (r.has_crystal ? r.crystal_res.rng_bytes_consumed : 0) << " bytes"
+                     << "  minSP=0x" << std::hex << (r.has_crystal ? r.crystal_res.min_sp : 0xFFFF) << std::dec;
             }
             line << "\n";
             if(verbose && r.has_crystal && !r.crystal_res.rng_trace.empty()){
@@ -2168,7 +2334,8 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
                 line << "    boundary=" << (r.boundary?r.boundary:"?")
                      << "  stop=" << (r.stop_reason?r.stop_reason:"?")
                      << "  insn=" << r.insn_count
-                     << "  poison-stable=" << (r.poison_stable?"yes":"NO") << "\n";
+                     << "  poison-stable=" << (r.poison_stable?"yes":"NO")
+                     << "  minSP=0x" << std::hex << (r.has_crystal ? r.crystal_res.min_sp : 0xFFFF) << std::dec << "\n";
                 if(r.has_crystal){
                     line << "    Crystal rng_trace:\n" << fmt_rng_trace(r.crystal_res.rng_trace);
                     line << "    Crystal rng_bytes=" << r.crystal_res.rng_bytes_consumed << "\n";
@@ -2178,6 +2345,7 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
                          << "  enemy_hp=" << r.crystal_res.enemy_hp << "\n";
                 }
                 if(r.has_engine){
+                    line << "    Enginemon rng_trace:\n" << fmt_eng_rng_trace(r.engine_res.rng_trace);
                     line << "    Enginemon rng_bytes=" << r.engine_res.rng_bytes_consumed << "\n";
                     line << "    Enginemon player_hp=" << r.engine_res.player_hp
                          << "  enemy_hp=" << r.engine_res.enemy_hp << "\n";
