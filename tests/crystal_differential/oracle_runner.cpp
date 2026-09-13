@@ -332,6 +332,10 @@ struct SymCache {
     // Obedience OT-ID check
     Sym wPlayerID;               // 01:D47B (2 bytes)
     Sym wPartyMon1ID;            // 01:DCE5 (2 bytes = Trainer ID of party slot 0)
+    Sym wPlayerProtectCount;     // 00:C679 -- consecutive Protect/Detect uses (0 = first use)
+    Sym wEffectFailed;           // 00:C70D -- set when an effect fails; must be 0 at fixture entry
+    Sym wFailedMessage;          // 00:C70E -- failure message flag; must be 0 at fixture entry
+    Sym wEnemyGoesFirst;         // 00:C70F -- 1 if enemy moved before player this turn
 
     static std::string load(const std::string& sym_path, SymCache* out,
                              std::string* sym_sha_out = nullptr)
@@ -447,6 +451,10 @@ struct SymCache {
             {"wBattleMonHappiness",            &out->wBattleMonHappiness},
             {"wPlayerID",                      &out->wPlayerID},
             {"wPartyMon1ID",                   &out->wPartyMon1ID},
+            {"wPlayerProtectCount",            &out->wPlayerProtectCount},
+            {"wEffectFailed",                  &out->wEffectFailed},
+            {"wFailedMessage",                 &out->wFailedMessage},
+            {"wEnemyGoesFirst",                &out->wEnemyGoesFirst},
         };
         for(const auto& r : required)
             if(!sym_get(sym_path,r.name,r.dst))
@@ -489,6 +497,35 @@ static size_t wram_off(uint16_t addr){
     if(addr>=0xD000) return size_t{0x1000}+(addr-0xD000);
     if(addr>=0xC000) return addr-0xC000;
     throw std::logic_error("wram_off: not WRAM");
+}
+
+// Normalize Crystal's raw status byte (wBattleMonStatus / wEnemyMonStatus) to the
+// canonical comparison schema shared with the Enginemon side:
+//   0x01 = poisoned (regular PSN)
+//   0x02 = badly poisoned (Toxic: PSN bit set + SUBSTATUS_TOXIC in substatus5)
+//   0x04 = burned
+//   0x08 = frozen
+//   0x10 = paralyzed
+//   0x20 = asleep (any non-zero sleep counter)
+// substatus5 is passed to distinguish regular PSN from bad poison (SUBSTATUS_TOXIC = bit 0).
+static uint8_t normalize_crystal_status(uint8_t raw_status, uint8_t substatus5){
+    // Crystal bit layout (pokecrystal constants/battle_constants.asm):
+    //   bits 0-2: SLP counter (non-zero = sleeping)
+    //   bit 3:   PSN  (0x08)
+    //   bit 4:   BRN  (0x10)
+    //   bit 5:   FRZ  (0x20)
+    //   bit 6:   PAR  (0x40)
+    //   SUBSTATUS_TOXIC = bit 0 of substatus5
+    uint8_t out = 0;
+    if(raw_status & 0x07) out |= 0x20;              // SLP
+    if(raw_status & 0x08){                           // PSN set
+        if(substatus5 & 0x01) out |= 0x02;          //   SUBSTATUS_TOXIC → bad poison
+        else                  out |= 0x01;           //   regular poison
+    }
+    if(raw_status & 0x10) out |= 0x04;              // BRN
+    if(raw_status & 0x20) out |= 0x08;              // FRZ
+    if(raw_status & 0x40) out |= 0x10;              // PAR
+    return out;
 }
 
 // ============================================================================
@@ -692,6 +729,9 @@ struct CrystalRunResult {
     uint16_t cur_damage;          // wCurDamage (big-endian u16)
     uint16_t player_hp;           // wBattleMonHP
     uint16_t enemy_hp;            // wEnemyMonHP
+    // Status (burn/para/sleep/poison/freeze)
+    uint8_t  player_status;       // wBattleMonStatus byte 0
+    uint8_t  enemy_status;        // wEnemyMonStatus byte 0
     // RNG trace
     std::vector<RngEntry> rng_trace;
     size_t   rng_bytes_consumed;
@@ -711,6 +751,8 @@ static bool crystal_run_results_equal(const CrystalRunResult& a, const CrystalRu
     if(a.cur_damage        != b.cur_damage)        return false;
     if(a.player_hp         != b.player_hp)         return false;
     if(a.enemy_hp          != b.enemy_hp)          return false;
+    if(a.player_status     != b.player_status)     return false;
+    if(a.enemy_status      != b.enemy_status)      return false;
     if(a.rng_bytes_consumed != b.rng_bytes_consumed) return false;
     for(size_t i=0; i<a.rng_trace.size() && i<b.rng_trace.size(); ++i)
         if(a.rng_trace[i].tape_value != b.rng_trace[i].tape_value) return false;
@@ -731,6 +773,9 @@ struct EngineSnapshot {
     size_t   rng_bytes_consumed;
     std::vector<uint8_t> rng_trace; // byte values consumed in order
     InitialSnapshot initial; // captured before execute_turn()
+    // Post-run status byte (low byte only: burn/para/sleep/poison/freeze)
+    uint8_t  player_status;
+    uint8_t  enemy_status;
 };
 
 // ============================================================================
@@ -937,6 +982,13 @@ static void fixture_common(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
     GB_write_memory(gb, sym.wPlayerID.addr + 1, 0x01); // OT ID low byte → wPlayerID = 0x0001
     GB_write_memory(gb, sym.wPartyMon1ID.addr,     0x00); // matches wPlayerID
     GB_write_memory(gb, sym.wPartyMon1ID.addr + 1, 0x01);
+    // Protect/Detect: consecutive-use counter must be 0 for first-use success
+    GB_write_memory(gb, sym.wPlayerProtectCount.addr, 0x00);
+    // Effect/failure flags: must be 0 so stat changes and moves don't pre-fail
+    GB_write_memory(gb, sym.wEffectFailed.addr,  0x00);
+    GB_write_memory(gb, sym.wFailedMessage.addr, 0x00);
+    // Turn order: player goes first (wEnemyGoesFirst=0) so Protect/Detect are allowed
+    GB_write_memory(gb, sym.wEnemyGoesFirst.addr, 0x00);
 }
 
 struct CrystalRunConfig {
@@ -950,6 +1002,8 @@ struct CrystalRunConfig {
     FixtureFn   extra_fixture;    // null if no extra fixture
     uint16_t    engine_move_id;   // Crystal move ID (engine_id from MoveSpec)
 };
+
+
 
 static CrystalRunResult run_crystal_case(
     const std::vector<uint8_t>& rom_bytes,
@@ -1335,6 +1389,20 @@ static CrystalRunResult run_crystal_case(
                 emulate_ret(r, "BattleCommand_MoveDelay(0D:7E80)");
                 did_skip = true;
             }
+            // BattleCommand_RaiseSubNoAnim (0D:65AF) — draws the player's back sprite
+            // after Substitute is set up. Calls CallBattleCore → GetBattleMonBackpic
+            // (LCD/VRAM) then jp WaitBGMap. Pure display; writes no semantic WRAM.
+            else if(pc == 0x65AF && bank == 0x0D){
+                emulate_ret(r, "BattleCommand_RaiseSubNoAnim(0D:65AF)");
+                did_skip = true;
+            }
+            // LoadAnim (0D:7E44) — writes wFXAnimID then calls PlayBattleAnim (LCD/VRAM).
+            // Called by BattleCommand_Substitute when wOptions bit7 (BATTLE_SCENE) is clear.
+            // Pure display; writes only wFXAnimID (presentation field, no semantic WRAM).
+            else if(pc == 0x7E44 && bank == 0x0D){
+                emulate_ret(r, "LoadAnim(0D:7E44)");
+                did_skip = true;
+            }
 
             if(exec_ctx.triggered) break; // emulate_ret set HARNESS_ERROR
             if(did_skip) continue;        // skip GB_run() for this step
@@ -1381,8 +1449,12 @@ static CrystalRunResult run_crystal_case(
     {auto* p=wram+wram_off(sym.wCurDamage.addr); res.cur_damage=(uint16_t)((p[0]<<8)|p[1]);}
     {auto* p=wram+wram_off(sym.wBattleMonHP.addr); res.player_hp=(uint16_t)((p[0]<<8)|p[1]);}
     {auto* p=wram+wram_off(sym.wEnemyMonHP.addr);  res.enemy_hp=(uint16_t)((p[0]<<8)|p[1]);}
-
-    GB_free(&gb);
+    res.player_status = normalize_crystal_status(
+        wram[wram_off(sym.wBattleMonStatus.addr)],
+        wram[wram_off(sym.wPlayerSubStatus5.addr)]);
+    res.enemy_status  = normalize_crystal_status(
+        wram[wram_off(sym.wEnemyMonStatus.addr)],
+        wram[wram_off(sym.wEnemySubStatus5.addr)]);
     res.stop_reason = StopReason::SINK_HIT;
     return res;
 }
@@ -1517,6 +1589,30 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     e.rng_bytes_consumed = rng_consumed;
     e.rng_trace = eng_rng_trace;
     e.initial   = eng_initial;
+    // Status: normalize to a category byte independent of Crystal's raw bit layout.
+    // Bit definitions (same for both sides after normalization):
+    //   0x01 = poisoned (regular)
+    //   0x02 = badly poisoned (Toxic)
+    //   0x04 = burned
+    //   0x08 = frozen
+    //   0x10 = paralyzed
+    //   0x20 = asleep (any sleep turns)
+    {
+        auto map_status = [](const enginemon::BattlePokemon& bp) -> uint8_t {
+            using S = enginemon::Status;
+            switch(bp.status){
+            case S::Poison:    return 0x01;
+            case S::BadPoison: return 0x02;
+            case S::Burn:      return 0x04;
+            case S::Freeze:    return 0x08;
+            case S::Paralysis: return 0x10;
+            case S::Sleep:     return 0x20;
+            default:           return 0;
+            }
+        };
+        e.player_status = map_status(pp);
+        e.enemy_status  = map_status(op);
+    }
     return e;
 }
 
@@ -1819,12 +1915,13 @@ static thread_local uint8_t  g_generic_pp      = 0;
 static void generic_fullscript_fixture(
     GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym,
     const std::vector<uint8_t>& rom_bytes,
-    uint16_t move_id, uint8_t pp)
+    uint16_t move_id, uint8_t pp, size_t /*wram_sz*/ = 0)
 {
     auto be16=[](uint8_t* d, uint16_t v){ d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF); };
 
     // wPlayerMoveStruct from ROM (all 7 bytes: anim, effect, power, type, acc, pp, chance)
     rom_populate_player_move_struct_fwd(rom_bytes, wram, sym, move_id);
+    // NOTE: wEffectFailed/wFailedMessage/wEnemyGoesFirst zeroed below for Protect/BellyDrum stability.
 
     // Move identity
     wram[wram_off(sym.wCurPlayerMove.addr)]    = (uint8_t)(move_id & 0xFF);
@@ -1867,10 +1964,11 @@ static void generic_fullscript_fixture(
     wram[wram_off(sym.wPlayerSubStatus3.addr)]   = 0;
     wram[wram_off(sym.wPlayerSubStatus4.addr)]   = 0;
     wram[wram_off(sym.wPlayerSubStatus5.addr)]   = 0;
+    wram[wram_off(sym.wPlayerProtectCount.addr)] = 0;  // 0xC679: first-use Protect always succeeds
     wram[wram_off(0xC66Du)]                      = 0;  // wEnemySubStatus1
     wram[wram_off(0xC66Eu)]                      = 0;  // wEnemySubStatus2
-    wram[wram_off(sym.wEnemySubStatus3.addr)]    = 0;
-    wram[wram_off(sym.wEnemySubStatus4.addr)]    = 0;
+    wram[wram_off(sym.wEnemySubStatus3.addr)]    = 0;  // 0xC66F: FlyDig/Rampage
+    wram[wram_off(sym.wEnemySubStatus4.addr)]    = 0;  // 0xC670: Substitute/LeechSeed
     wram[wram_off(sym.wEnemySubStatus5.addr)]    = 0;
     wram[wram_off(sym.wPlayerDisableCount.addr)] = 0;
     wram[wram_off(sym.wDisabledMove.addr)]       = 0;
@@ -1883,14 +1981,17 @@ static void generic_fullscript_fixture(
     wram[wram_off(sym.wPlayerTurnsTaken.addr)]   = 0;
     wram[wram_off(sym.wEnemyTurnsTaken.addr)]    = 0;
     wram[wram_off(sym.wAttackMissed.addr)]       = 0;
-    wram[wram_off(sym.wCriticalHit.addr)]        = 0;
-    wram[wram_off(sym.wTypeMatchup.addr)]        = 0x10;  // EFFECTIVE (1×)
+    wram[wram_off(sym.wCriticalHit.addr)]        = 0;    wram[wram_off(sym.wTypeMatchup.addr)]        = 0x10;  // EFFECTIVE (1×)
     wram[wram_off(0xC665u)]                      = 0;     // wTypeModifier: bit7=STAB, rest=type multiplier
     wram[wram_off(sym.wBattleWeather.addr)]      = 0;
     wram[wram_off(sym.wPlayerScreens.addr)]      = 0;
     wram[wram_off(sym.wEnemyScreens.addr)]       = 0;
     wram[wram_off(sym.wBattleAnimParam.addr)]    = 0;
     wram[wram_off(sym.wEnemyMoveStruct.addr)+3]  = 0xFF;  // enemy acc byte
+    // Effect/failure flags and turn order: must be 0 for Protect/BellyDrum stability
+    wram[wram_off(sym.wEffectFailed.addr)]       = 0;    // 0xC70D
+    wram[wram_off(sym.wFailedMessage.addr)]      = 0;    // 0xC70E
+    wram[wram_off(sym.wEnemyGoesFirst.addr)]     = 0;    // 0xC70F: player went first → Protect allowed
 
     // Stats and levels are set by fixture_common.
     // Types: Normal/Normal set by fixture_common.
@@ -2066,6 +2167,7 @@ static void present_fullscript_fixture(
     wram[wram_off(sym.wPlayerSubStatus3.addr)]      = 0;    // 0xC66A
     wram[wram_off(sym.wPlayerSubStatus4.addr)]      = 0;    // 0xC66B
     wram[wram_off(sym.wPlayerSubStatus5.addr)]      = 0;    // 0xC66C
+    wram[wram_off(sym.wPlayerProtectCount.addr)]    = 0;    // 0xC679: first-use Protect always succeeds
     wram[wram_off(0xC66Du)]                         = 0;    // wEnemySubStatus1 (absent from SymCache)
     wram[wram_off(0xC66Eu)]                         = 0;    // wEnemySubStatus2
     wram[wram_off(sym.wEnemySubStatus3.addr)]       = 0;    // 0xC66F
@@ -2077,6 +2179,10 @@ static void present_fullscript_fixture(
     wram[wram_off(sym.wEnemyCharging.addr)]         = 0;
     wram[wram_off(sym.wTurnEnded.addr)]             = 0;    // DoTurn clears this, but init anyway
     wram[wram_off(sym.wAlreadyDisobeyed.addr)]      = 0;
+    // Effect/failure flags and turn order: must be 0 for Protect/BellyDrum stability
+    wram[wram_off(sym.wEffectFailed.addr)]          = 0;    // 0xC70D
+    wram[wram_off(sym.wFailedMessage.addr)]         = 0;    // 0xC70E
+    wram[wram_off(sym.wEnemyGoesFirst.addr)]        = 0;    // 0xC70F: player went first → Protect allowed
 
     // ---------- Levels ------------------------------------------------------
     wram[wram_off(sym.wBattleMonLevel.addr)]        = P_LEVEL;
@@ -2367,6 +2473,108 @@ static void magnitude_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0xDE, TAPE_MAGNITUDE, sizeof(TAPE_MAGNITUDE)); }
 
 // ============================================================================
+// Batch 3: SeismicToss, NightShade, DragonRage, SonicBoom, SuperFang,
+//          BellyDrum, Rest, Protect, Detect, Substitute, LeechSeed, Toxic
+//
+// All use generic_fullscript_config (DoMove entry, EndMoveEffect sink).
+//
+// RNG notes:
+//   SeismicToss (0x45, EFFECT_LEVEL_DAMAGE=0x57): StaticDamage script.
+//     constantdamage takes .level_damage path (damage=level=50).
+//     checkhit: acc=0xFF → cp -1; jr z, .Hit → automatic hit, 0 bytes. Total: 0.
+//
+//   NightShade (0x65, EFFECT_LEVEL_DAMAGE=0x57): identical script to SeismicToss.
+//     acc=0xFF → 0 bytes. Total: 0.
+//
+//   DragonRage (0x52, EFFECT_STATIC_DAMAGE=0x29): StaticDamage script.
+//     constantdamage takes .static_damage path (damage=pwr=40, from ROM).
+//     acc=0xFF → 0 bytes. Total: 0.
+//
+//   SonicBoom (0x31, EFFECT_STATIC_DAMAGE=0x29): StaticDamage script.
+//     constantdamage takes .static_damage path (damage=pwr=20, from ROM).
+//     acc=0xE5=229: checkhit consumes 1 byte. 0x30=48<229 → hit. Total: 1.
+//
+//   SuperFang (0xA2, EFFECT_SUPER_FANG=0x28): StaticDamage script (shares label).
+//     constantdamage takes .super_fang path (damage = enemy_hp/2 = 150).
+//     acc=0xE5=229: checkhit consumes 1 byte. 0x30=48<229 → hit. Total: 1.
+//
+//   BellyDrum (0xBB, EFFECT_BELLY_DRUM=0x8E): BellyDrum script.
+//     No checkhit, no BattleRandom. BattleCommand_AttackUp2 + SubtractHPFromUser.
+//     player_hp decreases from 300 to 150 (half MaxHP). Total: 0.
+//
+//   Rest (0x9C, EFFECT_HEAL=0x20): Heal script, REST branch.
+//     BattleCommand_Heal: cp REST (0x9C) → rest path → full HP restore + SLP status.
+//     No BattleRandom. player_hp → 300 (already max; no change), player_status → SLP.
+//     Total: 0.
+//
+//   Protect (0xB6, EFFECT_PROTECT=0x6F): Protect script.
+//     ProtectChance: wPlayerProtectCount=0 → b=0xFF. BattleRandom loop (skips 0x00).
+//     dec a; cp b(=0xFF); jr nc, .failed → 0x40-1=0x3F < 0xFF → success.
+//     Total: 1 byte.
+//
+//   Detect (0xC5, EFFECT_PROTECT=0x6F): identical script/path to Protect.
+//     Total: 1 byte.
+//
+//   Substitute (0xA4, EFFECT_SUBSTITUTE=0x4F): Substitute script.
+//     MoveDelay(skip), _CheckBattleScene(nc, wOptions=0) → RaiseSubNoAnim(skip).
+//     StdBattleTextbox(skip), RefreshBattleHuds(skip). No BattleRandom.
+//     player_hp decreases from 300 to 225 (MaxHP*3/4 = 300 - 300/4 = 225). Total: 0.
+//
+//   LeechSeed (0x49, EFFECT_LEECH_SEED=0x54): LeechSeed script.
+//     checkhit: acc=0xE5=229. 0x30=48<229 → hit. Consumes 1 byte.
+//     Enemy is Normal/Normal (not Grass) → no type immunity. Total: 1.
+//
+//   Toxic (0x5C, EFFECT_TOXIC=0x21): Toxic/DoPoison script.
+//     checkhit: acc=0xD8=216. 0x30=48<216 → hit. Consumes 1 byte.
+//     stab: wTypeModifier set (Poison vs Normal → 0x10, non-zero → immunity check passes).
+//     checksafeguard: wEnemyScreens=0 → ret z (no safeguard).
+//     BattleCommand_Poison: hBattleTurn=0 → skips AI 25% fail sample.
+//     CheckSubstituteOpp: wEnemySubStatus4=0 → no substitute → continues.
+//     .check_toxic: EFFECT_TOXIC → ret Z → .toxic path → sets SUBSTATUS_TOXIC + PSN.
+//     enemy_status → PSN|TOXIC = 0x02 (normalized). Total: 1.
+// ============================================================================
+
+// Tapes: acc=0xE5 or acc=0xD8 moves need one hit byte; Protect needs one protect byte.
+static constexpr uint8_t TAPE_HIT[]     = { 0x30 };   // 48 < 229 (0xE5) and < 216 (0xD8)
+static constexpr uint8_t TAPE_PROTECT[] = { 0x40 };   // 0x40-1=0x3F < 0xFF → ProtectChance success
+
+static void seismictoss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x45, nullptr, 0); }
+
+static void nightshade_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x65, nullptr, 0); }
+
+static void dragonrage_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x52, nullptr, 0); }
+
+static void sonicboom_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x31, TAPE_HIT, sizeof(TAPE_HIT)); }
+
+static void superfang_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xA2, TAPE_HIT, sizeof(TAPE_HIT)); }
+
+static void bellydrum_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xBB, nullptr, 0); }
+
+static void rest_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x9C, nullptr, 0); }
+
+static void protect_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xB6, TAPE_PROTECT, sizeof(TAPE_PROTECT)); }
+
+static void detect_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xC5, TAPE_PROTECT, sizeof(TAPE_PROTECT)); }
+
+static void substitute_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xA4, nullptr, 0); }
+
+static void leechseed_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x49, TAPE_HIT, sizeof(TAPE_HIT)); }
+
+static void toxic_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x5C, TAPE_HIT, sizeof(TAPE_HIT)); }
+
+// ============================================================================
 // Registered moves -- adding a move requires:
 //   1. Registering here with name, insn_cap, rng_tape, build_config
 //   2. build_config sets entry, sinks, rng_tape, extra_fixture
@@ -2444,6 +2652,34 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 0x18, 0x18, "DoubleKick",    200000, TAPE_DOUBLEKICK,  sizeof(TAPE_DOUBLEKICK),  doublekick_config,  nullptr },
     { 0x29, 0x29, "Twineedle",     200000, TAPE_TWINEEDLE,   sizeof(TAPE_TWINEEDLE),   twineedle_config,   nullptr },
     { 0xDE, 0xDE, "Magnitude",     100000, TAPE_MAGNITUDE,   sizeof(TAPE_MAGNITUDE),   magnitude_config,   nullptr },
+    // ========================================================================
+    // Batch 3: SeismicToss, NightShade, DragonRage, SonicBoom, SuperFang,
+    //          BellyDrum, Rest, Protect, Detect, Substitute, LeechSeed, Toxic
+    // ========================================================================
+    // StaticDamage script; LEVEL_DAMAGE (damage=level=50); acc=0xFF auto-hit; 0 RNG.
+    { 0x45, 0x45, "SeismicToss",   100000, nullptr,       0,                    seismictoss_config, nullptr },
+    // StaticDamage script; LEVEL_DAMAGE (damage=level=50); acc=0xFF auto-hit; 0 RNG.
+    { 0x65, 0x65, "NightShade",    100000, nullptr,       0,                    nightshade_config,  nullptr },
+    // StaticDamage script; STATIC_DAMAGE pwr=40; acc=0xFF auto-hit; 0 RNG.
+    { 0x52, 0x52, "DragonRage",    100000, nullptr,       0,                    dragonrage_config,  nullptr },
+    // StaticDamage script; STATIC_DAMAGE pwr=20; acc=0xE5=229; 1 RNG byte (TAPE_HIT).
+    { 0x31, 0x31, "SonicBoom",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     sonicboom_config,   nullptr },
+    // StaticDamage script; SUPER_FANG (damage=enemy_hp/2=150); acc=0xE5=229; 1 RNG.
+    { 0xA2, 0xA2, "SuperFang",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     superfang_config,   nullptr },
+    // BellyDrum script; no RNG; player_hp halved (300→150); ATK raised to +6.
+    { 0xBB, 0xBB, "BellyDrum",     100000, nullptr,       0,                    bellydrum_config,   nullptr },
+    // Heal script REST branch; no RNG; player_hp→max, player_status→SLP.
+    { 0x9C, 0x9C, "Rest",          100000, nullptr,       0,                    rest_config,        nullptr },
+    // Protect script; 1 RNG byte (TAPE_PROTECT); wPlayerProtectCount=0 → success.
+    { 0xB6, 0xB6, "Protect",       100000, TAPE_PROTECT,  sizeof(TAPE_PROTECT), protect_config,     nullptr },
+    // Protect script (identical to Protect); 1 RNG byte.
+    { 0xC5, 0xC5, "Detect",        100000, TAPE_PROTECT,  sizeof(TAPE_PROTECT), detect_config,      nullptr },
+    // Substitute script; no RNG; player_hp 300→225 (MaxHP*3/4).
+    { 0xA4, 0xA4, "Substitute",    100000, nullptr,       0,                    substitute_config,  nullptr },
+    // LeechSeed script; acc=0xE5=229; 1 RNG byte (TAPE_HIT); SUBSTATUS_LEECH_SEED on enemy.
+    { 0x49, 0x49, "LeechSeed",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     leechseed_config,   nullptr },
+    // Toxic/DoPoison script; acc=0xD8=216; 1 RNG byte (TAPE_HIT); enemy_status→BadPoison.
+    { 0x5C, 0x5C, "Toxic",         100000, TAPE_HIT,      sizeof(TAPE_HIT),     toxic_config,       nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
@@ -2603,6 +2839,13 @@ static CaseResult run_case(
     }
     if(cr1.enemy_hp != eng->enemy_hp){
         all_match=false; diff<<"enemy_hp Crystal="<<cr1.enemy_hp<<" Enginemon="<<eng->enemy_hp<<"\n";
+    }
+    // Status comparison
+    if(cr1.player_status != eng->player_status){
+        all_match=false; diff<<"player_status Crystal=0x"<<std::hex<<(int)cr1.player_status<<" Enginemon=0x"<<(int)eng->player_status<<std::dec<<"\n";
+    }
+    if(cr1.enemy_status != eng->enemy_status){
+        all_match=false; diff<<"enemy_status Crystal=0x"<<std::hex<<(int)cr1.enemy_status<<" Enginemon=0x"<<(int)eng->enemy_status<<std::dec<<"\n";
     }
     // RNG consumption must match
     if(cr1.rng_bytes_consumed != eng->rng_bytes_consumed){
@@ -2966,6 +3209,10 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
                     line << "    Crystal cur_damage=" << r.crystal_res.cur_damage << "\n";
                     line << "    Crystal player_hp=" << r.crystal_res.player_hp
                          << "  enemy_hp=" << r.crystal_res.enemy_hp << "\n";
+                    line << "    Crystal player_status=0x" << std::hex << std::setw(2) << std::setfill('0')
+                         << (int)r.crystal_res.player_status
+                         << "  enemy_status=0x" << (int)r.crystal_res.enemy_status
+                         << std::dec << "\n";
                 }
                 if(r.status == Status::ENGINEMON_UNSUPPORTED){
                     line << "    Enginemon rng_trace: N/A (unsupported)\n";
@@ -2975,6 +3222,10 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
                     line << "    Enginemon rng_bytes=" << r.engine_res.rng_bytes_consumed << "\n";
                     line << "    Enginemon player_hp=" << r.engine_res.player_hp
                          << "  enemy_hp=" << r.engine_res.enemy_hp << "\n";
+                    line << "    Enginemon player_status=0x" << std::hex << std::setw(2) << std::setfill('0')
+                         << (int)r.engine_res.player_status
+                         << "  enemy_status=0x" << (int)r.engine_res.enemy_status
+                         << std::dec << "\n";
                 }
             }
         }
