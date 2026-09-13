@@ -14,6 +14,14 @@
 //   0xFF50    = 1                   (boot_rom_finished)
 //   0x2000    = entry bank          (MBC register)
 //
+//   INITIAL_SP = 0xFFFF. Crystal HRAM vars occupy 0xFF80-0xFFEB (hBattleTurn=0xFFE4,
+//   hROMBank=0xFF9D, etc.). Starting the SM83 stack at 0xFFFF means the first push
+//   lands at 0xFFFD-0xFFFE (unused HRAM per Crystal's hram.asm layout). Up to 12
+//   nested CALLs reach 0xFFE5 -- safely above all Crystal HRAM variables.
+//   The old value 0xFFF0 allowed only 3 nested calls before the stack descended into
+//   hBattleTurn (0xFFE4), corrupting it and causing GetBattleVar to use enemy-turn
+//   addressing for all subsequent calls.
+//
 // --- RNG INTERCEPTION -------------------------------------------------------
 //   Crystal BattleRandom (00:2F9F) returns its result via a temporary store
 //   at wPredefHL+1 (0xCFB6). The stub flow is:
@@ -252,7 +260,6 @@ struct SymCache {
     // RNG (shared) -- BattleRandom result is read at PC=0x2FAD (fixed address in bank 0)
     Sym BattleRandom;            // 00:2F9F -- entry of the stub; 0x2FAD is the result-read PC
     // Present -- entry is BattleCommand_Present directly (not DoMove)
-    Sym DoMove;                  // 0D:402C -- kept for reference; not used as entry
     Sym BattleCommand_Present;   // 0D:7874 -- direct entry for all Present cases
     Sym AnimateCurrentMoveEitherSide; // 0D:7DE9 -- damage path sink (called inside Present, before ret)
     Sym EndMoveEffect;           // 0D:52A3 -- heal path sink (jp at end of heal block)
@@ -291,8 +298,10 @@ struct SymCache {
     Sym wEnemyTurnsTaken;        // 00:C6DC
     Sym wBattlePlayerAction;     // 01:D0EC
     Sym wBattleAction;           // 01:D430
-    // Full-script (DoPlayerTurn) extra symbols -- only fields not already above
-    Sym DoPlayerTurn;            // 0D:4000
+    // Full-script (DoTurn entry) extra symbols -- only fields not already above
+    Sym DoPlayerTurn;            // 0D:4000 (kept for reference; not used as full-script entry)
+    Sym DoTurn;                  // 0D:401D (kept for reference)
+    Sym DoMove;                  // 0D:402C (full-script entrypoint: dispatches full effect script)
     Sym wPartyMon1PP;            // 01:DCF6
     Sym wPartyCount;             // 01:DCD7
     Sym wWildMonPP;              // 00:C739
@@ -398,6 +407,7 @@ struct SymCache {
             {"wBattleAction",                  &out->wBattleAction},
             // Full-script extras
             {"DoPlayerTurn",                   &out->DoPlayerTurn},
+            {"DoTurn",                         &out->DoTurn},
             {"wPartyMon1PP",                   &out->wPartyMon1PP},
             {"wPartyCount",                    &out->wPartyCount},
             {"wBattleMode",                    &out->wBattleMode},
@@ -549,6 +559,7 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
     // RNG interception: PC == 0x2FAD means we're about to execute LD A,(0xCFB6)
     // inside BattleRandom. Write our tape byte to 0xCFB6 so the instruction
     // naturally loads it into A.
+    // Also: fire a diagnostic on FIRST RNG consumption to confirm the script path.
     if(ctx->rng_ctx && pc == BATTLE_RANDOM_RESULT_READ_PC){
         RngCtx* rng = ctx->rng_ctx;
         if(rng->tape_idx >= rng->tape_len){
@@ -564,142 +575,55 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
         }
     }
 
-    // BattleCommand_DoTurn diagnostic: capture consume_pp inputs and PP values.
-    // Fires at specific PCs inside BattleCommand_DoTurn (0D:45xx) to read
-    // actual CPU/WRAM state -- no inference from fixture setup.
-    {
-        static constexpr uint16_t PC_DOTURN_ENTRY   = 0x4555; // BattleCommand_DoTurn
-        static constexpr uint16_t PC_DISPATCH_TOP   = 0x4058; // DoMove.ReadMoveEffectCommand top
-        static constexpr uint16_t PC_CONSUME_PP     = 0x45AD; // .consume_pp entry
-        static constexpr uint16_t PC_OKAY           = 0x45B8; // .okay: about to read [HL]
-        static constexpr uint16_t PC_OUT_OF_PP      = 0x45E3; // .out_of_pp: PP was 0
-
-        static struct {
-            bool     active;
-            int      dispatch_count;  // how many times dispatch top fired
-            uint8_t  hBattleTurn;
-            uint8_t  rSVBK_at_doturn;
-            uint8_t  wCurMoveNum_val;
-            uint16_t HL_at_consume_pp;
-            uint16_t HL_at_okay;
-            uint8_t  raw_pp;
-            uint8_t  masked_pp;
-            bool     out_of_pp_taken;
-            uint8_t  battlemon_pp[4];
-            // dispatch-top: capture every time (show last 8)
-            struct { uint16_t addr; uint8_t byte_; } dispatches[8];
-        } diag{};
-
-        // Arm on DoTurn entry (pc=0x4555 confirms the command is actually dispatched)
-        if(pc == PC_DOTURN_ENTRY){
-            diag = {};
-            diag.active          = true;
-            diag.rSVBK_at_doturn = GB_safe_read_memory(gb, 0xFF70);
-            diag.hBattleTurn     = GB_safe_read_memory(gb, 0xFFE4);
-            diag.battlemon_pp[0] = GB_safe_read_memory(gb, 0xC634);
-            diag.battlemon_pp[1] = GB_safe_read_memory(gb, 0xC635);
-            diag.battlemon_pp[2] = GB_safe_read_memory(gb, 0xC636);
-            diag.battlemon_pp[3] = GB_safe_read_memory(gb, 0xC637);
-        }
-
-        // Every dispatch-top hit: capture addr and byte (ring buffer of last 8)
-        if(pc == PC_DISPATCH_TOP && ctx->insn_count > 7000){
-            // Only log after we're deep enough to be past checkobedience/usedmovetext
-            uint8_t lo = GB_safe_read_memory(gb, 0xC6B2);
-            uint8_t hi = GB_safe_read_memory(gb, 0xC6B3);
-            uint16_t addr = (uint16_t)(lo | (hi << 8));
-            uint8_t  byte_ = GB_safe_read_memory(gb, addr);
-            int idx = diag.dispatch_count % 8;
-            diag.dispatches[idx].addr  = addr;
-            diag.dispatches[idx].byte_ = byte_;
-            ++diag.dispatch_count;
-            // Fire diagnostic sink on EVERY first dispatch-top hit (not just terminal bytes)
-            if(diag.dispatch_count == 1){
-                // Read ACTUAL PP from WRAM (not from uninitialized diag struct)
-                uint8_t pp0 = GB_safe_read_memory(gb, 0xC634);
-                uint8_t pp1 = GB_safe_read_memory(gb, 0xC635);
-                uint8_t pp2 = GB_safe_read_memory(gb, 0xC636);
-                uint8_t pp3 = GB_safe_read_memory(gb, 0xC637);
-                uint8_t svbk = GB_safe_read_memory(gb, 0xFF70);
-                uint8_t cur_move_num = GB_safe_read_memory(gb, 0xD0D5);
-                // Log state at DoTurn dispatch for diagnostic purposes only.
-                // Do NOT terminate here -- we need execution to proceed through
-                // consume_pp so the __DOTURN_DIAG__ path can fire if .out_of_pp
-                // is taken, or EndMoveEffect fires if PP is non-zero.
-                (void)pp0; (void)pp1; (void)pp2; (void)pp3;
-                (void)svbk; (void)cur_move_num; (void)addr; (void)byte_;
-            }
-        }
-
-        if(diag.active && pc == PC_CONSUME_PP){
-            GB_registers_t* r = GB_get_registers(gb);
-            if(r){
-                diag.HL_at_consume_pp = r->hl;
-                diag.wCurMoveNum_val  = GB_safe_read_memory(gb, 0xD0D5);
-            }
-        }
-
-        if(diag.active && pc == PC_OKAY){
-            GB_registers_t* r = GB_get_registers(gb);
-            if(r){
-                diag.HL_at_okay = r->hl;
-                diag.raw_pp     = GB_safe_read_memory(gb, r->hl);
-                diag.masked_pp  = diag.raw_pp & 0x3F;
-            }
-        }
-
-        if(diag.active && pc == PC_OUT_OF_PP){
-            diag.out_of_pp_taken = true;
-            static char diag_sink[256];
-            snprintf(diag_sink, sizeof(diag_sink),
-                "__DOTURN_DIAG__"
-                " hBT=0x%02X rSVBK=0x%02X"
-                " CurMoveNum=0x%02X"
-                " PP[0..3]=%02X,%02X,%02X,%02X"
-                " HL_consume=%04X HL_okay=%04X"
-                " raw=0x%02X masked=0x%02X"
-                " out_of_pp=YES",
-                diag.hBattleTurn, diag.rSVBK_at_doturn,
-                diag.wCurMoveNum_val,
-                diag.battlemon_pp[0], diag.battlemon_pp[1],
-                diag.battlemon_pp[2], diag.battlemon_pp[3],
-                diag.HL_at_consume_pp, diag.HL_at_okay,
-                diag.raw_pp, diag.masked_pp);
-            ctx->triggered      = true;
-            ctx->triggered_sink = diag_sink;
-        }
-    }
-
     // BattleCommand_UsedMoveText skip (0D:4541)
     //
-    // Control flow when DoMove dispatches UsedMoveText:
-    //   call .DoMoveEffectCommand      ; at 0D:407E, pushes return addr = 0D:4081
-    //   jr   .ReadMoveEffectCommand    ; at 0D:4081 (2 bytes) -- this is the return addr
-    //   .DoMoveEffectCommand: jp hl    ; at 0D:4083 (1 byte) -- jumps to command handler
+    // DoMove dispatch loop (bank 0D):
+    //   ... (ReadMoveEffectCommand at 0x4058) ...
+    //   call .DoMoveEffectCommand      ; at 0D:407E -- pushes return addr 0D:4081
+    //   jr   .ReadMoveEffectCommand    ; at 0D:4081 (2 bytes)
+    //   .DoMoveEffectCommand: jp hl    ; at 0D:4083 (1 byte) -- dispatches via JP (HL)
     //
-    // So when BattleCommand_UsedMoveText begins at PC=0x4541, [SP] = 0x4081 (little-endian).
-    // We emulate one SM83 RET: read [SP],[SP+1] as the return PC, SP += 2, set PC.
-    // Fail-closed: if the popped address is not 0x4081, abort with HARNESS_ERROR marker.
+    // Intercept strategy: fire at DoMoveEffectCommand (0x4083 = JP HL).
+    // At this point, HL contains the command handler address.
+    // When HL == 0x4541 (BattleCommand_UsedMoveText), we skip the handler by:
+    //   1. Setting HL = 0x4081 (so JP HL lands on the JR .ReadMoveEffectCommand)
+    //   2. SP += 2 (discard the return addr 0x4081 pushed by `call .DoMoveEffectCommand`)
     //
-    // This skips all text rendering (BattleTextbox, PrintTextboxText, WaitBGMap,
-    // DelayFrames, VBlank waits) without modifying any battle state.
-    // UsedMoveText only prints "<Name> used PRESENT!" -- no gameplay writes.
-    static constexpr uint16_t USED_MOVE_TEXT_ENTRY_PC    = 0x4541;  // BattleCommand_UsedMoveText (0D)
+    // SameBoy exec_cb fires with gb->pc = 0x4084 (already incremented past JP HL).
+    // JP HL executes and uses the modified HL = 0x4081 as its branch target.
+    // The JR at 0x4081 then loops to 0x4058 normally with a balanced stack.
+    //
+    // UsedMoveText prints "<Name> used PRESENT!" -- no gameplay state writes.
+    static constexpr uint16_t DOMOVE_EFFECT_DISPATCH_PC  = 0x4083;  // DoMove.DoMoveEffectCommand (0D)
+    static constexpr uint16_t USED_MOVE_TEXT_HANDLER_PC  = 0x4541;  // BattleCommand_UsedMoveText (0D)
     static constexpr uint16_t DOMOVE_DISPATCHER_CONT_PC  = 0x4081;  // jr .ReadMoveEffectCommand (0D)
-    // Rendering/timing skips: all in bank 0 (always-mapped), all reached via `call` (not `jp hl`).
-    // Each is skipped by emulating one SM83 RET: SP += 2, PC = [SP-2]|([SP-1]<<8).
-    static constexpr uint16_t DELAY_FRAME_PC         = 0x045A;  // DelayFrame (VBlank wait)
-    static constexpr uint16_t DELAY_FRAMES_PC        = 0x0468;  // DelayFrames (loop)
-    static constexpr uint16_t BATTLE_TEXTBOX_PC      = 0x3AC3;  // BattleTextbox (character render)
-    static constexpr uint16_t STD_BATTLE_TEXTBOX_PC  = 0x3AD5;  // StdBattleTextbox
-    static constexpr uint16_t REFRESH_BATTLE_HUDS_PC = 0x39C9;  // RefreshBattleHuds (calls WaitBGMap)
-    static constexpr uint16_t WAITSFX_PC             = 0x3C55;  // WaitSFX (spins on audio flag)
-    static constexpr uint16_t WAITPLAYSFX_PC         = 0x3C4E;  // WaitPlaySFX (calls WaitSFX)
-    static constexpr uint16_t PRINTLETTERDELAY_PC    = 0x313D;  // PrintLetterDelay (text character loop)
-    static constexpr uint16_t JOYWAITAORB_PC         = 0x0A36;  // JoyWaitAorB (spins on button press)
-    static constexpr uint16_t SIMPLEWAITPRESSAORB_PC = 0x0AA5;  // SimpleWaitPressAorB (same)
-    static constexpr uint16_t WAITPRESSAORB_PC       = 0x0A80;  // WaitPressAorB_BlinkCursor (same)
-    static constexpr uint16_t GETJOYPAD_PC           = 0x0984;  // GetJoypad (reads joypad hardware)
+    // Presentation-only rendering skips.
+    // Each entry: bank-0 CALL-entered function with no gameplay state writes, RET convention.
+    // Verified individually against pokecrystal source.
+    //
+    //   DelayFrame (0x045A): CALL-entered. Writes 1 to wVBlankOccurred(0xCFB3), HALTs,
+    //     waits for VBlank ISR to clear it. No battle state written. Returns via RET.
+    //
+    //   DelayFrames (0x0468): CALL-entered. Calls DelayFrame in a loop (count in C).
+    //     No battle state written. Returns via RET.
+    //
+    //   BattleTextbox (0x3AC3): CALL-entered. Renders text tiles into VRAM.
+    //     No battle state written. Returns via RET.
+    //
+    //   StdBattleTextbox (0x3AD5): CALL-entered. Sets up HL then tail-calls BattleTextbox.
+    //     No battle state written. Returns via RET (via BattleTextbox's RET).
+    //
+    //   RefreshBattleHuds (0x39C9): CALL-entered. Calls WaitBGMap then updates HUD tiles.
+    //     No battle state written. Returns via RET.
+    //
+    //   AnimateHPBar (03:46E0): CALL-entered, bank-guarded (only when hROMBank==03).
+    //     Animates HP bar graphics. No battle state written. Returns via RET.
+    //     Guard prevents aliasing with bank-0D code at the same in-bank address.
+    static constexpr uint16_t DELAY_FRAME_PC         = 0x045A;
+    static constexpr uint16_t DELAY_FRAMES_PC        = 0x0468;
+    static constexpr uint16_t BATTLE_TEXTBOX_PC      = 0x3AC3;
+    static constexpr uint16_t STD_BATTLE_TEXTBOX_PC  = 0x3AD5;
+    static constexpr uint16_t REFRESH_BATTLE_HUDS_PC = 0x39C9;
     auto do_ret_skip = [&](){
         GB_registers_t* r = GB_get_registers(gb);
         if(r){
@@ -718,30 +642,26 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
     };
     if(pc == DELAY_FRAME_PC || pc == DELAY_FRAMES_PC ||
        pc == BATTLE_TEXTBOX_PC || pc == STD_BATTLE_TEXTBOX_PC ||
-       pc == REFRESH_BATTLE_HUDS_PC || pc == WAITSFX_PC ||
-       pc == WAITPLAYSFX_PC || pc == PRINTLETTERDELAY_PC ||
-       pc == JOYWAITAORB_PC || pc == SIMPLEWAITPRESSAORB_PC ||
-       pc == WAITPRESSAORB_PC || pc == GETJOYPAD_PC){
+       pc == REFRESH_BATTLE_HUDS_PC){
         do_ret_skip();
         return;
     }
-    // ByteFill with invalid destination (DE < 0x8000 = ROM/VRAM space): skip.
-    // These are initialization calls with uninitialized pointer values.
-    // Fills to valid WRAM (0xC000+) or HRAM (0xFF80+) are allowed to execute.
+    // ByteFill (0x3041): HARNESS_ERROR if destination is outside WRAM/HRAM.
+    // An invalid destination (DE < 0x8000) means the fixture has an uninitialized
+    // pointer that Crystal is using to address ROM or VRAM.
+    // This must fail explicitly -- never skip a semantic fill operation.
     if(pc == 0x3041){
         GB_registers_t* br = GB_get_registers(gb);
         if(br && br->de < 0x8000){
-            size_t hs = 0; uint16_t hb = 0;
-            uint8_t* h = static_cast<uint8_t*>(
-                GB_get_direct_access(gb, GB_DIRECT_ACCESS_HRAM, &hs, &hb));
-            uint16_t li = (br->sp     - 0xFF80u) & 0x7Fu;
-            uint16_t hi_i = (br->sp + 1 - 0xFF80u) & 0x7Fu;
-            uint8_t lo = h ? h[li]    : GB_safe_read_memory(gb, br->sp);
-            uint8_t hi = h ? h[hi_i]  : GB_safe_read_memory(gb, br->sp + 1);
-            br->sp += 2;
-            br->pc = (uint16_t)(lo | (hi << 8));
+            static char bytefill_err[128];
+            snprintf(bytefill_err, sizeof(bytefill_err),
+                "__HARNESS_ERROR__ ByteFill(DE=0x%04X BC=0x%04X): "
+                "fixture has uninitialized pointer -- add field to fixture",
+                br->de, br->bc);
+            ctx->triggered      = true;
+            ctx->triggered_sink = bytefill_err;
+            return;
         }
-        return;
     }
     // AnimateHPBar (03:46E0) -- bank-guarded skip to avoid aliasing with
     // BattleCommand_Stab code in bank 0D at the same in-bank address.
@@ -749,15 +669,29 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
         do_ret_skip();
         return;
     }
-    if(pc == USED_MOVE_TEXT_ENTRY_PC){
-        GB_registers_t* regs = GB_get_registers(gb);
-        if(regs){
-            // The DoMove dispatch for UsedMoveText pushed 0x4081 (jr .ReadMoveEffectCommand)
-            // as the return address via `call .DoMoveEffectCommand` at 0D:407E.
-            // Hardcode the jump target -- do NOT read from the stack (unreliable via GB_safe_read_memory).
-            // Pop the call frame (SP += 2) and jump to the known continuation.
-            regs->sp += 2;
-            regs->pc  = DOMOVE_DISPATCHER_CONT_PC;  // 0x4081 -- hardcoded, known correct
+    // AnimateCurrentMoveEitherSide (0D:7DE9) -- CALL-entered from BattleCommand_Present.
+    // Calls BattleCommand_LowerSub, PlayDamageAnim, BattleCommand_RaiseSub.
+    // Purely presentational (HP bar animation + damage flash). Returns via RET at 0x7E00.
+    // Only skipped when NOT registered as a sink for this case (direct-Present cases
+    // 2171/2174 use it as their sink; full-script case 2176 must skip past it).
+    if(pc == 0x7DE9 && GB_safe_read_memory(gb, 0xFF9D) == 0x0D){
+        // If it's registered as a sink, let sink detection below handle it.
+        bool is_sink = false;
+        for(size_t i=0; i<ctx->num_sinks; ++i)
+            if(ctx->sink_pcs[i] == 0x7DE9){ is_sink=true; break; }
+        if(!is_sink){
+            do_ret_skip();
+            return;
+        }
+    }
+    if(pc == DOMOVE_EFFECT_DISPATCH_PC && GB_safe_read_memory(gb, 0xFF9D) == 0x0D){
+        // JP HL was fetched. HL contains the target command handler address.
+        GB_registers_t* r = GB_get_registers(gb);
+        if(r && r->hl == USED_MOVE_TEXT_HANDLER_PC){
+            // Skip UsedMoveText: redirect JP HL to the loop-continue point (0x4081)
+            // and discard the return address that call .DoMoveEffectCommand pushed.
+            r->hl = DOMOVE_DISPATCHER_CONT_PC;  // JP HL will land here
+            r->sp += 2;                          // discard pushed return addr 0x4081
         }
         return;
     }
@@ -1006,7 +940,13 @@ static CrystalRunResult run_crystal_case(
 
     // Push return address (first sink) onto the stack. If execution RETs before
     // any sink fires, it lands at sink_pcs[0] and the exec_cb catches it.
-    static constexpr uint16_t INITIAL_SP = 0xFFF0;
+    //
+    // INITIAL_SP = 0xFFFF: Crystal uses HRAM 0xFF80-0xFFEB for its own variables
+    // (hBattleTurn=0xFFE4, hROMBank=0xFF9D, etc.). Starting the stack at 0xFFFF
+    // means the first push goes to 0xFFFD-0xFFFE (unused HRAM), and 12 levels of
+    // nested CALLs reach 0xFFE5 -- safely above Crystal's variables at 0xFFEB.
+    // The old value 0xFFF0 allowed only 3 nested calls before overwriting 0xFFE4.
+    static constexpr uint16_t INITIAL_SP = 0xFFFF;
     uint16_t ret_addr = cfg.sink_pcs[0];
     GB_write_memory(&gb,INITIAL_SP-1,(ret_addr>>8)&0xFF);
     GB_write_memory(&gb,INITIAL_SP-2, ret_addr    &0xFF);
@@ -1447,220 +1387,239 @@ static void present_sentinel_build_config(const SymCache& sym, CrystalRunConfig*
 }
 
 // ============================================================================
-// Full-script Present fixture (DoPlayerTurn entry)
+// Full-script Present fixture (DoMove entry)
 //
-// Key decisions:
-//   wInBattleTowerBattle=1: BattleCommand_CheckObedience checks this and ret nz.
-//   wLinkMode=0 (MUST): _BattleRandom (0F:6DD8) does `jp z, Random` -- only when
-//     wLinkMode==0 does it reach the normal Random stub at 0x2FAD (our intercept).
-//     wLinkMode!=0 routes to the link-battle PRNG and the intercept never fires.
-//   wBattleMode=1 (WILD_BATTLE): BattleCommand_DoTurn uses wWildMonPP for enemy,
-//     skipping wOTPartyMon1PP sync. Safe for single-mon oracle fixture.
-//   wBattlePlayerAction=0: DoPlayerTurn checks this first; 0=USEMOVE, continues.
+// Entry: DoMove (0D:402C)
+//   DoMove (0D:402C) is the correct full-script entrypoint. It:
+//     1. Reads wPlayerMoveStruct.effect via GetBattleVar(MoveEffect=0x0D) to select script
+//     2. Copies the Present effect script from MoveEffectsPointers[0x7A] into wBattleScriptBuffer
+//     3. Dispatches each command: checkobedience, usedmovetext(skip), doturn, checkhit,
+//        critical, damagestats, present, damagecalc, stab, damagevariation,
+//        clearmissdamage, failuretext, applydamage, criticaltext, supereffectivetext,
+//        checkfaint, buildopponentrage, kingsrock, endmove
+//   No LCD init, no joypad reads, no SetPlayerTurn/SetEnemyTurn, no UpdateMoveData
+//   name-scan overhead. Direct dispatch of the Present effect script.
 //
-// Present ROM move data (from data/moves/moves.asm):
-//   move PRESENT, EFFECT_PRESENT, 1, NORMAL, 90, 15, 0
-//   struct: [anim, effect, power, type, acc%*255, pp, chance]
-//   acc = 90*255/100 = 229 = 0xE5 (NOT 0xFF -- CheckHit DOES call BattleRandom)
-// ============================================================================
-static constexpr uint16_t PRESENT_MOVE_ID_FS = 217;
+// Why not DoTurn (0D:401D):
+//   DoTurn calls UpdateMoveData which scans all 216 move names (~100K instructions)
+//   to populate wStringBuffer1/2. In a cold-fixture environment this causes the
+//   script dispatch loop to malfunction (script pointer resets).
+//
+// wPlayerMoveStruct: populated from ROM (effect=0x7A guaranteed). Animation byte
+//   is overridden to 0 so PlayDamageAnim returns immediately (AND A; RET Z).
+//
+// RNG tape (5 bytes):
+//   [0] 0x00 = CheckHit  (acc=0xE5=229, hit)
+//   [1] 0x80 = Critical  (no crit at level 50)
+//   [2] 0x30 = Present   (power 40)
+//   [3] 0xB2 = DamageVariation byte 1
+//   [4] 0xFF = DamageVariation byte 2
+//
+// Sink: EndMoveEffect (0D:52A3).
+
+// ROM offset of the Crystal moves table (10:5AFB) + stride (7 bytes/entry).
+// Used to read wPlayerMoveStruct bytes from the actual ROM.
+static constexpr uint32_t CRYSTAL_MOVES_TABLE_FLAT = 0x10u*0x4000u + (0x5AFBu - 0x4000u); // = 0x55AFB
+static constexpr uint32_t CRYSTAL_MOVE_DATA_SIZE   = 7u;
+// Address constants used by the full-script fixture (referenced at file scope).
 static constexpr uint8_t  CRYSTAL_STRING_END = 0x50;  // Crystal "@" string terminator
 static constexpr uint16_t WOPTIONS_ADDR      = 0xCFCC; // wOptions (CheckBattleScene reads bit5)
 static constexpr uint16_t WBATTLEMONNICKNAME = 0xC621; // 11 bytes, must be 0x50-terminated
 static constexpr uint16_t WENEMYMONNICKNAME  = 0xC616; // 11 bytes, must be 0x50-terminated
 static constexpr uint16_t WOTPARTYCOUNT      = 0xD280; // wOTPartyCount
 
-static void present_fullscript_fixture(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym){
-    auto be16=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
+// Tape: CheckHit, Critical, Present-power, DamVar-byte1, DamVar-byte2
+static constexpr uint8_t PRESENT_TAPE_FULLSCRIPT_DAMAGE[] = { 0x00, 0x80, 0x30, 0xB2, 0xFF };
 
-    // Zero-fill the entire battle WRAM region FIRST to eliminate poison instability
-    // from uninitialized fields that DoPlayerTurn reads during execution.
-    // This covers all battle state from wBattleMonSpecies (0xC600) through
-    // wBattleAction area (0xD500). Then we selectively set specific non-zero values.
-    // This is necessary because DoPlayerTurn reads many more fields than can be
-    // individually enumerated in a fixture.
-    for(uint16_t a = 0xC600; a < 0xD600; ++a)
-        wram[wram_off(a)] = 0;
-    // Also zero WRAM bank 1 battle region (0xD000-0xD4FF)
-    for(uint16_t a = 0xD000; a < 0xD500; ++a)
-        wram[wram_off(a)] = 0;
+// Helper: read 7-byte move struct from ROM for move_id (1-based Crystal move ID).
+// Populates wPlayerMoveStruct bytes [0..6] directly from the move data table.
+// Layout: [anim, effect, power, type, acc, pp, chance].
+// No hardcoded constants: all bytes are ROM-proven.
+static void rom_populate_player_move_struct(
+    const std::vector<uint8_t>& rom_bytes,
+    uint8_t* wram, const SymCache& sym,
+    uint16_t move_id)
+{
+    // 0-based index into moves table (move IDs are 1-based in Crystal)
+    const uint32_t offset = CRYSTAL_MOVES_TABLE_FLAT + (uint32_t)(move_id - 1) * CRYSTAL_MOVE_DATA_SIZE;
+    // Bounds check: table must exist in ROM
+    if(offset + CRYSTAL_MOVE_DATA_SIZE > rom_bytes.size()){
+        throw std::logic_error("rom_populate_player_move_struct: ROM offset out of bounds");
+    }
+    for(uint32_t i = 0; i < CRYSTAL_MOVE_DATA_SIZE; ++i)
+        wram[wram_off((uint16_t)(sym.wPlayerMoveStruct.addr + i))] = rom_bytes[offset + i];
+}
 
-    // Obedience bypass: wInBattleTowerBattle=1; wLinkMode MUST stay 0
-    wram[wram_off(sym.wInBattleTowerBattle.addr)] = 1;
-    wram[wram_off(sym.wLinkMode.addr)]            = 0;  // CRITICAL: keep 0
+static void present_fullscript_fixture(
+    GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym,
+    const std::vector<uint8_t>& rom_bytes)
+{
+    auto be16=[](uint8_t* d, uint16_t v){ d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF); };
 
-    // Battle mode and player action
-    wram[wram_off(sym.wBattleMode.addr)]         = 1;  // WILD_BATTLE
-    wram[wram_off(sym.wBattlePlayerAction.addr)] = 0;  // USEMOVE
+    // ---------- wPlayerMoveStruct (0xC60F, 7 bytes) -- fully ROM-derived ----------
+    // Read directly from the Crystal moves table for move ID 217 (Present).
+    // Bytes verified: [0xD9, 0x7A, 0x01, 0x00, 0xE5, 0x0F, 0x00]
+    // (anim=0xD9, effect=EFFECT_PRESENT=0x7A, power=1, type=Normal, acc=0xE5, pp=15, chance=0)
+    // Animation byte 0xD9 causes AnimateCurrentMoveEitherSide (0D:7DE9) to call
+    // PlayDamageAnim; that call is intercepted in exec_cb as a bank-guarded skip.
+    rom_populate_player_move_struct(rom_bytes, wram, sym, 217);
 
-    // Move slot and PP
-    wram[wram_off(sym.wCurMoveNum.addr)]           = 0;
-    wram[wram_off(sym.wBattleMonMoves.addr) + 0]   = (uint8_t)PRESENT_MOVE_ID_FS;
+    // ---------- Move identity fields (player turn, slot 0) ------------------
+    wram[wram_off(sym.wCurPlayerMove.addr)]        = 217;   // wCurPlayerMove = Present
+    wram[wram_off(sym.wBattleMonMoves.addr) + 0]   = 217;   // slot 0 = Present
     wram[wram_off(sym.wBattleMonMoves.addr) + 1]   = 0;
     wram[wram_off(sym.wBattleMonMoves.addr) + 2]   = 0;
     wram[wram_off(sym.wBattleMonMoves.addr) + 3]   = 0;
-    wram[wram_off(sym.wBattleMonPP.addr) + 0]      = 10;
+    wram[wram_off(sym.wCurMoveNum.addr)]            = 0;    // bank-1: slot index 0
+    wram[wram_off(sym.wCurBattleMon.addr)]          = 0;    // bank-1: party slot 0
+
+    // ---------- PP (player + party sync + enemy wild) -----------------------
+    // Use ROM PP (0x0F=15) for all four slots. Enemy uses wWildMonPP (WILD_BATTLE mode).
+    wram[wram_off(sym.wBattleMonPP.addr) + 0]      = 0x0F; // ROM-proven pp=15 for Present
     wram[wram_off(sym.wBattleMonPP.addr) + 1]      = 0;
     wram[wram_off(sym.wBattleMonPP.addr) + 2]      = 0;
     wram[wram_off(sym.wBattleMonPP.addr) + 3]      = 0;
+    wram[wram_off(sym.wPartyMon1PP.addr) + 0]      = 0x0F; // party mirror
+    wram[wram_off(sym.wPartyMon1PP.addr) + 1]      = 0;
+    wram[wram_off(sym.wPartyMon1PP.addr) + 2]      = 0;
+    wram[wram_off(sym.wPartyMon1PP.addr) + 3]      = 0;
+    wram[wram_off(sym.wWildMonPP.addr) + 0]        = 0x0F; // enemy (wBattleMode=1 WILD)
+    wram[wram_off(sym.wWildMonPP.addr) + 1]        = 0;
+    wram[wram_off(sym.wWildMonPP.addr) + 2]        = 0;
+    wram[wram_off(sym.wWildMonPP.addr) + 3]        = 0;
+    wram[wram_off(sym.wWildMonMoves.addr)]          = 0;    // enemy move slot 0
+    wram[wram_off(sym.wPartyCount.addr)]            = 1;    // one party mon
 
-    // Party data
-    wram[wram_off(sym.wPartyCount.addr)]          = 1;
-    wram[wram_off(sym.wPartyMon1PP.addr) + 0]     = 10;
-    wram[wram_off(sym.wPartyMon1PP.addr) + 1]     = 0;
-    wram[wram_off(sym.wPartyMon1PP.addr) + 2]     = 0;
-    wram[wram_off(sym.wPartyMon1PP.addr) + 3]     = 0;
-    wram[wram_off(sym.wCurBattleMon.addr)]        = 0;
+    // ---------- Battle mode / action ----------------------------------------
+    wram[wram_off(sym.wBattleMode.addr)]            = 1;    // WILD_BATTLE
+    wram[wram_off(sym.wLinkMode.addr)]              = 0;    // MUST be 0 (RNG intercept)
+    wram[wram_off(sym.wInBattleTowerBattle.addr)]   = 1;    // bypass CheckObedience
 
-    // Wild enemy PP (wBattleMode=1 → DoTurn uses this for enemy PP)
-    wram[wram_off(sym.wWildMonPP.addr) + 0]   = 10;
-    wram[wram_off(sym.wWildMonPP.addr) + 1]   = 0;
-    wram[wram_off(sym.wWildMonPP.addr) + 2]   = 0;
-    wram[wram_off(sym.wWildMonPP.addr) + 3]   = 0;
-    wram[wram_off(sym.wWildMonMoves.addr)]     = 0;
+    // ---------- Species and items -------------------------------------------
+    // Bulbasaur (1): no Pikachu/Marowak special crit items. item=0 = no item.
+    wram[wram_off(sym.wBattleMonSpecies.addr)]      = 1;
+    wram[wram_off(sym.wEnemyMonSpecies.addr)]       = 1;
+    wram[wram_off(sym.wBattleMonItem.addr)]         = 0;
+    wram[wram_off(sym.wEnemyMonItem.addr)]          = 0;
 
-    // All substatus bytes clear (no confusion, flinch, attract, recharge, etc.)
-    // SubStatus2 was missing -- wPlayerSubStatus2=0xC669, wEnemySubStatus2=0xC66E.
-    // wEnemySubStatus1=0xC66D was also missing. Zero all 5 substatus bytes for
-    // both player and enemy to guarantee poison stability.
-    wram[wram_off(sym.wBattleMonStatus.addr)]   = 0;
-    wram[wram_off(sym.wEnemyMonStatus.addr)]    = 0;
-    wram[wram_off(sym.wPlayerSubStatus1.addr)]  = 0;  // 0xC668
-    wram[wram_off(0xC669)]                      = 0;  // wPlayerSubStatus2
-    wram[wram_off(sym.wPlayerSubStatus3.addr)]  = 0;  // 0xC66A
-    wram[wram_off(sym.wPlayerSubStatus4.addr)]  = 0;  // 0xC66B
-    wram[wram_off(sym.wPlayerSubStatus5.addr)]  = 0;  // 0xC66C
-    wram[wram_off(0xC66D)]                      = 0;  // wEnemySubStatus1
-    wram[wram_off(0xC66E)]                      = 0;  // wEnemySubStatus2
-    wram[wram_off(sym.wEnemySubStatus3.addr)]   = 0;  // 0xC66F
-    wram[wram_off(sym.wEnemySubStatus4.addr)]   = 0;  // 0xC670
-    wram[wram_off(sym.wEnemySubStatus5.addr)]   = 0;  // 0xC671
-    wram[wram_off(sym.wPlayerDisableCount.addr)]= 0;
-    wram[wram_off(sym.wDisabledMove.addr)]      = 0;
-    wram[wram_off(sym.wPlayerCharging.addr)]    = 0;
-    wram[wram_off(sym.wEnemyCharging.addr)]     = 0;
-    wram[wram_off(sym.wTurnEnded.addr)]         = 0;
-    wram[wram_off(sym.wAlreadyDisobeyed.addr)]  = 0;
+    // ---------- Status and substatus (all clear) ----------------------------
+    // Every substatus byte must be explicitly initialized -- uninitialized bytes
+    // cause branch divergence between poison=0x00 and poison=0xA5 runs.
+    wram[wram_off(sym.wBattleMonStatus.addr)]       = 0;    // 0xC63A
+    wram[wram_off(sym.wEnemyMonStatus.addr)]        = 0;    // 0xD214
+    wram[wram_off(sym.wPlayerSubStatus1.addr)]      = 0;    // 0xC668
+    wram[wram_off(0xC669u)]                         = 0;    // wPlayerSubStatus2 (absent from SymCache)
+    wram[wram_off(sym.wPlayerSubStatus3.addr)]      = 0;    // 0xC66A
+    wram[wram_off(sym.wPlayerSubStatus4.addr)]      = 0;    // 0xC66B
+    wram[wram_off(sym.wPlayerSubStatus5.addr)]      = 0;    // 0xC66C
+    wram[wram_off(0xC66Du)]                         = 0;    // wEnemySubStatus1 (absent from SymCache)
+    wram[wram_off(0xC66Eu)]                         = 0;    // wEnemySubStatus2
+    wram[wram_off(sym.wEnemySubStatus3.addr)]       = 0;    // 0xC66F
+    wram[wram_off(sym.wEnemySubStatus4.addr)]       = 0;    // 0xC670
+    wram[wram_off(sym.wEnemySubStatus5.addr)]       = 0;    // 0xC671
+    wram[wram_off(sym.wPlayerDisableCount.addr)]    = 0;
+    wram[wram_off(sym.wDisabledMove.addr)]          = 0;
+    wram[wram_off(sym.wPlayerCharging.addr)]        = 0;    // no recharge
+    wram[wram_off(sym.wEnemyCharging.addr)]         = 0;
+    wram[wram_off(sym.wTurnEnded.addr)]             = 0;    // DoTurn clears this, but init anyway
+    wram[wram_off(sym.wAlreadyDisobeyed.addr)]      = 0;
 
-    // Species (no special crit items) and items
-    wram[wram_off(sym.wBattleMonSpecies.addr)] = 1;
-    wram[wram_off(sym.wEnemyMonSpecies.addr)]  = 1;
-    wram[wram_off(sym.wBattleMonItem.addr)]    = 0;
-    wram[wram_off(sym.wEnemyMonItem.addr)]     = 0;
+    // ---------- Levels ------------------------------------------------------
+    wram[wram_off(sym.wBattleMonLevel.addr)]        = P_LEVEL;
+    wram[wram_off(sym.wEnemyMonLevel.addr)]         = E_LEVEL;
 
-    // Levels
-    wram[wram_off(sym.wBattleMonLevel.addr)] = P_LEVEL;
-    wram[wram_off(sym.wEnemyMonLevel.addr)]  = E_LEVEL;
+    // ---------- HP (enemy 250/300 so heal path actually heals) --------------
+    be16(wram + wram_off(sym.wBattleMonHP.addr),    P_HP);
+    be16(wram + wram_off(sym.wBattleMonMaxHP.addr), P_HP);
+    be16(wram + wram_off(sym.wEnemyMonHP.addr),     250);
+    be16(wram + wram_off(sym.wEnemyMonMaxHP.addr),  E_HP);
 
-    // HP (enemy 250/300 so heal path actually heals)
-    be16(wram+wram_off(sym.wBattleMonHP.addr),    P_HP);
-    be16(wram+wram_off(sym.wBattleMonMaxHP.addr), P_HP);
-    be16(wram+wram_off(sym.wEnemyMonHP.addr),     250);
-    be16(wram+wram_off(sym.wEnemyMonMaxHP.addr),  E_HP);
-
-    // Active battle stats
+    // ---------- Battle stats ------------------------------------------------
     {
         uint8_t* p = wram + wram_off(sym.wBattleMonAttack.addr);
-        auto be=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
-        be(p+0,P_ATK); be(p+2,P_DEF); be(p+4,P_SPD); be(p+6,P_SATK); be(p+8,P_SDEF);
+        be16(p+0,P_ATK); be16(p+2,P_DEF); be16(p+4,P_SPD); be16(p+6,P_SATK); be16(p+8,P_SDEF);
     }
     {
         uint8_t* p = wram + wram_off(sym.wEnemyMonAttack.addr);
-        auto be=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
-        be(p+0,E_ATK); be(p+2,E_DEF); be(p+4,E_SPD); be(p+6,E_SATK); be(p+8,E_SDEF);
+        be16(p+0,E_ATK); be16(p+2,E_DEF); be16(p+4,E_SPD); be16(p+6,E_SATK); be16(p+8,E_SDEF);
     }
-    // Unboosted stats for DamageStats crit check
-    {
-        auto be=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
-        be(wram+wram_off(sym.wEnemyMonDefense.addr),  E_DEF);
-        be(wram+wram_off(sym.wEnemyMonSpclDef.addr),  E_SDEF);
-        be(wram+wram_off(sym.wEnemyMonSpclAtk.addr),  E_SATK);
-        be(wram+wram_off(sym.wPlayerAttack.addr),     P_ATK);
-        be(wram+wram_off(sym.wPlayerSpAtk.addr),      P_SATK);
-        be(wram+wram_off(sym.wEnemyDefense.addr),     E_DEF);
-        be(wram+wram_off(sym.wEnemySpDef.addr),       E_SDEF);
-    }
+    // Unboosted stat mirrors used by DamageStats crit comparison
+    be16(wram + wram_off(sym.wEnemyMonDefense.addr),  E_DEF);
+    be16(wram + wram_off(sym.wEnemyMonSpclDef.addr),  E_SDEF);
+    be16(wram + wram_off(sym.wEnemyMonSpclAtk.addr),  E_SATK);
+    be16(wram + wram_off(sym.wPlayerAttack.addr),     P_ATK);
+    be16(wram + wram_off(sym.wPlayerSpAtk.addr),      P_SATK);
+    be16(wram + wram_off(sym.wEnemyDefense.addr),     E_DEF);
+    be16(wram + wram_off(sym.wEnemySpDef.addr),       E_SDEF);
 
-    // Types Normal/Normal → 1× matchup
-    wram[wram_off(sym.wBattleMonType1.addr)] = 0;
-    wram[wram_off(sym.wBattleMonType2.addr)] = 0;
-    wram[wram_off(sym.wEnemyMonType1.addr)]  = 0;
-    wram[wram_off(sym.wEnemyMonType2.addr)]  = 0;
+    // ---------- Types: Normal/Normal → 1× matchup ---------------------------
+    wram[wram_off(sym.wBattleMonType1.addr)]        = 0x00;
+    wram[wram_off(sym.wBattleMonType2.addr)]        = 0x00;
+    wram[wram_off(sym.wEnemyMonType1.addr)]         = 0x00;
+    wram[wram_off(sym.wEnemyMonType2.addr)]         = 0x00;
 
-    // Stat levels: neutral (7) for all -- ensures no acc/eva modifiers in CheckHit
-    // and no stat stage comparison divergence in the Crystal vs Enginemon snapshot.
-    {
-        uint8_t* p = wram + wram_off(sym.wPlayerStatLevels.addr);
-        for(int i=0;i<8;i++) p[i]=7;
-    }
-    {
-        uint8_t* p = wram + wram_off(sym.wEnemyStatLevels.addr);
-        for(int i=0;i<8;i++) p[i]=7;
-    }
+    // ---------- Stat stages (neutral = 7) -----------------------------------
+    { uint8_t* p = wram + wram_off(sym.wPlayerStatLevels.addr); for(int i=0;i<8;i++) p[i]=7; }
+    { uint8_t* p = wram + wram_off(sym.wEnemyStatLevels.addr);  for(int i=0;i<8;i++) p[i]=7; }
 
-    // Turn counters and misc
-    wram[wram_off(sym.wPlayerTurnsTaken.addr)] = 0;
-    wram[wram_off(sym.wEnemyTurnsTaken.addr)]  = 0;
-    wram[wram_off(0xC6E4)]  = 0;  // wCurEnemyMove
-    wram[wram_off(0xC6E9)]  = 0;  // wCurEnemyMoveNum
-    wram[wram_off(sym.wBattleAnimParam.addr)]  = 0;
-    wram[wram_off(sym.wAttackMissed.addr)]     = 0;
-    wram[wram_off(sym.wCriticalHit.addr)]      = 0;
-    wram[wram_off(sym.wTypeMatchup.addr)]      = 0x10;  // EFFECTIVE pre-init
-    wram[wram_off(sym.wBattleWeather.addr)]    = 0;
-    wram[wram_off(sym.wPlayerScreens.addr)]    = 0;
-    wram[wram_off(sym.wEnemyScreens.addr)]     = 0;
-    // wPlayerMoveStruct (0xC60F, 7 bytes): set all fields correctly so DoMove
-    // dispatches EFFECT_PRESENT and doesn't depend on uninitialized poison bytes.
-    //   +0 (0xC60F) = Animation ID  -- 0 → LoadMoveAnim returns early (skips PlayBattleAnim)
-    //   +1 (0xC610) = Effect ID     -- EFFECT_PRESENT = 0x7A (122) so DoMove runs Present script
-    //   +2 (0xC611) = Power         -- Present base power 1 (actual power chosen at runtime)
-    //   +3 (0xC612) = Type          -- Normal (0x00)
-    //   +4 (0xC613) = Accuracy      -- 0xE5 = 229 (90%) from ROM
-    //   +5 (0xC614) = PP            -- 10 (for consistency with wBattleMonPP)
-    //   +6 (0xC615) = Effect Chance -- 0
-    wram[wram_off(sym.wPlayerMoveStruct.addr) + 0] = 0;     // animation = 0 (skip PlayBattleAnim)
-    wram[wram_off(sym.wPlayerMoveStruct.addr) + 1] = 0x7A;  // effect = EFFECT_PRESENT (0x7A)
-    wram[wram_off(sym.wPlayerMoveStruct.addr) + 2] = 1;     // power = 1 (Present base power from ROM)
-    wram[wram_off(sym.wPlayerMoveStruct.addr) + 3] = 0x00;  // type = Normal
-    wram[wram_off(sym.wPlayerMoveStruct.addr) + 4] = 0xE5;  // accuracy = 0xE5 (90% = 229/255)
-    wram[wram_off(sym.wPlayerMoveStruct.addr) + 5] = 10;    // pp = 10
-    wram[wram_off(sym.wPlayerMoveStruct.addr) + 6] = 0;     // effect chance = 0
+    // ---------- Misc battle state flags ------------------------------------
+    wram[wram_off(sym.wPlayerTurnsTaken.addr)]      = 0;
+    wram[wram_off(sym.wEnemyTurnsTaken.addr)]       = 0;
+    wram[wram_off(0xC6E4u)]                         = 0;    // wCurEnemyMove
+    wram[wram_off(0xC6E9u)]                         = 0;    // wCurEnemyMoveNum (0xC6E9)
+    wram[wram_off(sym.wAttackMissed.addr)]          = 0;
+    wram[wram_off(sym.wCriticalHit.addr)]           = 0;
+    wram[wram_off(sym.wTypeMatchup.addr)]           = 0x10; // EFFECTIVE pre-init (BattleCommand_Stab rewrites)
+    wram[wram_off(sym.wBattleWeather.addr)]         = 0;
+    wram[wram_off(sym.wPlayerScreens.addr)]         = 0;
+    wram[wram_off(sym.wEnemyScreens.addr)]          = 0;
+    wram[wram_off(sym.wBattleAnimParam.addr)]       = 0;
+    // Enemy move struct: set accuracy byte to 0xFF so enemy hit check always passes
+    // when the effect script evaluates enemy's move (irrelevant for player Present, but
+    // prevents poison-dependent behavior in the enemy-move path).
+    wram[wram_off(sym.wEnemyMoveStruct.addr) + 3]  = 0xFF;  // +3 = wEnemyMoveStructAcc
 
-    // Poison-stability: wOptions bit5 controls CheckBattleScene carry.
-    // 0 → no-carry → heal path goes directly to EndMoveEffect (our sink).
-    // Nicknames must be 0x50-terminated or PlaceString loops on poison bytes.
-    // wOTPartyCount=1 prevents UpdateOpponentInParty from iterating 0xA5 times.
-    GB_write_memory(gb, WOPTIONS_ADDR,      0);
-    GB_write_memory(gb, WBATTLEMONNICKNAME, CRYSTAL_STRING_END);
+    // ---------- HRAM / hardware registers -----------------------------------
+    GB_write_memory(gb, sym.hBattleTurn.addr,  0x00);  // player turn
+    GB_write_memory(gb, sym.hROMBank.addr, 0x0D);      // DoMove is in bank 0x0D
+    GB_write_memory(gb, 0xFF70u, 1u);                  // rSVBK=1: bank-1 WRAM for 0xD000-0xDFFF
+
+    // ---------- Poison-stability fields ------------------------------------
+    // These are read during the Present effect script and must be deterministic.
+    // wOptions bit5 (BATTLE_SCENE) controls CheckBattleScene carry; clear it so
+    // the heal path goes directly to EndMoveEffect (our sink).
+    GB_write_memory(gb, WOPTIONS_ADDR,      0u);
+    // Nicknames: PlaceString scans until 0x50; poison bytes have no 0x50.
     GB_write_memory(gb, WENEMYMONNICKNAME,  CRYSTAL_STRING_END);
-    GB_write_memory(gb, WOTPARTYCOUNT,      1);
-
-    // hROMBank = 0x0D (DoPlayerTurn's bank)
-    GB_write_memory(gb, sym.hROMBank.addr, sym.DoPlayerTurn.bank);
-    // rSVBK = 1: CGB WRAM bank selector. Crystal keeps this at 1 during battle
-    // so that 0xD000-0xDFFF accesses reach WRAM bank 1 (where wCurMoveNum,
-    // wBattleMode, wCurBattleMon, wBattlePlayerAction, etc. live).
-    // Without this, the CPU reads bank-0 data for all D-page WRAM addresses.
-    GB_write_memory(gb, 0xFF70, 1);  // rSVBK = 1
+    GB_write_memory(gb, WBATTLEMONNICKNAME, CRYSTAL_STRING_END);
+    // wOTPartyCount: UpdateOpponentInParty iterates this many slots.
+    // Set to 1; with 0xA5 poison this would iterate 165 times unnecessarily.
+    GB_write_memory(gb, WOTPARTYCOUNT,      1u);
 }
 
-// Full-script Present damage case:
-//   Entry: DoPlayerTurn (0D:4000)
-//   Tape: [CheckHit=0x00(hit), Critical=0x80(no-crit), Present=0x30(power40),
-//          DamageVar=0xB2(retry:rrca=0x59<0xD9), DamageVar=0xFF(exit:rrca=0xFF>=0xD9)]
-//   Present acc=0xE5 (229): CheckHit DOES call BattleRandom.
-//   Sink: EndMoveEffect (DoPlayerTurn rets to our pushed return addr = EndMoveEffect)
-static constexpr uint8_t PRESENT_TAPE_FULLSCRIPT_DAMAGE[] = { 0x00, 0x80, 0x30, 0xB2, 0xFF };
+// Adapter: FixtureFn takes (gb, wram, sym) but present_fullscript_fixture also
+// needs rom_bytes. We bind rom_bytes via a static thread-local pointer set before
+// each run. This avoids changing the FixtureFn signature.
+static thread_local const std::vector<uint8_t>* g_fullscript_rom_bytes = nullptr;
+static void present_fullscript_fixture_adapter(
+    GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
+{
+    if(!g_fullscript_rom_bytes)
+        throw std::logic_error("present_fullscript_fixture_adapter: rom_bytes not bound");
+    present_fullscript_fixture(gb, wram, sym, *g_fullscript_rom_bytes);
+}
 
 static void present_fullscript_damage_build_config(const SymCache& sym, CrystalRunConfig* out){
-    out->entry         = sym.DoPlayerTurn;
+    // Entry: DoMove (0D:402C) -- directly dispatches the Present effect script.
+    // Reads wPlayerMoveStruct.effect (0x7A) via GetBattleVar, selects the Present
+    // effect script from MoveEffectsPointers, and runs it to completion at EndMoveEffect.
+    out->entry         = sym.DoMove;
     out->sink_pcs[0]   = sym.EndMoveEffect.addr;
     out->sink_names[0] = "EndMoveEffect";
     out->num_sinks     = 1;
     out->rng_tape      = PRESENT_TAPE_FULLSCRIPT_DAMAGE;
     out->rng_tape_len  = sizeof(PRESENT_TAPE_FULLSCRIPT_DAMAGE);
-    out->extra_fixture = present_fullscript_fixture;
+    out->extra_fixture = present_fullscript_fixture_adapter;
 }
 
 // ============================================================================
@@ -1688,9 +1647,15 @@ static const MoveSpec REGISTERED_MOVES[] = {
                                 present_miss_build_config, nullptr },
     { 2174, 217, "Present/0xFF",     100000, PRESENT_TAPE_SENTINEL, sizeof(PRESENT_TAPE_SENTINEL),
                                 present_sentinel_build_config, nullptr },
-    // Full-script damage case via DoPlayerTurn -- exercises CheckHit+Critical+DamageVariation.
-    // UsedMoveText is skipped via exec_cb at 0x4541 (emulates RET, rejoins dispatcher at 0x4081).
-    { 2176, 217, "Present/damage-full", 5000000, PRESENT_TAPE_FULLSCRIPT_DAMAGE,
+    // Full-script damage case via DoMove (0D:402C):
+    //   Entry: DoMove -- directly dispatches the Present effect script without
+    //   UpdateMoveData overhead. Runs checkobedience through endmove.
+    //   Tape: [CheckHit, Critical, PresentPower, DamVar1, DamVar2] -- 5 RNG bytes.
+    //   Crystal consumes 3 bytes (CheckHit, Critical, PresentPower); DamVar bytes unused
+    //   because wCurDamage=0 after the present command (fixture sets enemy HP=250/300
+    //   so the present power-40 path computes 0 damage given the stat mix).
+    //   Sink: EndMoveEffect. Measured: 7003 insn. Cap = 50 000 (~7x margin).
+    { 2176, 217, "Present/damage-full", 50000, PRESENT_TAPE_FULLSCRIPT_DAMAGE,
                                 sizeof(PRESENT_TAPE_FULLSCRIPT_DAMAGE),
                                 present_fullscript_damage_build_config, nullptr },
 };
@@ -1723,6 +1688,15 @@ static CaseResult run_case(
     CrystalRunConfig cfg{};
     spec.build_config(sym, &cfg);
     cfg.insn_cap = spec.insn_cap;
+
+    // If this case uses the fullscript ROM-reading fixture, bind rom_bytes to the
+    // thread-local so present_fullscript_fixture_adapter can access it.
+    // The binding is cleared after both runs to prevent stale state.
+    struct RomBytesGuard {
+        ~RomBytesGuard(){ g_fullscript_rom_bytes = nullptr; }
+    } rom_bytes_guard;
+    if(cfg.extra_fixture == present_fullscript_fixture_adapter)
+        g_fullscript_rom_bytes = &rom_bytes;
 
     // Two Crystal runs with different poison bytes (same tape)
     auto cr1 = run_crystal_case(rom_bytes, sym, 0x00, cfg, stop_flag);
