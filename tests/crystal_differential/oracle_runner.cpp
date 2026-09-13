@@ -1523,7 +1523,7 @@ static std::optional<EngineSnapshot> run_enginemon_case(
 // ============================================================================
 // Case result
 // ============================================================================
-enum class Status { MATCH, ENGINEMON_MISMATCH, HARNESS_ERROR };
+enum class Status { MATCH, ENGINEMON_MISMATCH, ENGINEMON_UNSUPPORTED, HARNESS_ERROR };
 
 struct CaseResult {
     uint16_t    move_id;
@@ -2554,7 +2554,10 @@ static CaseResult run_case(
     // Enginemon run with the same tape
     auto eng = run_enginemon_case(spec.engine_id, ed, spec.rng_tape, spec.rng_tape_len);
     if(!eng){
-        r.detail = "Enginemon run failed (move not supported or data error)";
+        // Crystal execution completed (has_crystal=true, poison-stable verified above).
+        // Enginemon cannot compute this move — not a harness failure.
+        r.status  = Status::ENGINEMON_UNSUPPORTED;
+        r.detail  = "Enginemon does not support this move (effect not implemented)";
         return r;
     }
     r.has_engine = true;
@@ -2732,8 +2735,8 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
             "  " << prog << " crystal.gbc pokecrystal11.sym --move 217\n\n"
             "Exit codes:\n"
             "  0  all MATCH\n"
-            "  1  ENGINEMON_MISMATCH\n"
-            "  2  HARNESS_ERROR (takes precedence over 1)\n"
+            "  1  ENGINEMON_MISMATCH or ENGINEMON_UNSUPPORTED\n"
+            "  2  HARNESS_ERROR (Crystal oracle untrustworthy; takes precedence over 1)\n"
             "  3  invalid CLI / unregistered move\n";
         return EXIT_ALL_MATCH;
     }
@@ -2899,7 +2902,7 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
 
     std::vector<std::string> error_lines;
     std::mutex out_mutex;
-    int n_match=0, n_mismatch=0, n_error=0;
+    int n_match=0, n_mismatch=0, n_unsupported=0, n_error=0;
 
     for(size_t i=0; i<n; i++){
         const auto& r = results[i];
@@ -2921,8 +2924,15 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
                 line << "    rng_trace:\n" << fmt_rng_trace(r.crystal_res.rng_trace);
             }
         } else {
-            const char* cls   = (r.status==Status::ENGINEMON_MISMATCH) ? "ENGINEMON_MISMATCH" : "HARNESS_ERROR";
-            const char* subsys = (r.status==Status::HARNESS_ERROR) ? "ORACLE" : "BATTLE";
+            const char* cls;
+            const char* subsys;
+            if(r.status == Status::ENGINEMON_MISMATCH){
+                cls = "ENGINEMON_MISMATCH"; subsys = "BATTLE";
+            } else if(r.status == Status::ENGINEMON_UNSUPPORTED){
+                cls = "ENGINEMON_UNSUPPORTED"; subsys = "BATTLE";
+            } else {
+                cls = "HARNESS_ERROR"; subsys = "ORACLE";
+            }
             int cerr_n = error_nums[i];
 
             if(!r.detail.empty() && r.status==Status::ENGINEMON_MISMATCH){
@@ -2957,7 +2967,10 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
                     line << "    Crystal player_hp=" << r.crystal_res.player_hp
                          << "  enemy_hp=" << r.crystal_res.enemy_hp << "\n";
                 }
-                if(r.has_engine){
+                if(r.status == Status::ENGINEMON_UNSUPPORTED){
+                    line << "    Enginemon rng_trace: N/A (unsupported)\n";
+                    line << "    Enginemon rng_bytes: N/A\n";
+                } else if(r.has_engine){
                     line << "    Enginemon rng_trace:\n" << fmt_eng_rng_trace(r.engine_res.rng_trace);
                     line << "    Enginemon rng_bytes=" << r.engine_res.rng_bytes_consumed << "\n";
                     line << "    Enginemon player_hp=" << r.engine_res.player_hp
@@ -2969,9 +2982,10 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
         { std::lock_guard<std::mutex> lk(out_mutex); std::cout << line.str(); }
 
         switch(r.status){
-        case Status::MATCH:              ++n_match;    break;
-        case Status::ENGINEMON_MISMATCH: ++n_mismatch; break;
-        case Status::HARNESS_ERROR:      ++n_error;    break;
+        case Status::MATCH:                ++n_match;      break;
+        case Status::ENGINEMON_MISMATCH:   ++n_mismatch;   break;
+        case Status::ENGINEMON_UNSUPPORTED:++n_mismatch; ++n_unsupported; break;  // severity 1
+        case Status::HARNESS_ERROR:        ++n_error;      break;
         }
     }
 
@@ -2979,10 +2993,11 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
     int ms=(int)std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0).count();
 
     std::cout << "\n=== Summary ===\n";
-    std::cout << "  MATCH:              " << n_match    << "\n";
-    std::cout << "  ENGINEMON_MISMATCH: " << n_mismatch << "\n";
-    std::cout << "  HARNESS_ERROR:      " << n_error    << "\n";
-    std::cout << "  Total:              " << n          << "\n";
+    std::cout << "  MATCH:                  " << n_match       << "\n";
+    std::cout << "  ENGINEMON_MISMATCH:     " << (n_mismatch - n_unsupported) << "\n";
+    std::cout << "  ENGINEMON_UNSUPPORTED:  " << n_unsupported << "\n";
+    std::cout << "  HARNESS_ERROR:          " << n_error       << "\n";
+    std::cout << "  Total:                  " << n             << "\n";
     std::cout << "  Time:               " << ms << " ms  (" << jobs << " job" << (jobs==1?"":"s") << ")\n";
     if(!error_lines.empty()){
         std::cout << "\nErrors:\n";
