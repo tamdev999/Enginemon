@@ -326,6 +326,11 @@ struct SymCache {
     Sym wBattleWeather;          // 00:C70A
     Sym wPlayerScreens;          // 00:C6FF
     Sym wEnemyScreens;           // 00:C700
+    // Return/Frustration happiness power
+    Sym wBattleMonHappiness;     // 00:C638
+    // Obedience OT-ID check
+    Sym wPlayerID;               // 01:D47B (2 bytes)
+    Sym wPartyMon1ID;            // 01:DCE5 (2 bytes = Trainer ID of party slot 0)
 
     static std::string load(const std::string& sym_path, SymCache* out,
                              std::string* sym_sha_out = nullptr)
@@ -437,6 +442,9 @@ struct SymCache {
             {"wBattleWeather",                 &out->wBattleWeather},
             {"wPlayerScreens",                 &out->wPlayerScreens},
             {"wEnemyScreens",                  &out->wEnemyScreens},
+            {"wBattleMonHappiness",            &out->wBattleMonHappiness},
+            {"wPlayerID",                      &out->wPlayerID},
+            {"wPartyMon1ID",                   &out->wPartyMon1ID},
         };
         for(const auto& r : required)
             if(!sym_get(sym_path,r.name,r.dst))
@@ -913,7 +921,17 @@ static void fixture_common(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
         wram[wram_off(sym.wBattleMonType2.addr)] = 0x00;
         wram[wram_off(sym.wEnemyMonType1.addr)]  = 0x00;
         wram[wram_off(sym.wEnemyMonType2.addr)]  = 0x00;
+        // Happiness: used by Return/Frustration damage formula; Enginemon sets 200
+        wram[wram_off(sym.wBattleMonHappiness.addr)] = 200;
     }
+    // Obedience OT-ID: both wPlayerID and wPartyMon1ID set to 0x0001 so
+    // BattleCommand_CheckObedience exits at the OT-match check (ret z) without
+    // consuming RNG or disrupting the effect script. wInBattleTowerBattle=0
+    // is the normal (non-Battle-Tower) code path.
+    GB_write_memory(gb, sym.wPlayerID.addr,     0x00); // OT ID high byte
+    GB_write_memory(gb, sym.wPlayerID.addr + 1, 0x01); // OT ID low byte → wPlayerID = 0x0001
+    GB_write_memory(gb, sym.wPartyMon1ID.addr,     0x00); // matches wPlayerID
+    GB_write_memory(gb, sym.wPartyMon1ID.addr + 1, 0x01);
 }
 
 struct CrystalRunConfig {
@@ -1287,6 +1305,23 @@ static CrystalRunResult run_crystal_case(
                     emulate_ret(r, "AnimateFailedMove(0D:7E77)");
                     did_skip = true;
                 }
+            }
+            // BattleCommand_MoveAnim (0D:4F57) — script command for move animation.
+            // Calls BattleCommand_LowerSub, PlayUserBattleAnim (bank 0x33 via callfar),
+            // BattleCommand_RaiseSub. Pure presentation; no battle state written.
+            // The callfar PlayBattleAnim path (bank 0x33) calls display hardware and
+            // does not converge via WaitBGMap alone — skipping the whole command here
+            // is cleaner and equivalent to skipping at WaitBGMap depth.
+            else if(pc == 0x4F57 && bank == 0x0D){
+                emulate_ret(r, "BattleCommand_MoveAnim(0D:4F57)");
+                did_skip = true;
+            }
+            // BattleCommand_MoveDelay (0D:7E80) — delay 40 frames between HP bar anim.
+            // Does `jp DelayFrames`; DelayFrames is already in our skip list via 0x0468.
+            // Pre-step skip here avoids the JP dispatch overhead.
+            else if(pc == 0x7E80 && bank == 0x0D){
+                emulate_ret(r, "BattleCommand_MoveDelay(0D:7E80)");
+                did_skip = true;
             }
 
             if(exec_ctx.triggered) break; // emulate_ret set HARNESS_ERROR
@@ -1742,6 +1777,154 @@ static void present_sentinel_build_config(const SymCache& sym, CrystalRunConfig*
 }
 
 // ============================================================================
+// Generic full-script fixture (DoMove entry, any move)
+//
+// Forward declarations of ROM-reading helpers defined later in this file.
+// ============================================================================
+static constexpr uint32_t CRYSTAL_MOVES_TABLE_FLAT_DECL = 0x10u*0x4000u + (0x5AFBu - 0x4000u);
+static constexpr uint32_t CRYSTAL_MOVE_DATA_SIZE_DECL   = 7u;
+static inline void rom_populate_player_move_struct_fwd(
+    const std::vector<uint8_t>& rom_bytes,
+    uint8_t* wram, const SymCache& sym, uint16_t move_id)
+{
+    const uint32_t offset = CRYSTAL_MOVES_TABLE_FLAT_DECL + (uint32_t)(move_id-1)*CRYSTAL_MOVE_DATA_SIZE_DECL;
+    if(offset + CRYSTAL_MOVE_DATA_SIZE_DECL > rom_bytes.size())
+        throw std::logic_error("rom_populate_player_move_struct_fwd: ROM offset out of bounds");
+    for(uint32_t i=0; i<CRYSTAL_MOVE_DATA_SIZE_DECL; ++i)
+        wram[wram_off((uint16_t)(sym.wPlayerMoveStruct.addr + i))] = rom_bytes[offset + i];
+}
+//
+// Configures the minimum WRAM state for DoMove to dispatch a move's complete
+// effect script. Move-neutral: no Present-specific fields. Reads wPlayerMoveStruct
+// from ROM. The move ID and PP are passed via thread-locals bound by run_case.
+//
+// CheckObedience passes via OT-ID match (wPlayerID == wPartyMon1ID from fixture_common).
+// No BattleTower bypass used.
+// ============================================================================
+static thread_local uint16_t g_generic_move_id = 0;
+static thread_local uint8_t  g_generic_pp      = 0;
+
+static void generic_fullscript_fixture(
+    GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym,
+    const std::vector<uint8_t>& rom_bytes,
+    uint16_t move_id, uint8_t pp)
+{
+    auto be16=[](uint8_t* d, uint16_t v){ d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF); };
+
+    // wPlayerMoveStruct from ROM (all 7 bytes: anim, effect, power, type, acc, pp, chance)
+    rom_populate_player_move_struct_fwd(rom_bytes, wram, sym, move_id);
+
+    // Move identity
+    wram[wram_off(sym.wCurPlayerMove.addr)]    = (uint8_t)(move_id & 0xFF);
+    wram[wram_off(sym.wBattleMonMoves.addr)]   = (uint8_t)(move_id & 0xFF);
+    wram[wram_off(sym.wBattleMonMoves.addr)+1] = 0;
+    wram[wram_off(sym.wBattleMonMoves.addr)+2] = 0;
+    wram[wram_off(sym.wBattleMonMoves.addr)+3] = 0;
+    wram[wram_off(sym.wCurMoveNum.addr)]       = 0;
+    wram[wram_off(sym.wCurBattleMon.addr)]     = 0;
+
+    // PP
+    wram[wram_off(sym.wBattleMonPP.addr)]   = pp;
+    wram[wram_off(sym.wBattleMonPP.addr)+1] = 0;
+    wram[wram_off(sym.wBattleMonPP.addr)+2] = 0;
+    wram[wram_off(sym.wBattleMonPP.addr)+3] = 0;
+    wram[wram_off(sym.wPartyMon1PP.addr)]   = pp;
+    wram[wram_off(sym.wPartyMon1PP.addr)+1] = 0;
+    wram[wram_off(sym.wPartyMon1PP.addr)+2] = 0;
+    wram[wram_off(sym.wPartyMon1PP.addr)+3] = 0;
+    wram[wram_off(sym.wWildMonPP.addr)]     = pp;  // enemy (WILD mode)
+    wram[wram_off(sym.wWildMonMoves.addr)]  = 0;
+    wram[wram_off(sym.wPartyCount.addr)]    = 1;
+
+    // Battle mode
+    wram[wram_off(sym.wBattleMode.addr)]            = 1;  // WILD_BATTLE
+    wram[wram_off(sym.wLinkMode.addr)]              = 0;
+    wram[wram_off(sym.wInBattleTowerBattle.addr)]   = 0;  // normal — OT-ID match handles obedience
+
+    // Species / items (Bulbasaur = 1, no item)
+    wram[wram_off(sym.wBattleMonSpecies.addr)] = 1;
+    wram[wram_off(sym.wEnemyMonSpecies.addr)]  = 1;
+    wram[wram_off(sym.wBattleMonItem.addr)]    = 0;
+    wram[wram_off(sym.wEnemyMonItem.addr)]     = 0;
+
+    // Status and substatus (all clear)
+    wram[wram_off(sym.wBattleMonStatus.addr)]    = 0;
+    wram[wram_off(sym.wEnemyMonStatus.addr)]     = 0;
+    wram[wram_off(sym.wPlayerSubStatus1.addr)]   = 0;
+    wram[wram_off(0xC669u)]                      = 0;  // wPlayerSubStatus2
+    wram[wram_off(sym.wPlayerSubStatus3.addr)]   = 0;
+    wram[wram_off(sym.wPlayerSubStatus4.addr)]   = 0;
+    wram[wram_off(sym.wPlayerSubStatus5.addr)]   = 0;
+    wram[wram_off(0xC66Du)]                      = 0;  // wEnemySubStatus1
+    wram[wram_off(0xC66Eu)]                      = 0;  // wEnemySubStatus2
+    wram[wram_off(sym.wEnemySubStatus3.addr)]    = 0;
+    wram[wram_off(sym.wEnemySubStatus4.addr)]    = 0;
+    wram[wram_off(sym.wEnemySubStatus5.addr)]    = 0;
+    wram[wram_off(sym.wPlayerDisableCount.addr)] = 0;
+    wram[wram_off(sym.wDisabledMove.addr)]       = 0;
+    wram[wram_off(sym.wPlayerCharging.addr)]     = 0;
+    wram[wram_off(sym.wEnemyCharging.addr)]      = 0;
+    wram[wram_off(sym.wTurnEnded.addr)]          = 0;
+    wram[wram_off(sym.wAlreadyDisobeyed.addr)]   = 0;
+
+    // Misc state
+    wram[wram_off(sym.wPlayerTurnsTaken.addr)]   = 0;
+    wram[wram_off(sym.wEnemyTurnsTaken.addr)]    = 0;
+    wram[wram_off(sym.wAttackMissed.addr)]       = 0;
+    wram[wram_off(sym.wCriticalHit.addr)]        = 0;
+    wram[wram_off(sym.wTypeMatchup.addr)]        = 0x10;  // EFFECTIVE (1×)
+    wram[wram_off(sym.wBattleWeather.addr)]      = 0;
+    wram[wram_off(sym.wPlayerScreens.addr)]      = 0;
+    wram[wram_off(sym.wEnemyScreens.addr)]       = 0;
+    wram[wram_off(sym.wBattleAnimParam.addr)]    = 0;
+    wram[wram_off(sym.wEnemyMoveStruct.addr)+3]  = 0xFF;  // enemy acc byte
+
+    // Stats and levels are set by fixture_common.
+    // Types: Normal/Normal set by fixture_common.
+    // HP/MaxHP set by fixture_common (P_HP=300, E_HP=300).
+    // Happiness set by fixture_common (200) — used by Return/Frustration.
+    // OT-ID match set by fixture_common (wPlayerID == wPartyMon1ID = 0x0001).
+
+    // HRAM
+    GB_write_memory(gb, sym.hBattleTurn.addr, 0x00);   // player's turn
+    GB_write_memory(gb, sym.hROMBank.addr, 0x0D);       // DoMove in bank 0x0D
+    GB_write_memory(gb, 0xFF70u, 1u);                   // rSVBK=1 for 0xD000-0xDFFF
+
+    // Poison-stability fields
+    GB_write_memory(gb, 0xCFCCu, 0u);  // wOptions: bit5=BATTLE_SCENE clear
+    GB_write_memory(gb, 0xC616u, 0x50); // wEnemyMonNickname: null-terminated
+    GB_write_memory(gb, 0xC621u, 0x50); // wBattleMonNickname: null-terminated
+    GB_write_memory(gb, 0xD280u, 1u);   // wOTPartyCount = 1
+}
+
+static thread_local const std::vector<uint8_t>* g_generic_rom_bytes_ptr = nullptr;
+static void generic_fullscript_fixture_adapter(
+    GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
+{
+    if(!g_generic_rom_bytes_ptr)
+        throw std::logic_error("generic_fullscript_fixture_adapter: rom_bytes not bound");
+    if(!g_generic_move_id)
+        throw std::logic_error("generic_fullscript_fixture_adapter: move_id not set");
+    generic_fullscript_fixture(gb, wram, sym, *g_generic_rom_bytes_ptr,
+                               g_generic_move_id, g_generic_pp);
+}
+
+// Generic full-script build config: DoMove entry, EndMoveEffect sink, generic fixture.
+static void generic_fullscript_config(const SymCache& sym, CrystalRunConfig* out,
+                                       uint16_t engine_move_id,
+                                       const uint8_t* tape, size_t tape_len)
+{
+    out->entry         = sym.DoMove;
+    out->sink_pcs[0]   = sym.EndMoveEffect.addr;
+    out->sink_names[0] = "EndMoveEffect";
+    out->num_sinks     = 1;
+    out->rng_tape      = tape;
+    out->rng_tape_len  = tape_len;
+    out->extra_fixture = generic_fullscript_fixture_adapter;
+    out->engine_move_id= engine_move_id;
+}
+
+// ============================================================================
 // Full-script Present fixture (DoMove entry)
 //
 // Entry: DoMove (0D:402C)
@@ -1760,8 +1943,9 @@ static void present_sentinel_build_config(const SymCache& sym, CrystalRunConfig*
 //   to populate wStringBuffer1/2. In a cold-fixture environment this causes the
 //   script dispatch loop to malfunction (script pointer resets).
 //
-// wPlayerMoveStruct: populated from ROM (effect=0x7A guaranteed). Animation byte
-//   is overridden to 0 so PlayDamageAnim returns immediately (AND A; RET Z).
+// wPlayerMoveStruct: populated from ROM via rom_populate_player_move_struct().
+// Animation byte is the ROM value (0xD9 for Present); PlayDamageAnim is handled
+// by the pre-step skip at PlayDamageAnim (0D:7E19).
 //
 // RNG tape (5 bytes):
 //   [0] 0x00 = CheckHit  (acc=0xE5=229, hit)
@@ -1848,7 +2032,9 @@ static void present_fullscript_fixture(
     // ---------- Battle mode / action ----------------------------------------
     wram[wram_off(sym.wBattleMode.addr)]            = 1;    // WILD_BATTLE
     wram[wram_off(sym.wLinkMode.addr)]              = 0;    // MUST be 0 (RNG intercept)
-    wram[wram_off(sym.wInBattleTowerBattle.addr)]   = 1;    // bypass CheckObedience
+    // wInBattleTowerBattle = 0: normal battle (not Battle Tower).
+    // CheckObedience passes via OT-ID match (wPlayerID == wPartyMon1ID, set in fixture_common).
+    wram[wram_off(sym.wInBattleTowerBattle.addr)]   = 0;
 
     // ---------- Species and items -------------------------------------------
     // Bulbasaur (1): no Pikachu/Marowak special crit items. item=0 = no item.
@@ -2044,6 +2230,42 @@ static void present_fullscript_crit_build_config(const SymCache& sym, CrystalRun
 }
 
 // ============================================================================
+// Batch 1: Recover, PainSplit, Return, Reversal
+//
+// All use generic_fullscript_config (DoMove entry, EndMoveEffect sink).
+// RNG notes:
+//   Recover  (ID 105, EFFECT_HEAL=0x20): no BattleRandom.
+//   PainSplit (ID 220, EFFECT_PAIN_SPLIT=0x5B): checkhit with acc=0xFF →
+//     cp -1; jr z, .Hit — no BattleRandom consumed.
+//   Return    (ID 216, EFFECT_RETURN=0x79): critical (1 byte), damagevariation
+//     (1 byte, chosen so rrca(b)>=86: 0xB2→rrca=0x59=89 ✓).
+//   Reversal  (ID 179, EFFECT_REVERSAL=0x63): checkhit acc=0xFF → no BattleRandom.
+//     constantdamage reads HP ratio, no RNG. moveanimnosub → display, skipped.
+//
+// Return happiness power: happiness=200 (from fixture_common), power=200*10/25=80.
+// Both Crystal and Enginemon set happiness=200 so they agree on Return power.
+// ============================================================================
+
+// Return: critical (1 byte) + damagevariation (2 bytes).
+// DamVar uses percent macro: 85 percent + 1 = 218 = 0xDA. Loop exits when rrca(b)>=218.
+//   0xB2 → rrca = 0x59 = 89 < 218 → LOOPS (consumes 2nd byte)
+//   0xFF → rrca = 0xFF = 255 >= 218 → EXIT (consumes 3rd byte)
+// Total: 3 RNG bytes.
+static constexpr uint8_t TAPE_RETURN[]    = { 0x80, 0xB2, 0xFF };
+
+static void recover_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 105, nullptr, 0); }
+
+static void painsplit_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 220, nullptr, 0); }
+
+static void return_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 216, TAPE_RETURN, sizeof(TAPE_RETURN)); }
+
+static void reversal_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 179, nullptr, 0); }
+
+// ============================================================================
 // Registered moves -- adding a move requires:
 //   1. Registering here with name, insn_cap, rng_tape, build_config
 //   2. build_config sets entry, sinks, rng_tape, extra_fixture
@@ -2093,6 +2315,22 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 2180, 217, "Present/crit-full",   50000, PRESENT_TAPE_FULLSCRIPT_CRIT,
                                 sizeof(PRESENT_TAPE_FULLSCRIPT_CRIT),
                                 present_fullscript_crit_build_config, nullptr },
+    // ========================================================================
+    // Batch 1: ordinary moves via DoMove full-script
+    // ========================================================================
+    // Recover (ID 105): EFFECT_HEAL. Script: checkobedience usedmovetext doturn heal endmove.
+    // No RNG. Heal restores half of player's max HP.
+    { 105,  105, "Recover",        100000, nullptr, 0, recover_config,   nullptr },
+    // PainSplit (ID 220): EFFECT_PAIN_SPLIT. Script: checkobedience usedmovetext doturn checkhit painsplit endmove.
+    // acc=0xFF → automatic hit, no BattleRandom. PainSplit averages HP between user and target.
+    { 220,  220, "PainSplit",      100000, nullptr, 0, painsplit_config, nullptr },
+    // Return (ID 216): EFFECT_RETURN. Script: checkobedience usedmovetext doturn critical damagestats happinesspower damagecalc stab damagevariation checkhit moveanim failuretext applydamage criticaltext supereffectivetext checkfaint buildopponentrage kingsrock endmove.
+    // 3 RNG bytes: critical (0x80=no-crit), damagevariation (0xB2→rrca=89<218 LOOP, 0xFF→rrca=255>=218 EXIT).
+    // Return power = happiness*10/25 = 200*10/25 = 80. acc=0xFF → automatic hit.
+    { 216,  216, "Return",         100000, TAPE_RETURN, sizeof(TAPE_RETURN), return_config,   nullptr },
+    // Reversal (ID 179): EFFECT_REVERSAL. Script: checkobedience usedmovetext doturn constantdamage stab checkhit moveanim failuretext applydamage supereffectivetext checkfaint buildopponentrage kingsrock endmove.
+    // No RNG. acc=0xFF → automatic hit. Damage = current_hp * 48 / max_hp (approx 8 at 300/300).
+    { 179,  179, "Reversal",       100000, nullptr, 0, reversal_config,  nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
@@ -2130,10 +2368,20 @@ static CaseResult run_case(
     // thread-local so present_fullscript_fixture_adapter can access it.
     // The binding is cleared after both runs to prevent stale state.
     struct RomBytesGuard {
-        ~RomBytesGuard(){ g_fullscript_rom_bytes = nullptr; }
+        ~RomBytesGuard(){
+            g_fullscript_rom_bytes   = nullptr;
+            g_generic_rom_bytes_ptr  = nullptr;
+            g_generic_move_id        = 0;
+            g_generic_pp             = 0;
+        }
     } rom_bytes_guard;
     if(cfg.extra_fixture == present_fullscript_fixture_adapter)
         g_fullscript_rom_bytes = &rom_bytes;
+    if(cfg.extra_fixture == generic_fullscript_fixture_adapter){
+        g_generic_rom_bytes_ptr = &rom_bytes;
+        g_generic_move_id       = cfg.engine_move_id;
+        g_generic_pp            = P_PP; // ROM-proven PP; all batch moves use this baseline
+    }
 
     // Two Crystal runs with different poison bytes (same tape)
     auto cr1 = run_crystal_case(rom_bytes, sym, 0x00, cfg, stop_flag);
