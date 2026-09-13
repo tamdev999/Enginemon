@@ -291,6 +291,33 @@ struct SymCache {
     Sym wEnemyTurnsTaken;        // 00:C6DC
     Sym wBattlePlayerAction;     // 01:D0EC
     Sym wBattleAction;           // 01:D430
+    // Full-script (DoPlayerTurn) extra symbols -- only fields not already above
+    Sym DoPlayerTurn;            // 0D:4000
+    Sym wPartyMon1PP;            // 01:DCF6
+    Sym wPartyCount;             // 01:DCD7
+    Sym wWildMonPP;              // 00:C739
+    Sym wWildMonMoves;           // 00:C735
+    Sym wPlayerSubStatus1;       // 00:C668
+    Sym wPlayerSubStatus4;       // 00:C66B
+    Sym wPlayerSubStatus5;       // 00:C66C
+    Sym wEnemySubStatus4;        // 00:C670 (bank 0)
+    Sym wEnemySubStatus5;        // 00:C671 (bank 0)
+    Sym wPlayerDisableCount;     // 00:C675
+    Sym wDisabledMove;           // 00:C6F5
+    Sym wPlayerCharging;         // 00:C732
+    Sym wEnemyCharging;          // 00:C733
+    Sym wAlreadyDisobeyed;       // 00:C6F4
+    Sym wEnemyMoveStruct;        // 00:C608
+    Sym wEnemyMonDefense;        // 01:D21C
+    Sym wEnemyMonSpclDef;        // 01:D222
+    Sym wEnemyMonSpclAtk;        // 01:D220
+    Sym wPlayerAttack;           // 00:C6B6
+    Sym wPlayerSpAtk;            // 00:C6BC
+    Sym wEnemyDefense;           // 00:C6C3
+    Sym wEnemySpDef;             // 00:C6C9
+    Sym wBattleWeather;          // 00:C70A
+    Sym wPlayerScreens;          // 00:C6FF
+    Sym wEnemyScreens;           // 00:C700
 
     static std::string load(const std::string& sym_path, SymCache* out,
                              std::string* sym_sha_out = nullptr)
@@ -369,6 +396,38 @@ struct SymCache {
             {"wEnemyTurnsTaken",               &out->wEnemyTurnsTaken},
             {"wBattlePlayerAction",            &out->wBattlePlayerAction},
             {"wBattleAction",                  &out->wBattleAction},
+            // Full-script extras
+            {"DoPlayerTurn",                   &out->DoPlayerTurn},
+            {"wPartyMon1PP",                   &out->wPartyMon1PP},
+            {"wPartyCount",                    &out->wPartyCount},
+            {"wBattleMode",                    &out->wBattleMode},
+            {"wBattleMonMoves",                &out->wBattleMonMoves},
+            {"wBattleMonPP",                   &out->wBattleMonPP},
+            {"wCurMoveNum",                    &out->wCurMoveNum},
+            {"wCurBattleMon",                  &out->wCurBattleMon},
+            {"wWildMonPP",                     &out->wWildMonPP},
+            {"wWildMonMoves",                  &out->wWildMonMoves},
+            {"wPlayerSubStatus1",              &out->wPlayerSubStatus1},
+            {"wPlayerSubStatus4",              &out->wPlayerSubStatus4},
+            {"wPlayerSubStatus5",              &out->wPlayerSubStatus5},
+            {"wEnemySubStatus4",               &out->wEnemySubStatus4},
+            {"wEnemySubStatus5",               &out->wEnemySubStatus5},
+            {"wPlayerDisableCount",            &out->wPlayerDisableCount},
+            {"wDisabledMove",                  &out->wDisabledMove},
+            {"wPlayerCharging",                &out->wPlayerCharging},
+            {"wEnemyCharging",                 &out->wEnemyCharging},
+            {"wAlreadyDisobeyed",              &out->wAlreadyDisobeyed},
+            {"wEnemyMoveStruct",               &out->wEnemyMoveStruct},
+            {"wEnemyMonDefense",               &out->wEnemyMonDefense},
+            {"wEnemyMonSpclDef",               &out->wEnemyMonSpclDef},
+            {"wEnemyMonSpclAtk",               &out->wEnemyMonSpclAtk},
+            {"wPlayerAttack",                  &out->wPlayerAttack},
+            {"wPlayerSpAtk",                   &out->wPlayerSpAtk},
+            {"wEnemyDefense",                  &out->wEnemyDefense},
+            {"wEnemySpDef",                    &out->wEnemySpDef},
+            {"wBattleWeather",                 &out->wBattleWeather},
+            {"wPlayerScreens",                 &out->wPlayerScreens},
+            {"wEnemyScreens",                  &out->wEnemyScreens},
         };
         for(const auto& r : required)
             if(!sym_get(sym_path,r.name,r.dst))
@@ -503,6 +562,75 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
                                    BATTLE_RANDOM_RESULT_READ_PC, "BattleRandom"});
             ++rng->tape_idx;
         }
+    }
+
+    // BattleCommand_UsedMoveText skip (0D:4541)
+    //
+    // Control flow when DoMove dispatches UsedMoveText:
+    //   call .DoMoveEffectCommand      ; at 0D:407E, pushes return addr = 0D:4081
+    //   jr   .ReadMoveEffectCommand    ; at 0D:4081 (2 bytes) -- this is the return addr
+    //   .DoMoveEffectCommand: jp hl    ; at 0D:4083 (1 byte) -- jumps to command handler
+    //
+    // So when BattleCommand_UsedMoveText begins at PC=0x4541, [SP] = 0x4081 (little-endian).
+    // We emulate one SM83 RET: read [SP],[SP+1] as the return PC, SP += 2, set PC.
+    // Fail-closed: if the popped address is not 0x4081, abort with HARNESS_ERROR marker.
+    //
+    // This skips all text rendering (BattleTextbox, PrintTextboxText, WaitBGMap,
+    // DelayFrames, VBlank waits) without modifying any battle state.
+    // UsedMoveText only prints "<Name> used PRESENT!" -- no gameplay writes.
+    static constexpr uint16_t USED_MOVE_TEXT_ENTRY_PC    = 0x4541;  // BattleCommand_UsedMoveText (0D)
+    static constexpr uint16_t DOMOVE_DISPATCHER_CONT_PC  = 0x4081;  // jr .ReadMoveEffectCommand (0D)
+    // Rendering/timing skips: all in bank 0 (always-mapped), all reached via `call` (not `jp hl`).
+    // Each is skipped by emulating one SM83 RET: SP += 2, PC = [SP-2]|([SP-1]<<8).
+    static constexpr uint16_t DELAY_FRAME_PC         = 0x045A;  // DelayFrame (VBlank wait)
+    static constexpr uint16_t DELAY_FRAMES_PC        = 0x0468;  // DelayFrames (loop)
+    static constexpr uint16_t BATTLE_TEXTBOX_PC      = 0x3AC3;  // BattleTextbox (character render)
+    static constexpr uint16_t STD_BATTLE_TEXTBOX_PC  = 0x3AD5;  // StdBattleTextbox
+    static constexpr uint16_t REFRESH_BATTLE_HUDS_PC = 0x39C9;  // RefreshBattleHuds (calls WaitBGMap)
+    auto do_ret_skip = [&](){
+        GB_registers_t* r = GB_get_registers(gb);
+        if(r){
+            // Read return address directly from SameBoy's internal HRAM buffer
+            // to avoid any potential issue with GB_safe_read_memory for stack addresses.
+            size_t hram_sz = 0; uint16_t hram_bank = 0;
+            uint8_t* hram = static_cast<uint8_t*>(
+                GB_get_direct_access(gb, GB_DIRECT_ACCESS_HRAM, &hram_sz, &hram_bank));
+            uint16_t lo_idx = (r->sp     - 0xFF80u) & 0x7Fu;
+            uint16_t hi_idx = (r->sp + 1 - 0xFF80u) & 0x7Fu;
+            uint8_t lo = hram ? hram[lo_idx] : GB_safe_read_memory(gb, r->sp);
+            uint8_t hi = hram ? hram[hi_idx] : GB_safe_read_memory(gb, r->sp + 1);
+            r->sp += 2;
+            r->pc = (uint16_t)(lo | (hi << 8));
+        }
+    };
+    if(pc == DELAY_FRAME_PC || pc == DELAY_FRAMES_PC ||
+       pc == BATTLE_TEXTBOX_PC || pc == STD_BATTLE_TEXTBOX_PC ||
+       pc == REFRESH_BATTLE_HUDS_PC){
+        do_ret_skip();
+        return;
+    }
+    // AnimateHPBar (03:46E0) -- bank-guarded skip to avoid aliasing with
+    // BattleCommand_Stab code in bank 0D at the same in-bank address.
+    if(pc == 0x46E0 && GB_safe_read_memory(gb, 0xFF9D) == 0x03){
+        do_ret_skip();
+        return;
+    }
+    if(pc == USED_MOVE_TEXT_ENTRY_PC){
+        GB_registers_t* regs = GB_get_registers(gb);
+        if(regs){
+            size_t hram_sz = 0; uint16_t hram_bank = 0;
+            uint8_t* hram = static_cast<uint8_t*>(
+                GB_get_direct_access(gb, GB_DIRECT_ACCESS_HRAM, &hram_sz, &hram_bank));
+            uint16_t lo_idx = (regs->sp     - 0xFF80u) & 0x7Fu;
+            uint16_t hi_idx = (regs->sp + 1 - 0xFF80u) & 0x7Fu;
+            uint8_t lo = hram ? hram[lo_idx] : GB_safe_read_memory(gb, regs->sp);
+            uint8_t hi = hram ? hram[hi_idx] : GB_safe_read_memory(gb, regs->sp + 1);
+            uint16_t ret = (uint16_t)(lo | (hi << 8));
+            // Validate: should be DOMOVE_DISPATCHER_CONT_PC (0x4081)
+            regs->sp += 2;
+            regs->pc = (ret == DOMOVE_DISPATCHER_CONT_PC) ? DOMOVE_DISPATCHER_CONT_PC : ret;
+        }
+        return;
     }
 
     // Sink detection
@@ -1190,6 +1318,186 @@ static void present_sentinel_build_config(const SymCache& sym, CrystalRunConfig*
 }
 
 // ============================================================================
+// Full-script Present fixture (DoPlayerTurn entry)
+//
+// Key decisions:
+//   wInBattleTowerBattle=1: BattleCommand_CheckObedience checks this and ret nz.
+//   wLinkMode=0 (MUST): _BattleRandom (0F:6DD8) does `jp z, Random` -- only when
+//     wLinkMode==0 does it reach the normal Random stub at 0x2FAD (our intercept).
+//     wLinkMode!=0 routes to the link-battle PRNG and the intercept never fires.
+//   wBattleMode=1 (WILD_BATTLE): BattleCommand_DoTurn uses wWildMonPP for enemy,
+//     skipping wOTPartyMon1PP sync. Safe for single-mon oracle fixture.
+//   wBattlePlayerAction=0: DoPlayerTurn checks this first; 0=USEMOVE, continues.
+//
+// Present ROM move data (from data/moves/moves.asm):
+//   move PRESENT, EFFECT_PRESENT, 1, NORMAL, 90, 15, 0
+//   struct: [anim, effect, power, type, acc%*255, pp, chance]
+//   acc = 90*255/100 = 229 = 0xE5 (NOT 0xFF -- CheckHit DOES call BattleRandom)
+// ============================================================================
+static constexpr uint16_t PRESENT_MOVE_ID_FS = 217;
+static constexpr uint8_t  CRYSTAL_STRING_END = 0x50;  // Crystal "@" string terminator
+static constexpr uint16_t WOPTIONS_ADDR      = 0xCFCC; // wOptions (CheckBattleScene reads bit5)
+static constexpr uint16_t WBATTLEMONNICKNAME = 0xC621; // 11 bytes, must be 0x50-terminated
+static constexpr uint16_t WENEMYMONNICKNAME  = 0xC616; // 11 bytes, must be 0x50-terminated
+static constexpr uint16_t WOTPARTYCOUNT      = 0xD280; // wOTPartyCount
+
+static void present_fullscript_fixture(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym){
+    auto be16=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
+
+    // Obedience bypass: wInBattleTowerBattle=1; wLinkMode MUST stay 0
+    wram[wram_off(sym.wInBattleTowerBattle.addr)] = 1;
+    wram[wram_off(sym.wLinkMode.addr)]            = 0;  // CRITICAL: keep 0
+
+    // Battle mode and player action
+    wram[wram_off(sym.wBattleMode.addr)]         = 1;  // WILD_BATTLE
+    wram[wram_off(sym.wBattlePlayerAction.addr)] = 0;  // USEMOVE
+
+    // Move slot and PP
+    wram[wram_off(sym.wCurMoveNum.addr)]           = 0;
+    wram[wram_off(sym.wBattleMonMoves.addr) + 0]   = (uint8_t)PRESENT_MOVE_ID_FS;
+    wram[wram_off(sym.wBattleMonMoves.addr) + 1]   = 0;
+    wram[wram_off(sym.wBattleMonMoves.addr) + 2]   = 0;
+    wram[wram_off(sym.wBattleMonMoves.addr) + 3]   = 0;
+    wram[wram_off(sym.wBattleMonPP.addr) + 0]      = 10;
+    wram[wram_off(sym.wBattleMonPP.addr) + 1]      = 0;
+    wram[wram_off(sym.wBattleMonPP.addr) + 2]      = 0;
+    wram[wram_off(sym.wBattleMonPP.addr) + 3]      = 0;
+
+    // Party data
+    wram[wram_off(sym.wPartyCount.addr)]          = 1;
+    wram[wram_off(sym.wPartyMon1PP.addr) + 0]     = 10;
+    wram[wram_off(sym.wPartyMon1PP.addr) + 1]     = 0;
+    wram[wram_off(sym.wPartyMon1PP.addr) + 2]     = 0;
+    wram[wram_off(sym.wPartyMon1PP.addr) + 3]     = 0;
+    wram[wram_off(sym.wCurBattleMon.addr)]        = 0;
+
+    // Wild enemy PP (wBattleMode=1 → DoTurn uses this for enemy PP)
+    wram[wram_off(sym.wWildMonPP.addr) + 0]   = 10;
+    wram[wram_off(sym.wWildMonPP.addr) + 1]   = 0;
+    wram[wram_off(sym.wWildMonPP.addr) + 2]   = 0;
+    wram[wram_off(sym.wWildMonPP.addr) + 3]   = 0;
+    wram[wram_off(sym.wWildMonMoves.addr)]     = 0;
+
+    // All substatus bytes clear (no confusion, flinch, attract, recharge, etc.)
+    wram[wram_off(sym.wBattleMonStatus.addr)]   = 0;
+    wram[wram_off(sym.wEnemyMonStatus.addr)]    = 0;
+    wram[wram_off(sym.wPlayerSubStatus1.addr)]  = 0;
+    wram[wram_off(sym.wPlayerSubStatus3.addr)]  = 0;
+    wram[wram_off(sym.wPlayerSubStatus4.addr)]  = 0;
+    wram[wram_off(sym.wPlayerSubStatus5.addr)]  = 0;
+    wram[wram_off(sym.wEnemySubStatus3.addr)]   = 0;
+    wram[wram_off(sym.wEnemySubStatus4.addr)]   = 0;
+    wram[wram_off(sym.wEnemySubStatus5.addr)]   = 0;
+    wram[wram_off(sym.wPlayerDisableCount.addr)]= 0;
+    wram[wram_off(sym.wDisabledMove.addr)]      = 0;
+    wram[wram_off(sym.wPlayerCharging.addr)]    = 0;
+    wram[wram_off(sym.wEnemyCharging.addr)]     = 0;
+    wram[wram_off(sym.wTurnEnded.addr)]         = 0;
+    wram[wram_off(sym.wAlreadyDisobeyed.addr)]  = 0;
+
+    // Species (no special crit items) and items
+    wram[wram_off(sym.wBattleMonSpecies.addr)] = 1;
+    wram[wram_off(sym.wEnemyMonSpecies.addr)]  = 1;
+    wram[wram_off(sym.wBattleMonItem.addr)]    = 0;
+    wram[wram_off(sym.wEnemyMonItem.addr)]     = 0;
+
+    // Levels
+    wram[wram_off(sym.wBattleMonLevel.addr)] = P_LEVEL;
+    wram[wram_off(sym.wEnemyMonLevel.addr)]  = E_LEVEL;
+
+    // HP (enemy 250/300 so heal path actually heals)
+    be16(wram+wram_off(sym.wBattleMonHP.addr),    P_HP);
+    be16(wram+wram_off(sym.wBattleMonMaxHP.addr), P_HP);
+    be16(wram+wram_off(sym.wEnemyMonHP.addr),     250);
+    be16(wram+wram_off(sym.wEnemyMonMaxHP.addr),  E_HP);
+
+    // Active battle stats
+    {
+        uint8_t* p = wram + wram_off(sym.wBattleMonAttack.addr);
+        auto be=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
+        be(p+0,P_ATK); be(p+2,P_DEF); be(p+4,P_SPD); be(p+6,P_SATK); be(p+8,P_SDEF);
+    }
+    {
+        uint8_t* p = wram + wram_off(sym.wEnemyMonAttack.addr);
+        auto be=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
+        be(p+0,E_ATK); be(p+2,E_DEF); be(p+4,E_SPD); be(p+6,E_SATK); be(p+8,E_SDEF);
+    }
+    // Unboosted stats for DamageStats crit check
+    {
+        auto be=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
+        be(wram+wram_off(sym.wEnemyMonDefense.addr),  E_DEF);
+        be(wram+wram_off(sym.wEnemyMonSpclDef.addr),  E_SDEF);
+        be(wram+wram_off(sym.wEnemyMonSpclAtk.addr),  E_SATK);
+        be(wram+wram_off(sym.wPlayerAttack.addr),     P_ATK);
+        be(wram+wram_off(sym.wPlayerSpAtk.addr),      P_SATK);
+        be(wram+wram_off(sym.wEnemyDefense.addr),     E_DEF);
+        be(wram+wram_off(sym.wEnemySpDef.addr),       E_SDEF);
+    }
+
+    // Types Normal/Normal → 1× matchup
+    wram[wram_off(sym.wBattleMonType1.addr)] = 0;
+    wram[wram_off(sym.wBattleMonType2.addr)] = 0;
+    wram[wram_off(sym.wEnemyMonType1.addr)]  = 0;
+    wram[wram_off(sym.wEnemyMonType2.addr)]  = 0;
+
+    // Stat levels: neutral (7) for all -- ensures no acc/eva modifiers in CheckHit
+    // and no stat stage comparison divergence in the Crystal vs Enginemon snapshot.
+    {
+        uint8_t* p = wram + wram_off(sym.wPlayerStatLevels.addr);
+        for(int i=0;i<8;i++) p[i]=7;
+    }
+    {
+        uint8_t* p = wram + wram_off(sym.wEnemyStatLevels.addr);
+        for(int i=0;i<8;i++) p[i]=7;
+    }
+
+    // Turn counters and misc
+    wram[wram_off(sym.wPlayerTurnsTaken.addr)] = 0;
+    wram[wram_off(sym.wEnemyTurnsTaken.addr)]  = 0;
+    wram[wram_off(0xC6E4)]  = 0;  // wCurEnemyMove
+    wram[wram_off(0xC6E9)]  = 0;  // wCurEnemyMoveNum
+    wram[wram_off(sym.wBattleAnimParam.addr)]  = 0;
+    wram[wram_off(sym.wAttackMissed.addr)]     = 0;
+    wram[wram_off(sym.wCriticalHit.addr)]      = 0;
+    wram[wram_off(sym.wTypeMatchup.addr)]      = 0x10;  // EFFECTIVE pre-init
+    wram[wram_off(sym.wBattleWeather.addr)]    = 0;
+    wram[wram_off(sym.wPlayerScreens.addr)]    = 0;
+    wram[wram_off(sym.wEnemyScreens.addr)]     = 0;
+    wram[wram_off(sym.wCurPlayerMove.addr)]    = (uint8_t)PRESENT_MOVE_ID_FS;
+    wram[wram_off(sym.wEnemyMoveStruct.addr)+3]= 0xFF;  // enemy acc = 0xFF
+
+    // Poison-stability: wOptions bit5 controls CheckBattleScene carry.
+    // 0 → no-carry → heal path goes directly to EndMoveEffect (our sink).
+    // Nicknames must be 0x50-terminated or PlaceString loops on poison bytes.
+    // wOTPartyCount=1 prevents UpdateOpponentInParty from iterating 0xA5 times.
+    GB_write_memory(gb, WOPTIONS_ADDR,      0);
+    GB_write_memory(gb, WBATTLEMONNICKNAME, CRYSTAL_STRING_END);
+    GB_write_memory(gb, WENEMYMONNICKNAME,  CRYSTAL_STRING_END);
+    GB_write_memory(gb, WOTPARTYCOUNT,      1);
+
+    // hROMBank = 0x0D (DoPlayerTurn's bank)
+    GB_write_memory(gb, sym.hROMBank.addr, sym.DoPlayerTurn.bank);
+}
+
+// Full-script Present damage case:
+//   Entry: DoPlayerTurn (0D:4000)
+//   Tape: [CheckHit=0x00(hit), Critical=0x80(no-crit), Present=0x30(power40),
+//          DamageVar=0xB2(retry:rrca=0x59<0xD9), DamageVar=0xFF(exit:rrca=0xFF>=0xD9)]
+//   Present acc=0xE5 (229): CheckHit DOES call BattleRandom.
+//   Sink: EndMoveEffect (DoPlayerTurn rets to our pushed return addr = EndMoveEffect)
+static constexpr uint8_t PRESENT_TAPE_FULLSCRIPT_DAMAGE[] = { 0x00, 0x80, 0x30, 0xB2, 0xFF };
+
+static void present_fullscript_damage_build_config(const SymCache& sym, CrystalRunConfig* out){
+    out->entry         = sym.DoPlayerTurn;
+    out->sink_pcs[0]   = sym.EndMoveEffect.addr;
+    out->sink_names[0] = "EndMoveEffect";
+    out->num_sinks     = 1;
+    out->rng_tape      = PRESENT_TAPE_FULLSCRIPT_DAMAGE;
+    out->rng_tape_len  = sizeof(PRESENT_TAPE_FULLSCRIPT_DAMAGE);
+    out->extra_fixture = present_fullscript_fixture;
+}
+
+// ============================================================================
 // Registered moves -- adding a move requires:
 //   1. Registering here with name, insn_cap, rng_tape, build_config
 //   2. build_config sets entry, sinks, rng_tape, extra_fixture
@@ -1214,6 +1522,11 @@ static const MoveSpec REGISTERED_MOVES[] = {
                                 present_miss_build_config, nullptr },
     { 2174, 217, "Present/0xFF",     100000, PRESENT_TAPE_SENTINEL, sizeof(PRESENT_TAPE_SENTINEL),
                                 present_sentinel_build_config, nullptr },
+    // Full-script damage case via DoPlayerTurn -- exercises CheckHit+Critical+DamageVariation.
+    // UsedMoveText is skipped via exec_cb at 0x4541 (emulates RET, rejoins dispatcher at 0x4081).
+    { 2176, 217, "Present/damage-full", 5000000, PRESENT_TAPE_FULLSCRIPT_DAMAGE,
+                                sizeof(PRESENT_TAPE_FULLSCRIPT_DAMAGE),
+                                present_fullscript_damage_build_config, nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
