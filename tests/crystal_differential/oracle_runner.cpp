@@ -14,13 +14,12 @@
 //   0xFF50    = 1                   (boot_rom_finished)
 //   0x2000    = entry bank          (MBC register)
 //
-//   INITIAL_SP = 0xFFFF. Crystal HRAM vars occupy 0xFF80-0xFFEB (hBattleTurn=0xFFE4,
-//   hROMBank=0xFF9D, etc.). Starting the SM83 stack at 0xFFFF means the first push
-//   lands at 0xFFFD-0xFFFE (unused HRAM per Crystal's hram.asm layout). Up to 12
-//   nested CALLs reach 0xFFE5 -- safely above all Crystal HRAM variables.
-//   The old value 0xFFF0 allowed only 3 nested calls before the stack descended into
-//   hBattleTurn (0xFFE4), corrupting it and causing GetBattleVar to use enemy-turn
-//   addressing for all subsequent calls.
+//   INITIAL_SP = 0xC0FF. Crystal's SM83 stack is wStackBottom(0xC000)–wStackTop(0xC0FF)
+//   in WRAM bank 0 (proved: pokecrystal/ram/wram.asm `ds $100-1; ds 1` under "Stack",
+//   and pokecrystal/home/init.asm `ld sp, wStackTop`). The harness pushes a sentinel
+//   return address at 0xC0FD-0xC0FE and starts execution with SP=0xC0FD.
+//   Previous INITIAL_SP=0xFFFE used HRAM as stack; the stack descended to 0xFFE0,
+//   overwriting Crystal HRAM variables (hRandomAdd=0xFFE1, hBattleTurn=0xFFE4, etc.).
 //
 // --- RNG INTERCEPTION -------------------------------------------------------
 //   Crystal BattleRandom (00:2F9F) returns its result via a temporary store
@@ -583,6 +582,87 @@ static const char* stop_reason_str(StopReason r){
 }
 
 // ============================================================================
+// InitialSnapshot -- semantic state before either engine executes.
+// Captured from Crystal WRAM after fixture / from Enginemon BattlePokemon
+// before execute_turn(). Both sides must be identical or the comparison is
+// meaningless. Fields chosen to cover all inputs that can affect the outcome.
+// ============================================================================
+struct InitialSnapshot {
+    // HP (current and max, both sides)
+    uint16_t player_hp;
+    uint16_t player_max_hp;
+    uint16_t enemy_hp;
+    uint16_t enemy_max_hp;
+    // Level
+    uint8_t  player_level;
+    uint8_t  enemy_level;
+    // Battle stats (the active stats used in damage calc)
+    uint16_t player_stats[5]; // ATK DEF SPD SATK SDEF
+    uint16_t enemy_stats[5];
+    // Stat stages (0=neutral for Enginemon; 7=neutral for Crystal raw, normalized here)
+    int8_t   player_stages[7]; // ATK DEF SPD SATK SDEF ACC EVA
+    int8_t   enemy_stages[7];
+    // Status (burn/para/etc.)
+    uint8_t  player_status;
+    uint8_t  enemy_status;
+    // Types
+    uint8_t  player_type1;
+    uint8_t  player_type2;
+    uint8_t  enemy_type1;
+    uint8_t  enemy_type2;
+    // Move and PP (player only -- the move being used)
+    uint16_t player_move_id;
+    uint8_t  player_pp;
+    uint8_t  player_max_pp;
+};
+
+// Returns "" if equal, otherwise a human-readable diff.
+static std::string initial_snapshot_diff(const InitialSnapshot& c, const InitialSnapshot& e){
+    std::ostringstream os;
+    auto chk16=[&](const char* n, uint16_t cv, uint16_t ev){
+        if(cv!=ev) os<<n<<" Crystal="<<cv<<" Enginemon="<<ev<<"\n";
+    };
+    auto chk8=[&](const char* n, uint8_t cv, uint8_t ev){
+        if(cv!=ev) os<<n<<" Crystal="<<(int)cv<<" Enginemon="<<(int)ev<<"\n";
+    };
+    auto chki8=[&](const char* n, int8_t cv, int8_t ev){
+        if(cv!=ev) os<<n<<" Crystal="<<(int)cv<<" Enginemon="<<(int)ev<<"\n";
+    };
+    chk16("init.player_hp",       c.player_hp,       e.player_hp);
+    chk16("init.player_max_hp",   c.player_max_hp,   e.player_max_hp);
+    chk16("init.enemy_hp",        c.enemy_hp,        e.enemy_hp);
+    chk16("init.enemy_max_hp",    c.enemy_max_hp,    e.enemy_max_hp);
+    chk8 ("init.player_level",    c.player_level,    e.player_level);
+    chk8 ("init.enemy_level",     c.enemy_level,     e.enemy_level);
+    static const char* sn[5]={"ATK","DEF","SPD","SATK","SDEF"};
+    static const char* sg[7]={"ATK","DEF","SPD","SATK","SDEF","ACC","EVA"};
+    char buf[64];
+    for(int i=0;i<5;i++){
+        snprintf(buf,sizeof(buf),"init.player_stat.%s",sn[i]);
+        chk16(buf, c.player_stats[i], e.player_stats[i]);
+        snprintf(buf,sizeof(buf),"init.enemy_stat.%s",sn[i]);
+        chk16(buf, c.enemy_stats[i],  e.enemy_stats[i]);
+    }
+    for(int i=0;i<7;i++){
+        snprintf(buf,sizeof(buf),"init.player_stage.%s",sg[i]);
+        chki8(buf, c.player_stages[i], e.player_stages[i]);
+        snprintf(buf,sizeof(buf),"init.enemy_stage.%s",sg[i]);
+        chki8(buf, c.enemy_stages[i],  e.enemy_stages[i]);
+    }
+    chk8 ("init.player_status",  c.player_status,  e.player_status);
+    chk8 ("init.enemy_status",   c.enemy_status,   e.enemy_status);
+    chk8 ("init.player_type1",   c.player_type1,   e.player_type1);
+    chk8 ("init.player_type2",   c.player_type2,   e.player_type2);
+    chk8 ("init.enemy_type1",    c.enemy_type1,    e.enemy_type1);
+    chk8 ("init.enemy_type2",    c.enemy_type2,    e.enemy_type2);
+    snprintf(buf,sizeof(buf),"init.player_move_id");
+    chk16(buf, c.player_move_id, e.player_move_id);
+    chk8 ("init.player_pp",      c.player_pp,      e.player_pp);
+    chk8 ("init.player_max_pp",  c.player_max_pp,  e.player_max_pp);
+    return os.str();
+}
+
+// ============================================================================
 // CrystalRunResult -- raw output from run_crystal_case
 // ============================================================================
 struct CrystalRunResult {
@@ -606,6 +686,8 @@ struct CrystalRunResult {
     size_t   rng_bytes_consumed;
     // Stack low-water mark -- minimum SP observed during the run
     uint16_t min_sp;
+    // Initial semantic state (captured after fixture, before GB_run)
+    InitialSnapshot initial;
 };
 
 static bool crystal_run_results_equal(const CrystalRunResult& a, const CrystalRunResult& b){
@@ -637,17 +719,114 @@ struct EngineSnapshot {
     uint16_t enemy_hp;
     size_t   rng_bytes_consumed;
     std::vector<uint8_t> rng_trace; // byte values consumed in order
+    InitialSnapshot initial; // captured before execute_turn()
 };
 
 // ============================================================================
 // Shared fixture constants
 // ============================================================================
-static constexpr int8_t   PLAYER_DELTA[7] = {+2,-3,+1,-1,+3,+4,-2};
-static constexpr int8_t   ENEMY_DELTA[7]  = {-4,+6,-2,+3,-1,-3,+5};
+static constexpr int8_t   PLAYER_DELTA[7] = {0,0,0,0,0,0,0};  // neutral: all stages start at 7 in Crystal
+static constexpr int8_t   ENEMY_DELTA[7]  = {0,0,0,0,0,0,0};  // neutral: all stages start at 7 in Crystal
 static constexpr uint16_t P_ATK=110,P_DEF=60,P_SPD=130,P_SATK=95,P_SDEF=70;
 static constexpr uint16_t E_ATK=75, E_DEF=110,E_SPD=30, E_SATK=100,E_SDEF=80;
 static constexpr uint16_t P_HP=300, E_HP=300;
 static constexpr uint8_t  P_LEVEL=50, E_LEVEL=50;
+// PP for Present (move ID 217): read from ROM via rom_populate_player_move_struct.
+// Byte [5] of the 7-byte move record = 0x0F = 15.
+static constexpr uint8_t  P_PP = 0x0F;
+
+// ============================================================================
+// capture_crystal_initial -- read semantic state from Crystal WRAM after
+// fixture application, before any GB_run() call. All reads use WRAM direct
+// access (the same wram pointer used by the fixture).
+// ============================================================================
+static InitialSnapshot capture_crystal_initial(
+    const uint8_t* wram, const SymCache& sym)
+{
+    InitialSnapshot s{};
+    auto rbe16=[&](uint16_t addr)->uint16_t{
+        auto* p=wram+wram_off(addr);
+        return (uint16_t)((p[0]<<8)|p[1]);
+    };
+    s.player_hp      = rbe16(sym.wBattleMonHP.addr);
+    s.player_max_hp  = rbe16(sym.wBattleMonMaxHP.addr);
+    s.enemy_hp       = rbe16(sym.wEnemyMonHP.addr);
+    s.enemy_max_hp   = rbe16(sym.wEnemyMonMaxHP.addr);
+    s.player_level   = wram[wram_off(sym.wBattleMonLevel.addr)];
+    s.enemy_level    = wram[wram_off(sym.wEnemyMonLevel.addr)];
+    {auto* p=wram+wram_off(sym.wBattleMonAttack.addr);
+     for(int i=0;i<5;i++) s.player_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
+    {auto* p=wram+wram_off(sym.wEnemyMonAttack.addr);
+     for(int i=0;i<5;i++) s.enemy_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
+    {auto* p=wram+wram_off(sym.wPlayerStatLevels.addr);
+     for(int i=0;i<7;i++) s.player_stages[i]=int8_t(int(p[i])-7);}
+    {auto* p=wram+wram_off(sym.wEnemyStatLevels.addr);
+     for(int i=0;i<7;i++) s.enemy_stages[i]=int8_t(int(p[i])-7);}
+    s.player_status = wram[wram_off(sym.wBattleMonStatus.addr)];
+    s.enemy_status  = wram[wram_off(sym.wEnemyMonStatus.addr)];
+    s.player_type1  = wram[wram_off(sym.wBattleMonType1.addr)];
+    s.player_type2  = wram[wram_off(sym.wBattleMonType2.addr)];
+    s.enemy_type1   = wram[wram_off(sym.wEnemyMonType1.addr)];
+    s.enemy_type2   = wram[wram_off(sym.wEnemyMonType2.addr)];
+    s.player_move_id = wram[wram_off(sym.wBattleMonMoves.addr)];
+    s.player_pp     = wram[wram_off(sym.wBattleMonPP.addr)];
+    // max PP: read from wPartyMon1PP which is the authoritative ROM-derived value
+    s.player_max_pp = wram[wram_off(sym.wPartyMon1PP.addr)];
+    return s;
+}
+
+// ============================================================================
+// capture_enginemon_initial -- read semantic state from BattlePokemon before
+// execute_turn(). Normalizes to the same representation as capture_crystal_initial.
+// ============================================================================
+static InitialSnapshot capture_enginemon_initial(
+    const enginemon::BattlePokemon& player,
+    const enginemon::BattlePokemon& opponent,
+    enginemon::MoveId move_id)
+{
+    InitialSnapshot s{};
+    s.player_hp      = (uint16_t)player.stats.hp;
+    s.player_max_hp  = (uint16_t)player.stats.max_hp;
+    s.enemy_hp       = (uint16_t)opponent.stats.hp;
+    s.enemy_max_hp   = (uint16_t)opponent.stats.max_hp;
+    s.player_level   = player.level;
+    s.enemy_level    = opponent.level;
+    s.player_stats[0]=(uint16_t)player.stats.attack;
+    s.player_stats[1]=(uint16_t)player.stats.defense;
+    s.player_stats[2]=(uint16_t)player.stats.speed;
+    s.player_stats[3]=(uint16_t)player.stats.special_attack;
+    s.player_stats[4]=(uint16_t)player.stats.special_defense;
+    s.enemy_stats[0] =(uint16_t)opponent.stats.attack;
+    s.enemy_stats[1] =(uint16_t)opponent.stats.defense;
+    s.enemy_stats[2] =(uint16_t)opponent.stats.speed;
+    s.enemy_stats[3] =(uint16_t)opponent.stats.special_attack;
+    s.enemy_stats[4] =(uint16_t)opponent.stats.special_defense;
+    s.player_stages[0]=player.stages.attack;
+    s.player_stages[1]=player.stages.defense;
+    s.player_stages[2]=player.stages.speed;
+    s.player_stages[3]=player.stages.special_attack;
+    s.player_stages[4]=player.stages.special_defense;
+    s.player_stages[5]=player.stages.accuracy;
+    s.player_stages[6]=player.stages.evasion;
+    s.enemy_stages[0] =opponent.stages.attack;
+    s.enemy_stages[1] =opponent.stages.defense;
+    s.enemy_stages[2] =opponent.stages.speed;
+    s.enemy_stages[3] =opponent.stages.special_attack;
+    s.enemy_stages[4] =opponent.stages.special_defense;
+    s.enemy_stages[5] =opponent.stages.accuracy;
+    s.enemy_stages[6] =opponent.stages.evasion;
+    // Status: Enginemon uses a Status enum; Crystal uses a byte (0=no status)
+    s.player_status = (player.status != enginemon::Status::None) ? 1 : 0;
+    s.enemy_status  = (opponent.status != enginemon::Status::None) ? 1 : 0;
+    s.player_type1  = player.type1;
+    s.player_type2  = player.type2;
+    s.enemy_type1   = opponent.type1;
+    s.enemy_type2   = opponent.type2;
+    s.player_move_id = (uint16_t)move_id;
+    s.player_pp     = player.moves[0].pp;
+    s.player_max_pp = player.moves[0].max_pp;
+    return s;
+}
 
 // ============================================================================
 // run_crystal_case
@@ -708,6 +887,33 @@ static void fixture_common(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
     wram[wram_off(sym.wEnemyMonHP.addr)  ]  = 0x01;
     wram[wram_off(sym.wEnemyMonHP.addr)+1]  = 0x2C;
     wram[wram_off(sym.wCriticalHit.addr)]   = 0;
+
+    // Fields required for initial snapshot equivalence (read by capture_crystal_initial).
+    // Set universally so every case starts with a defined semantic state that
+    // matches the Enginemon BattlePokemon construction.
+    {
+        auto be=[](uint8_t* d,uint16_t v){d[0]=(v>>8);d[1]=v&0xFF;};
+        // Active battle stats (used in damage formula; separate from wPlayerStats base stats)
+        {
+            uint8_t* p=wram+wram_off(sym.wBattleMonAttack.addr);
+            be(p+0,P_ATK);be(p+2,P_DEF);be(p+4,P_SPD);be(p+6,P_SATK);be(p+8,P_SDEF);
+        }
+        {
+            uint8_t* p=wram+wram_off(sym.wEnemyMonAttack.addr);
+            be(p+0,E_ATK);be(p+2,E_DEF);be(p+4,E_SPD);be(p+6,E_SATK);be(p+8,E_SDEF);
+        }
+        // MaxHP (used by CheckFaint, AICheckMaxHP, and initial snapshot)
+        be(wram+wram_off(sym.wBattleMonMaxHP.addr), P_HP);
+        be(wram+wram_off(sym.wEnemyMonMaxHP.addr),  E_HP);
+        // Level (used by damage formula)
+        wram[wram_off(sym.wBattleMonLevel.addr)] = P_LEVEL;
+        wram[wram_off(sym.wEnemyMonLevel.addr)]  = E_LEVEL;
+        // Types (Normal/Normal — neutral matchup; overridden per case if needed)
+        wram[wram_off(sym.wBattleMonType1.addr)] = 0x00;
+        wram[wram_off(sym.wBattleMonType2.addr)] = 0x00;
+        wram[wram_off(sym.wEnemyMonType1.addr)]  = 0x00;
+        wram[wram_off(sym.wEnemyMonType2.addr)]  = 0x00;
+    }
 }
 
 struct CrystalRunConfig {
@@ -719,6 +925,7 @@ struct CrystalRunConfig {
     const uint8_t* rng_tape;      // null if no RNG interception
     size_t         rng_tape_len;
     FixtureFn   extra_fixture;    // null if no extra fixture
+    uint16_t    engine_move_id;   // Crystal move ID (engine_id from MoveSpec)
 };
 
 static CrystalRunResult run_crystal_case(
@@ -793,20 +1000,40 @@ static CrystalRunResult run_crystal_case(
     // Case-specific extra fixture
     if(cfg.extra_fixture) cfg.extra_fixture(&gb, wram, sym);
 
+    // Write the player's move ID and PP so every case has a defined initial snapshot.
+    // Cases that set these in extra_fixture will have already overwritten with their
+    // specific values. Cases that don't (e.g. Haze) get the engine_move_id from the spec.
+    // This runs AFTER extra_fixture to ensure it never overwrites case-specific values.
+    // We use GB_write_memory (MMU path) to match how Crystal will read these fields.
+    if(cfg.engine_move_id){
+        // Only overwrite if extra_fixture hasn't already set a non-poison value.
+        // We detect "extra_fixture wrote this" by checking against the engine_move_id.
+        // For Haze (extra_fixture=null), the field is still poison; we overwrite it.
+        // For Present (extra_fixture set wBattleMonMoves=217), we do nothing.
+        // Use GB_write_memory so it goes through the MMU.
+        GB_write_memory(&gb, sym.wBattleMonMoves.addr,
+            (uint8_t)(cfg.engine_move_id & 0xFF));
+        GB_write_memory(&gb, sym.wBattleMonPP.addr,   P_PP);
+        GB_write_memory(&gb, sym.wPartyMon1PP.addr,   P_PP);
+    }
+
+    // Capture initial semantic state (after all fixture writes, before any execution)
+    res.initial = capture_crystal_initial(wram, sym);
+
     GB_registers_t* regs=GB_get_registers(&gb);
     if(!regs){ GB_free(&gb); res.stop_reason=StopReason::REGS_ACCESS_FAILED; return res; }
 
     // -------------------------------------------------------------------------
-    // Stack: Crystal's HRAM layout (pokecrystal/ram/hram.asm):
-    //   Last named HRAM symbol: hClockResetTrigger = 0xFFEB
-    //   Stack region: 0xFFEC–0xFFFE  (13 bytes, grows downward)
-    //   Initial SP  : 0xFFFE  (first push writes to 0xFFFD–0xFFFE)
-    //
-    // We push one sentinel (first sink addr) below the initial SP so that a
-    // stray RET before any sink fires lands on a monitored address.
-    // Stack escape (SP < wStackBottom or SP > wStackTop) = HARNESS_ERROR.
-    static constexpr uint16_t W_STACK_TOP    = 0xFFFE; // Crystal's initial SP
-    static constexpr uint16_t W_STACK_BOTTOM = 0xFFEC; // first byte of stack region
+    // Stack: Crystal's actual SM83 stack is wStackBottom(0xC000)–wStackTop(0xC0FF)
+    // in WRAM bank 0 (proved from pokecrystal/ram/wram.asm: ds $100-1 then ds 1,
+    // and pokecrystal/home/init.asm: ld sp, wStackTop).
+    // The harness places its sentinel at wStackTop-2 = 0xC0FD and starts SP there.
+    // Escape: SP < wStackBottom = 0xC000.
+    // The previous W_STACK_TOP=0xFFFE used HRAM as stack, which descends into
+    // Crystal HRAM variables (hBattleTurn=0xFFE4, hROMBank=0xFF9D, etc.) and
+    // corrupts them — proved by observed minSP=0xFFE0 < last HRAM var 0xFFEB.
+    static constexpr uint16_t W_STACK_TOP    = 0xC0FF; // wStackTop in Crystal's wram.asm
+    static constexpr uint16_t W_STACK_BOTTOM = 0xC000; // wStackBottom in Crystal's wram.asm
     uint16_t ret_addr = cfg.sink_pcs[0];
     GB_write_memory(&gb, W_STACK_TOP - 1, (ret_addr >> 8) & 0xFF);
     GB_write_memory(&gb, W_STACK_TOP - 2,  ret_addr       & 0xFF);
@@ -894,15 +1121,14 @@ static CrystalRunResult run_crystal_case(
         const uint8_t  bank = GB_safe_read_memory(&gb, 0xFF9D); // hROMBank
 
         // --- Stack min-SP tracking and bounds check -----------------------
-        // Record low-water mark. SP is allowed anywhere in HRAM (0xFF80–0xFFFE);
-        // the Crystal stack region is 0xFFEC–0xFFFE but during deep call chains
-        // SP may descend into 0xFF80–0xFFEB (also HRAM, safe). SP escaping below
-        // 0xFF80 into Echo RAM is always an error.
+        // Record low-water mark. SP must stay >= W_STACK_BOTTOM = 0xC000.
+        // Crystal's actual stack occupies 0xC000-0xC0FF (wStackBottom–wStackTop).
         if(sp < observed_min_sp) observed_min_sp = sp;
-        if(sp < 0xFF80){
+        if(sp < W_STACK_BOTTOM){
             static char sp_err[64];
             snprintf(sp_err, sizeof(sp_err),
-                "__HARNESS_ERROR__ stack escape: SP=0x%04X < 0xFF80", sp);
+                "__HARNESS_ERROR__ stack escape: SP=0x%04X < wStackBottom=0x%04X",
+                sp, (unsigned)W_STACK_BOTTOM);
             exec_ctx.triggered      = true;
             exec_ctx.triggered_sink = sp_err;
             break;
@@ -1191,7 +1417,7 @@ static std::optional<EngineSnapshot> run_enginemon_case(
         bp.stats.special_attack=bp.base_stats.special_attack=satk;
         bp.stats.special_defense=bp.base_stats.special_defense=sdef;
         bp.happiness=200; bp.dv_atk=bp.dv_def=bp.dv_spd=bp.dv_spc=15;
-        bp.moves[0].move=mid; bp.moves[0].pp=bp.moves[0].max_pp=10;
+        bp.moves[0].move=mid; bp.moves[0].pp=bp.moves[0].max_pp=P_PP;
         bp.stages.attack=sd[0]; bp.stages.defense=sd[1]; bp.stages.speed=sd[2];
         bp.stages.special_attack=sd[3]; bp.stages.special_defense=sd[4];
         bp.stages.accuracy=sd[5]; bp.stages.evasion=sd[6];
@@ -1216,6 +1442,10 @@ static std::optional<EngineSnapshot> run_enginemon_case(
         bat.set_rng_callback([]()->uint32_t{ return 0xFF; });
     }
 
+    // Capture initial state before execution
+    InitialSnapshot eng_initial = capture_enginemon_initial(
+        bat.player_pokemon(), bat.opponent_pokemon(), move_id);
+
     bat.set_player_action(enginemon::ActionFight{0,0});
     bat.set_opponent_action(enginemon::ActionFight{0,0});
     bat.execute_turn();
@@ -1239,6 +1469,7 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     e.enemy_hp  = (uint16_t)op.stats.hp;
     e.rng_bytes_consumed = rng_consumed;
     e.rng_trace = eng_rng_trace;
+    e.initial   = eng_initial;
     return e;
 }
 
@@ -1292,6 +1523,7 @@ static void haze_build_config(const SymCache& sym, CrystalRunConfig* out){
     out->rng_tape      = nullptr;
     out->rng_tape_len  = 0;
     out->extra_fixture = nullptr;
+    out->engine_move_id= 114; // Haze (Crystal move ID 114)
 }
 
 // ============================================================================
@@ -1373,6 +1605,10 @@ static void present_extra_fixture(GB_gameboy_t* gb, uint8_t* wram, const SymCach
 
     // wCurPlayerMove = 217 (Present) -- used by BattleCommand_Stab for move-type lookup
     wram[wram_off(sym.wCurPlayerMove.addr)] = 217;
+    // wBattleMonMoves[0] and wBattleMonPP[0] -- needed for initial snapshot equivalence
+    wram[wram_off(sym.wBattleMonMoves.addr)] = 217;
+    wram[wram_off(sym.wBattleMonPP.addr)]    = P_PP;
+    wram[wram_off(sym.wPartyMon1PP.addr)]    = P_PP; // max PP mirror
 
     // wPlayerMoveStruct (0xC60F, 6 bytes): present_extra_fixture sets all fields
     // to avoid poison-dependent behavior in BattleCommand_Stab and AnimateCurrentMove.
@@ -1487,6 +1723,7 @@ static void present_build_config_impl(const SymCache& sym, CrystalRunConfig* out
     out->rng_tape      = tape;
     out->rng_tape_len  = tape_len;
     out->extra_fixture = fixture_fn;
+    out->engine_move_id= 217; // Present (Crystal move ID 217)
 }
 
 static void present_damage_build_config(const SymCache& sym, CrystalRunConfig* out){
@@ -1646,10 +1883,10 @@ static void present_fullscript_fixture(
     wram[wram_off(sym.wBattleMonLevel.addr)]        = P_LEVEL;
     wram[wram_off(sym.wEnemyMonLevel.addr)]         = E_LEVEL;
 
-    // ---------- HP (enemy 250/300 so heal path actually heals) --------------
+    // ---------- HP ----------
     be16(wram + wram_off(sym.wBattleMonHP.addr),    P_HP);
     be16(wram + wram_off(sym.wBattleMonMaxHP.addr), P_HP);
-    be16(wram + wram_off(sym.wEnemyMonHP.addr),     250);
+    be16(wram + wram_off(sym.wEnemyMonHP.addr),     E_HP);
     be16(wram + wram_off(sym.wEnemyMonMaxHP.addr),  E_HP);
 
     // ---------- Battle stats ------------------------------------------------
@@ -1738,6 +1975,7 @@ static void present_fullscript_damage_build_config(const SymCache& sym, CrystalR
     out->rng_tape      = PRESENT_TAPE_FULLSCRIPT_DAMAGE;
     out->rng_tape_len  = sizeof(PRESENT_TAPE_FULLSCRIPT_DAMAGE);
     out->extra_fixture = present_fullscript_fixture_adapter;
+    out->engine_move_id= 217; // Present (Crystal move ID 217)
 }
 
 // ============================================================================
@@ -1785,6 +2023,7 @@ static void fullscript_endmove_config(const SymCache& sym, CrystalRunConfig* out
     out->rng_tape      = tape;
     out->rng_tape_len  = tape_len;
     out->extra_fixture = present_fullscript_fixture_adapter;
+    out->engine_move_id= 217; // Present (Crystal move ID 217)
 }
 
 static void present_fullscript_heal_build_config(const SymCache& sym, CrystalRunConfig* out){
@@ -1884,6 +2123,8 @@ static CaseResult run_case(
     CrystalRunConfig cfg{};
     spec.build_config(sym, &cfg);
     cfg.insn_cap = spec.insn_cap;
+    // If build_config didn't set engine_move_id, fall back to spec.engine_id
+    if(!cfg.engine_move_id) cfg.engine_move_id = spec.engine_id;
 
     // If this case uses the fullscript ROM-reading fixture, bind rom_bytes to the
     // thread-local so present_fullscript_fixture_adapter can access it.
@@ -1957,6 +2198,17 @@ static CaseResult run_case(
     }
     r.has_engine = true;
     r.engine_res = *eng;
+
+    // Assert initial snapshot equivalence before comparing outcomes.
+    // If the two sides started from different states the comparison is invalid.
+    {
+        std::string init_diff = initial_snapshot_diff(cr1.initial, eng->initial);
+        if(!init_diff.empty()){
+            r.detail  = "INITIAL SNAPSHOT MISMATCH -- fix fixture before comparing outcomes:\n";
+            r.detail += init_diff;
+            return r; // HARNESS_ERROR (status was already HARNESS_ERROR from default)
+        }
+    }
 
     // Normalize and compare
     // Crystal stages: raw-7 = delta; Enginemon: 0=neutral
