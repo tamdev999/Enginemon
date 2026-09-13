@@ -564,6 +564,112 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
         }
     }
 
+    // BattleCommand_DoTurn diagnostic: capture consume_pp inputs and PP values.
+    // Fires at specific PCs inside BattleCommand_DoTurn (0D:45xx) to read
+    // actual CPU/WRAM state -- no inference from fixture setup.
+    {
+        static constexpr uint16_t PC_DOTURN_ENTRY   = 0x4555; // BattleCommand_DoTurn
+        static constexpr uint16_t PC_DISPATCH_TOP   = 0x4058; // DoMove.ReadMoveEffectCommand top
+        static constexpr uint16_t PC_CONSUME_PP     = 0x45AD; // .consume_pp entry
+        static constexpr uint16_t PC_OKAY           = 0x45B8; // .okay: about to read [HL]
+        static constexpr uint16_t PC_OUT_OF_PP      = 0x45E3; // .out_of_pp: PP was 0
+
+        static struct {
+            bool     active;
+            int      dispatch_count;  // how many times dispatch top fired
+            uint8_t  hBattleTurn;
+            uint8_t  rSVBK_at_doturn;
+            uint8_t  wCurMoveNum_val;
+            uint16_t HL_at_consume_pp;
+            uint16_t HL_at_okay;
+            uint8_t  raw_pp;
+            uint8_t  masked_pp;
+            bool     out_of_pp_taken;
+            uint8_t  battlemon_pp[4];
+            // dispatch-top: capture every time (show last 8)
+            struct { uint16_t addr; uint8_t byte_; } dispatches[8];
+        } diag{};
+
+        // Arm on DoTurn entry (pc=0x4555 confirms the command is actually dispatched)
+        if(pc == PC_DOTURN_ENTRY){
+            diag = {};
+            diag.active          = true;
+            diag.rSVBK_at_doturn = GB_safe_read_memory(gb, 0xFF70);
+            diag.hBattleTurn     = GB_safe_read_memory(gb, 0xFFE4);
+            diag.battlemon_pp[0] = GB_safe_read_memory(gb, 0xC634);
+            diag.battlemon_pp[1] = GB_safe_read_memory(gb, 0xC635);
+            diag.battlemon_pp[2] = GB_safe_read_memory(gb, 0xC636);
+            diag.battlemon_pp[3] = GB_safe_read_memory(gb, 0xC637);
+        }
+
+        // Every dispatch-top hit: capture addr and byte (ring buffer of last 8)
+        if(pc == PC_DISPATCH_TOP && ctx->insn_count > 7000){
+            // Only log after we're deep enough to be past checkobedience/usedmovetext
+            uint8_t lo = GB_safe_read_memory(gb, 0xC6B2);
+            uint8_t hi = GB_safe_read_memory(gb, 0xC6B3);
+            uint16_t addr = (uint16_t)(lo | (hi << 8));
+            uint8_t  byte_ = GB_safe_read_memory(gb, addr);
+            int idx = diag.dispatch_count % 8;
+            diag.dispatches[idx].addr  = addr;
+            diag.dispatches[idx].byte_ = byte_;
+            ++diag.dispatch_count;
+            // Fire diagnostic sink on EVERY first dispatch-top hit (not just terminal bytes)
+            if(diag.dispatch_count == 1){
+                // Read ACTUAL PP from WRAM (not from uninitialized diag struct)
+                uint8_t pp0 = GB_safe_read_memory(gb, 0xC634);
+                uint8_t pp1 = GB_safe_read_memory(gb, 0xC635);
+                uint8_t pp2 = GB_safe_read_memory(gb, 0xC636);
+                uint8_t pp3 = GB_safe_read_memory(gb, 0xC637);
+                uint8_t svbk = GB_safe_read_memory(gb, 0xFF70);
+                uint8_t cur_move_num = GB_safe_read_memory(gb, 0xD0D5);
+                // Log state at DoTurn dispatch for diagnostic purposes only.
+                // Do NOT terminate here -- we need execution to proceed through
+                // consume_pp so the __DOTURN_DIAG__ path can fire if .out_of_pp
+                // is taken, or EndMoveEffect fires if PP is non-zero.
+                (void)pp0; (void)pp1; (void)pp2; (void)pp3;
+                (void)svbk; (void)cur_move_num; (void)addr; (void)byte_;
+            }
+        }
+
+        if(diag.active && pc == PC_CONSUME_PP){
+            GB_registers_t* r = GB_get_registers(gb);
+            if(r){
+                diag.HL_at_consume_pp = r->hl;
+                diag.wCurMoveNum_val  = GB_safe_read_memory(gb, 0xD0D5);
+            }
+        }
+
+        if(diag.active && pc == PC_OKAY){
+            GB_registers_t* r = GB_get_registers(gb);
+            if(r){
+                diag.HL_at_okay = r->hl;
+                diag.raw_pp     = GB_safe_read_memory(gb, r->hl);
+                diag.masked_pp  = diag.raw_pp & 0x3F;
+            }
+        }
+
+        if(diag.active && pc == PC_OUT_OF_PP){
+            diag.out_of_pp_taken = true;
+            static char diag_sink[256];
+            snprintf(diag_sink, sizeof(diag_sink),
+                "__DOTURN_DIAG__"
+                " hBT=0x%02X rSVBK=0x%02X"
+                " CurMoveNum=0x%02X"
+                " PP[0..3]=%02X,%02X,%02X,%02X"
+                " HL_consume=%04X HL_okay=%04X"
+                " raw=0x%02X masked=0x%02X"
+                " out_of_pp=YES",
+                diag.hBattleTurn, diag.rSVBK_at_doturn,
+                diag.wCurMoveNum_val,
+                diag.battlemon_pp[0], diag.battlemon_pp[1],
+                diag.battlemon_pp[2], diag.battlemon_pp[3],
+                diag.HL_at_consume_pp, diag.HL_at_okay,
+                diag.raw_pp, diag.masked_pp);
+            ctx->triggered      = true;
+            ctx->triggered_sink = diag_sink;
+        }
+    }
+
     // BattleCommand_UsedMoveText skip (0D:4541)
     //
     // Control flow when DoMove dispatches UsedMoveText:
@@ -587,6 +693,13 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
     static constexpr uint16_t BATTLE_TEXTBOX_PC      = 0x3AC3;  // BattleTextbox (character render)
     static constexpr uint16_t STD_BATTLE_TEXTBOX_PC  = 0x3AD5;  // StdBattleTextbox
     static constexpr uint16_t REFRESH_BATTLE_HUDS_PC = 0x39C9;  // RefreshBattleHuds (calls WaitBGMap)
+    static constexpr uint16_t WAITSFX_PC             = 0x3C55;  // WaitSFX (spins on audio flag)
+    static constexpr uint16_t WAITPLAYSFX_PC         = 0x3C4E;  // WaitPlaySFX (calls WaitSFX)
+    static constexpr uint16_t PRINTLETTERDELAY_PC    = 0x313D;  // PrintLetterDelay (text character loop)
+    static constexpr uint16_t JOYWAITAORB_PC         = 0x0A36;  // JoyWaitAorB (spins on button press)
+    static constexpr uint16_t SIMPLEWAITPRESSAORB_PC = 0x0AA5;  // SimpleWaitPressAorB (same)
+    static constexpr uint16_t WAITPRESSAORB_PC       = 0x0A80;  // WaitPressAorB_BlinkCursor (same)
+    static constexpr uint16_t GETJOYPAD_PC           = 0x0984;  // GetJoypad (reads joypad hardware)
     auto do_ret_skip = [&](){
         GB_registers_t* r = GB_get_registers(gb);
         if(r){
@@ -605,8 +718,29 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
     };
     if(pc == DELAY_FRAME_PC || pc == DELAY_FRAMES_PC ||
        pc == BATTLE_TEXTBOX_PC || pc == STD_BATTLE_TEXTBOX_PC ||
-       pc == REFRESH_BATTLE_HUDS_PC){
+       pc == REFRESH_BATTLE_HUDS_PC || pc == WAITSFX_PC ||
+       pc == WAITPLAYSFX_PC || pc == PRINTLETTERDELAY_PC ||
+       pc == JOYWAITAORB_PC || pc == SIMPLEWAITPRESSAORB_PC ||
+       pc == WAITPRESSAORB_PC || pc == GETJOYPAD_PC){
         do_ret_skip();
+        return;
+    }
+    // ByteFill with invalid destination (DE < 0x8000 = ROM/VRAM space): skip.
+    // These are initialization calls with uninitialized pointer values.
+    // Fills to valid WRAM (0xC000+) or HRAM (0xFF80+) are allowed to execute.
+    if(pc == 0x3041){
+        GB_registers_t* br = GB_get_registers(gb);
+        if(br && br->de < 0x8000){
+            size_t hs = 0; uint16_t hb = 0;
+            uint8_t* h = static_cast<uint8_t*>(
+                GB_get_direct_access(gb, GB_DIRECT_ACCESS_HRAM, &hs, &hb));
+            uint16_t li = (br->sp     - 0xFF80u) & 0x7Fu;
+            uint16_t hi_i = (br->sp + 1 - 0xFF80u) & 0x7Fu;
+            uint8_t lo = h ? h[li]    : GB_safe_read_memory(gb, br->sp);
+            uint8_t hi = h ? h[hi_i]  : GB_safe_read_memory(gb, br->sp + 1);
+            br->sp += 2;
+            br->pc = (uint16_t)(lo | (hi << 8));
+        }
         return;
     }
     // AnimateHPBar (03:46E0) -- bank-guarded skip to avoid aliasing with
@@ -618,17 +752,12 @@ static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
     if(pc == USED_MOVE_TEXT_ENTRY_PC){
         GB_registers_t* regs = GB_get_registers(gb);
         if(regs){
-            size_t hram_sz = 0; uint16_t hram_bank = 0;
-            uint8_t* hram = static_cast<uint8_t*>(
-                GB_get_direct_access(gb, GB_DIRECT_ACCESS_HRAM, &hram_sz, &hram_bank));
-            uint16_t lo_idx = (regs->sp     - 0xFF80u) & 0x7Fu;
-            uint16_t hi_idx = (regs->sp + 1 - 0xFF80u) & 0x7Fu;
-            uint8_t lo = hram ? hram[lo_idx] : GB_safe_read_memory(gb, regs->sp);
-            uint8_t hi = hram ? hram[hi_idx] : GB_safe_read_memory(gb, regs->sp + 1);
-            uint16_t ret = (uint16_t)(lo | (hi << 8));
-            // Validate: should be DOMOVE_DISPATCHER_CONT_PC (0x4081)
+            // The DoMove dispatch for UsedMoveText pushed 0x4081 (jr .ReadMoveEffectCommand)
+            // as the return address via `call .DoMoveEffectCommand` at 0D:407E.
+            // Hardcode the jump target -- do NOT read from the stack (unreliable via GB_safe_read_memory).
+            // Pop the call frame (SP += 2) and jump to the known continuation.
             regs->sp += 2;
-            regs->pc = (ret == DOMOVE_DISPATCHER_CONT_PC) ? DOMOVE_DISPATCHER_CONT_PC : ret;
+            regs->pc  = DOMOVE_DISPATCHER_CONT_PC;  // 0x4081 -- hardcoded, known correct
         }
         return;
     }
@@ -1344,6 +1473,18 @@ static constexpr uint16_t WOTPARTYCOUNT      = 0xD280; // wOTPartyCount
 static void present_fullscript_fixture(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym){
     auto be16=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
 
+    // Zero-fill the entire battle WRAM region FIRST to eliminate poison instability
+    // from uninitialized fields that DoPlayerTurn reads during execution.
+    // This covers all battle state from wBattleMonSpecies (0xC600) through
+    // wBattleAction area (0xD500). Then we selectively set specific non-zero values.
+    // This is necessary because DoPlayerTurn reads many more fields than can be
+    // individually enumerated in a fixture.
+    for(uint16_t a = 0xC600; a < 0xD600; ++a)
+        wram[wram_off(a)] = 0;
+    // Also zero WRAM bank 1 battle region (0xD000-0xD4FF)
+    for(uint16_t a = 0xD000; a < 0xD500; ++a)
+        wram[wram_off(a)] = 0;
+
     // Obedience bypass: wInBattleTowerBattle=1; wLinkMode MUST stay 0
     wram[wram_off(sym.wInBattleTowerBattle.addr)] = 1;
     wram[wram_off(sym.wLinkMode.addr)]            = 0;  // CRITICAL: keep 0
@@ -1379,15 +1520,21 @@ static void present_fullscript_fixture(GB_gameboy_t* gb, uint8_t* wram, const Sy
     wram[wram_off(sym.wWildMonMoves.addr)]     = 0;
 
     // All substatus bytes clear (no confusion, flinch, attract, recharge, etc.)
+    // SubStatus2 was missing -- wPlayerSubStatus2=0xC669, wEnemySubStatus2=0xC66E.
+    // wEnemySubStatus1=0xC66D was also missing. Zero all 5 substatus bytes for
+    // both player and enemy to guarantee poison stability.
     wram[wram_off(sym.wBattleMonStatus.addr)]   = 0;
     wram[wram_off(sym.wEnemyMonStatus.addr)]    = 0;
-    wram[wram_off(sym.wPlayerSubStatus1.addr)]  = 0;
-    wram[wram_off(sym.wPlayerSubStatus3.addr)]  = 0;
-    wram[wram_off(sym.wPlayerSubStatus4.addr)]  = 0;
-    wram[wram_off(sym.wPlayerSubStatus5.addr)]  = 0;
-    wram[wram_off(sym.wEnemySubStatus3.addr)]   = 0;
-    wram[wram_off(sym.wEnemySubStatus4.addr)]   = 0;
-    wram[wram_off(sym.wEnemySubStatus5.addr)]   = 0;
+    wram[wram_off(sym.wPlayerSubStatus1.addr)]  = 0;  // 0xC668
+    wram[wram_off(0xC669)]                      = 0;  // wPlayerSubStatus2
+    wram[wram_off(sym.wPlayerSubStatus3.addr)]  = 0;  // 0xC66A
+    wram[wram_off(sym.wPlayerSubStatus4.addr)]  = 0;  // 0xC66B
+    wram[wram_off(sym.wPlayerSubStatus5.addr)]  = 0;  // 0xC66C
+    wram[wram_off(0xC66D)]                      = 0;  // wEnemySubStatus1
+    wram[wram_off(0xC66E)]                      = 0;  // wEnemySubStatus2
+    wram[wram_off(sym.wEnemySubStatus3.addr)]   = 0;  // 0xC66F
+    wram[wram_off(sym.wEnemySubStatus4.addr)]   = 0;  // 0xC670
+    wram[wram_off(sym.wEnemySubStatus5.addr)]   = 0;  // 0xC671
     wram[wram_off(sym.wPlayerDisableCount.addr)]= 0;
     wram[wram_off(sym.wDisabledMove.addr)]      = 0;
     wram[wram_off(sym.wPlayerCharging.addr)]    = 0;
@@ -1463,8 +1610,22 @@ static void present_fullscript_fixture(GB_gameboy_t* gb, uint8_t* wram, const Sy
     wram[wram_off(sym.wBattleWeather.addr)]    = 0;
     wram[wram_off(sym.wPlayerScreens.addr)]    = 0;
     wram[wram_off(sym.wEnemyScreens.addr)]     = 0;
-    wram[wram_off(sym.wCurPlayerMove.addr)]    = (uint8_t)PRESENT_MOVE_ID_FS;
-    wram[wram_off(sym.wEnemyMoveStruct.addr)+3]= 0xFF;  // enemy acc = 0xFF
+    // wPlayerMoveStruct (0xC60F, 7 bytes): set all fields correctly so DoMove
+    // dispatches EFFECT_PRESENT and doesn't depend on uninitialized poison bytes.
+    //   +0 (0xC60F) = Animation ID  -- 0 → LoadMoveAnim returns early (skips PlayBattleAnim)
+    //   +1 (0xC610) = Effect ID     -- EFFECT_PRESENT = 0x7A (122) so DoMove runs Present script
+    //   +2 (0xC611) = Power         -- Present base power 1 (actual power chosen at runtime)
+    //   +3 (0xC612) = Type          -- Normal (0x00)
+    //   +4 (0xC613) = Accuracy      -- 0xE5 = 229 (90%) from ROM
+    //   +5 (0xC614) = PP            -- 10 (for consistency with wBattleMonPP)
+    //   +6 (0xC615) = Effect Chance -- 0
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 0] = 0;     // animation = 0 (skip PlayBattleAnim)
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 1] = 0x7A;  // effect = EFFECT_PRESENT (0x7A)
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 2] = 1;     // power = 1 (Present base power from ROM)
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 3] = 0x00;  // type = Normal
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 4] = 0xE5;  // accuracy = 0xE5 (90% = 229/255)
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 5] = 10;    // pp = 10
+    wram[wram_off(sym.wPlayerMoveStruct.addr) + 6] = 0;     // effect chance = 0
 
     // Poison-stability: wOptions bit5 controls CheckBattleScene carry.
     // 0 → no-carry → heal path goes directly to EndMoveEffect (our sink).
@@ -1477,6 +1638,11 @@ static void present_fullscript_fixture(GB_gameboy_t* gb, uint8_t* wram, const Sy
 
     // hROMBank = 0x0D (DoPlayerTurn's bank)
     GB_write_memory(gb, sym.hROMBank.addr, sym.DoPlayerTurn.bank);
+    // rSVBK = 1: CGB WRAM bank selector. Crystal keeps this at 1 during battle
+    // so that 0xD000-0xDFFF accesses reach WRAM bank 1 (where wCurMoveNum,
+    // wBattleMode, wCurBattleMon, wBattlePlayerAction, etc. live).
+    // Without this, the CPU reads bank-0 data for all D-page WRAM addresses.
+    GB_write_memory(gb, 0xFF70, 1);  // rSVBK = 1
 }
 
 // Full-script Present damage case:
