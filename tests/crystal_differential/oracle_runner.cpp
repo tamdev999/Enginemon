@@ -543,7 +543,64 @@ static uint8_t normalize_crystal_status(uint8_t raw_status, uint8_t substatus5){
     return out;
 }
 
-// ============================================================================
+// Normalize Crystal substatus bytes to the Enginemon VolatileStatus bitmask.
+// Only maps fields that have a direct semantic equivalent in Enginemon's VolatileStatus.
+// Crystal-only fields (IN_LOOP, X_ACCURACY, ENCORED, CURLED) are excluded.
+// Toxic is NOT included here — it is encoded in normalize_crystal_status() instead.
+static uint32_t normalize_crystal_volatile(
+    uint8_t sub1, uint8_t /*sub2_unused*/,
+    uint8_t sub3, uint8_t sub4, uint8_t sub5)
+{
+    uint32_t out = 0;
+    // SubStatus1 bits (const_def from 0):
+    if(sub1 & (1<<0)) out |= 0x20u;       // SUBSTATUS_NIGHTMARE   → VolatileStatus::Nightmare
+    if(sub1 & (1<<1)) out |= 0x10u;       // SUBSTATUS_CURSE       → VolatileStatus::Cursed
+    if(sub1 & (1<<2)) out |= 0x400000u;   // SUBSTATUS_PROTECT     → VolatileStatus::Protect
+    if(sub1 & (1<<3)) out |= 0x100000u;   // SUBSTATUS_IDENTIFIED  → VolatileStatus::Identified
+    if(sub1 & (1<<4)) out |= 0x4000000u;  // SUBSTATUS_PERISH      → VolatileStatus::Perish
+    if(sub1 & (1<<5)) out |= 0x800000u;   // SUBSTATUS_ENDURE      → VolatileStatus::Endure
+    if(sub1 & (1<<6)) out |= 0x1000u;     // SUBSTATUS_ROLLOUT     → VolatileStatus::Rollout
+    if(sub1 & (1<<7)) out |= 0x40u;       // SUBSTATUS_IN_LOVE     → VolatileStatus::Infatuation
+    // SubStatus3 bits (const_def from 0):
+    if(sub3 & (1<<0)) out |= 0x400u;      // SUBSTATUS_BIDE        → VolatileStatus::Bide
+    if(sub3 & (1<<1)) out |= 0x800u;      // SUBSTATUS_RAMPAGE     → VolatileStatus::Rampage
+    // bit2 = SUBSTATUS_IN_LOOP: no Enginemon equivalent; skip
+    if(sub3 & (1<<3)) out |= 0x2u;        // SUBSTATUS_FLINCHED    → VolatileStatus::Flinch
+    if(sub3 & (1<<4)) out |= 0x20000u;    // SUBSTATUS_CHARGED     → VolatileStatus::Charging
+    if(sub3 & (1<<5)) out |= 0x4000u;     // SUBSTATUS_UNDERGROUND → VolatileStatus::Underground
+    if(sub3 & (1<<6)) out |= 0x2000u;     // SUBSTATUS_FLYING      → VolatileStatus::Flying
+    if(sub3 & (1<<7)) out |= 0x1u;        // SUBSTATUS_CONFUSED    → VolatileStatus::Confusion
+    // SubStatus4 bits (const_def from 0):
+    // bit0 = SUBSTATUS_X_ACCURACY: no Enginemon volatile_status equivalent; skip
+    if(sub4 & (1<<1)) out |= 0x80000u;    // SUBSTATUS_MIST        → VolatileStatus::Mist
+    if(sub4 & (1<<2)) out |= 0x80u;       // SUBSTATUS_FOCUS_ENERGY→ VolatileStatus::FocusEnergy
+    // bit3 = const_skip
+    if(sub4 & (1<<4)) out |= 0x100u;      // SUBSTATUS_SUBSTITUTE  → VolatileStatus::Substitute
+    if(sub4 & (1<<5)) out |= 0x200u;      // SUBSTATUS_RECHARGE    → VolatileStatus::Recharge
+    if(sub4 & (1<<6)) out |= 0x8000u;     // SUBSTATUS_RAGE        → VolatileStatus::Rage
+    if(sub4 & (1<<7)) out |= 0x8u;        // SUBSTATUS_LEECH_SEED  → VolatileStatus::Seeded
+    // SubStatus5 bits (const_def from 0):
+    // bit0 = SUBSTATUS_TOXIC: handled by normalize_crystal_status on the status byte; skip
+    // bits 1,2 = const_skip
+    if(sub5 & (1<<3)) out |= 0x40000u;    // SUBSTATUS_TRANSFORMED → VolatileStatus::Transformed
+    // bit4 = SUBSTATUS_ENCORED: tracked in encore_turns, not VolatileStatus; skip
+    if(sub5 & (1<<5)) out |= 0x1000000u;  // SUBSTATUS_LOCK_ON     → VolatileStatus::LockOn
+    if(sub5 & (1<<6)) out |= 0x2000000u;  // SUBSTATUS_DESTINY_BOND→ VolatileStatus::DestinyBond
+    if(sub5 & (1<<7)) out |= 0x200000u;   // SUBSTATUS_CANT_RUN    → VolatileStatus::CantRun
+    return out;
+}
+
+// Normalize Enginemon volatile_status to the same canonical bitmask.
+// Masks out any bits that have no Crystal counterpart (future-proofing).
+// Currently keeps all bits that are mapped in normalize_crystal_volatile.
+static uint32_t normalize_enginemon_volatile(uint32_t eng_volatile){
+    static constexpr uint32_t MAPPED_MASK =
+        0x1u|0x2u|0x8u|0x10u|0x20u|0x40u|0x80u|0x100u|0x200u|
+        0x400u|0x800u|0x1000u|0x2000u|0x4000u|0x8000u|0x20000u|
+        0x40000u|0x80000u|0x100000u|0x200000u|0x400000u|0x800000u|
+        0x1000000u|0x2000000u|0x4000000u;
+    return eng_volatile & MAPPED_MASK;
+}
 // SameBoy no-op callbacks
 // ============================================================================
 static void sb_log_nop(GB_gameboy_t*, const char*, GB_log_attributes_t){}
@@ -677,6 +734,28 @@ struct InitialSnapshot {
     uint16_t player_move_id;
     uint8_t  player_pp;
     uint8_t  player_max_pp;
+    // Volatile / substatus state — normalized to the Enginemon VolatileStatus bitmask.
+    // Both engines must start with the same volatile state or the comparison is invalid.
+    // Crystal fields mapped to Enginemon VolatileStatus bits (same values used on both sides):
+    //   SubStatus1: Nightmare(0x20), Curse(0x10), Protect(0x400000), Identified(0x100000),
+    //               Perish(0x4000000), Endure(0x800000), Rollout(0x1000), InLove/Infatuation(0x40)
+    //   SubStatus2: Curled — no Enginemon volatile_status bit (tracked via Minimized indirectly;
+    //               omitted from comparison — Curled only matters mid-battle, not at start)
+    //   SubStatus3: Bide(0x400), Rampage(0x800), Confused(0x1), Flinched(0x2),
+    //               Charged/Charging(0x20000), Underground(0x4000), Flying(0x2000)
+    //               InLoop — Crystal-internal multi-hit loop state; no Enginemon equivalent
+    //   SubStatus4: Substitute(0x100), Mist(0x80000), FocusEnergy(0x80), Recharge(0x200),
+    //               Rage(0x8000), LeechSeed/Seeded(0x8), XAccuracy — held-item effect, no Enginemon bit
+    //   SubStatus5: Toxic is absorbed into normalize_crystal_status() on the Status byte;
+    //               Transformed(0x40000), LockOn(0x1000000), DestinyBond(0x2000000), CantRun(0x200000)
+    //               Encored — tracked in BattlePokemon::encore_turns, not VolatileStatus; omitted
+    // Crystal-only fields with NO Enginemon VolatileStatus equivalent:
+    //   SUBSTATUS_IN_LOOP (Sub3 bit2) — internal multi-hit loop counter
+    //   SUBSTATUS_X_ACCURACY (Sub4 bit0) — X Accuracy item effect (item-only, never fixture-set)
+    //   SUBSTATUS_ENCORED (Sub5 bit4) — tracked in encore_turns, not VolatileStatus
+    //   SUBSTATUS_CURLED (Sub2 bit0) — Minimize-curl, only relevant mid-battle
+    uint32_t player_volatile;  // Enginemon VolatileStatus bitmask (normalized)
+    uint32_t enemy_volatile;   // Enginemon VolatileStatus bitmask (normalized)
 };
 
 // Returns "" if equal, otherwise a human-readable diff.
@@ -722,6 +801,33 @@ static std::string initial_snapshot_diff(const InitialSnapshot& c, const Initial
     chk16(buf, c.player_move_id, e.player_move_id);
     chk8 ("init.player_pp",      c.player_pp,      e.player_pp);
     chk8 ("init.player_max_pp",  c.player_max_pp,  e.player_max_pp);
+    // Volatile/substatus state — normalized to Enginemon VolatileStatus bitmask.
+    // Report each differing bit by name so the error is actionable.
+    {
+        struct { uint32_t bit; const char* name; } bits[] = {
+            {0x1u,       "Confusion"},    {0x2u,       "Flinch"},
+            {0x8u,       "Seeded"},       {0x10u,      "Cursed"},
+            {0x20u,      "Nightmare"},    {0x40u,      "Infatuation"},
+            {0x80u,      "FocusEnergy"},  {0x100u,     "Substitute"},
+            {0x200u,     "Recharge"},     {0x400u,     "Bide"},
+            {0x800u,     "Rampage"},      {0x1000u,    "Rollout"},
+            {0x2000u,    "Flying"},       {0x4000u,    "Underground"},
+            {0x8000u,    "Rage"},         {0x20000u,   "Charging"},
+            {0x40000u,   "Transformed"},  {0x80000u,   "Mist"},
+            {0x100000u,  "Identified"},   {0x200000u,  "CantRun"},
+            {0x400000u,  "Protect"},      {0x800000u,  "Endure"},
+            {0x1000000u, "LockOn"},       {0x2000000u, "DestinyBond"},
+            {0x4000000u, "Perish"},
+        };
+        for(const auto& b : bits){
+            bool cp = (c.player_volatile & b.bit) != 0;
+            bool ep = (e.player_volatile & b.bit) != 0;
+            if(cp!=ep){ char n[64]; snprintf(n,sizeof(n),"init.player_volatile.%s",b.name); chk8(n,(uint8_t)cp,(uint8_t)ep); }
+            bool ce = (c.enemy_volatile  & b.bit) != 0;
+            bool ee = (e.enemy_volatile  & b.bit) != 0;
+            if(ce!=ee){ char n[64]; snprintf(n,sizeof(n),"init.enemy_volatile.%s",b.name); chk8(n,(uint8_t)ce,(uint8_t)ee); }
+        }
+    }
     return os.str();
 }
 
@@ -843,6 +949,21 @@ static InitialSnapshot capture_crystal_initial(
     s.player_pp     = wram[wram_off(sym.wBattleMonPP.addr)];
     // max PP: read from wPartyMon1PP which is the authoritative ROM-derived value
     s.player_max_pp = wram[wram_off(sym.wPartyMon1PP.addr)];
+    // Volatile/substatus state — normalize to Enginemon VolatileStatus bitmask.
+    // SubStatus2 (0xC669/0xC66E) has only SUBSTATUS_CURLED which has no Enginemon
+    // VolatileStatus equivalent, so it is passed as 0.
+    s.player_volatile = normalize_crystal_volatile(
+        wram[wram_off(sym.wPlayerSubStatus1.addr)],
+        /* sub2 */ 0,
+        wram[wram_off(sym.wPlayerSubStatus3.addr)],
+        wram[wram_off(sym.wPlayerSubStatus4.addr)],
+        wram[wram_off(sym.wPlayerSubStatus5.addr)]);
+    s.enemy_volatile = normalize_crystal_volatile(
+        wram[wram_off(0xC66Du)],   // wEnemySubStatus1 (not in SymCache)
+        /* sub2 */ 0,
+        wram[wram_off(sym.wEnemySubStatus3.addr)],
+        wram[wram_off(sym.wEnemySubStatus4.addr)],
+        wram[wram_off(sym.wEnemySubStatus5.addr)]);
     return s;
 }
 
@@ -896,6 +1017,9 @@ static InitialSnapshot capture_enginemon_initial(
     s.player_move_id = (uint16_t)move_id;
     s.player_pp     = player.moves[0].pp;
     s.player_max_pp = player.moves[0].max_pp;
+    // Volatile state — normalize Enginemon VolatileStatus bitmask.
+    s.player_volatile = normalize_enginemon_volatile(player.volatile_status);
+    s.enemy_volatile  = normalize_enginemon_volatile(opponent.volatile_status);
     return s;
 }
 
@@ -3161,6 +3285,64 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
             std::cout << "  emulate_ret bad-return [0x8800]: "
                       << e.substr(0, 80) << "...\n";
         }
+    }
+
+    // 3b. Volatile/substatus initial-snapshot negative tests:
+    //   Prove that a fixture mismatch in battle substatus fields is caught as
+    //   HARNESS_ERROR via initial_snapshot_diff before any execution.
+    //
+    //   Test A: Player Substitute (SUBSTATUS_SUBSTITUTE = Sub4 bit4).
+    //     Crystal sub4=0x10 → player_volatile bit 0x100 (VolatileStatus::Substitute) = 1.
+    //     Enginemon player_volatile = 0 (no Substitute).
+    //     Expected: diff reports "init.player_volatile.Substitute".
+    {
+        InitialSnapshot c{}; // Crystal side: player has Substitute
+        InitialSnapshot e{}; // Enginemon side: clean
+        // Set player_volatile for Substitute only
+        c.player_volatile = 0x100u; // VolatileStatus::Substitute
+        e.player_volatile = 0u;
+        std::string diff = initial_snapshot_diff(c, e);
+        if(diff.find("init.player_volatile.Substitute") == std::string::npos){
+            return startup_fail("SELF_TEST",
+                "volatile substatus test A (player Substitute): expected mismatch not detected. diff='"+diff+"'");
+        }
+        std::cout << "  volatile substatus [player Substitute]: HARNESS_ERROR path confirmed\n";
+    }
+    //   Test B: Enemy Toxic/bad-poison substatus (SUBSTATUS_TOXIC = Sub5 bit0).
+    //     Note: SUBSTATUS_TOXIC is absorbed into normalize_crystal_status() on the Status byte
+    //     (it changes regular PSN to BadPoison in the normalized output, which IS compared
+    //     in initial_snapshot_diff via enemy_status). However, SUBSTATUS_TOXIC also lives in
+    //     substatus5. If Crystal has substatus5 bit0=1 but Enginemon has Status::BadPoison
+    //     not set (Status::None), this should show as enemy_status mismatch at the initial check.
+    //     We test this via Seeded/LeechSeed on the enemy (Sub4 bit7 = VolatileStatus::Seeded)
+    //     since that IS in the volatile mapping. Toxic itself is via Status byte comparison.
+    {
+        InitialSnapshot c{}; // Crystal: enemy has Leech Seed (SubStatus4 bit7 = 0x80)
+        InitialSnapshot e{}; // Enginemon: clean
+        // normalize_crystal_volatile maps Sub4 bit7 → VolatileStatus::Seeded (0x8)
+        c.enemy_volatile = 0x8u; // VolatileStatus::Seeded
+        e.enemy_volatile = 0u;
+        std::string diff = initial_snapshot_diff(c, e);
+        if(diff.find("init.enemy_volatile.Seeded") == std::string::npos){
+            return startup_fail("SELF_TEST",
+                "volatile substatus test B (enemy Seeded/LeechSeed): expected mismatch not detected. diff='"+diff+"'");
+        }
+        std::cout << "  volatile substatus [enemy Seeded]: HARNESS_ERROR path confirmed\n";
+    }
+    // Also directly test the toxic substatus path via Status byte comparison:
+    // SUBSTATUS_TOXIC in sub5 causes normalize_crystal_status to return 0x02 (BadPoison).
+    // With player_status Crystal=0x02 vs Enginemon=0x00 → initial_snapshot_diff catches it.
+    {
+        InitialSnapshot c{};
+        InitialSnapshot e{};
+        c.enemy_status = 0x02u; // normalize_crystal_status result for Toxic
+        e.enemy_status = 0x00u; // Enginemon Status::None → 0
+        std::string diff = initial_snapshot_diff(c, e);
+        if(diff.find("init.enemy_status") == std::string::npos){
+            return startup_fail("SELF_TEST",
+                "volatile substatus test C (enemy Toxic via Status): expected mismatch not detected. diff='"+diff+"'");
+        }
+        std::cout << "  volatile substatus [enemy Toxic/status]: HARNESS_ERROR path confirmed\n";
     }
 
     // 4. Engine data
