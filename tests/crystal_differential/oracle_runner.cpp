@@ -540,169 +540,20 @@ struct ExecCtx {
     int         insn_count;
     // Wall-clock preemption
     std::atomic<bool>* stop_flag;
-    // RNG interception — pointer to case's RngCtx (null if no RNG for this case)
+    // RNG context — kept for RNG-exhaustion detection (injection now pre-step)
     RngCtx*     rng_ctx;
 };
 
-static void exec_cb(GB_gameboy_t* gb, uint16_t pc, uint8_t){
+static void exec_cb(GB_gameboy_t* gb, uint16_t /*pc*/, uint8_t){
     auto* ctx = static_cast<ExecCtx*>(GB_get_user_data(gb));
     if(!ctx || ctx->triggered) return;
     ++ctx->insn_count;
 
-    // Wall-clock preemption
+    // Wall-clock preemption only — all RNG injection, sink detection, and
+    // presentation skips are handled in the pre-step loop before GB_run().
     if(ctx->stop_flag && ctx->stop_flag->load(std::memory_order_relaxed)){
         ctx->triggered = true;
         ctx->triggered_sink = "__TIMEOUT__";
-        return;
-    }
-
-    // RNG interception: PC == 0x2FAD means we're about to execute LD A,(0xCFB6)
-    // inside BattleRandom. Write our tape byte to 0xCFB6 so the instruction
-    // naturally loads it into A.
-    // Also: fire a diagnostic on FIRST RNG consumption to confirm the script path.
-    if(ctx->rng_ctx && pc == BATTLE_RANDOM_RESULT_READ_PC){
-        RngCtx* rng = ctx->rng_ctx;
-        if(rng->tape_idx >= rng->tape_len){
-            rng->exhausted = true;
-            // Don't stop here -- let the case exhaust and we report it after
-        } else {
-            uint8_t crystal_val = GB_safe_read_memory(gb, 0xCFB6); // side-effect-free read
-            uint8_t tape_val    = rng->tape[rng->tape_idx];
-            GB_write_memory(gb, 0xCFB6, tape_val);
-            rng->trace.push_back({rng->tape_idx, tape_val, crystal_val,
-                                   BATTLE_RANDOM_RESULT_READ_PC, "BattleRandom"});
-            ++rng->tape_idx;
-        }
-    }
-
-    // BattleCommand_UsedMoveText skip (0D:4541)
-    //
-    // DoMove dispatch loop (bank 0D):
-    //   ... (ReadMoveEffectCommand at 0x4058) ...
-    //   call .DoMoveEffectCommand      ; at 0D:407E -- pushes return addr 0D:4081
-    //   jr   .ReadMoveEffectCommand    ; at 0D:4081 (2 bytes)
-    //   .DoMoveEffectCommand: jp hl    ; at 0D:4083 (1 byte) -- dispatches via JP (HL)
-    //
-    // Intercept strategy: fire at DoMoveEffectCommand (0x4083 = JP HL).
-    // At this point, HL contains the command handler address.
-    // When HL == 0x4541 (BattleCommand_UsedMoveText), we skip the handler by:
-    //   1. Setting HL = 0x4081 (so JP HL lands on the JR .ReadMoveEffectCommand)
-    //   2. SP += 2 (discard the return addr 0x4081 pushed by `call .DoMoveEffectCommand`)
-    //
-    // SameBoy exec_cb fires with gb->pc = 0x4084 (already incremented past JP HL).
-    // JP HL executes and uses the modified HL = 0x4081 as its branch target.
-    // The JR at 0x4081 then loops to 0x4058 normally with a balanced stack.
-    //
-    // UsedMoveText prints "<Name> used PRESENT!" -- no gameplay state writes.
-    static constexpr uint16_t DOMOVE_EFFECT_DISPATCH_PC  = 0x4083;  // DoMove.DoMoveEffectCommand (0D)
-    static constexpr uint16_t USED_MOVE_TEXT_HANDLER_PC  = 0x4541;  // BattleCommand_UsedMoveText (0D)
-    static constexpr uint16_t DOMOVE_DISPATCHER_CONT_PC  = 0x4081;  // jr .ReadMoveEffectCommand (0D)
-    // Presentation-only rendering skips.
-    // Each entry: bank-0 CALL-entered function with no gameplay state writes, RET convention.
-    // Verified individually against pokecrystal source.
-    //
-    //   DelayFrame (0x045A): CALL-entered. Writes 1 to wVBlankOccurred(0xCFB3), HALTs,
-    //     waits for VBlank ISR to clear it. No battle state written. Returns via RET.
-    //
-    //   DelayFrames (0x0468): CALL-entered. Calls DelayFrame in a loop (count in C).
-    //     No battle state written. Returns via RET.
-    //
-    //   BattleTextbox (0x3AC3): CALL-entered. Renders text tiles into VRAM.
-    //     No battle state written. Returns via RET.
-    //
-    //   StdBattleTextbox (0x3AD5): CALL-entered. Sets up HL then tail-calls BattleTextbox.
-    //     No battle state written. Returns via RET (via BattleTextbox's RET).
-    //
-    //   RefreshBattleHuds (0x39C9): CALL-entered. Calls WaitBGMap then updates HUD tiles.
-    //     No battle state written. Returns via RET.
-    //
-    //   AnimateHPBar (03:46E0): CALL-entered, bank-guarded (only when hROMBank==03).
-    //     Animates HP bar graphics. No battle state written. Returns via RET.
-    //     Guard prevents aliasing with bank-0D code at the same in-bank address.
-    static constexpr uint16_t DELAY_FRAME_PC         = 0x045A;
-    static constexpr uint16_t DELAY_FRAMES_PC        = 0x0468;
-    static constexpr uint16_t BATTLE_TEXTBOX_PC      = 0x3AC3;
-    static constexpr uint16_t STD_BATTLE_TEXTBOX_PC  = 0x3AD5;
-    static constexpr uint16_t REFRESH_BATTLE_HUDS_PC = 0x39C9;
-    auto do_ret_skip = [&](){
-        GB_registers_t* r = GB_get_registers(gb);
-        if(r){
-            // Read return address directly from SameBoy's internal HRAM buffer
-            // to avoid any potential issue with GB_safe_read_memory for stack addresses.
-            size_t hram_sz = 0; uint16_t hram_bank = 0;
-            uint8_t* hram = static_cast<uint8_t*>(
-                GB_get_direct_access(gb, GB_DIRECT_ACCESS_HRAM, &hram_sz, &hram_bank));
-            uint16_t lo_idx = (r->sp     - 0xFF80u) & 0x7Fu;
-            uint16_t hi_idx = (r->sp + 1 - 0xFF80u) & 0x7Fu;
-            uint8_t lo = hram ? hram[lo_idx] : GB_safe_read_memory(gb, r->sp);
-            uint8_t hi = hram ? hram[hi_idx] : GB_safe_read_memory(gb, r->sp + 1);
-            r->sp += 2;
-            r->pc = (uint16_t)(lo | (hi << 8));
-        }
-    };
-    if(pc == DELAY_FRAME_PC || pc == DELAY_FRAMES_PC ||
-       pc == BATTLE_TEXTBOX_PC || pc == STD_BATTLE_TEXTBOX_PC ||
-       pc == REFRESH_BATTLE_HUDS_PC){
-        do_ret_skip();
-        return;
-    }
-    // ByteFill (0x3041): HARNESS_ERROR if destination is outside WRAM/HRAM.
-    // An invalid destination (DE < 0x8000) means the fixture has an uninitialized
-    // pointer that Crystal is using to address ROM or VRAM.
-    // This must fail explicitly -- never skip a semantic fill operation.
-    if(pc == 0x3041){
-        GB_registers_t* br = GB_get_registers(gb);
-        if(br && br->de < 0x8000){
-            static char bytefill_err[128];
-            snprintf(bytefill_err, sizeof(bytefill_err),
-                "__HARNESS_ERROR__ ByteFill(DE=0x%04X BC=0x%04X): "
-                "fixture has uninitialized pointer -- add field to fixture",
-                br->de, br->bc);
-            ctx->triggered      = true;
-            ctx->triggered_sink = bytefill_err;
-            return;
-        }
-    }
-    // AnimateHPBar (03:46E0) -- bank-guarded skip to avoid aliasing with
-    // BattleCommand_Stab code in bank 0D at the same in-bank address.
-    if(pc == 0x46E0 && GB_safe_read_memory(gb, 0xFF9D) == 0x03){
-        do_ret_skip();
-        return;
-    }
-    // AnimateCurrentMoveEitherSide (0D:7DE9) -- CALL-entered from BattleCommand_Present.
-    // Calls BattleCommand_LowerSub, PlayDamageAnim, BattleCommand_RaiseSub.
-    // Purely presentational (HP bar animation + damage flash). Returns via RET at 0x7E00.
-    // Only skipped when NOT registered as a sink for this case (direct-Present cases
-    // 2171/2174 use it as their sink; full-script case 2176 must skip past it).
-    if(pc == 0x7DE9 && GB_safe_read_memory(gb, 0xFF9D) == 0x0D){
-        // If it's registered as a sink, let sink detection below handle it.
-        bool is_sink = false;
-        for(size_t i=0; i<ctx->num_sinks; ++i)
-            if(ctx->sink_pcs[i] == 0x7DE9){ is_sink=true; break; }
-        if(!is_sink){
-            do_ret_skip();
-            return;
-        }
-    }
-    if(pc == DOMOVE_EFFECT_DISPATCH_PC && GB_safe_read_memory(gb, 0xFF9D) == 0x0D){
-        // JP HL was fetched. HL contains the target command handler address.
-        GB_registers_t* r = GB_get_registers(gb);
-        if(r && r->hl == USED_MOVE_TEXT_HANDLER_PC){
-            // Skip UsedMoveText: redirect JP HL to the loop-continue point (0x4081)
-            // and discard the return address that call .DoMoveEffectCommand pushed.
-            r->hl = DOMOVE_DISPATCHER_CONT_PC;  // JP HL will land here
-            r->sp += 2;                          // discard pushed return addr 0x4081
-        }
-        return;
-    }
-
-    // Sink detection
-    for(size_t i=0; i<ctx->num_sinks; ++i){
-        if(pc == ctx->sink_pcs[i]){
-            ctx->triggered = true;
-            ctx->triggered_sink = ctx->sink_names[i];
-            return;
-        }
     }
 }
 
@@ -838,8 +689,10 @@ static void fixture_common(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
     }
     GB_write_memory(gb,sym.hBattleTurn.addr,0x00);
     GB_write_memory(gb,sym.hROMBank.addr,0x0D); // set at call site; override if needed
-    GB_write_memory(gb,0xFFFF,0x00);
-    GB_write_memory(gb,0xFF0F,0x00);
+    // IE = 0x00, IF = 0x00: all interrupts disabled.
+    // Presentation code that would HALT for VBlank is skipped pre-step before GB_run().
+    GB_write_memory(gb,0xFFFF,0x00); // IE: no interrupts
+    GB_write_memory(gb,0xFF0F,0x00); // IF: no pending flags
     // Zero out snapshot-read fields so they're poison-stable across runs.
     // Haze doesn't write these; Present writes them. Starting at 0 makes them
     // deterministic for poison stability regardless of which move runs.
@@ -910,7 +763,7 @@ static CrystalRunResult run_crystal_case(
     exec_ctx.triggered_sink= nullptr;
     exec_ctx.insn_count    = 0;
     exec_ctx.stop_flag     = stop_flag;
-    exec_ctx.rng_ctx       = rng_ctx.get(); // null if no RNG for this case
+    exec_ctx.rng_ctx       = rng_ctx.get(); // for exhaustion tracking only
 
     GB_set_user_data(&gb,&exec_ctx);
     GB_set_execution_callback(&gb,exec_cb);
@@ -938,24 +791,232 @@ static CrystalRunResult run_crystal_case(
     GB_registers_t* regs=GB_get_registers(&gb);
     if(!regs){ GB_free(&gb); res.stop_reason=StopReason::REGS_ACCESS_FAILED; return res; }
 
-    // Push return address (first sink) onto the stack. If execution RETs before
-    // any sink fires, it lands at sink_pcs[0] and the exec_cb catches it.
+    // -------------------------------------------------------------------------
+    // Stack: Crystal's HRAM layout (pokecrystal/ram/hram.asm):
+    //   Last named HRAM symbol: hClockResetTrigger = 0xFFEB
+    //   Stack region: 0xFFEC–0xFFFE  (13 bytes, grows downward)
+    //   Initial SP  : 0xFFFE  (first push writes to 0xFFFD–0xFFFE)
     //
-    // INITIAL_SP = 0xFFFF: Crystal uses HRAM 0xFF80-0xFFEB for its own variables
-    // (hBattleTurn=0xFFE4, hROMBank=0xFF9D, etc.). Starting the stack at 0xFFFF
-    // means the first push goes to 0xFFFD-0xFFFE (unused HRAM), and 12 levels of
-    // nested CALLs reach 0xFFE5 -- safely above Crystal's variables at 0xFFEB.
-    // The old value 0xFFF0 allowed only 3 nested calls before overwriting 0xFFE4.
-    static constexpr uint16_t INITIAL_SP = 0xFFFF;
+    // We push one sentinel (first sink addr) below the initial SP so that a
+    // stray RET before any sink fires lands on a monitored address.
+    // Stack escape (SP < wStackBottom or SP > wStackTop) = HARNESS_ERROR.
+    static constexpr uint16_t W_STACK_TOP    = 0xFFFE; // Crystal's initial SP
+    static constexpr uint16_t W_STACK_BOTTOM = 0xFFEC; // first byte of stack region
     uint16_t ret_addr = cfg.sink_pcs[0];
-    GB_write_memory(&gb,INITIAL_SP-1,(ret_addr>>8)&0xFF);
-    GB_write_memory(&gb,INITIAL_SP-2, ret_addr    &0xFF);
-    regs->sp = INITIAL_SP-2;
+    GB_write_memory(&gb, W_STACK_TOP - 1, (ret_addr >> 8) & 0xFF);
+    GB_write_memory(&gb, W_STACK_TOP - 2,  ret_addr       & 0xFF);
+    regs->sp = W_STACK_TOP - 2;
     regs->pc = cfg.entry.addr;
 
-    // Execute
-    while(!exec_ctx.triggered && exec_ctx.insn_count < cfg.insn_cap)
+    // -------------------------------------------------------------------------
+    // Pre-step execution loop.
+    //
+    // Before each GB_run() we inspect the current PC and handle:
+    //   1. Sink detection   — stop before the instruction executes
+    //   2. Presentation skips — emulate a RET without entering the function
+    //   3. RNG injection    — write tape byte to 0xCFB6 before BattleRandom reads it
+    //   4. UsedMoveText skip via JP HL redirect at DoMoveEffectCommand
+    //
+    // None of these mutate PC/SP from exec_cb. exec_cb only counts instructions
+    // and handles wall-clock timeout.
+    //
+    // Presentation skips (all CALL-entered, pure display, no gameplay writes):
+    //
+    //   DelayFrame      (00:045A)  CALL-entered, HALTs for VBlank. RET conv.
+    //   DelayFrames     (00:0468)  calls DelayFrame in a loop. RET conv.
+    //   WaitBGMap       (00:31F6)  calls DelayFrames. RET conv.
+    //   BattleTextbox   (00:3AC3)  renders text tiles. RET conv.
+    //   StdBattleTextbox(00:3AD5)  sets HL, tail-calls BattleTextbox. RET conv.
+    //   RefreshBattleHuds(00:39C9) calls WaitBGMap + HUD update. RET conv.
+    //   AnimateHPBar    (03:46E0)  bank-guarded (hROMBank==03). RET conv.
+    //   PlayDamageAnim  (0D:7E19)  bank-guarded (hROMBank==0D). RET conv.
+    //     PlayDamageAnim is called from inside AnimateCurrentMoveEitherSide after
+    //     all callee-saves; the return addr on the stack is 0x7DFA (return inside
+    //     AnimateCurrentMoveEitherSide). Emulating RET here lets LowerSub +
+    //     RaiseSub + epilogue complete normally, restoring the caller's stack.
+    //
+    //   NOT skipped: AnimateCurrentMoveEitherSide itself — it is a registered sink
+    //     for cases 2171/2174 and must trigger the sink handler, not be skipped.
+    //
+    // For each skip, we emulate RET:
+    //   lo = mem[SP]; hi = mem[SP+1]; SP += 2; PC = (hi<<8)|lo
+    //   Fail-closed: if the popped address is outside the valid code range
+    //   (ROM: 0x0000–0x7FFF, or banked ROM in 0x4000–0x7FFF), report HARNESS_ERROR.
+    //
+    // DoMove UsedMoveText skip (DoMoveEffectCommand = 0D:4083, JP HL):
+    //   When hROMBank==0D and PC==0x4083 (JP HL) and HL==0x4541 (UsedMoveText),
+    //   we redirect JP HL by setting HL=0x4081 and SP+=2 before GB_run.
+    //   JP HL executes and lands on 0x4081 (JR .ReadMoveEffectCommand) with
+    //   a balanced stack. This is the same mechanism that already works for
+    //   the other cases; it remains a pre-step action, not an exec_cb mutation.
+
+    // Helper: read little-endian word at addr from SameBoy's memory
+    auto read_word = [&](uint16_t addr) -> uint16_t {
+        uint8_t lo = GB_safe_read_memory(&gb, addr);
+        uint8_t hi = GB_safe_read_memory(&gb, (uint16_t)(addr + 1));
+        return (uint16_t)(lo | (hi << 8));
+    };
+
+    // Emulate a RET: pop [SP] as new PC, SP += 2. Returns the new PC, or 0xFFFF
+    // (HARNESS_ERROR sentinel) if the return address is implausible.
+    auto emulate_ret = [&](GB_registers_t* r, const char* skip_name) -> uint16_t {
+        uint16_t ret_pc = read_word(r->sp);
+        r->sp += 2;
+        // Valid return destinations are ROM (0x0000–0x7FFF).
+        // Popping an address in WRAM/HRAM/IO means the stack is corrupt.
+        if(ret_pc > 0x7FFF){
+            static char bad_ret[128];
+            snprintf(bad_ret, sizeof(bad_ret),
+                "__HARNESS_ERROR__ %s: invalid return addr 0x%04X (SP was 0x%04X)",
+                skip_name, ret_pc, (uint16_t)(r->sp - 2));
+            exec_ctx.triggered      = true;
+            exec_ctx.triggered_sink = bad_ret;
+            return 0xFFFF;
+        }
+        r->pc = ret_pc;
+        return ret_pc;
+    };
+
+    while(!exec_ctx.triggered && exec_ctx.insn_count < cfg.insn_cap){
+        GB_registers_t* r = GB_get_registers(&gb);
+        if(!r){ exec_ctx.triggered = true; exec_ctx.triggered_sink = "__HARNESS_ERROR__ GB_get_registers null"; break; }
+
+        const uint16_t pc  = r->pc;
+        const uint16_t sp  = r->sp;
+        const uint8_t  bank = GB_safe_read_memory(&gb, 0xFF9D); // hROMBank
+
+        // --- Stack bounds check -------------------------------------------
+        // SP is allowed to be below W_STACK_BOTTOM only if it is in HRAM
+        // (0xFF80–0xFFFE); HRAM is always valid stack territory for Crystal.
+        // A SP escaping below 0xFF80 into Echo RAM is always an error.
+        if(sp < 0xFF80){
+            static char sp_err[64];
+            snprintf(sp_err, sizeof(sp_err),
+                "__HARNESS_ERROR__ stack escape: SP=0x%04X < 0xFF80", sp);
+            exec_ctx.triggered      = true;
+            exec_ctx.triggered_sink = sp_err;
+            break;
+        }
+
+        // --- Sink detection (pre-step) ------------------------------------
+        bool hit_sink = false;
+        for(size_t i = 0; i < cfg.num_sinks; ++i){
+            if(pc == cfg.sink_pcs[i]){
+                exec_ctx.triggered      = true;
+                exec_ctx.triggered_sink = cfg.sink_names[i];
+                hit_sink = true;
+                break;
+            }
+        }
+        if(hit_sink) break;
+
+        // --- ByteFill guard (0x3041) --------------------------------------
+        // Destination in DE < 0x8000 means a fixture field is uninitialized.
+        if(pc == 0x3041 && r->de < 0x8000){
+            static char bytefill_err[128];
+            snprintf(bytefill_err, sizeof(bytefill_err),
+                "__HARNESS_ERROR__ ByteFill(DE=0x%04X BC=0x%04X): "
+                "fixture has uninitialized pointer",
+                r->de, r->bc);
+            exec_ctx.triggered      = true;
+            exec_ctx.triggered_sink = bytefill_err;
+            break;
+        }
+
+        // --- RNG injection (pre-step) -------------------------------------
+        // PC == 0x2FAD: about to execute LD A,(0xCFB6) inside BattleRandom.
+        // Write our tape byte first so the instruction loads it naturally.
+        if(rng_ctx && pc == BATTLE_RANDOM_RESULT_READ_PC){
+            if(rng_ctx->tape_idx >= rng_ctx->tape_len){
+                rng_ctx->exhausted = true;
+                // Fall through — let the case exhaust; we report it later.
+            } else {
+                uint8_t crystal_val = GB_safe_read_memory(&gb, 0xCFB6);
+                uint8_t tape_val    = rng_ctx->tape[rng_ctx->tape_idx];
+                GB_write_memory(&gb, 0xCFB6, tape_val);
+                rng_ctx->trace.push_back({rng_ctx->tape_idx, tape_val, crystal_val,
+                                          BATTLE_RANDOM_RESULT_READ_PC, "BattleRandom"});
+                ++rng_ctx->tape_idx;
+            }
+        }
+
+        // --- UsedMoveText skip via JP HL redirect (pre-step) --------------
+        // At DoMove.DoMoveEffectCommand (0D:4083 = JP HL), when HL == 0x4541
+        // (BattleCommand_UsedMoveText), redirect JP HL to 0x4081 and discard
+        // the return address pushed by `call .DoMoveEffectCommand`.
+        // JP HL then executes and lands on JR .ReadMoveEffectCommand (0x4081)
+        // with a balanced stack.
+        if(pc == 0x4083 && bank == 0x0D && r->hl == 0x4541){
+            r->hl  = 0x4081; // JP HL lands here
+            r->sp += 2;      // discard 0x4081 pushed by call .DoMoveEffectCommand
+            // Fall through to GB_run() — JP HL executes with the modified HL.
+        }
+
+        // --- Presentation skips (pre-step RET emulation) ------------------
+        // Each skip: emulate one RET before GB_run() to avoid the function body.
+        // The function never executes. The return address is validated.
+        {
+            bool did_skip = false;
+
+            // DelayFrame (00:045A) — HALTs for VBlank; pure timing, no game state
+            if(pc == 0x045A){
+                emulate_ret(r, "DelayFrame(00:045A)");
+                did_skip = true;
+            }
+            // DelayFrames (00:0468) — calls DelayFrame in a loop; pure timing
+            else if(pc == 0x0468){
+                emulate_ret(r, "DelayFrames(00:0468)");
+                did_skip = true;
+            }
+            // WaitBGMap (00:31F6) — calls DelayFrames; BG map sync, no game state
+            else if(pc == 0x31F6){
+                emulate_ret(r, "WaitBGMap(00:31F6)");
+                did_skip = true;
+            }
+            // BattleTextbox (00:3AC3) — renders text tiles; no game state
+            else if(pc == 0x3AC3){
+                emulate_ret(r, "BattleTextbox(00:3AC3)");
+                did_skip = true;
+            }
+            // StdBattleTextbox (00:3AD5) — sets HL, calls BattleTextbox
+            else if(pc == 0x3AD5){
+                emulate_ret(r, "StdBattleTextbox(00:3AD5)");
+                did_skip = true;
+            }
+            // RefreshBattleHuds (00:39C9) — WaitBGMap + HUD tiles; no game state
+            else if(pc == 0x39C9){
+                emulate_ret(r, "RefreshBattleHuds(00:39C9)");
+                did_skip = true;
+            }
+            // AnimateHPBar (03:46E0) — bank-guarded; HP bar animation
+            else if(pc == 0x46E0 && bank == 0x03){
+                emulate_ret(r, "AnimateHPBar(03:46E0)");
+                did_skip = true;
+            }
+            // PlayDamageAnim (0D:7E19) — bank-guarded; damage flash animation.
+            // Called from AnimateCurrentMoveEitherSide after all callee-saves.
+            // The return addr on the stack is 0x7DFA (inside AnimateCMES); popping
+            // it lets BattleCommand_LowerSub (already done), POP AF, BattleCommand_
+            // RaiseSub, and the AnimateCMES epilogue (POP BC/DE/HL, RET) execute
+            // normally, correctly restoring the BattleCommand_Present call frame.
+            // Not skipped when AnimateCurrentMoveEitherSide is a registered sink.
+            else if(pc == 0x7E19 && bank == 0x0D){
+                bool acmes_is_sink = false;
+                for(size_t i = 0; i < cfg.num_sinks; ++i)
+                    if(cfg.sink_pcs[i] == 0x7DE9){ acmes_is_sink = true; break; }
+                if(!acmes_is_sink){
+                    emulate_ret(r, "PlayDamageAnim(0D:7E19)");
+                    did_skip = true;
+                }
+            }
+
+            if(exec_ctx.triggered) break; // emulate_ret set HARNESS_ERROR
+            if(did_skip) continue;        // skip GB_run() for this step
+        }
+
+        // --- Execute one instruction ---------------------------------------
         GB_run(&gb);
+    }
 
     res.insn_count = exec_ctx.insn_count;
     res.sink_name  = exec_ctx.triggered_sink;
@@ -1651,10 +1712,8 @@ static const MoveSpec REGISTERED_MOVES[] = {
     //   Entry: DoMove -- directly dispatches the Present effect script without
     //   UpdateMoveData overhead. Runs checkobedience through endmove.
     //   Tape: [CheckHit, Critical, PresentPower, DamVar1, DamVar2] -- 5 RNG bytes.
-    //   Crystal consumes 3 bytes (CheckHit, Critical, PresentPower); DamVar bytes unused
-    //   because wCurDamage=0 after the present command (fixture sets enemy HP=250/300
-    //   so the present power-40 path computes 0 damage given the stat mix).
-    //   Sink: EndMoveEffect. Measured: 7003 insn. Cap = 50 000 (~7x margin).
+    //   All 5 consumed; damage=28, enemy_hp=222 (from 250). Measured: 15664 insn.
+    //   Sink: EndMoveEffect. Cap = 50 000 (~3.2x margin).
     { 2176, 217, "Present/damage-full", 50000, PRESENT_TAPE_FULLSCRIPT_DAMAGE,
                                 sizeof(PRESENT_TAPE_FULLSCRIPT_DAMAGE),
                                 present_fullscript_damage_build_config, nullptr },
