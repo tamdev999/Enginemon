@@ -1,4 +1,4 @@
-// tests/crystal_differential/oracle_runner.cpp
+﻿// tests/crystal_differential/oracle_runner.cpp
 //
 // Crystal battle differential oracle -- hardened parallel runner with RNG interception.
 //
@@ -1558,6 +1558,24 @@ static CrystalRunResult run_crystal_case(
                 emulate_ret(r, "LoadAnim(0D:7E44)");
                 did_skip = true;
             }
+            // BattleCommand_StatUpAnim (0D:4FD1) -- stat-raise animation.
+            // Called from stat-up scripts (SwordsDance, Agility, Amnesia, Barrier, etc.)
+            // after the stat stage is already written to wPlayerStatLevels.
+            // Calls PlayFXAnimID -> FarCall PlayBattleAnim (33:40D6) -> DelayFrames loop.
+            // Pure LCD/VRAM presentation; no semantic WRAM written after stage change.
+            // Source-proven: BattleCommand_StatUpAnim at 0D:4FD1 in pokecrystal11.sym.
+            else if(pc == 0x4FD1 && bank == 0x0D){
+                emulate_ret(r, "BattleCommand_StatUpAnim(0D:4FD1)");
+                did_skip = true;
+            }
+            // BattleCommand_StatDownAnim (0D:4FDB) -- stat-lower animation.
+            // Called from stat-down scripts (Growl, Leer, TailWhip, Screech, StringShot, Charm)
+            // after the stage is already decremented. Same display path as StatUpAnim.
+            // Source-proven: BattleCommand_StatDownAnim at 0D:4FDB in pokecrystal11.sym.
+            else if(pc == 0x4FDB && bank == 0x0D){
+                emulate_ret(r, "BattleCommand_StatDownAnim(0D:4FDB)");
+                did_skip = true;
+            }
 
             if(exec_ctx.triggered) break; // emulate_ret set HARNESS_ERROR
             if(did_skip) continue;        // skip GB_run() for this step
@@ -2770,6 +2788,49 @@ static void toxic_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x5C, TAPE_HIT, sizeof(TAPE_HIT)); }
 
 // ============================================================================
+// Batch 4: Single-turn stat-stage changes
+//
+// All use generic_fullscript_config (DoMove entry, EndMoveEffect sink).
+// No new fixture logic, no new sink PCs, no new WRAM fields.
+// Stat-up self moves (acc=0xFF): zero RNG bytes.
+// Stat-down opponent moves (acc varies): 1 RNG byte via TAPE_HIT={0x30}=48.
+//   TAPE_HIT byte 48 < acc for all: Growl/TailWhip/Leer/StringShot/Charm acc=229 ✓,
+//                                    Screech acc=204 ✓.
+//
+// Crystal effect bytes (ROM-proven, from pokecrystal data/moves/moves.asm):
+//   SwordsDance 0x0E  EFFECT_ATTACK_UP2       AttackUp2     acc=0xFF   0 RNG
+//   Growl       0x2D  EFFECT_ATTACK_DOWN       AttackDown1  acc=0xE5   1 RNG
+//   TailWhip    0x27  EFFECT_DEFENSE_DOWN      DefenseDown1  acc=0xE5   1 RNG
+//   Leer        0x2B  EFFECT_DEFENSE_DOWN      DefenseDown1  acc=0xE5   1 RNG
+//   Screech     0x67  EFFECT_DEFENSE_DOWN2     DefenseDown2  acc=0xCC   1 RNG
+//   StringShot  0x51  EFFECT_SPEED_DOWN        SpeedDown1    acc=0xE5   1 RNG
+//   Agility     0x61  EFFECT_SPEED_UP2         SpeedUp2      acc=0xFF   0 RNG
+//   Amnesia     0x85  EFFECT_SPECIAL_ATK_UP2   SpAtkUp2      acc=0xFF   0 RNG
+//   Barrier     0x70  EFFECT_DEFENSE_UP2       DefenseUp2    acc=0xFF   0 RNG
+//   Charm       0xCC  EFFECT_ATTACK_DOWN2      AttackDown2   acc=0xE5   1 RNG
+// ============================================================================
+static void swordsdance_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x0E, nullptr,  0); }
+static void growl_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x2D, TAPE_HIT, sizeof(TAPE_HIT)); }
+static void tailwhip_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x27, TAPE_HIT, sizeof(TAPE_HIT)); }
+static void leer_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x2B, TAPE_HIT, sizeof(TAPE_HIT)); }
+static void screech_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x67, TAPE_HIT, sizeof(TAPE_HIT)); }
+static void stringshot_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x51, TAPE_HIT, sizeof(TAPE_HIT)); }
+static void agility_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x61, nullptr,  0); }
+static void amnesia_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x85, nullptr,  0); }
+static void barrier_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x70, nullptr,  0); }
+static void charm_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xCC, TAPE_HIT, sizeof(TAPE_HIT)); }
+
+// ============================================================================
 // Registered moves -- adding a move requires:
 //   1. Registering here with name, insn_cap, rng_tape, build_config
 //   2. build_config sets entry, sinks, rng_tape, extra_fixture
@@ -2875,6 +2936,32 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 0x49, 0x49, "LeechSeed",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     leechseed_config,   nullptr },
     // Toxic/DoPoison script; acc=0xD8=216; 1 RNG byte (TAPE_HIT); enemy_statusâ†’BadPoison.
     { 0x5C, 0x5C, "Toxic",         100000, TAPE_HIT,      sizeof(TAPE_HIT),     toxic_config,       nullptr },
+    // ========================================================================
+    // Batch 4: Single-turn stat-stage changes (DoMove → EndMoveEffect)
+    // Stat-up self moves: acc=0xFF, 0 RNG bytes.
+    // Stat-down opponent moves: acc ≤ 0xE5, 1 RNG byte (TAPE_HIT={0x30}=48).
+    // No move-specific fixture or sink logic — pure generic_fullscript_config.
+    // ========================================================================
+    // Swords Dance (0x0E, EFFECT_ATTACK_UP2): player ATK +2. 0 RNG.
+    { 0x0E, 0x0E, "SwordsDance",  100000, nullptr,       0,                    swordsdance_config, nullptr },
+    // Growl (0x2D, EFFECT_ATTACK_DOWN): enemy ATK -1. acc=0xE5=229. 1 RNG.
+    { 0x2D, 0x2D, "Growl",        100000, TAPE_HIT,      sizeof(TAPE_HIT),     growl_config,       nullptr },
+    // Tail Whip (0x27, EFFECT_DEFENSE_DOWN): enemy DEF -1. acc=0xE5=229. 1 RNG.
+    { 0x27, 0x27, "TailWhip",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     tailwhip_config,    nullptr },
+    // Leer (0x2B, EFFECT_DEFENSE_DOWN): enemy DEF -1. acc=0xE5=229. 1 RNG.
+    { 0x2B, 0x2B, "Leer",         100000, TAPE_HIT,      sizeof(TAPE_HIT),     leer_config,        nullptr },
+    // Screech (0x67, EFFECT_DEFENSE_DOWN2): enemy DEF -2. acc=0xCC=204. 1 RNG.
+    { 0x67, 0x67, "Screech",      100000, TAPE_HIT,      sizeof(TAPE_HIT),     screech_config,     nullptr },
+    // String Shot (0x51, EFFECT_SPEED_DOWN): enemy SPD -1. acc=0xE5=229. 1 RNG.
+    { 0x51, 0x51, "StringShot",   100000, TAPE_HIT,      sizeof(TAPE_HIT),     stringshot_config,  nullptr },
+    // Agility (0x61, EFFECT_SPEED_UP2): player SPD +2. acc=0xFF. 0 RNG.
+    { 0x61, 0x61, "Agility",      100000, nullptr,       0,                    agility_config,     nullptr },
+    // Amnesia (0x85, EFFECT_SPECIAL_ATK_UP2): player SATK +2. acc=0xFF. 0 RNG.
+    { 0x85, 0x85, "Amnesia",      100000, nullptr,       0,                    amnesia_config,     nullptr },
+    // Barrier (0x70, EFFECT_DEFENSE_UP2): player DEF +2. acc=0xFF. 0 RNG.
+    { 0x70, 0x70, "Barrier",      100000, nullptr,       0,                    barrier_config,     nullptr },
+    // Charm (0xCC, EFFECT_ATTACK_DOWN2): enemy ATK -2. acc=0xE5=229. 1 RNG.
+    { 0xCC, 0xCC, "Charm",        100000, TAPE_HIT,      sizeof(TAPE_HIT),     charm_config,       nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
