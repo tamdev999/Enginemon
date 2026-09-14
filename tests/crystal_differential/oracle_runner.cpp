@@ -1246,10 +1246,28 @@ struct CrystalRunConfig {
     // Used exclusively by oracle_harness_negative_test to inject a bad SP.
     // Never set by production code paths (MoveSpec::build_config never touches it).
     uint16_t    force_sp_before_loop = 0;
+    // TEST-ONLY: if force_woptions_before_loop is nonzero, override wOptions (0xCFCC) to
+    // this value immediately before the pre-step loop. Used by negative tests to violate
+    // presentation-skip preconditions without modifying production fixtures.
+    uint8_t     force_woptions_before_loop = 0;
 };
 
 
 
+
+// Helper: build and set an UNSAFE_PRESENTATION_SKIP HARNESS_ERROR for a presentation skip
+// that has been reached with a violated semantic precondition.
+// Sets exec_ctx.triggered and exec_ctx.triggered_sink; returns 0xFFFF (error sentinel).
+// Like the bad-return path, the error string is stored in a static buffer.
+static uint16_t unsafe_skip_error(ExecCtx& ctx, const char* symbol, const char* precondition){
+    static char unsafe_err[256];
+    snprintf(unsafe_err, sizeof(unsafe_err),
+        "__HARNESS_ERROR__ UNSAFE_PRESENTATION_SKIP: %s -- precondition violated: %s",
+        symbol, precondition);
+    ctx.triggered      = true;
+    ctx.triggered_sink = unsafe_err;
+    return 0xFFFF;
+}
 static CrystalRunResult run_crystal_case(
     const std::vector<uint8_t>& rom_bytes,
     const SymCache& sym,
@@ -1383,6 +1401,8 @@ static CrystalRunResult run_crystal_case(
     // stack-escape guard on the very first iteration of the pre-step loop.
     // Production code never sets this field (default = 0).
     if(cfg.force_sp_before_loop) regs->sp = cfg.force_sp_before_loop;
+    // TEST-ONLY: override wOptions before the execution loop.
+    if(cfg.force_woptions_before_loop) GB_write_memory(&gb, 0xCFCC, cfg.force_woptions_before_loop);
 
     // Track minimum SP observed across the entire run.
     uint16_t observed_min_sp = W_STACK_TOP;
@@ -1660,10 +1680,16 @@ static CrystalRunResult run_crystal_case(
                 emulate_ret(r, "BattleCommand_MoveDelay(0D:7E80)");
                 did_skip = true;
             }
-            // BattleCommand_RaiseSubNoAnim (0D:65AF) â€” draws the player's back sprite
-            // after Substitute is set up. Calls CallBattleCore â†’ GetBattleMonBackpic
-            // (LCD/VRAM) then jp WaitBGMap. Pure display; writes no semantic WRAM.
+            // BattleCommand_RaiseSubNoAnim (0D:65AF) -- draws the player's back sprite.
+            // Called by BattleCommand_Substitute when wOptions bit5 (BATTLE_SCENE) is SET.
+            // Source-proven: Substitute 0D:6EE8 = CALL 0x65AF, reached only when
+            // _CheckBattleScene returned carry (SCENE_ACTIVE). If SCENE_CLEAR, LoadAnim runs.
+            // Precondition: wOptions(0xCFCC) bit5 must be 1 (BATTLE_SCENE set).
             else if(pc == 0x65AF && bank == 0x0D){
+                {
+                    uint8_t wopts = GB_safe_read_memory(&gb, 0xCFCC);
+                    if(!(wopts & 0x20u)){ unsafe_skip_error(exec_ctx, "BattleCommand_RaiseSubNoAnim(0D:65AF)", "wOptions(0xCFCC) bit5 (BATTLE_SCENE) must be 1 -- clear means Crystal should have reached LoadAnim"); break; }
+                }
                 emulate_ret(r, "BattleCommand_RaiseSubNoAnim(0D:65AF)");
                 did_skip = true;
             }
@@ -1677,10 +1703,16 @@ static CrystalRunResult run_crystal_case(
                 emulate_ret(r, "BattleCommand_LowerSubNoAnim(0D:65C3)");
                 did_skip = true;
             }
-            // LoadAnim (0D:7E44) â€” writes wFXAnimID then calls PlayBattleAnim (LCD/VRAM).
-            // Called by BattleCommand_Substitute when wOptions bit7 (BATTLE_SCENE) is clear.
-            // Pure display; writes only wFXAnimID (presentation field, no semantic WRAM).
+            // LoadAnim (0D:7E44) -- writes wFXAnimID then calls PlayBattleAnim (LCD/VRAM).
+            // Called by BattleCommand_Substitute when wOptions bit5 (BATTLE_SCENE) is CLEAR.
+            // Source-proven: Substitute 0D:6ED2 calls _CheckBattleScene; JR C to RaiseSubNoAnim
+            // if SCENE_ACTIVE; falls through to LoadAnim if SCENE_CLEAR.
+            // Precondition: wOptions(0xCFCC) bit5 must be 0.
             else if(pc == 0x7E44 && bank == 0x0D){
+                {
+                    uint8_t wopts = GB_safe_read_memory(&gb, 0xCFCC);
+                    if(wopts & 0x20u){ unsafe_skip_error(exec_ctx, "LoadAnim(0D:7E44)", "wOptions(0xCFCC) bit5 (BATTLE_SCENE) must be 0 -- set means Crystal should have reached RaiseSubNoAnim"); break; }
+                }
                 emulate_ret(r, "LoadAnim(0D:7E44)");
                 did_skip = true;
             }
@@ -4553,6 +4585,84 @@ int run_harness_negative_tests(const char* rom_path, const char* sym_path, bool 
                         + std::to_string(res.rng_bytes_consumed) + " of 1 bytes)"
                       : "FAIL stop_reason=" + std::string(stop_reason_str(res.stop_reason))
                         + " insn=" + std::to_string(res.insn_count));
+        }
+    }
+
+    // =====================================================================
+    // Tests 10–11: UNSAFE_PRESENTATION_SKIP negative controls.
+    //
+    // These verify that presentation-skip precondition guards fire BEFORE
+    // any skip occurs when the semantic state violates the required condition.
+    //
+    // Test 10: LoadAnim(0D:7E44) guard.
+    //   The LoadAnim intercept requires wOptions bit5 (BATTLE_SCENE) == 0.
+    //   We force wOptions = 0x20 (bit5 set) before the loop.
+    //   Crystal's Substitute script will reach 0x7E44 and the guard must fire.
+    //
+    // Test 11: BattleCommand_RaiseSubNoAnim(0D:65AF) guard.
+    //   The RaiseSubNoAnim intercept requires wOptions bit5 == 1 (BATTLE_SCENE set).
+    //   With our fixture always clearing wOptions, RaiseSubNoAnim should never be
+    //   reached normally. We use force_sp + force_pc approach: set PC = 0x65AF
+    //   (with hROMBank = 0x0D) via a custom config so the pre-step loop fires the
+    //   guard immediately on the first iteration.
+    // =====================================================================
+    {
+        if(verbose) { std::cout << "neg-test: running test 10 (unsafe-skip-loadanim)\n"; std::cout.flush(); }
+        // Test 10: LoadAnim guard -- BATTLE_SCENE bit set triggers UNSAFE_PRESENTATION_SKIP.
+        //   Use the Substitute (0xA4) case config with force_woptions_before_loop=0x20.
+        {
+            g_generic_rom_bytes_ptr = &rom_bytes;
+            g_generic_move_id       = 0xA4; // Substitute
+            g_generic_pp            = P_PP;
+            struct TLSGuard10 {
+                ~TLSGuard10(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+            } tls10;
+
+            CrystalRunConfig cfg{};
+            substitute_config(sym, &cfg);
+            cfg.insn_cap                  = 100000;
+            cfg.force_woptions_before_loop = 0x20; // bit5 = BATTLE_SCENE set
+
+            auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+            // Expect HARNESS_GUARD_FIRED with UNSAFE_PRESENTATION_SKIP for LoadAnim.
+            bool ok = (res.stop_reason == StopReason::HARNESS_GUARD_FIRED)
+                   && res.sink_name
+                   && (std::string(res.sink_name).find("UNSAFE_PRESENTATION_SKIP") != std::string::npos)
+                   && (std::string(res.sink_name).find("LoadAnim") != std::string::npos);
+            report("unsafe-skip-loadanim", ok,
+                   ok ? "HARNESS_GUARD_FIRED: " + std::string(res.sink_name).substr(0, 100)
+                      : "FAIL stop=" + std::string(stop_reason_str(res.stop_reason))
+                        + " sink=" + (res.sink_name ? std::string(res.sink_name).substr(0,80) : "(null)"));
+        }
+
+        if(verbose) { std::cout << "neg-test: running test 11 (unsafe-skip-raisesubnoanim)\n"; std::cout.flush(); }
+        // Test 11: RaiseSubNoAnim guard -- BATTLE_SCENE bit CLEAR triggers UNSAFE_PRESENTATION_SKIP.
+        //   Force PC directly to RaiseSubNoAnim (0D:65AF) via a minimal config.
+        //   hROMBank must be 0x0D so the bank guard passes; wOptions must be 0 (normal fixture).
+        //   The guard checks wOptions bit5 == 1 (BATTLE_SCENE must be set); with bit5=0 it fires.
+        {
+            CrystalRunConfig cfg{};
+            // Use Haze config for the basic fixture, then override entry to point at 0x65AF.
+            haze_build_config(sym, &cfg);
+            cfg.entry.bank = 0x0D;
+            cfg.entry.addr = 0x65AF; // BattleCommand_RaiseSubNoAnim directly
+            cfg.insn_cap   = 100000;
+            // Sentinel return address on stack: haze sink AnimateCurrentMove (0x7E01) -- any valid ROM addr.
+            cfg.sink_pcs[0]   = sym.AnimateCurrentMove.addr;
+            cfg.sink_names[0] = "AnimateCurrentMove";
+            cfg.num_sinks     = 1;
+            cfg.force_woptions_before_loop = 0; // bit5 clear = precondition violated for RaiseSubNoAnim
+
+            auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+            // Expect HARNESS_GUARD_FIRED with UNSAFE_PRESENTATION_SKIP for RaiseSubNoAnim.
+            bool ok = (res.stop_reason == StopReason::HARNESS_GUARD_FIRED)
+                   && res.sink_name
+                   && (std::string(res.sink_name).find("UNSAFE_PRESENTATION_SKIP") != std::string::npos)
+                   && (std::string(res.sink_name).find("RaiseSubNoAnim") != std::string::npos);
+            report("unsafe-skip-raisesubnoanim", ok,
+                   ok ? "HARNESS_GUARD_FIRED: " + std::string(res.sink_name).substr(0, 100)
+                      : "FAIL stop=" + std::string(stop_reason_str(res.stop_reason))
+                        + " sink=" + (res.sink_name ? std::string(res.sink_name).substr(0,80) : "(null)"));
         }
     }
 

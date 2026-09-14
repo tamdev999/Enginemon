@@ -402,7 +402,7 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
             PROPERTIES
                 LABELS  "oracle-diff"
                 TIMEOUT 120
-                PASS_REGULAR_EXPRESSION "Negative controls: 10/10 passed")
+                PASS_REGULAR_EXPRESSION "Negative controls: 12/12 passed")
     endif()
 endif()
 
