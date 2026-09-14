@@ -1773,7 +1773,7 @@ struct CaseResult {
     bool        poison_stable;
     const char* stop_reason;
     const char* boundary;
-    CrystalRunResult crystal_res; // from poison=0x00 run
+    CrystalRunResult crystal_res; // from poison=0x00 run (run1)
     EngineSnapshot   engine_res;
     bool has_crystal = false;
     bool has_engine  = false;
@@ -2875,58 +2875,78 @@ static CaseResult run_case(
         g_generic_pp            = P_PP; // ROM-proven PP; all batch moves use this baseline
     }
 
-    // Two Crystal runs with different poison bytes (same tape)
-    auto cr1 = run_crystal_case(rom_bytes, sym, 0x00, cfg, stop_flag);
-    auto cr2 = run_crystal_case(rom_bytes, sym, 0xA5, cfg, stop_flag);
-
-    r.insn_count  = cr1.insn_count;
-    r.stop_reason = stop_reason_str(cr1.stop_reason);
-    r.boundary    = cr1.sink_name;
-
-    if(cr1.stop_reason != StopReason::SINK_HIT){
-        r.detail = std::string("Crystal run 1 failed: ")+stop_reason_str(cr1.stop_reason)
-                 + " after "+std::to_string(cr1.insn_count)+" insn";
-        return r;
+    // Four Crystal runs with different WRAM-fill patterns (same RNG tape).
+    // All four must produce identical normalized semantic output — any divergence
+    // indicates an uninitialized WRAM dependency in the fixture.
+    static constexpr uint8_t POISON_PATTERNS[4] = { 0x00, 0xA5, 0x5A, 0xFF };
+    CrystalRunResult cr[4];
+    for(int pi = 0; pi < 4; ++pi){
+        cr[pi] = run_crystal_case(rom_bytes, sym, POISON_PATTERNS[pi], cfg, stop_flag);
     }
-    if(cr2.stop_reason != StopReason::SINK_HIT){
-        r.detail = std::string("Crystal run 2 (poison=0xA5) failed: ")
-                 + stop_reason_str(cr2.stop_reason)
-                 + " after "+std::to_string(cr2.insn_count)+" insn";
-        return r;
+
+    // Use the 0x00 run as the canonical Crystal result.
+    r.insn_count  = cr[0].insn_count;
+    r.stop_reason = stop_reason_str(cr[0].stop_reason);
+    r.boundary    = cr[0].sink_name;
+
+    for(int pi = 0; pi < 4; ++pi){
+        if(cr[pi].stop_reason != StopReason::SINK_HIT){
+            char lbl[32]; snprintf(lbl, sizeof(lbl), "poison=0x%02X", POISON_PATTERNS[pi]);
+            r.detail = std::string("Crystal run (")+lbl+") failed: "
+                     + stop_reason_str(cr[pi].stop_reason)
+                     + " after "+std::to_string(cr[pi].insn_count)+" insn";
+            return r;
+        }
     }
 
     r.has_crystal = true;
-    r.crystal_res = cr1;
-    r.poison_stable = crystal_run_results_equal(cr1, cr2);
+    r.crystal_res = cr[0];
+
+    // Compare each non-baseline run against the 0x00 run.
+    bool all_stable = true;
+    std::ostringstream instability_os;
+    static const char* SN[7]={"ATK","DEF","SPD","SATK","SDEF","ACC","EVA"};
+    static const char* CN[5]={"ATK","DEF","SPD","SATK","SDEF"};
+    for(int pi = 1; pi < 4; ++pi){
+        if(!crystal_run_results_equal(cr[0], cr[pi])){
+            all_stable = false;
+            char lbl[64];
+            snprintf(lbl, sizeof(lbl),
+                "poison instability (run1 poison=0x%02X vs run%d poison=0x%02X):\n",
+                POISON_PATTERNS[0], pi+1, POISON_PATTERNS[pi]);
+            instability_os << lbl;
+            for(int i=0;i<7;i++){
+                if(cr[0].player_stages[i]!=cr[pi].player_stages[i])
+                    instability_os<<"  player_stage."<<SN[i]<<" run1="<<(int)cr[0].player_stages[i]<<" run"<<(pi+1)<<"="<<(int)cr[pi].player_stages[i]<<"\n";
+                if(cr[0].enemy_stages[i]!=cr[pi].enemy_stages[i])
+                    instability_os<<"  enemy_stage."<<SN[i]<<" run1="<<(int)cr[0].enemy_stages[i]<<" run"<<(pi+1)<<"="<<(int)cr[pi].enemy_stages[i]<<"\n";
+            }
+            for(int i=0;i<5;i++){
+                if(cr[0].player_stats[i]!=cr[pi].player_stats[i])
+                    instability_os<<"  player_stat."<<CN[i]<<" run1="<<cr[0].player_stats[i]<<" run"<<(pi+1)<<"="<<cr[pi].player_stats[i]<<"\n";
+                if(cr[0].enemy_stats[i]!=cr[pi].enemy_stats[i])
+                    instability_os<<"  enemy_stat."<<CN[i]<<" run1="<<cr[0].enemy_stats[i]<<" run"<<(pi+1)<<"="<<cr[pi].enemy_stats[i]<<"\n";
+            }
+            if(cr[0].battle_anim_param!=cr[pi].battle_anim_param)
+                instability_os<<"  battle_anim_param: run1="<<(int)cr[0].battle_anim_param<<" run"<<(pi+1)<<"="<<(int)cr[pi].battle_anim_param<<"\n";
+            if(cr[0].cur_damage!=cr[pi].cur_damage)
+                instability_os<<"  cur_damage: run1="<<cr[0].cur_damage<<" run"<<(pi+1)<<"="<<cr[pi].cur_damage<<"\n";
+            if(cr[0].player_hp!=cr[pi].player_hp)
+                instability_os<<"  player_hp: run1="<<cr[0].player_hp<<" run"<<(pi+1)<<"="<<cr[pi].player_hp<<"\n";
+            if(cr[0].enemy_hp!=cr[pi].enemy_hp)
+                instability_os<<"  enemy_hp: run1="<<cr[0].enemy_hp<<" run"<<(pi+1)<<"="<<cr[pi].enemy_hp<<"\n";
+            if(cr[0].player_status!=cr[pi].player_status)
+                instability_os<<"  player_status: run1=0x"<<std::hex<<(int)cr[0].player_status<<" run"<<(pi+1)<<"=0x"<<(int)cr[pi].player_status<<std::dec<<"\n";
+            if(cr[0].enemy_status!=cr[pi].enemy_status)
+                instability_os<<"  enemy_status: run1=0x"<<std::hex<<(int)cr[0].enemy_status<<" run"<<(pi+1)<<"=0x"<<(int)cr[pi].enemy_status<<std::dec<<"\n";
+            if(cr[0].rng_bytes_consumed!=cr[pi].rng_bytes_consumed)
+                instability_os<<"  rng_bytes_consumed: run1="<<cr[0].rng_bytes_consumed<<" run"<<(pi+1)<<"="<<cr[pi].rng_bytes_consumed<<"\n";
+        }
+    }
+    r.poison_stable = all_stable;
 
     if(!r.poison_stable){
-        std::ostringstream os;
-        os << "poison instability (run1 poison=0x00 vs run2 poison=0xA5):\n";
-        static const char* SN[7]={"ATK","DEF","SPD","SATK","SDEF","ACC","EVA"};
-        static const char* CN[5]={"ATK","DEF","SPD","SATK","SDEF"};
-        for(int i=0;i<7;i++){
-            if(cr1.player_stages[i]!=cr2.player_stages[i])
-                os<<"  player_stage."<<SN[i]<<" run1="<<(int)cr1.player_stages[i]<<" run2="<<(int)cr2.player_stages[i]<<"\n";
-            if(cr1.enemy_stages[i]!=cr2.enemy_stages[i])
-                os<<"  enemy_stage."<<SN[i]<<" run1="<<(int)cr1.enemy_stages[i]<<" run2="<<(int)cr2.enemy_stages[i]<<"\n";
-        }
-        for(int i=0;i<5;i++){
-            if(cr1.player_stats[i]!=cr2.player_stats[i])
-                os<<"  player_stat."<<CN[i]<<" run1="<<cr1.player_stats[i]<<" run2="<<cr2.player_stats[i]<<"\n";
-            if(cr1.enemy_stats[i]!=cr2.enemy_stats[i])
-                os<<"  enemy_stat."<<CN[i]<<" run1="<<cr1.enemy_stats[i]<<" run2="<<cr2.enemy_stats[i]<<"\n";
-        }
-        if(cr1.battle_anim_param!=cr2.battle_anim_param)
-            os<<"  battle_anim_param: run1="<<(int)cr1.battle_anim_param<<" run2="<<(int)cr2.battle_anim_param<<"\n";
-        if(cr1.cur_damage!=cr2.cur_damage)
-            os<<"  cur_damage: run1="<<cr1.cur_damage<<" run2="<<cr2.cur_damage<<"\n";
-        if(cr1.player_hp!=cr2.player_hp)
-            os<<"  player_hp: run1="<<cr1.player_hp<<" run2="<<cr2.player_hp<<"\n";
-        if(cr1.enemy_hp!=cr2.enemy_hp)
-            os<<"  enemy_hp: run1="<<cr1.enemy_hp<<" run2="<<cr2.enemy_hp<<"\n";
-        if(cr1.rng_bytes_consumed!=cr2.rng_bytes_consumed)
-            os<<"  rng_bytes_consumed: run1="<<cr1.rng_bytes_consumed<<" run2="<<cr2.rng_bytes_consumed<<"\n";
-        r.detail = os.str();
+        r.detail = instability_os.str();
         return r; // HARNESS_ERROR
     }
 
@@ -2945,7 +2965,7 @@ static CaseResult run_case(
     // Assert initial snapshot equivalence before comparing outcomes.
     // If the two sides started from different states the comparison is invalid.
     {
-        std::string init_diff = initial_snapshot_diff(cr1.initial, eng->initial);
+        std::string init_diff = initial_snapshot_diff(cr[0].initial, eng->initial);
         if(!init_diff.empty()){
             r.detail  = "INITIAL SNAPSHOT MISMATCH -- fix fixture before comparing outcomes:\n";
             r.detail += init_diff;
@@ -2955,56 +2975,55 @@ static CaseResult run_case(
 
     // Normalize and compare
     // Crystal stages: raw-7 = delta; Enginemon: 0=neutral
-    static const char* SN[7]={"ATK","DEF","SPD","SATK","SDEF","ACC","EVA"};
-    static const char* CN[5]={"ATK","DEF","SPD","SATK","SDEF"};
+    // SN and CN already defined in the instability check block above.
     bool all_match = true;
     std::ostringstream diff;
 
     for(int i=0;i<7;i++){
-        int8_t cd=int8_t(int(cr1.player_stages[i])-7), ed2=eng->player_stages[i];
+        int8_t cd=int8_t(int(cr[0].player_stages[i])-7), ed2=eng->player_stages[i];
         if(cd!=ed2){ all_match=false; diff<<"player_stage."<<SN[i]<<" Crystal="<<(int)cd<<" Enginemon="<<(int)ed2<<"\n"; }
     }
     for(int i=0;i<7;i++){
-        int8_t cd=int8_t(int(cr1.enemy_stages[i])-7), ed2=eng->enemy_stages[i];
+        int8_t cd=int8_t(int(cr[0].enemy_stages[i])-7), ed2=eng->enemy_stages[i];
         if(cd!=ed2){ all_match=false; diff<<"enemy_stage."<<SN[i]<<" Crystal="<<(int)cd<<" Enginemon="<<(int)ed2<<"\n"; }
     }
     for(int i=0;i<5;i++){
-        uint16_t cr=cr1.player_stats[i], em=eng->player_stats[i];
-        if(cr!=em){ all_match=false; diff<<"player_stat."<<CN[i]<<" Crystal="<<cr<<" Enginemon="<<em<<"\n"; }
+        uint16_t cval=cr[0].player_stats[i], em=eng->player_stats[i];
+        if(cval!=em){ all_match=false; diff<<"player_stat."<<CN[i]<<" Crystal="<<cval<<" Enginemon="<<em<<"\n"; }
     }
     for(int i=0;i<5;i++){
-        uint16_t cr=cr1.enemy_stats[i], em=eng->enemy_stats[i];
-        if(cr!=em){ all_match=false; diff<<"enemy_stat."<<CN[i]<<" Crystal="<<cr<<" Enginemon="<<em<<"\n"; }
+        uint16_t cval=cr[0].enemy_stats[i], em=eng->enemy_stats[i];
+        if(cval!=em){ all_match=false; diff<<"enemy_stat."<<CN[i]<<" Crystal="<<cval<<" Enginemon="<<em<<"\n"; }
     }
     // HP comparison (Present may change HP)
-    if(cr1.player_hp != eng->player_hp){
-        all_match=false; diff<<"player_hp Crystal="<<cr1.player_hp<<" Enginemon="<<eng->player_hp<<"\n";
+    if(cr[0].player_hp != eng->player_hp){
+        all_match=false; diff<<"player_hp Crystal="<<cr[0].player_hp<<" Enginemon="<<eng->player_hp<<"\n";
     }
-    if(cr1.enemy_hp != eng->enemy_hp){
-        all_match=false; diff<<"enemy_hp Crystal="<<cr1.enemy_hp<<" Enginemon="<<eng->enemy_hp<<"\n";
+    if(cr[0].enemy_hp != eng->enemy_hp){
+        all_match=false; diff<<"enemy_hp Crystal="<<cr[0].enemy_hp<<" Enginemon="<<eng->enemy_hp<<"\n";
     }
     // Status comparison
-    if(cr1.player_status != eng->player_status){
-        all_match=false; diff<<"player_status Crystal=0x"<<std::hex<<(int)cr1.player_status<<" Enginemon=0x"<<(int)eng->player_status<<std::dec<<"\n";
+    if(cr[0].player_status != eng->player_status){
+        all_match=false; diff<<"player_status Crystal=0x"<<std::hex<<(int)cr[0].player_status<<" Enginemon=0x"<<(int)eng->player_status<<std::dec<<"\n";
     }
-    if(cr1.enemy_status != eng->enemy_status){
-        all_match=false; diff<<"enemy_status Crystal=0x"<<std::hex<<(int)cr1.enemy_status<<" Enginemon=0x"<<(int)eng->enemy_status<<std::dec<<"\n";
+    if(cr[0].enemy_status != eng->enemy_status){
+        all_match=false; diff<<"enemy_status Crystal=0x"<<std::hex<<(int)cr[0].enemy_status<<" Enginemon=0x"<<(int)eng->enemy_status<<std::dec<<"\n";
     }
     // RNG consumption must match
-    if(cr1.rng_bytes_consumed != eng->rng_bytes_consumed){
+    if(cr[0].rng_bytes_consumed != eng->rng_bytes_consumed){
         all_match=false;
-        diff<<"rng_bytes_consumed Crystal="<<cr1.rng_bytes_consumed<<" Enginemon="<<eng->rng_bytes_consumed<<"\n";
+        diff<<"rng_bytes_consumed Crystal="<<cr[0].rng_bytes_consumed<<" Enginemon="<<eng->rng_bytes_consumed<<"\n";
     }
     // RNG byte sequence must match (order matters)
     {
-        const size_t clen = cr1.rng_trace.size();
+        const size_t clen = cr[0].rng_trace.size();
         const size_t elen = eng->rng_trace.size();
         const size_t n    = std::min(clen, elen);
         for(size_t i = 0; i < n; ++i){
-            if(cr1.rng_trace[i].tape_value != eng->rng_trace[i]){
+            if(cr[0].rng_trace[i].tape_value != eng->rng_trace[i]){
                 all_match = false;
                 diff << "rng_trace[" << i << "] Crystal=0x"
-                     << std::hex << (int)cr1.rng_trace[i].tape_value
+                     << std::hex << (int)cr[0].rng_trace[i].tape_value
                      << " Enginemon=0x" << (int)eng->rng_trace[i]
                      << std::dec << "\n";
             }
