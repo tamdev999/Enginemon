@@ -602,6 +602,67 @@ static uint32_t normalize_enginemon_volatile(uint32_t eng_volatile){
         0x1000000u|0x2000000u|0x4000000u;
     return eng_volatile & MAPPED_MASK;
 }
+
+// check_crystal_unmapped_state -- detect Crystal semantic state that has no
+// Enginemon equivalent and cannot be validated by outcome comparison.
+//
+// Called after fixture application, before any execution.
+// Returns "" if all unmapped fields are neutral (zero), otherwise a
+// HARNESS_ERROR description that names the specific Crystal field and raw bit.
+//
+// Unmapped fields (must be 0 at case start):
+//   Sub2 bit0 = SUBSTATUS_CURLED       -- Minimize-curl; no Enginemon equivalent
+//   Sub3 bit2 = SUBSTATUS_IN_LOOP      -- multi-hit loop counter; no Enginemon equivalent
+//   Sub4 bit0 = SUBSTATUS_X_ACCURACY   -- X Accuracy item; no Enginemon volatile bit
+//   Sub4 bit3 = (const_skip)           -- always 0 in vanilla; no Enginemon meaning
+//   Sub5 bit1 = (const_skip)           -- always 0 in vanilla; no Enginemon meaning
+//   Sub5 bit2 = (const_skip)           -- always 0 in vanilla; no Enginemon meaning
+//
+// Mapped elsewhere (NOT listed here; compared via InitialSnapshot fields):
+//   Sub5 bit4 = SUBSTATUS_ENCORED      -- mapped to encore_turns in InitialSnapshot
+//   Sub5 bit0 = SUBSTATUS_TOXIC        -- absorbed into status byte comparison
+//   Sub5 bit3 = SUBSTATUS_TRANSFORMED  -- mapped to VolatileStatus::Transformed
+//   All Sub1/Sub3/Sub4/Sub5 bits handled in normalize_crystal_volatile (mapped to volatile).
+static std::string check_crystal_unmapped_state(
+    const uint8_t* wram, const SymCache& sym,
+    const char* side_label)
+{
+    // sub2 is 0xC669 (player) or 0xC66E (enemy) -- hardcoded since not in SymCache.
+    const bool is_player = (std::string(side_label) == "player");
+    uint8_t sub2 = wram[wram_off(is_player ? 0xC669u : 0xC66Eu)];
+    uint8_t sub3 = wram[wram_off(is_player ? sym.wPlayerSubStatus3.addr : sym.wEnemySubStatus3.addr)];
+    uint8_t sub4 = wram[wram_off(is_player ? sym.wPlayerSubStatus4.addr : sym.wEnemySubStatus4.addr)];
+    uint8_t sub5 = wram[wram_off(is_player ? sym.wPlayerSubStatus5.addr : sym.wEnemySubStatus5.addr)];
+
+    struct Check { uint8_t byte_val; uint8_t mask; const char* field_name; };
+    static const Check checks[] = {
+        // Sub2
+        {0, 1<<0, "SUBSTATUS_CURLED (Sub2 bit0)"},
+        // Sub3
+        {0, 1<<2, "SUBSTATUS_IN_LOOP (Sub3 bit2)"},
+        // Sub4
+        {0, 1<<0, "SUBSTATUS_X_ACCURACY (Sub4 bit0)"},
+        {0, 1<<3, "Sub4 bit3 (const_skip)"},
+        // Sub5
+        {0, 1<<1, "Sub5 bit1 (const_skip)"},
+        {0, 1<<2, "Sub5 bit2 (const_skip)"},
+    };
+    // Fill in actual values
+    uint8_t actual_bytes[] = { sub2, sub3, sub4, sub4, sub5, sub5 };
+    for(size_t i = 0; i < sizeof(checks)/sizeof(checks[0]); ++i){
+        if(actual_bytes[i] & checks[i].mask){
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+                "UNMAPPED_SEMANTIC_STATE: %s %s = 0x%02X (bit set: 0x%02X) "
+                "-- no Enginemon equivalent; cannot compare outcomes",
+                side_label, checks[i].field_name,
+                (unsigned)actual_bytes[i], (unsigned)(actual_bytes[i] & checks[i].mask));
+            return std::string(buf);
+        }
+    }
+    return {};
+}
+
 // SameBoy no-op callbacks
 // ============================================================================
 static void sb_log_nop(GB_gameboy_t*, const char*, GB_log_attributes_t){}
@@ -761,6 +822,10 @@ struct InitialSnapshot {
     //   SUBSTATUS_CURLED (Sub2 bit0) â€” Minimize-curl, only relevant mid-battle
     uint32_t player_volatile;  // Enginemon VolatileStatus bitmask (normalized)
     uint32_t enemy_volatile;   // Enginemon VolatileStatus bitmask (normalized)
+    // Encore state: SUBSTATUS_ENCORED (Sub5 bit4) maps to BattlePokemon::encore_turns.
+    // Neutral = 0 (not encored). Compared directly.
+    uint8_t  player_encore_turns = 0;
+    uint8_t  enemy_encore_turns  = 0;
 };
 
 // Returns "" if equal, otherwise a human-readable diff.
@@ -833,6 +898,9 @@ static std::string initial_snapshot_diff(const InitialSnapshot& c, const Initial
             if(ce!=ee){ char n[64]; snprintf(n,sizeof(n),"init.enemy_volatile.%s",b.name); chk8(n,(uint8_t)ce,(uint8_t)ee); }
         }
     }
+    // Encore turns (SUBSTATUS_ENCORED mapped to BattlePokemon::encore_turns).
+    chk8("init.player_encore_turns", c.player_encore_turns, e.player_encore_turns);
+    chk8("init.enemy_encore_turns",  c.enemy_encore_turns,  e.enemy_encore_turns);
     return os.str();
 }
 
@@ -969,6 +1037,11 @@ static InitialSnapshot capture_crystal_initial(
         wram[wram_off(sym.wEnemySubStatus3.addr)],
         wram[wram_off(sym.wEnemySubStatus4.addr)],
         wram[wram_off(sym.wEnemySubStatus5.addr)]);
+    // Encore state: SUBSTATUS_ENCORED (Sub5 bit4) maps to encore_turns.
+    // Crystal stores encore-turns count in wPlayerEncore (C675 area) when Sub5 bit4 is set.
+    // For the initial snapshot we only need to know if encore is active (bit4 set means >0).
+    s.player_encore_turns = (wram[wram_off(sym.wPlayerSubStatus5.addr)] & (1<<4)) ? 1u : 0u;
+    s.enemy_encore_turns  = (wram[wram_off(sym.wEnemySubStatus5.addr)]  & (1<<4)) ? 1u : 0u;
     return s;
 }
 
@@ -1025,6 +1098,9 @@ static InitialSnapshot capture_enginemon_initial(
     // Volatile state â€” normalize Enginemon VolatileStatus bitmask.
     s.player_volatile = normalize_enginemon_volatile(player.volatile_status);
     s.enemy_volatile  = normalize_enginemon_volatile(opponent.volatile_status);
+    // Encore state: BattlePokemon::encore_turns > 0 maps to Sub5 bit4 (SUBSTATUS_ENCORED).
+    s.player_encore_turns = (player.encore_turns   > 0) ? 1u : 0u;
+    s.enemy_encore_turns  = (opponent.encore_turns > 0) ? 1u : 0u;
     return s;
 }
 
@@ -1049,6 +1125,27 @@ static void fixture_common(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
     wram[wram_off(sym.wBattleMonStatus.addr)+1]  = 0;
     wram[wram_off(sym.wEnemyMonStatus.addr)  ]   = 0;
     wram[wram_off(sym.wEnemyMonStatus.addr)+1]   = 0;
+    // SubStatus2 (0xC669/0xC66E) contains only SUBSTATUS_CURLED (bit0) which has no
+    // Enginemon equivalent. Zero it so check_crystal_unmapped_state always passes
+    // for cases that don't need it (e.g. Haze with no extra_fixture).
+    wram[wram_off(0xC669u)] = 0;   // wPlayerSubStatus2
+    wram[wram_off(0xC66Eu)] = 0;   // wEnemySubStatus2
+    // Zero ALL SubStatus bytes that contain unmapped Crystal-only bits (IN_LOOP, X_ACCURACY,
+    // const_skip bits). These are already zeroed by generic_fullscript_fixture/present_fixture
+    // for full-script cases; zeroing here ensures Haze and other no-extra-fixture cases pass
+    // check_crystal_unmapped_state.
+    // Sub1 (all mapped) -- zeroed by extra_fixture when needed; here we zero for safety.
+    wram[wram_off(sym.wPlayerSubStatus1.addr)]   = 0;
+    wram[wram_off(0xC66Du)]                      = 0;  // wEnemySubStatus1
+    // Sub3 (bit2=IN_LOOP is unmapped)
+    wram[wram_off(sym.wPlayerSubStatus3.addr)]   = 0;
+    wram[wram_off(sym.wEnemySubStatus3.addr)]    = 0;
+    // Sub4 (bit0=X_ACCURACY, bit3=const_skip are unmapped)
+    wram[wram_off(sym.wPlayerSubStatus4.addr)]   = 0;
+    wram[wram_off(sym.wEnemySubStatus4.addr)]    = 0;
+    // Sub5 (bits1,2=const_skip, bit4=ENCORED are unmapped/mapped-elsewhere)
+    wram[wram_off(sym.wPlayerSubStatus5.addr)]   = 0;
+    wram[wram_off(sym.wEnemySubStatus5.addr)]    = 0;
     // Stat stages (overwritten by Haze, pre-set for Present)
     {
         uint8_t* p=wram+wram_off(sym.wPlayerStatLevels.addr);
@@ -1244,6 +1341,22 @@ static CrystalRunResult run_crystal_case(
 
     // Capture initial semantic state (after all fixture writes, before any execution)
     res.initial = capture_crystal_initial(wram, sym);
+
+    // Guard: reject any non-neutral Crystal semantic state that has no Enginemon equivalent.
+    // These fields cannot be compared; running with them set would silently corrupt results.
+    for(const char* side : {"player", "enemy"}){
+        std::string err = check_crystal_unmapped_state(wram, sym, side);
+        if(!err.empty()){
+            static char unmapped_err[256];
+            std::memcpy(unmapped_err, err.c_str(), std::min(err.size()+1, sizeof(unmapped_err)-1));
+            unmapped_err[sizeof(unmapped_err)-1] = '\0';
+            GB_free(&gb);
+            // Reuse the HARNESS_GUARD_FIRED path so run_case sees it as HARNESS_ERROR.
+            res.sink_name  = unmapped_err;
+            res.stop_reason = StopReason::HARNESS_GUARD_FIRED;
+            return res;
+        }
+    }
 
     GB_registers_t* regs=GB_get_registers(&gb);
     if(!regs){ GB_free(&gb); res.stop_reason=StopReason::REGS_ACCESS_FAILED; return res; }
@@ -3621,6 +3734,80 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
                 "volatile substatus test C (enemy Toxic via Status): expected mismatch not detected. diff='"+diff+"'");
         }
         std::cout << "  volatile substatus [enemy Toxic/status]: HARNESS_ERROR path confirmed\n";
+    }
+
+    // 3c. Unmapped-semantic-state negative tests.
+    //   check_crystal_unmapped_state() must fire for each genuinely unmapped bit.
+    //   We construct a minimal fake WRAM region in a local array, write the target bit,
+    //   then call check_crystal_unmapped_state() with offsets adjusted to the local array.
+    //   Since the function uses wram_off() which computes offsets from 0xC000/0xD000,
+    //   we instead test by calling it on the real WRAM snapshot from a just-loaded
+    //   WRAM (via a throwaway GB instance) with the specific bit forced.
+    //   Simpler: we just verify the function returns the expected error string for
+    //   hand-crafted SymCache offsets -- but SymCache is initialized. Use a direct
+    //   call with the test WRAM approach below.
+    //
+    //   Test A: X Accuracy (Sub4 bit0 = SUBSTATUS_X_ACCURACY).
+    //   Test B: Curled (Sub2 bit0 = SUBSTATUS_CURLED).
+    {
+        // Build a minimal WRAM array (8KB bank0 + 8KB bank1 = 16KB) initialized to 0.
+        // wram_off(0xC668) = 0xC668 - 0xC000 = 0x668 (bank0)
+        // wram_off(0xC669) = 0x669   (player sub2)
+        // wram_off(0xC66B) = 0x66B   (player sub4)
+        std::vector<uint8_t> fake_wram(0x4000, 0u); // 16KB zeroed
+
+        auto fake_chk = [&](const char* side, uint16_t sub2_addr, uint16_t sub3_addr,
+                             uint16_t sub4_addr, uint16_t sub5_addr,
+                             const char* field_name, uint16_t field_addr, uint8_t bit_mask,
+                             const char* test_label) -> std::string {
+            // Clear all fields, set the target bit.
+            fake_wram[wram_off(sub2_addr)] = 0;
+            fake_wram[wram_off(sub3_addr)] = 0;
+            fake_wram[wram_off(sub4_addr)] = 0;
+            fake_wram[wram_off(sub5_addr)] = 0;
+            fake_wram[wram_off(field_addr)] |= bit_mask;
+            std::string err = check_crystal_unmapped_state(fake_wram.data(), sym, side);
+            bool ok = !err.empty()
+                && err.find("UNMAPPED_SEMANTIC_STATE") != std::string::npos
+                && err.find(field_name) != std::string::npos;
+            // Reset.
+            fake_wram[wram_off(field_addr)] &= ~bit_mask;
+            if(!ok) return std::string("expected UNMAPPED_SEMANTIC_STATE for ")
+                         + field_name + ", got: '" + err + "'";
+            std::cout << "  unmapped-state [" << test_label << "]: HARNESS_ERROR path confirmed ("
+                      << err.substr(0, 80) << "...)\n";
+            return {};
+        };
+
+        // Test A: SUBSTATUS_X_ACCURACY (Sub4 bit0).
+        {
+            std::string r = fake_chk(
+                "player",
+                0xC669u, // player sub2
+                sym.wPlayerSubStatus3.addr,
+                sym.wPlayerSubStatus4.addr,
+                sym.wPlayerSubStatus5.addr,
+                "SUBSTATUS_X_ACCURACY",
+                sym.wPlayerSubStatus4.addr, // field_addr = sub4
+                (1<<0),                     // bit0
+                "X-Accuracy/Sub4-bit0");
+            if(!r.empty()) return startup_fail("SELF_TEST", r);
+        }
+
+        // Test B: SUBSTATUS_CURLED (Sub2 bit0).
+        {
+            std::string r = fake_chk(
+                "player",
+                0xC669u, // player sub2
+                sym.wPlayerSubStatus3.addr,
+                sym.wPlayerSubStatus4.addr,
+                sym.wPlayerSubStatus5.addr,
+                "SUBSTATUS_CURLED",
+                0xC669u,  // field_addr = sub2
+                (1<<0),   // bit0
+                "Curled/Sub2-bit0");
+            if(!r.empty()) return startup_fail("SELF_TEST", r);
+        }
     }
 
     // 4. Engine data
