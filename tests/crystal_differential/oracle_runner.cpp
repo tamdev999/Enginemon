@@ -1674,6 +1674,17 @@ static std::optional<EngineData> load_engine_data(
     return d;
 }
 
+// TEST-ONLY: Enginemon fault-injection mask.
+// Set via --fault <bitmask> CLI argument (crystal_battle_diff only).
+// Default = 0 (no faults). Never set by normal oracle execution.
+// Bit definitions:
+//   bit 0 (0x01): Return     -- enemy_hp  -= 1  (simulates +1 damage)
+//   bit 1 (0x02): Recover    -- player_hp -= 1  (simulates -1 heal)
+//   bit 2 (0x04): Haze       -- player_stages[ATK] += 1 (stage left over)
+//   bit 3 (0x08): DragonRage -- enemy_hp  -= 1  (simulates +1 damage)
+//   bit 4 (0x10): Return     -- rng_bytes_consumed += 1 (extra phantom RNG)
+static thread_local uint32_t g_eng_fault_mask = 0;
+
 static std::optional<EngineSnapshot> run_enginemon_case(
     enginemon::MoveId move_id,
     const EngineData& ed,
@@ -1732,6 +1743,21 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     bat.set_opponent_action(enginemon::ActionFight{0,0});
     bat.execute_turn();
 
+    // TEST-ONLY fault injection (controlled by g_eng_fault_mask).
+    // Applied after execute_turn() so Crystal execution is never affected.
+    // Normal runs have g_eng_fault_mask == 0 and this block is a no-op.
+    uint16_t fault_enemy_hp_delta  = 0;
+    uint16_t fault_player_hp_delta = 0;
+    int8_t   fault_atk_stage_delta = 0;
+    size_t   fault_rng_extra       = 0;
+    if(g_eng_fault_mask){
+        if((g_eng_fault_mask & 0x01) && move_id == 216) fault_enemy_hp_delta  = 1; // Return +1 dmg
+        if((g_eng_fault_mask & 0x02) && move_id == 105) fault_player_hp_delta = 1; // Recover -1 heal
+        if((g_eng_fault_mask & 0x04) && move_id == 114) fault_atk_stage_delta = 1; // Haze +1 ATK stage
+        if((g_eng_fault_mask & 0x08) && move_id ==  82) fault_enemy_hp_delta  = 1; // DragonRage +1 dmg
+        if((g_eng_fault_mask & 0x10) && move_id == 216) fault_rng_extra       = 1; // Return +1 RNG byte
+    }
+
     const auto& pp=bat.player_pokemon(); const auto& op=bat.opponent_pokemon();
     const auto& ps=pp.stages; const auto& os=op.stages;
     EngineSnapshot e{};
@@ -1750,6 +1776,11 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     e.player_hp = (uint16_t)pp.stats.hp;
     e.enemy_hp  = (uint16_t)op.stats.hp;
     e.rng_bytes_consumed = rng_consumed;
+    // Apply test-only fault deltas (all zero in normal execution).
+    if(fault_enemy_hp_delta  && e.enemy_hp  >= fault_enemy_hp_delta)  e.enemy_hp  -= fault_enemy_hp_delta;
+    if(fault_player_hp_delta && e.player_hp >= fault_player_hp_delta) e.player_hp -= fault_player_hp_delta;
+    if(fault_atk_stage_delta) e.player_stages[0] = (int8_t)(e.player_stages[0] + fault_atk_stage_delta);
+    e.rng_bytes_consumed += fault_rng_extra;
     e.rng_trace = eng_rng_trace;
     e.initial   = eng_initial;
     // Status: normalize to a category byte independent of Crystal's raw bit layout.
@@ -2175,6 +2206,7 @@ static void generic_fullscript_fixture(
 }
 
 static thread_local const std::vector<uint8_t>* g_generic_rom_bytes_ptr = nullptr;
+
 static void generic_fullscript_fixture_adapter(
     GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
 {
@@ -3135,6 +3167,12 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
         else if(a=="--all")                { all_flag=true; }
         else if(a=="--verbose"||a=="-v")   { verbose=true; }
         else if((a=="--jobs"||a=="-j")&&i+1<argc){ jobs=std::max(1,std::stoi(argv[++i])); }
+        else if(a=="--fault"&&i+1<argc){
+            // TEST-ONLY: inject deliberate Enginemon fault(s) by bitmask.
+            // See g_eng_fault_mask comment for bit definitions.
+            // Normal oracle runs never pass --fault; default mask = 0.
+            g_eng_fault_mask = (uint32_t)std::stoul(argv[++i], nullptr, 0);
+        }
         else if(a=="--move"&&i+1<argc){
             while(i+1<argc&&argv[i+1][0]!='-') move_ids.push_back((uint16_t)std::stoi(argv[++i]));
         }
@@ -3159,6 +3197,7 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
             "  --jobs N       Parallel workers (default: 1)\n"
             "  --verbose      Print snapshots, RNG traces, stop reasons\n"
             "  --list         List registered moves and exit 0\n"
+            "  --fault N      TEST-ONLY: inject Enginemon fault bitmask (see source)\n"
             "  --help         Show this message\n\n"
             "Quick start:\n"
             "  " << prog << " crystal.gbc pokecrystal11.sym --all --jobs 16\n"
@@ -3422,8 +3461,13 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
             const MoveSpec* spec = find_move(move_ids[j]);
             stop_flags.push_back(std::make_unique<std::atomic<bool>>(false));
             std::atomic<bool>* sf = stop_flags.back().get();
+            // Capture the fault mask value so the worker thread's thread_local
+            // g_eng_fault_mask is set correctly (thread_locals are per-thread;
+            // the main thread's value is not inherited by async workers).
+            uint32_t fault_mask = g_eng_fault_mask;
             futures.push_back(std::async(std::launch::async,
-                [&rom_bytes,&sym,&ed,spec,sf](){
+                [&rom_bytes,&sym,&ed,spec,sf,fault_mask](){
+                    g_eng_fault_mask = fault_mask;
                     return run_case(*spec,rom_bytes,sym,ed,sf);
                 }));
         }
