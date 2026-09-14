@@ -689,6 +689,7 @@ enum class StopReason {
     WRAM_ACCESS_FAILED,
     REGS_ACCESS_FAILED,
     HARNESS_GUARD_FIRED, // internal guard (__HARNESS_ERROR__) tripped during execution
+    RNG_TAPE_UNUSED,     // tape had bytes left over after Crystal reached its sink
 };
 static const char* stop_reason_str(StopReason r){
     switch(r){
@@ -700,6 +701,7 @@ static const char* stop_reason_str(StopReason r){
     case StopReason::WRAM_ACCESS_FAILED: return "WRAM_ACCESS_FAILED";
     case StopReason::REGS_ACCESS_FAILED: return "REGS_ACCESS_FAILED";
     case StopReason::HARNESS_GUARD_FIRED: return "HARNESS_GUARD_FIRED";
+    case StopReason::RNG_TAPE_UNUSED:    return "RNG_TAPE_UNUSED";
     }
     return "?";
 }
@@ -2835,11 +2837,11 @@ static void toxic_config(const SymCache& sym, CrystalRunConfig* out){
 static void swordsdance_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x0E, nullptr,  0); }
 static void growl_config(const SymCache& sym, CrystalRunConfig* out){
-    generic_fullscript_config(sym, out, 0x2D, TAPE_HIT, sizeof(TAPE_HIT)); }
+    generic_fullscript_config(sym, out, 0x2D, nullptr, 0); }
 static void tailwhip_config(const SymCache& sym, CrystalRunConfig* out){
-    generic_fullscript_config(sym, out, 0x27, TAPE_HIT, sizeof(TAPE_HIT)); }
+    generic_fullscript_config(sym, out, 0x27, nullptr, 0); }
 static void leer_config(const SymCache& sym, CrystalRunConfig* out){
-    generic_fullscript_config(sym, out, 0x2B, TAPE_HIT, sizeof(TAPE_HIT)); }
+    generic_fullscript_config(sym, out, 0x2B, nullptr, 0); }
 static void screech_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x67, TAPE_HIT, sizeof(TAPE_HIT)); }
 static void stringshot_config(const SymCache& sym, CrystalRunConfig* out){
@@ -2855,7 +2857,7 @@ static void amnesia_config(const SymCache& sym, CrystalRunConfig* out){
 static void barrier_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x70, nullptr,  0); }
 static void charm_config(const SymCache& sym, CrystalRunConfig* out){
-    generic_fullscript_config(sym, out, 0xCC, TAPE_HIT, sizeof(TAPE_HIT)); }
+    generic_fullscript_config(sym, out, 0xCC, nullptr, 0); }
 // ============================================================================
 // Batch 5: Accuracy / Evasion stage changes
 // ============================================================================
@@ -3000,11 +3002,11 @@ static const MoveSpec REGISTERED_MOVES[] = {
     // Swords Dance (0x0E, EFFECT_ATTACK_UP2): player ATK +2. 0 RNG.
     { 0x0E, 0x0E, "Swords Dance",  100000, nullptr,       0,                    swordsdance_config, nullptr },
     // Growl (0x2D, EFFECT_ATTACK_DOWN): enemy ATK -1. acc=0xE5=229. 1 RNG.
-    { 0x2D, 0x2D, "Growl",        100000, TAPE_HIT,      sizeof(TAPE_HIT),     growl_config,       nullptr },
+    { 0x2D, 0x2D, "Growl",        100000, nullptr,       0,                    growl_config,       nullptr },
     // Tail Whip (0x27, EFFECT_DEFENSE_DOWN): enemy DEF -1. acc=0xE5=229. 1 RNG.
-    { 0x27, 0x27, "Tail Whip",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     tailwhip_config,    nullptr },
+    { 0x27, 0x27, "Tail Whip",     100000, nullptr,       0,                    tailwhip_config,    nullptr },
     // Leer (0x2B, EFFECT_DEFENSE_DOWN): enemy DEF -1. acc=0xE5=229. 1 RNG.
-    { 0x2B, 0x2B, "Leer",         100000, TAPE_HIT,      sizeof(TAPE_HIT),     leer_config,        nullptr },
+    { 0x2B, 0x2B, "Leer",         100000, nullptr,       0,                    leer_config,        nullptr },
     // Screech (0x67, EFFECT_DEFENSE_DOWN2): enemy DEF -2. acc=0xCC=204. 1 RNG.
     { 0x67, 0x67, "Screech",      100000, TAPE_HIT,      sizeof(TAPE_HIT),     screech_config,     nullptr },
     // String Shot (0x51, EFFECT_SPEED_DOWN): enemy SPD -1. acc=0xE5=229. 1 RNG.
@@ -3020,7 +3022,7 @@ static const MoveSpec REGISTERED_MOVES[] = {
     // Barrier (0x70, EFFECT_DEFENSE_UP2): player DEF +2. acc=0xFF. 0 RNG.
     { 0x70, 0x70, "Barrier",      100000, nullptr,       0,                    barrier_config,     nullptr },
     // Charm (0xCC, EFFECT_ATTACK_DOWN2): enemy ATK -2. acc=0xE5=229. 1 RNG.
-    { 0xCC, 0xCC, "Charm",        100000, TAPE_HIT,      sizeof(TAPE_HIT),     charm_config,       nullptr },
+    { 0xCC, 0xCC, "Charm",        100000, nullptr,       0,                    charm_config,       nullptr },
     // ========================================================================
     // Batch 5: Accuracy / Evasion stage changes
     // ========================================================================
@@ -3174,6 +3176,33 @@ static CaseResult run_case(
     }
 
     // Enginemon run with the same tape
+    // RNG exact-consumption gate: after Crystal reaches its legitimate sink, every
+    // tape byte must have been consumed. Unused trailing bytes mean the tape is wrong.
+    // This check uses the canonical (poison=0x00) run result.
+    // consumed < tape_len => RNG_TAPE_UNUSED (HARNESS_ERROR)
+    // consumed > tape_len is already caught as RNG_TAPE_EXHAUSTED above.
+    if(spec.rng_tape && spec.rng_tape_len > 0){
+        const size_t consumed = cr[0].rng_bytes_consumed;
+        const size_t tape_len = spec.rng_tape_len;
+        if(consumed < tape_len){
+            std::ostringstream os;
+            os << "RNG_TAPE_UNUSED: case \"" << spec.name << "\""
+               << " tape_len=" << tape_len
+               << " consumed=" << consumed
+               << " unused_bytes=[";
+            for(size_t i = consumed; i < tape_len; ++i){
+                if(i > consumed) os << ',';
+                os << '[' << i << "]=0x"
+                   << std::hex << std::setw(2) << std::setfill('0')
+                   << (int)spec.rng_tape[i];
+            }
+            os << "]";
+            r.stop_reason = stop_reason_str(StopReason::RNG_TAPE_UNUSED);
+            r.detail = os.str();
+            return r; // HARNESS_ERROR
+        }
+    }
+
     auto eng = run_enginemon_case(spec.engine_id, ed, spec.rng_tape, spec.rng_tape_len);
     if(!eng){
         // Crystal execution completed (has_crystal=true, poison-stable verified above).
@@ -4257,6 +4286,87 @@ int run_harness_negative_tests(const char* rom_path, const char* sym_path, bool 
         report("insn-cap-exhaustion", ok,
                ok ? "HARNESS_ERROR: "+result.detail.substr(0,80)
                   : "FAIL status="+std::to_string((int)result.status)+" "+result.detail.substr(0,80));
+    }
+
+    // =====================================================================
+    // Tests 7–9: RNG exact-consumption controls.
+    //   Return normally consumes exactly 3 RNG bytes.
+    //   Test 7: correct 3-byte tape → exact consumption, MATCH.
+    //   Test 8: 3-byte tape + 1 extra trailing byte → RNG_TAPE_UNUSED HARNESS_ERROR.
+    //   Test 9: 2-byte tape (one short) → RNG_TAPE_EXHAUSTED HARNESS_ERROR (already
+    //           tested by test 3; here we confirm via run_case wrapper).
+    // =====================================================================
+    {
+        // Bind thread-locals for generic_fullscript_fixture_adapter (same as test 3).
+        g_generic_rom_bytes_ptr = &rom_bytes;
+        g_generic_move_id       = 216; // Return
+        g_generic_pp            = P_PP;
+        struct TLSGuard2 {
+            ~TLSGuard2(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+        } tlsg;
+
+        // Canonical Return tape: {0x80, 0xB2, 0xFF} (3 bytes, exactly consumed).
+        static constexpr uint8_t TAPE_RETURN_OK[]    = { 0x80, 0xB2, 0xFF };
+        static constexpr uint8_t TAPE_RETURN_EXTRA[] = { 0x80, 0xB2, 0xFF, 0x42 }; // 1 extra
+        static constexpr uint8_t TAPE_RETURN_SHORT[] = { 0x80 };              // 2 short (only crit byte)
+
+        if(verbose) { std::cout << "neg-test: running test 7 (rng-exact-return-ok)\n"; std::cout.flush(); }
+        // Test 7: exact 3-byte tape → MATCH (no HARNESS_ERROR).
+        {
+            MoveSpec spec{ 216, 216, "Return", 100000,
+                           TAPE_RETURN_OK, sizeof(TAPE_RETURN_OK), return_config, nullptr };
+            auto result = run_case(spec, rom_bytes, sym, ed, &no_stop);
+            bool ok = (result.status == Status::MATCH
+                    || result.status == Status::ENGINEMON_MISMATCH)
+                   && result.status != Status::HARNESS_ERROR;
+            report("rng-exact-return-ok", ok,
+                   ok ? "status="+std::to_string((int)result.status)+" (not HARNESS_ERROR)"
+                      : "FAIL status="+std::to_string((int)result.status)+" "+result.detail.substr(0,80));
+        }
+
+        if(verbose) { std::cout << "neg-test: running test 8 (rng-unused-trailing)\n"; std::cout.flush(); }
+        // Test 8: 4-byte tape for Return (1 extra byte) → HARNESS_ERROR RNG_TAPE_UNUSED.
+        {
+            MoveSpec spec{ 216, 216, "Return", 100000,
+                           TAPE_RETURN_EXTRA, sizeof(TAPE_RETURN_EXTRA), return_config, nullptr };
+            auto result = run_case(spec, rom_bytes, sym, ed, &no_stop);
+            bool ok = (result.status == Status::HARNESS_ERROR)
+                   && (result.detail.find("RNG_TAPE_UNUSED") != std::string::npos)
+                   && (result.detail.find("tape_len=4") != std::string::npos)
+                   && (result.detail.find("consumed=3") != std::string::npos);
+            report("rng-unused-trailing", ok,
+                   ok ? "HARNESS_ERROR RNG_TAPE_UNUSED: "+result.detail.substr(0,100)
+                      : "FAIL status="+std::to_string((int)result.status)+" "+result.detail.substr(0,80));
+        }
+
+        if(verbose) { std::cout << "neg-test: running test 9 (rng-short-return)\n"; std::cout.flush(); }
+        // Test 9: 1-byte tape for Return (missing both damvar bytes) → RNG_TAPE_EXHAUSTED.
+        //   Crystal's BattleRandom is called 3 times for Return; with tape_len=1 the
+        //   second call finds tape exhausted. run_crystal_case returns RNG_TAPE_EXHAUSTED
+        //   because rng_ctx->exhausted=true when the run terminates.
+        {
+            // Bind thread-locals for generic_fullscript_fixture_adapter.
+            g_generic_rom_bytes_ptr = &rom_bytes;
+            g_generic_move_id       = 216;
+            g_generic_pp            = P_PP;
+            struct TLSGuard3 {
+                ~TLSGuard3(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+            } tlsg3;
+
+            CrystalRunConfig cfg{};
+            return_config(sym, &cfg);
+            cfg.insn_cap     = 100000;
+            cfg.rng_tape     = TAPE_RETURN_SHORT;
+            cfg.rng_tape_len = 1;
+
+            auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+            bool ok = (res.stop_reason == StopReason::RNG_TAPE_EXHAUSTED);
+            report("rng-short-return", ok,
+                   ok ? "RNG_TAPE_EXHAUSTED as expected (consumed "
+                        + std::to_string(res.rng_bytes_consumed) + " of 1 bytes)"
+                      : "FAIL stop_reason=" + std::string(stop_reason_str(res.stop_reason))
+                        + " insn=" + std::to_string(res.insn_count));
+        }
     }
 
     // =====================================================================
