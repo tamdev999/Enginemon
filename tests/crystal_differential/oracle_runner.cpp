@@ -1140,6 +1140,10 @@ struct CrystalRunConfig {
     size_t         rng_tape_len;
     FixtureFn   extra_fixture;    // null if no extra fixture
     uint16_t    engine_move_id;   // Crystal move ID (engine_id from MoveSpec)
+    // TEST-ONLY: if non-zero, overrides SP immediately before the pre-step loop.
+    // Used exclusively by oracle_harness_negative_test to inject a bad SP.
+    // Never set by production code paths (MoveSpec::build_config never touches it).
+    uint16_t    force_sp_before_loop = 0;
 };
 
 
@@ -1255,6 +1259,12 @@ static CrystalRunResult run_crystal_case(
     GB_write_memory(&gb, W_STACK_TOP - 2,  ret_addr       & 0xFF);
     regs->sp = W_STACK_TOP - 2;
     regs->pc = cfg.entry.addr;
+
+    // TEST-ONLY injection hook: if force_sp_before_loop is set, override SP now.
+    // This is used exclusively by oracle_harness_negative_test to trigger the
+    // stack-escape guard on the very first iteration of the pre-step loop.
+    // Production code never sets this field (default = 0).
+    if(cfg.force_sp_before_loop) regs->sp = cfg.force_sp_before_loop;
 
     // Track minimum SP observed across the entire run.
     uint16_t observed_min_sp = W_STACK_TOP;
@@ -3790,6 +3800,45 @@ int run_harness_negative_tests(const char* rom_path, const char* sym_path, bool 
                     +" (>= 0xC000="+std::to_string((unsigned)0xC000u)+")"
                   : "FAIL fmt_ok="+std::to_string(fmt_ok)
                     +" no_escape="+std::to_string(no_escape));
+    }
+
+    if(verbose) { std::cout << "neg-test: running test 5b (stack-escape-live)\n"; std::cout.flush(); }
+    // =====================================================================
+    // Test 5b: LIVE stack-escape injection into run_crystal_case.
+    //   After normal ROM/fixture/CPU setup, force_sp_before_loop=0xBFFE overrides
+    //   SP immediately before the pre-step loop. The loop's stack guard fires on
+    //   the first iteration (before any GB_run/Crystal instruction executes):
+    //     if(sp < W_STACK_BOTTOM) → HARNESS_ERROR "stack escape: SP=0xBFFE < wStackBottom=0xC000"
+    //   exec_ctx.triggered=true, loop exits, stop_reason=SINK_HIT,
+    //   sink_name starts with __HARNESS_ERROR__.
+    //   This exercises the real guard path, not just the error-format string.
+    // =====================================================================
+    {
+        CrystalRunConfig cfg{};
+        haze_build_config(sym, &cfg);
+        cfg.insn_cap             = 50000;
+        cfg.force_sp_before_loop = 0xBFFE; // below W_STACK_BOTTOM=0xC000
+
+        auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+
+        // The guard fires before any instruction, so insn_count must be 0.
+        // stop_reason is SINK_HIT (exec_ctx.triggered=true via the guard branch).
+        // sink_name must start with __HARNESS_ERROR__ and contain the key fields.
+        bool sink_hit   = (res.stop_reason == StopReason::SINK_HIT);
+        bool no_insns   = (res.insn_count == 0);
+        bool has_err    = (res.sink_name != nullptr);
+        bool has_tag    = has_err && (std::string(res.sink_name).find("__HARNESS_ERROR__") == 0);
+        bool has_escape = has_err && (std::string(res.sink_name).find("stack escape")    != std::string::npos);
+        bool has_sp     = has_err && (std::string(res.sink_name).find("0xBFFE")          != std::string::npos);
+        bool has_bottom = has_err && (std::string(res.sink_name).find("0xC000")          != std::string::npos);
+
+        bool ok = sink_hit && no_insns && has_tag && has_escape && has_sp && has_bottom;
+        std::string detail = has_err ? std::string(res.sink_name) : "(no sink_name)";
+        report("stack-escape-live", ok,
+               ok ? "LIVE HARNESS_ERROR after 0 insns: "+detail
+                  : "FAIL sink_hit="+std::to_string(sink_hit)
+                    +" insns="+std::to_string(res.insn_count)
+                    +" msg="+detail);
     }
 
     if(verbose) { std::cout << "neg-test: running test 6 (insn-cap)\n"; std::cout.flush(); }
