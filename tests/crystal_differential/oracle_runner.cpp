@@ -2979,6 +2979,9 @@ static void leechseed_config(const SymCache& sym, CrystalRunConfig* out){
 
 static void toxic_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x5C, TAPE_HIT, sizeof(TAPE_HIT)); }
+// Toxic/miss: acc=0xD8=216. 0xF0=240 >= 216 -> CheckHit miss. No status applied. 1 RNG byte.
+static void toxic_miss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x5C, TAPE_SCREECH_MISS, sizeof(TAPE_SCREECH_MISS)); }
 
 // ============================================================================
 // Batch 4: Single-turn stat-stage changes
@@ -3191,6 +3194,8 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 0x49, 0x49, "Leech Seed",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     leechseed_config,   nullptr },
     // Toxic/DoPoison script; acc=0xD8=216; 1 RNG byte (TAPE_HIT); enemy_statusâ†’BadPoison.
     { 0x5C, 0x5C, "Toxic",         100000, TAPE_HIT,      sizeof(TAPE_HIT),     toxic_config,       nullptr },
+    // Toxic/miss: acc=0xD8=216; 0xF0=240>=216 -> CheckHit miss. No status applied. 1 RNG byte.
+    { 920, 0x5C, "Toxic/miss",     100000, TAPE_SCREECH_MISS, sizeof(TAPE_SCREECH_MISS), toxic_miss_config,  nullptr },
     // ========================================================================
     // Batch 4: Single-turn stat-stage changes (DoMove → EndMoveEffect)
     // Stat-up self moves: acc=0xFF, 0 RNG bytes.
