@@ -1012,8 +1012,11 @@ static InitialSnapshot capture_crystal_initial(
      for(int i=0;i<7;i++) s.player_stages[i]=int8_t(int(p[i])-7);}
     {auto* p=wram+wram_off(sym.wEnemyStatLevels.addr);
      for(int i=0;i<7;i++) s.enemy_stages[i]=int8_t(int(p[i])-7);}
-    s.player_status = wram[wram_off(sym.wBattleMonStatus.addr)];
-    s.enemy_status  = wram[wram_off(sym.wEnemyMonStatus.addr)];
+    // Normalize initial status bytes so they compare to Enginemon's normalized Status enum.
+    s.player_status = normalize_crystal_status(wram[wram_off(sym.wBattleMonStatus.addr)],
+                                                wram[wram_off(sym.wPlayerSubStatus5.addr)]);
+    s.enemy_status  = normalize_crystal_status(wram[wram_off(sym.wEnemyMonStatus.addr)],
+                                                wram[wram_off(sym.wEnemySubStatus5.addr)]);
     s.player_type1  = wram[wram_off(sym.wBattleMonType1.addr)];
     s.player_type2  = wram[wram_off(sym.wBattleMonType2.addr)];
     s.enemy_type1   = wram[wram_off(sym.wEnemyMonType1.addr)];
@@ -1086,8 +1089,23 @@ static InitialSnapshot capture_enginemon_initial(
     s.enemy_stages[5] =opponent.stages.accuracy;
     s.enemy_stages[6] =opponent.stages.evasion;
     // Status: Enginemon uses a Status enum; Crystal uses a byte (0=no status)
-    s.player_status = (player.status != enginemon::Status::None) ? 1 : 0;
-    s.enemy_status  = (opponent.status != enginemon::Status::None) ? 1 : 0;
+    // Use the same mapping as run_enginemon_case for consistency with capture_crystal_initial.
+    {
+        auto map_eng_status = [](enginemon::Status st) -> uint8_t {
+            using S = enginemon::Status;
+            switch(st){
+            case S::Poison:    return 0x01;
+            case S::BadPoison: return 0x02;
+            case S::Burn:      return 0x04;
+            case S::Freeze:    return 0x08;
+            case S::Paralysis: return 0x10;
+            case S::Sleep:     return 0x20;
+            default:           return 0;
+            }
+        };
+        s.player_status = map_eng_status(player.status);
+        s.enemy_status  = map_eng_status(opponent.status);
+    }
     s.player_type1  = player.type1;
     s.player_type2  = player.type2;
     s.enemy_type1   = opponent.type1;
@@ -1253,6 +1271,13 @@ struct CrystalRunConfig {
     // If non-zero, overrides wBattleMonHP (Crystal) and stats.hp (Enginemon) to this value.
     // MaxHP remains P_HP=300. Use to test heal moves that restore HP. Zero = use P_HP default.
     uint16_t    init_player_hp = 0;
+    // If non-zero, write raw value to wEnemyMonStatus (Crystal) and set opponent Sleep status (Enginemon).
+    // Only sleep (raw bits 0-2 non-zero) is currently mapped. Zero = no status (default).
+    uint8_t     init_enemy_status_raw = 0;
+    // If non-zero, overrides byte[1] of wPlayerMoveStruct (wPlayerMoveStructEffect) after all fixtures.
+    // Crystal-only: forces a specific BattleScript dispatch without changing Enginemon's move semantics.
+    // Used when the move table effect byte selects the wrong BattleScript (e.g. recoil eff=0x30->FocusEnergy).
+    uint8_t     init_move_effect_override = 0;
 };
 
 
@@ -1365,6 +1390,17 @@ static CrystalRunResult run_crystal_case(
     if(cfg.init_player_hp != 0){
         GB_write_memory(&gb, sym.wBattleMonHP.addr,     (uint8_t)(cfg.init_player_hp >> 8));
         GB_write_memory(&gb, sym.wBattleMonHP.addr + 1, (uint8_t)(cfg.init_player_hp & 0xFF));
+    }
+    // init_enemy_status_raw: write raw Crystal status byte to wEnemyMonStatus.
+    // Used for Dream Eater asleep fixture. Bits 0-2 non-zero = sleep counter.
+    if(cfg.init_enemy_status_raw != 0){
+        GB_write_memory(&gb, sym.wEnemyMonStatus.addr,     cfg.init_enemy_status_raw);
+        GB_write_memory(&gb, sym.wEnemyMonStatus.addr + 1, 0);
+    }
+    // init_move_effect_override: override wPlayerMoveStructEffect (byte[1] of wPlayerMoveStruct).
+    // Used when move table effect selects wrong BattleScript (recoil eff=0x30->FocusEnergy bug).
+    if(cfg.init_move_effect_override != 0){
+        GB_write_memory(&gb, (uint16_t)(sym.wPlayerMoveStruct.addr + 1), cfg.init_move_effect_override);
     }
     // Capture initial semantic state (after all fixture writes, before any execution)
     res.initial = capture_crystal_initial(wram, sym);
@@ -1883,7 +1919,8 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     enginemon::MoveId move_id,
     const EngineData& ed,
     const uint8_t* rng_tape, size_t rng_tape_len,
-    uint16_t init_player_hp = 0)
+    uint16_t init_player_hp = 0,
+    uint8_t  init_enemy_status_raw = 0)
 {
     const enginemon::MoveData* md=ed.moves.get(move_id);
     if(!md||!md->effect_desc.is_supported) return std::nullopt;
@@ -1915,6 +1952,9 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     bat.opponent_pokemon() = make(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,ENEMY_DELTA);
     // init_player_hp: override current HP without changing max HP.
     if(init_player_hp != 0) bat.player_pokemon().stats.hp = init_player_hp;
+    // init_enemy_status_raw: set opponent Sleep status if raw bits 0-2 are non-zero (sleep counter).
+    if(init_enemy_status_raw != 0 && (init_enemy_status_raw & 0x07) != 0)
+        bat.opponent_pokemon().status = enginemon::Status::Sleep;
 
     // Feed tape to Enginemon's RNG (same bytes, same order)
     size_t rng_idx = 0;
@@ -2764,6 +2804,20 @@ static void present_fullscript_crit_build_config(const SymCache& sym, CrystalRun
 // Total: 3 RNG bytes.
 static constexpr uint8_t TAPE_RETURN[]    = { 0x80, 0xB2, 0xFF };
 
+// ============================================================================
+// Batch 7: Drain + Recoil tape constants
+// GetBattleVar(MoveEffect) uses two-level BVP indirection to read wPlayerMoveStructEffect.
+// eff=0x03 drain script: Critical(1)+DamVar(2) = 3 bytes (acc=0xFF, no CheckHit RNG).
+// eff=0x30 recoil script (09:0x7657): Critical(1)+DamVar(2)+CheckHit(0 or 1) = 3 or 4 bytes.
+//   For acc=0xFF (DoubleEdge/Struggle): CheckHit consumes 0 RNG -> 3 bytes total.
+//   For acc<0xFF (Submission/TakeDown): CheckHit consumes 1 byte -> 4 bytes total.
+//   Script order: Critical THEN DamVar THEN CheckHit. So tape = {crit, damvar1, damvar2, acc_check}.
+// Dream Eater eff=0x08 (acc=0xFF, target asleep): 3 bytes (same as TAPE_RETURN).
+// Dream Eater awake: 0 bytes (nullptr). CheckHit.DreamEater rejects awake target before any RNG.
+static constexpr uint8_t TAPE_RECOIL_HIT[]       = { 0x80, 0xB2, 0xFF, 0x30 };  // no-crit+damvar(2)+acc_hit(0x30<204)
+static constexpr uint8_t TAPE_RECOIL_MISS_CC[]   = { 0x80, 0xB2, 0xFF, 0xE0 };  // no-crit+damvar(2)+miss(0xE0>=204)
+static constexpr uint8_t TAPE_RECOIL_MISS_D8[]   = { 0x80, 0xB2, 0xFF, 0xF0 };  // no-crit+damvar(2)+miss(0xF0>=216)
+
 static void recover_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 105, nullptr, 0); }
 
@@ -3002,6 +3056,77 @@ static void toxic_miss_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x5C, TAPE_SCREECH_MISS, sizeof(TAPE_SCREECH_MISS)); }
 
 // ============================================================================
+// Batch 7: Drain + Recoil move configs
+//
+// GetBattleVar(MoveEffect) uses two-level BVP indirection to read wPlayerMoveStructEffect.
+// The runtime effect byte selects the MoveEffectsPointers entry used by DoMove.
+//
+// Drain moves (eff=0x03). acc=0xFF. Script 09:0x7347. 3 RNG bytes: Critical(1)+DamVar(2).
+//   BCP opcode 0x13 (PoisonTarget) reads the runtime effect byte 0x03 and dispatches
+//   to the drain-HP heal path instead of poison application.
+//
+// Recoil moves (eff=0x30). Script 09:0x7657. No init_move_effect_override needed.
+//   Script order: Critical(1), DamStats, DamCalc, Stab, DamVar(2), CheckHit(0 or 1), Recoil.
+//   crit and damvar always run before the acc check. Miss also consumes 4 bytes.
+//   acc=0xFF (DoubleEdge/Struggle): 3 RNG = TAPE_RETURN {0x80,0xB2,0xFF}.
+//   acc<0xFF hit (Submission/TakeDown): 4 RNG = TAPE_RECOIL_HIT {0x80,0xB2,0xFF,0x30}.
+//   acc<0xFF miss: 4 RNG = TAPE_RECOIL_MISS_CC or TAPE_RECOIL_MISS_D8.
+//
+// Dream Eater (eff=0x08). acc=0xFF. Script 09:0x73A6.
+//   Asleep: 3 RNG (TAPE_RETURN). init_enemy_status_raw=3 sets enemy sleep.
+//   Awake: 0 RNG (nullptr). CheckHit.DreamEater rejects awake target; no crit/damvar.
+// ============================================================================
+
+// -- Drain moves --
+static void absorb_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x47, TAPE_RETURN, sizeof(TAPE_RETURN)); }
+static void megadrain_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x48, TAPE_RETURN, sizeof(TAPE_RETURN)); }
+static void gigadrain_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xCA, TAPE_RETURN, sizeof(TAPE_RETURN)); }
+static void leechlife_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x8D, TAPE_RETURN, sizeof(TAPE_RETURN)); }
+
+// Dream Eater asleep: enemy must be asleep. init_enemy_status_raw=3 (sleep counter 3).
+static void dreameater_asleep_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x8A, TAPE_RETURN, sizeof(TAPE_RETURN));
+    out->init_enemy_status_raw = 3;  // enemy asleep: bits 0-2 = sleep counter
+}
+// Dream Eater awake: enemy awake (default status=0). CheckHit.DreamEater fails. 0 RNG.
+static void dreameater_awake_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x8A, nullptr, 0); }
+
+// -- Recoil moves --
+// All recoil moves use eff=0x30 in the move table.
+// GetBattleVar(MoveEffect) reads wPlayerMoveStructEffect (0xC610) = 0x30 at runtime.
+// DoMove dispatches to MoveEffectsPointers[0x30] = recoil damage script at 09:0x7657.
+// No init_move_effect_override needed -- eff=0x30 IS the correct recoil damage script.
+//
+// Recoil damage script (09:0x7657):
+//   CheckObed(02), UsedText(03), DoTurn(04), Critical(05,1RNG), DamStats(06), DamCalc(62),
+//   Stab(07), DamVar(08,2RNG), CheckHit(09,0RNG for acc=0xFF / 1RNG for acc<0xFF),
+//   MoveAnim(AB,skip), FailureText(0D), ApplyDamage(0E), CritText(0F), SuperEff(10),
+//   Recoil(27), CheckFaint(11), BuildOppRage(12), HeldFlinch(4D), END.
+//
+// DoubleEdge/Struggle acc=0xFF: TAPE_RETURN {0x80,0xB2,0xFF} = 3 bytes (crit+damvar, no CheckHit RNG).
+// Submission acc=0xCC=204 / TakeDown acc=0xD8=216: 4 bytes = crit(1)+damvar(2)+acc_check(1).
+//   Tape order: {crit_byte, damvar_loop, damvar_exit, acc_check_byte}.
+static void doubleedge_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x26, TAPE_RETURN, sizeof(TAPE_RETURN)); }
+static void struggle_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xA5, TAPE_RETURN, sizeof(TAPE_RETURN)); }
+// Submission acc=0xCC=204: hit=4 RNG {0x80,0xB2,0xFF,0x30}; miss=4 RNG {0x80,0xB2,0xFF,0xE0}.
+static void submission_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x42, TAPE_RECOIL_HIT, sizeof(TAPE_RECOIL_HIT)); }
+static void submission_miss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x42, TAPE_RECOIL_MISS_CC, sizeof(TAPE_RECOIL_MISS_CC)); }
+// Take Down acc=0xD8=216: hit=4 RNG {0x80,0xB2,0xFF,0x30}; miss=4 RNG {0x80,0xB2,0xFF,0xF0}.
+static void takedown_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x24, TAPE_RECOIL_HIT, sizeof(TAPE_RECOIL_HIT)); }
+static void takedown_miss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x24, TAPE_RECOIL_MISS_D8, sizeof(TAPE_RECOIL_MISS_D8)); }
+
+// ============================================================================
 // Batch 4: Single-turn stat-stage changes
 //
 // All use generic_fullscript_config (DoMove entry, EndMoveEffect sink).
@@ -3217,6 +3342,28 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 0x5C, 0x5C, "Toxic",         100000, TAPE_HIT,      sizeof(TAPE_HIT),     toxic_config,       nullptr },
     // Toxic/miss: acc=0xD8=216; 0xF0=240>=216 -> CheckHit miss. No status applied. 1 RNG byte.
     { 920, 0x5C, "Toxic/miss",     100000, TAPE_SCREECH_MISS, sizeof(TAPE_SCREECH_MISS), toxic_miss_config,  nullptr },
+    // ===================================================================
+    // Batch 7: Drain + Recoil moves
+    // ===================================================================
+    // Drain moves (eff=0x03, DrainHP script). acc=0xFF. 3 RNG bytes (TAPE_RETURN).
+    { 0x47, 0x47, "Absorb",           100000, TAPE_RETURN,       sizeof(TAPE_RETURN),       absorb_config,            nullptr },
+    { 0x48, 0x48, "Mega Drain",       100000, TAPE_RETURN,       sizeof(TAPE_RETURN),       megadrain_config,         nullptr },
+    { 0xCA, 0xCA, "Giga Drain",       100000, TAPE_RETURN,       sizeof(TAPE_RETURN),       gigadrain_config,         nullptr },
+    { 0x8D, 0x8D, "Leech Life",       100000, TAPE_RETURN,       sizeof(TAPE_RETURN),       leechlife_config,         nullptr },
+    // Dream Eater asleep (eff=0x08). init_enemy_status_raw=3. acc=0xFF. 3 RNG bytes.
+    { 0x8A, 0x8A, "Dream Eater",      100000, TAPE_RETURN,       sizeof(TAPE_RETURN),       dreameater_asleep_config, nullptr },
+    // Dream Eater awake: CheckHit.DreamEater fails (sleep=0). 0 RNG. No damage.
+    { 1380, 0x8A, "Dream Eater/awake",100000, nullptr,           0,                         dreameater_awake_config,  nullptr },
+    // Recoil moves (eff=0x30).
+    // DoubleEdge/Struggle: acc=0xFF; 3 RNG bytes (TAPE_RETURN).
+    { 0x26, 0x26, "Double-Edge",      100000, TAPE_RETURN,       sizeof(TAPE_RETURN),       doubleedge_config,        nullptr },
+    { 0xA5, 0xA5, "Struggle",         100000, TAPE_RETURN,       sizeof(TAPE_RETURN),       struggle_config,          nullptr },
+    // Submission acc=0xCC=204: hit=4 RNG, miss=1 RNG.
+    { 0x42, 0x42, "Submission",       100000, TAPE_RECOIL_HIT,   sizeof(TAPE_RECOIL_HIT),   submission_config,        nullptr },
+    { 660,  0x42, "Submission/miss",  100000, TAPE_RECOIL_MISS_CC, sizeof(TAPE_RECOIL_MISS_CC), submission_miss_config, nullptr },
+    // Take Down acc=0xD8=216: hit=4 RNG, miss=1 RNG (TAPE_SCREECH_MISS=0xF0>=216).
+    { 0x24, 0x24, "Take Down",        100000, TAPE_RECOIL_HIT,   sizeof(TAPE_RECOIL_HIT),   takedown_config,          nullptr },
+    { 360,  0x24, "Take Down/miss",   100000, TAPE_RECOIL_MISS_D8, sizeof(TAPE_RECOIL_MISS_D8), takedown_miss_config, nullptr },
     // ========================================================================
     // Batch 4: Single-turn stat-stage changes (DoMove → EndMoveEffect)
     // Stat-up self moves: acc=0xFF, 0 RNG bytes.
@@ -3470,7 +3617,7 @@ static CaseResult run_case(
         }
     }
 
-    auto eng = run_enginemon_case(spec.engine_id, ed, spec.rng_tape, spec.rng_tape_len, cfg.init_player_hp);
+    auto eng = run_enginemon_case(spec.engine_id, ed, spec.rng_tape, spec.rng_tape_len, cfg.init_player_hp, cfg.init_enemy_status_raw);
     if(!eng){
         // Crystal execution completed (has_crystal=true, poison-stable verified above).
         // Enginemon cannot compute this move â€” not a harness failure.
