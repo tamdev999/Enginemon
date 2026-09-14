@@ -1551,6 +1551,16 @@ static CrystalRunResult run_crystal_case(
                 emulate_ret(r, "BattleCommand_RaiseSubNoAnim(0D:65AF)");
                 did_skip = true;
             }
+            // BattleCommand_LowerSubNoAnim (0D:65C3) -- hides the player sub sprite without animation.
+            // Used by DoubleTeam/Minimize effect scripts after EvasionUp.
+            // Writes only hBGMapMode (0xFFD4, display register). Reads hBattleTurn for sprite
+            // selection only. The EvasionUp stage change runs BEFORE this command.
+            // Ends with JP WaitBGMap (0x31F6) which is already in the skip list.
+            // Source-proven: BattleCommand_LowerSubNoAnim at 0D:65C3 in pokecrystal11.sym.
+            else if(pc == 0x65C3 && bank == 0x0D){
+                emulate_ret(r, "BattleCommand_LowerSubNoAnim(0D:65C3)");
+                did_skip = true;
+            }
             // LoadAnim (0D:7E44) â€” writes wFXAnimID then calls PlayBattleAnim (LCD/VRAM).
             // Called by BattleCommand_Substitute when wOptions bit7 (BATTLE_SCENE) is clear.
             // Pure display; writes only wFXAnimID (presentation field, no semantic WRAM).
@@ -2754,7 +2764,17 @@ static constexpr uint8_t TAPE_PROTECT[] = { 0x40 };   // 0x40-1=0x3F < 0xFF
 // Screech  acc=0xD8=216: use 0xF0=240 >= 216 -> miss
 // StringShot acc=0xF2=242: use 0xF8=248 >= 242 -> miss
 static constexpr uint8_t TAPE_SCREECH_MISS[]    = { 0xF0 };  // 240 >= 216 -> CheckHit miss
-static constexpr uint8_t TAPE_STRINGSHOT_MISS[] = { 0xF8 };  // 248 >= 242 -> CheckHit miss â†’ ProtectChance success
+static constexpr uint8_t TAPE_STRINGSHOT_MISS[] = { 0xF8 };  // 248 >= 242 -> CheckHit miss
+// Accuracy/evasion family tapes
+// Flash    acc=0xB2=178:  miss byte 0xC0=192 >= 178
+// Kinesis  acc=0xCC=204:  miss byte 0xD0=208 >= 204
+// Smokescreen acc=0xBF=191: damage script; critical(1)+damvar(2)+checkhit(1) = 4 bytes
+//   hit:  0x80(no-crit), 0xB2+0xFF(damvar), 0x30(hit <191)
+//   miss: 0x80(no-crit), 0xB2+0xFF(damvar), 0xC8(miss >=191)
+static constexpr uint8_t TAPE_FLASH_MISS[]       = { 0xC0 };          // 192 >= 178  -> miss
+static constexpr uint8_t TAPE_KINESIS_MISS[]     = { 0xD0 };          // 208 >= 204  -> miss
+static constexpr uint8_t TAPE_SMOKESCREEN_HIT[]  = { 0x80, 0xB2, 0xFF, 0x30 }; // crit+damvar+hit
+static constexpr uint8_t TAPE_SMOKESCREEN_MISS[] = { 0x80, 0xB2, 0xFF, 0xC8 }; // crit+damvar+miss â†’ ProtectChance success
 
 static void seismictoss_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x45, nullptr, 0); }
@@ -2838,6 +2858,37 @@ static void barrier_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x70, nullptr,  0); }
 static void charm_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0xCC, TAPE_HIT, sizeof(TAPE_HIT)); }
+// ============================================================================
+// Batch 5: Accuracy / Evasion stage changes
+// ============================================================================
+// SandAttack (0x1C, eff=0x17): AccuracyDown1 on enemy. acc=0xFF 0 RNG.
+static void sandattack_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x1C, nullptr, 0); }
+// Flash (0x94, eff=0x17): AccuracyDown1 on enemy. acc=0xB2=178. 1 RNG.
+static void flash_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x94, TAPE_HIT, sizeof(TAPE_HIT)); }
+static void flash_miss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x94, TAPE_FLASH_MISS, sizeof(TAPE_FLASH_MISS)); }
+// Kinesis (0x86, eff=0x17): AccuracyDown1 on enemy. acc=0xCC=204. 1 RNG.
+static void kinesis_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x86, TAPE_HIT, sizeof(TAPE_HIT)); }
+static void kinesis_miss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x86, TAPE_KINESIS_MISS, sizeof(TAPE_KINESIS_MISS)); }
+// Smokescreen (0x79, eff=0x00): damage script + acc=0xBF=191. 4 RNG bytes.
+// Effect 0x00 damage script: critical+damstat+stab+damvar+checkhit+...
+static void smokescreen_hit_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x79, TAPE_SMOKESCREEN_HIT, sizeof(TAPE_SMOKESCREEN_HIT)); }
+static void smokescreen_miss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x79, TAPE_SMOKESCREEN_MISS, sizeof(TAPE_SMOKESCREEN_MISS)); }
+// DoubleTeam (0x68, eff=0x10): EvasionUp1 on self. acc=0xFF 0 RNG.
+static void doubleteam_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x68, nullptr, 0); }
+// Minimize (0x6B, eff=0x10): EvasionUp1 on self + sets_minimize. acc=0xFF 0 RNG.
+static void minimize_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x6B, nullptr, 0); }
+// SweetScent (0xE6, eff=0x18): EvasionDown1 on enemy. acc=0xFF 0 RNG.
+static void sweetscent_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0xE6, nullptr, 0); }
 
 // ============================================================================
 // Registered moves -- adding a move requires:
@@ -2975,6 +3026,26 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 0x70, 0x70, "Barrier",      100000, nullptr,       0,                    barrier_config,     nullptr },
     // Charm (0xCC, EFFECT_ATTACK_DOWN2): enemy ATK -2. acc=0xE5=229. 1 RNG.
     { 0xCC, 0xCC, "Charm",        100000, TAPE_HIT,      sizeof(TAPE_HIT),     charm_config,       nullptr },
+    // ========================================================================
+    // Batch 5: Accuracy / Evasion stage changes
+    // ========================================================================
+    // SandAttack (0x1C, eff=0x17 AccDown1, acc=0xFF): 0 RNG.
+    { 0x1C, 0x1C, "SandAttack",   100000, nullptr,           0,                          sandattack_config,       nullptr },
+    // Flash (0x94, eff=0x17, acc=0xB2=178): 1 RNG hit or miss.
+    { 0x94, 0x94, "Flash",        100000, TAPE_HIT,          sizeof(TAPE_HIT),           flash_config,            nullptr },
+    {  940, 0x94, "Flash/miss",   100000, TAPE_FLASH_MISS,   sizeof(TAPE_FLASH_MISS),    flash_miss_config,       nullptr },
+    // Kinesis (0x86, eff=0x17, acc=0xCC=204): 1 RNG hit or miss.
+    { 0x86, 0x86, "Kinesis",      100000, TAPE_HIT,          sizeof(TAPE_HIT),           kinesis_config,          nullptr },
+    {  860, 0x86, "Kinesis/miss", 100000, TAPE_KINESIS_MISS, sizeof(TAPE_KINESIS_MISS),  kinesis_miss_config,     nullptr },
+    // Smokescreen (0x79, eff=0x00 damage script, acc=0xBF=191): 4 RNG bytes.
+    { 0x79, 0x79, "Smokescreen",      100000, TAPE_SMOKESCREEN_HIT,  sizeof(TAPE_SMOKESCREEN_HIT),  smokescreen_hit_config,  nullptr },
+    { 1211, 0x79, "Smokescreen/miss", 100000, TAPE_SMOKESCREEN_MISS, sizeof(TAPE_SMOKESCREEN_MISS), smokescreen_miss_config, nullptr },
+    // DoubleTeam (0x68, eff=0x10 EvasionUp1, acc=0xFF): 0 RNG.
+    { 0x68, 0x68, "DoubleTeam",   100000, nullptr,           0,                          doubleteam_config,       nullptr },
+    // Minimize (0x6B, eff=0x10 + sets_minimize, acc=0xFF): 0 RNG.
+    { 0x6B, 0x6B, "Minimize",     100000, nullptr,           0,                          minimize_config,         nullptr },
+    // SweetScent (0xE6, eff=0x18 EvasionDown1, acc=0xFF): 0 RNG.
+    { 0xE6, 0xE6, "SweetScent",   100000, nullptr,           0,                          sweetscent_config,       nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
