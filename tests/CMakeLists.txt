@@ -239,6 +239,107 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # Oracle anti-confirmation canaries (crystal_battle_diff --fault).
+    #
+    # Each canary is a PAIR of CTest entries:
+    #   *_baseline  — unmodified case; PASS if oracle returns MATCH
+    #   *_mutated   — deliberate Enginemon fault injected; PASS if oracle returns
+    #                 ENGINEMON_MISMATCH (i.e. the bug is correctly detected)
+    #
+    # The test suite PASSES when mutation detection works.
+    # The test suite FAILS if a mutated case ever returns MATCH.
+    #
+    # Fault bitmask bits (--fault <hex>):
+    #   0x01  Return      enemy_hp -= 1  (simulates +1 damage)
+    #   0x02  Recover     player_hp -= 1 (simulates -1 heal)
+    #   0x04  Haze        player_stages[ATK] += 1 (stage not reset)
+    #   0x08  DragonRage  enemy_hp -= 1  (simulates +1 damage)
+    #   0x10  Return      rng_bytes_consumed += 1 (phantom extra RNG byte)
+    #
+    # Label: oracle-diff (runs with the rest of the oracle suite).
+    # ============================================================================
+    if(ENGINEMON_ROM_PATH AND ENGINEMON_SYM_PATH)
+        set(_CBD $<TARGET_FILE:crystal_battle_diff>)
+        set(_ROM "${ENGINEMON_ROM_PATH}")
+        set(_SYM "${ENGINEMON_SYM_PATH}")
+
+        # -- Return damage +1 --
+        add_test(NAME oracle_canary_return_damage_baseline
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 216
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_return_damage_baseline PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "MATCH: *1")
+
+        add_test(NAME oracle_canary_return_damage_mutated
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 216 --fault 0x01
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_return_damage_mutated PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "enemy_hp Crystal=[0-9]+ Enginemon=[0-9]+")
+
+        # -- Recover heal -1 --
+        add_test(NAME oracle_canary_recover_heal_baseline
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 105
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_recover_heal_baseline PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "MATCH: *1")
+
+        add_test(NAME oracle_canary_recover_heal_mutated
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 105 --fault 0x02
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_recover_heal_mutated PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "player_hp Crystal=[0-9]+ Enginemon=[0-9]+")
+
+        # -- Haze ATK stage +1 --
+        add_test(NAME oracle_canary_haze_stage_baseline
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 114
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_haze_stage_baseline PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "MATCH: *1")
+
+        add_test(NAME oracle_canary_haze_stage_mutated
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 114 --fault 0x04
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_haze_stage_mutated PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "player_stage\\.ATK Crystal=0 Enginemon=1")
+
+        # -- DragonRage damage +1 --
+        add_test(NAME oracle_canary_dragonrage_damage_baseline
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 82
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_dragonrage_damage_baseline PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "MATCH: *1")
+
+        add_test(NAME oracle_canary_dragonrage_damage_mutated
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 82 --fault 0x08
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_dragonrage_damage_mutated PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "enemy_hp Crystal=[0-9]+ Enginemon=[0-9]+")
+
+        # -- Return extra RNG byte --
+        add_test(NAME oracle_canary_return_rng_baseline
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 216
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_return_rng_baseline PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "MATCH: *1")
+
+        add_test(NAME oracle_canary_return_rng_mutated
+            COMMAND ${_CBD} "${_ROM}" "${_SYM}" --move 216 --fault 0x10
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(oracle_canary_return_rng_mutated PROPERTIES
+            LABELS "oracle-diff" TIMEOUT 30
+            PASS_REGULAR_EXPRESSION "rng_bytes_consumed Crystal=[0-9]+ Enginemon=[0-9]+")
+    endif()
+
+    # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
     # Legacy entry point kept for compatibility.
     # Requires: <rom_path> <sym_path> [--jobs N]
@@ -301,7 +402,7 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
             PROPERTIES
                 LABELS  "oracle-diff"
                 TIMEOUT 120
-                PASS_REGULAR_EXPRESSION "Negative controls: 6/6 passed")
+                PASS_REGULAR_EXPRESSION "Negative controls: 7/7 passed")
     endif()
 endif()
 
