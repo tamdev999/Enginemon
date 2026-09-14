@@ -123,6 +123,7 @@
 #endif
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -3604,6 +3605,122 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
     const EngineData& ed=*ed_opt;
     std::cout << "  Engine:    OK\n\n";
 
+    // 4b. Move-identity validation.
+    //
+    // For each registered MoveSpec with a concrete Crystal move ID (engine_id in [1..251]),
+    // derive a ROM fingerprint: {effect_byte, power_byte, accuracy_byte} directly from the
+    // pinned ROM's moves table (flat offset CRYSTAL_MOVES_TABLE_FLAT + (id-1)*7).
+    //
+    // Invariant: all MoveSpec entries sharing the same base_name MUST reference Crystal moves
+    // with identical ROM fingerprints. Two entries named "Smokescreen" must both point to the
+    // same Crystal move -- if one points to 0x6C (eff=0x17,pow=0,acc=0xFF) and the other to
+    // 0x79 (eff=0x00,pow=100,acc=0xBF), they describe different moves and one is wrong.
+    //
+    // Conversely: two entries with different base_names MUST NOT share the same engine_id
+    // (unless both are sub-cases of a multi-branch move with the same base, which is allowed
+    // because base names would then be identical after stripping the suffix).
+    //
+    // Authority: ROM bytes only. No handwritten name → ID table. No Crystal name decoder.
+    //
+    // Negative self-test: reproduces the exact field mistake (Smokescreen labelled Egg Bomb).
+    {
+        // Helper: extract base name (everything before the first '/').
+        auto base_name = [](const char* full) -> std::string {
+            std::string s(full);
+            auto pos = s.find('/');
+            return (pos == std::string::npos) ? s : s.substr(0, pos);
+        };
+
+        // ROM fingerprint for a Crystal move ID (1..251): {effect, power, accuracy}.
+        struct MoveFingerprint { uint8_t eff, pow, acc; };
+        auto rom_fp = [&rom_bytes](uint16_t id) -> MoveFingerprint {
+            if(id == 0 || id > 251) return {0xFF, 0xFF, 0xFF}; // sentinel: skip
+            uint32_t off = CRYSTAL_MOVES_TABLE_FLAT + (uint32_t)(id - 1) * CRYSTAL_MOVE_DATA_SIZE;
+            if(off + 7 > rom_bytes.size()) return {0xFF, 0xFF, 0xFF};
+            // Layout: [anim, effect, power, type, accuracy, pp, chance]
+            return { rom_bytes[off+1], rom_bytes[off+2], rom_bytes[off+4] };
+        };
+        auto fp_eq = [](const MoveFingerprint& a, const MoveFingerprint& b) {
+            return a.eff==b.eff && a.pow==b.pow && a.acc==b.acc;
+        };
+        auto fp_str = [](const MoveFingerprint& f) -> std::string {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "eff=0x%02X pow=%u acc=0x%02X", f.eff, f.pow, f.acc);
+            return std::string(buf);
+        };
+
+        // Collect {base_name -> first_engine_id + fingerprint} and {engine_id -> base_name}.
+        std::map<std::string, std::pair<uint16_t, MoveFingerprint>> name_to_fp;
+        std::map<uint16_t, std::string>                             id_to_name;
+
+        auto check_spec = [&](const char* spec_name, uint16_t eid) -> std::string {
+            if(eid == 0 || eid > 251) return {};
+            std::string bn = base_name(spec_name);
+            MoveFingerprint fp = rom_fp(eid);
+            if(fp.eff == 0xFF && fp.pow == 0xFF) return {}; // out-of-range, skip
+
+            // Check: same base name must map to same ROM fingerprint.
+            auto it = name_to_fp.find(bn);
+            if(it != name_to_fp.end()){
+                if(!fp_eq(it->second.second, fp)){
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                        "move name \"%s\" used for engine_id=%u (%s) "
+                        "and engine_id=%u (%s) -- different Crystal moves",
+                        bn.c_str(), eid, fp_str(fp).c_str(),
+                        it->second.first, fp_str(it->second.second).c_str());
+                    return std::string(buf);
+                }
+            } else {
+                name_to_fp[bn] = {eid, fp};
+            }
+
+            // Check: same engine_id must map to same base name.
+            auto it2 = id_to_name.find(eid);
+            if(it2 != id_to_name.end()){
+                if(it2->second != bn){
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                        "engine_id=%u used for move names \"%s\" and \"%s\" "
+                        "-- same Crystal move registered under different names",
+                        eid, bn.c_str(), it2->second.c_str());
+                    return std::string(buf);
+                }
+            } else {
+                id_to_name[eid] = bn;
+            }
+            return {};
+        };
+
+        // Validate all registered moves.
+        for(size_t i = 0; i < NUM_REGISTERED; ++i){
+            const MoveSpec& spec = REGISTERED_MOVES[i];
+            const uint16_t eid = spec.engine_id ? spec.engine_id : spec.id;
+            std::string err = check_spec(spec.name, eid);
+            if(!err.empty())
+                return startup_fail("MOVE_IDENTITY", err);
+        }
+
+        // Negative self-test: the exact field mistake.
+        //   "Smokescreen" + engine_id=0x79=121 (Egg Bomb: eff=0x00,pow=100,acc=0xBF)
+        //   conflicts with "Smokescreen" + engine_id=0x6C=108 (eff=0x17,pow=0,acc=0xFF).
+        //   The check must produce a MOVE_IDENTITY error.
+        {
+            std::string err = check_spec("Smokescreen", 0x79); // 121 = Egg Bomb
+            bool fired = !err.empty()
+                && err.find("Smokescreen") != std::string::npos
+                && err.find("different Crystal moves") != std::string::npos;
+            if(!fired){
+                return startup_fail("SELF_TEST",
+                    "move-identity negative test: expected CONFIG_ERROR for "
+                    "Smokescreen/0x79 vs Smokescreen/0x6C, got: '" + err + "'");
+            }
+            // Print the exact error the check would have produced.
+            std::cout << "  move-identity [Smokescreen/0x79 vs Smokescreen/0x6C=0x108]: "
+                         "CONFIG_ERROR confirmed (" << err.substr(0,80) << "...)\n";
+        }
+        std::cout << "  Move IDs:  OK (" << NUM_REGISTERED << " checked)\n";
+    }
     std::cout << "Running " << move_ids.size() << " move(s)  jobs=" << jobs
               << (verbose ? "  verbose" : "") << "\n\n";
     auto t0=std::chrono::steady_clock::now();
