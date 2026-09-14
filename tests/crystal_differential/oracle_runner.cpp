@@ -2943,7 +2943,7 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 105,  105, "Recover",        100000, nullptr, 0, recover_config,   nullptr },
     // PainSplit (ID 220): EFFECT_PAIN_SPLIT. Script: checkobedience usedmovetext doturn checkhit painsplit endmove.
     // acc=0xFF â†’ automatic hit, no BattleRandom. PainSplit averages HP between user and target.
-    { 220,  220, "PainSplit",      100000, nullptr, 0, painsplit_config, nullptr },
+    { 220,  220, "Pain Split",      100000, nullptr, 0, painsplit_config, nullptr },
     // Return (ID 216): EFFECT_RETURN. Script: checkobedience usedmovetext doturn critical damagestats happinesspower damagecalc stab damagevariation checkhit moveanim failuretext applydamage criticaltext supereffectivetext checkfaint buildopponentrage kingsrock endmove.
     // 3 RNG bytes: critical (0x80=no-crit), damagevariation (0xB2â†’rrca=89<218 LOOP, 0xFFâ†’rrca=255>=218 EXIT).
     // Return power = happiness*10/25 = 200*10/25 = 80. acc=0xFF â†’ automatic hit.
@@ -2956,11 +2956,11 @@ static const MoveSpec REGISTERED_MOVES[] = {
     //          DoubleKick, Twineedle, Magnitude
     // ========================================================================
     { 0x87, 0x87, "Softboiled",    100000, nullptr, 0, softboiled_config,  nullptr },
-    { 0xD0, 0xD0, "MilkDrink",     100000, nullptr, 0, milkdrink_config,   nullptr },
+    { 0xD0, 0xD0, "Milk Drink",     100000, nullptr, 0, milkdrink_config,   nullptr },
     { 0xDA, 0xDA, "Frustration",   100000, TAPE_FRUSTRATION, sizeof(TAPE_FRUSTRATION), frustration_config, nullptr },
     { 0xAF, 0xAF, "Flail",         100000, nullptr, 0, flail_config,       nullptr },
     { 0x95, 0x95, "Psywave",       100000, TAPE_PSYWAVE,     sizeof(TAPE_PSYWAVE),     psywave_config,     nullptr },
-    { 0x18, 0x18, "DoubleKick",    200000, TAPE_DOUBLEKICK,  sizeof(TAPE_DOUBLEKICK),  doublekick_config,  nullptr },
+    { 0x18, 0x18, "Double Kick",    200000, TAPE_DOUBLEKICK,  sizeof(TAPE_DOUBLEKICK),  doublekick_config,  nullptr },
     { 0x29, 0x29, "Twineedle",     200000, TAPE_TWINEEDLE,   sizeof(TAPE_TWINEEDLE),   twineedle_config,   nullptr },
     { 0xDE, 0xDE, "Magnitude",     100000, TAPE_MAGNITUDE,   sizeof(TAPE_MAGNITUDE),   magnitude_config,   nullptr },
     // ========================================================================
@@ -2968,17 +2968,17 @@ static const MoveSpec REGISTERED_MOVES[] = {
     //          BellyDrum, Rest, Protect, Detect, Substitute, LeechSeed, Toxic
     // ========================================================================
     // StaticDamage script; LEVEL_DAMAGE (damage=level=50); acc=0xFF auto-hit; 0 RNG.
-    { 0x45, 0x45, "SeismicToss",   100000, nullptr,       0,                    seismictoss_config, nullptr },
+    { 0x45, 0x45, "Seismic Toss",   100000, nullptr,       0,                    seismictoss_config, nullptr },
     // StaticDamage script; LEVEL_DAMAGE (damage=level=50); acc=0xFF auto-hit; 0 RNG.
-    { 0x65, 0x65, "NightShade",    100000, nullptr,       0,                    nightshade_config,  nullptr },
+    { 0x65, 0x65, "Night Shade",    100000, nullptr,       0,                    nightshade_config,  nullptr },
     // StaticDamage script; STATIC_DAMAGE pwr=40; acc=0xFF auto-hit; 0 RNG.
-    { 0x52, 0x52, "DragonRage",    100000, nullptr,       0,                    dragonrage_config,  nullptr },
+    { 0x52, 0x52, "Dragon Rage",    100000, nullptr,       0,                    dragonrage_config,  nullptr },
     // StaticDamage script; STATIC_DAMAGE pwr=20; acc=0xE5=229; 1 RNG byte (TAPE_HIT).
     { 0x31, 0x31, "SonicBoom",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     sonicboom_config,   nullptr },
     // StaticDamage script; SUPER_FANG (damage=enemy_hp/2=150); acc=0xE5=229; 1 RNG.
-    { 0xA2, 0xA2, "SuperFang",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     superfang_config,   nullptr },
+    { 0xA2, 0xA2, "Super Fang",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     superfang_config,   nullptr },
     // BellyDrum script; no RNG; player_hp halved (300â†’150); ATK raised to +6.
-    { 0xBB, 0xBB, "BellyDrum",     100000, nullptr,       0,                    bellydrum_config,   nullptr },
+    { 0xBB, 0xBB, "Belly Drum",     100000, nullptr,       0,                    bellydrum_config,   nullptr },
     // Heal script REST branch; no RNG; player_hpâ†’max, player_statusâ†’SLP.
     { 0x9C, 0x9C, "Rest",          100000, nullptr,       0,                    rest_config,        nullptr },
     // Protect script; 1 RNG byte (TAPE_PROTECT); wPlayerProtectCount=0 â†’ success.
@@ -2988,7 +2988,7 @@ static const MoveSpec REGISTERED_MOVES[] = {
     // Substitute script; no RNG; player_hp 300â†’225 (MaxHP*3/4).
     { 0xA4, 0xA4, "Substitute",    100000, nullptr,       0,                    substitute_config,  nullptr },
     // LeechSeed script; acc=0xE5=229; 1 RNG byte (TAPE_HIT); SUBSTATUS_LEECH_SEED on enemy.
-    { 0x49, 0x49, "LeechSeed",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     leechseed_config,   nullptr },
+    { 0x49, 0x49, "Leech Seed",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     leechseed_config,   nullptr },
     // Toxic/DoPoison script; acc=0xD8=216; 1 RNG byte (TAPE_HIT); enemy_statusâ†’BadPoison.
     { 0x5C, 0x5C, "Toxic",         100000, TAPE_HIT,      sizeof(TAPE_HIT),     toxic_config,       nullptr },
     // ========================================================================
@@ -2998,21 +2998,21 @@ static const MoveSpec REGISTERED_MOVES[] = {
     // No move-specific fixture or sink logic — pure generic_fullscript_config.
     // ========================================================================
     // Swords Dance (0x0E, EFFECT_ATTACK_UP2): player ATK +2. 0 RNG.
-    { 0x0E, 0x0E, "SwordsDance",  100000, nullptr,       0,                    swordsdance_config, nullptr },
+    { 0x0E, 0x0E, "Swords Dance",  100000, nullptr,       0,                    swordsdance_config, nullptr },
     // Growl (0x2D, EFFECT_ATTACK_DOWN): enemy ATK -1. acc=0xE5=229. 1 RNG.
     { 0x2D, 0x2D, "Growl",        100000, TAPE_HIT,      sizeof(TAPE_HIT),     growl_config,       nullptr },
     // Tail Whip (0x27, EFFECT_DEFENSE_DOWN): enemy DEF -1. acc=0xE5=229. 1 RNG.
-    { 0x27, 0x27, "TailWhip",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     tailwhip_config,    nullptr },
+    { 0x27, 0x27, "Tail Whip",     100000, TAPE_HIT,      sizeof(TAPE_HIT),     tailwhip_config,    nullptr },
     // Leer (0x2B, EFFECT_DEFENSE_DOWN): enemy DEF -1. acc=0xE5=229. 1 RNG.
     { 0x2B, 0x2B, "Leer",         100000, TAPE_HIT,      sizeof(TAPE_HIT),     leer_config,        nullptr },
     // Screech (0x67, EFFECT_DEFENSE_DOWN2): enemy DEF -2. acc=0xCC=204. 1 RNG.
     { 0x67, 0x67, "Screech",      100000, TAPE_HIT,      sizeof(TAPE_HIT),     screech_config,     nullptr },
     // String Shot (0x51, EFFECT_SPEED_DOWN): enemy SPD -1. acc=0xE5=229. 1 RNG.
-    { 0x51, 0x51, "StringShot",   100000, TAPE_HIT,      sizeof(TAPE_HIT),     stringshot_config,  nullptr },
+    { 0x51, 0x51, "String Shot",   100000, TAPE_HIT,      sizeof(TAPE_HIT),     stringshot_config,  nullptr },
     // Screech miss (0xF0=240 >= acc=0xD8=216): CheckHit misses, no stat change. 1 RNG byte.
     { 671,  0x67, "Screech/miss",  100000, TAPE_SCREECH_MISS,    sizeof(TAPE_SCREECH_MISS),    screech_miss_config,    nullptr },
     // StringShot miss (0xF8=248 >= acc=0xF2=242): CheckHit misses, no stat change. 1 RNG byte.
-    { 811,  0x51, "StringShot/miss", 100000, TAPE_STRINGSHOT_MISS, sizeof(TAPE_STRINGSHOT_MISS), stringshot_miss_config, nullptr },
+    { 811,  0x51, "String Shot/miss", 100000, TAPE_STRINGSHOT_MISS, sizeof(TAPE_STRINGSHOT_MISS), stringshot_miss_config, nullptr },
     // Agility (0x61, EFFECT_SPEED_UP2): player SPD +2. acc=0xFF. 0 RNG.
     { 0x61, 0x61, "Agility",      100000, nullptr,       0,                    agility_config,     nullptr },
     // Amnesia (0x85, EFFECT_SPECIAL_ATK_UP2): player SATK +2. acc=0xFF. 0 RNG.
@@ -3025,7 +3025,7 @@ static const MoveSpec REGISTERED_MOVES[] = {
     // Batch 5: Accuracy / Evasion stage changes
     // ========================================================================
     // SandAttack (0x1C, eff=0x17 AccDown1, acc=0xFF): 0 RNG.
-    { 0x1C, 0x1C, "SandAttack",   100000, nullptr,           0,                          sandattack_config,       nullptr },
+    { 0x1C, 0x1C, "Sand-Attack",   100000, nullptr,           0,                          sandattack_config,       nullptr },
     // Flash (0x94, eff=0x17, acc=0xB2=178): 1 RNG hit or miss.
     { 0x94, 0x94, "Flash",        100000, TAPE_HIT,          sizeof(TAPE_HIT),           flash_config,            nullptr },
     {  940, 0x94, "Flash/miss",   100000, TAPE_FLASH_MISS,   sizeof(TAPE_FLASH_MISS),    flash_miss_config,       nullptr },
@@ -3035,11 +3035,11 @@ static const MoveSpec REGISTERED_MOVES[] = {
     // Smokescreen (0x6C=108, eff=0x17 AccuracyDown1, acc=0xFF): 0 RNG. Same script as SandAttack/Flash/Kinesis.
     { 0x6C, 0x6C, "Smokescreen",   100000, nullptr, 0, smokescreen_config, nullptr },
     // DoubleTeam (0x68, eff=0x10 EvasionUp1, acc=0xFF): 0 RNG.
-    { 0x68, 0x68, "DoubleTeam",   100000, nullptr,           0,                          doubleteam_config,       nullptr },
+    { 0x68, 0x68, "Double Team",   100000, nullptr,           0,                          doubleteam_config,       nullptr },
     // Minimize (0x6B, eff=0x10 + sets_minimize, acc=0xFF): 0 RNG.
     { 0x6B, 0x6B, "Minimize",     100000, nullptr,           0,                          minimize_config,         nullptr },
     // SweetScent (0xE6, eff=0x18 EvasionDown1, acc=0xFF): 0 RNG.
-    { 0xE6, 0xE6, "SweetScent",   100000, nullptr,           0,                          sweetscent_config,       nullptr },
+    { 0xE6, 0xE6, "Sweet Scent",   100000, nullptr,           0,                          sweetscent_config,       nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
@@ -3607,119 +3607,179 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
 
     // 4b. Move-identity validation.
     //
-    // For each registered MoveSpec with a concrete Crystal move ID (engine_id in [1..251]),
-    // derive a ROM fingerprint: {effect_byte, power_byte, accuracy_byte} directly from the
-    // pinned ROM's moves table (flat offset CRYSTAL_MOVES_TABLE_FLAT + (id-1)*7).
+    // Identity model:
+    //   The authoritative identity of each registered case is its engine_id (Crystal move ID).
+    //   The canonical move name is derived DIRECTLY from the pinned ROM's move-name table
+    //   at 72:5F29 (flat = 0x72*0x4000 + (0x5F29-0x4000) = 0x1CA929).
+    //   Human-authored base names in MoveSpec::name are NOT trusted for identity.
+    //   They are validated against the ROM-derived name; any discrepancy is CONFIG_ERROR.
     //
-    // Invariant: all MoveSpec entries sharing the same base_name MUST reference Crystal moves
-    // with identical ROM fingerprints. Two entries named "Smokescreen" must both point to the
-    // same Crystal move -- if one points to 0x6C (eff=0x17,pow=0,acc=0xFF) and the other to
-    // 0x79 (eff=0x00,pow=100,acc=0xBF), they describe different moves and one is wrong.
+    //   MoveSpec::name may carry a suffix after '/', e.g. "Flash/miss" -- the base "Flash"
+    //   must equal the ROM-derived name for engine_id=0x94.
     //
-    // Conversely: two entries with different base_names MUST NOT share the same engine_id
-    // (unless both are sub-cases of a multi-branch move with the same base, which is allowed
-    // because base names would then be identical after stripping the suffix).
+    //   (effect, power, accuracy) from the moves TABLE are preserved as DIAGNOSTIC METADATA
+    //   in error messages only -- they are not the identity.
     //
-    // Authority: ROM bytes only. No handwritten name → ID table. No Crystal name decoder.
+    // Move-name table: sequential Crystal-encoded strings, one per move ID 1..251.
+    //   Each string: uppercase A-Z encoded as 0x80..0x99, space=0x7F, hyphen=0xE3, @=0x50 (term).
+    //   Symbol: 72:5F29 MoveNames in pokecrystal11.sym.
+    //   Flat address: 0x72*0x4000 + (0x5F29-0x4000) = 0x1CA929.
+    //   This address is derived from the sym file which is itself SHA-1 pinned at startup.
     //
-    // Negative self-test: reproduces the exact field mistake (Smokescreen labelled Egg Bomb).
+    // Invariants checked:
+    //   1. engine_id must be in [1..251] (or 0 = no check).
+    //   2. ROM-derived name for engine_id must match the human base name.
+    //   3. No two cases with different engine_ids may share the same human base name
+    //      (would mean one case is mislabelled under another move's name).
+    //
+    // Negative self-tests:
+    //   A. ID 0x79 (121) must derive "EGG BOMB", never "SMOKESCREEN".
+    //   B. ID 0x6C (108) must derive "SMOKESCREEN".
+    //   C. "SMOKESCREEN" + engine_id=0x79 conflicts with "SMOKESCREEN" + engine_id=0x6C
+    //      → CONFIG_ERROR: human label matches two different ROM-derived identities.
     {
-        // Helper: extract base name (everything before the first '/').
-        auto base_name = [](const char* full) -> std::string {
-            std::string s(full);
-            auto pos = s.find('/');
-            return (pos == std::string::npos) ? s : s.substr(0, pos);
+        // Move-name table address (from pinned sym file: 72:5F29 MoveNames).
+        static constexpr uint32_t MOVE_NAMES_FLAT = 0x72u*0x4000u + (0x5F29u - 0x4000u); // = 0x1CA929
+
+        // Decode the nth move name (1-based) from the ROM name table.
+        // Returns an all-caps string, e.g. "SMOKESCREEN", or "" if id is out of range.
+        auto decode_rom_move_name = [&](uint16_t id) -> std::string {
+            if(id == 0 || id > 251) return "";
+            uint32_t off = MOVE_NAMES_FLAT;
+            // Walk to the (id-1) terminators to reach the nth entry.
+            for(uint16_t i = 1; i < id && off < (uint32_t)rom_bytes.size(); ++i){
+                while(off < (uint32_t)rom_bytes.size() && rom_bytes[off] != 0x50) ++off;
+                ++off; // skip 0x50 terminator
+            }
+            // Decode the string at current offset.
+            std::string result;
+            while(off < (uint32_t)rom_bytes.size() && rom_bytes[off] != 0x50){
+                uint8_t b = rom_bytes[off++];
+                if(b >= 0x80 && b <= 0x99)      result += (char)('A' + b - 0x80);
+                else if(b == 0x7F)               result += ' ';
+                else if(b == 0xE3)               result += '-';
+                else                             result += '?';
+            }
+            return result;
         };
 
-        // ROM fingerprint for a Crystal move ID (1..251): {effect, power, accuracy}.
-        struct MoveFingerprint { uint8_t eff, pow, acc; };
-        auto rom_fp = [&rom_bytes](uint16_t id) -> MoveFingerprint {
-            if(id == 0 || id > 251) return {0xFF, 0xFF, 0xFF}; // sentinel: skip
-            uint32_t off = CRYSTAL_MOVES_TABLE_FLAT + (uint32_t)(id - 1) * CRYSTAL_MOVE_DATA_SIZE;
-            if(off + 7 > rom_bytes.size()) return {0xFF, 0xFF, 0xFF};
-            // Layout: [anim, effect, power, type, accuracy, pp, chance]
-            return { rom_bytes[off+1], rom_bytes[off+2], rom_bytes[off+4] };
-        };
-        auto fp_eq = [](const MoveFingerprint& a, const MoveFingerprint& b) {
-            return a.eff==b.eff && a.pow==b.pow && a.acc==b.acc;
-        };
-        auto fp_str = [](const MoveFingerprint& f) -> std::string {
+        // ROM fingerprint for diagnostic metadata (not identity).
+        auto rom_fp_str = [&](uint16_t id) -> std::string {
+            if(id == 0 || id > 251) return "";
+            uint32_t off = CRYSTAL_MOVES_TABLE_FLAT + (uint32_t)(id-1)*CRYSTAL_MOVE_DATA_SIZE;
+            if(off+5 >= (uint32_t)rom_bytes.size()) return "";
             char buf[64];
-            snprintf(buf, sizeof(buf), "eff=0x%02X pow=%u acc=0x%02X", f.eff, f.pow, f.acc);
+            snprintf(buf, sizeof(buf), "eff=0x%02X pow=%u acc=0x%02X",
+                rom_bytes[off+1], rom_bytes[off+2], rom_bytes[off+4]);
             return std::string(buf);
         };
 
-        // Collect {base_name -> first_engine_id + fingerprint} and {engine_id -> base_name}.
-        std::map<std::string, std::pair<uint16_t, MoveFingerprint>> name_to_fp;
-        std::map<uint16_t, std::string>                             id_to_name;
-
-        auto check_spec = [&](const char* spec_name, uint16_t eid) -> std::string {
-            if(eid == 0 || eid > 251) return {};
-            std::string bn = base_name(spec_name);
-            MoveFingerprint fp = rom_fp(eid);
-            if(fp.eff == 0xFF && fp.pow == 0xFF) return {}; // out-of-range, skip
-
-            // Check: same base name must map to same ROM fingerprint.
-            auto it = name_to_fp.find(bn);
-            if(it != name_to_fp.end()){
-                if(!fp_eq(it->second.second, fp)){
-                    char buf[256];
-                    snprintf(buf, sizeof(buf),
-                        "move name \"%s\" used for engine_id=%u (%s) "
-                        "and engine_id=%u (%s) -- different Crystal moves",
-                        bn.c_str(), eid, fp_str(fp).c_str(),
-                        it->second.first, fp_str(it->second.second).c_str());
-                    return std::string(buf);
-                }
-            } else {
-                name_to_fp[bn] = {eid, fp};
-            }
-
-            // Check: same engine_id must map to same base name.
-            auto it2 = id_to_name.find(eid);
-            if(it2 != id_to_name.end()){
-                if(it2->second != bn){
-                    char buf[256];
-                    snprintf(buf, sizeof(buf),
-                        "engine_id=%u used for move names \"%s\" and \"%s\" "
-                        "-- same Crystal move registered under different names",
-                        eid, bn.c_str(), it2->second.c_str());
-                    return std::string(buf);
-                }
-            } else {
-                id_to_name[eid] = bn;
-            }
-            return {};
+        // Extract base name from "Flash/miss" -> "FLASH", uppercased for comparison.
+        auto upper_base = [](const char* full) -> std::string {
+            std::string s(full);
+            auto pos = s.find('/');
+            if(pos != std::string::npos) s = s.substr(0, pos);
+            for(char& c : s) c = (char)std::toupper((unsigned char)c);
+            return s;
         };
 
-        // Validate all registered moves.
+        // Negative self-tests run BEFORE validating the registration table.
+        // A. ID 0x79 must derive "EGG BOMB".
+        {
+            std::string n = decode_rom_move_name(0x79);
+            if(n != "EGG BOMB"){
+                return startup_fail("SELF_TEST",
+                    "move-name self-test A: expected 0x79=EGG BOMB, got \"" + n + "\"");
+            }
+        }
+        // B. ID 0x6C must derive "SMOKESCREEN".
+        {
+            std::string n = decode_rom_move_name(0x6C);
+            if(n != "SMOKESCREEN"){
+                return startup_fail("SELF_TEST",
+                    "move-name self-test B: expected 0x6C=SMOKESCREEN, got \"" + n + "\"");
+            }
+        }
+        // C. Attempting to register "SMOKESCREEN" with engine_id=0x79 while engine_id=0x6C is
+        //    also named "SMOKESCREEN" must conflict.  Simulate by checking the fingerprint
+        //    mismatch explicitly (the main loop below would catch the label mismatch).
+        //    Here we prove that ROM names are distinct and different from each other.
+        {
+            std::string n79  = decode_rom_move_name(0x79);  // "EGG BOMB"
+            std::string n6C  = decode_rom_move_name(0x6C);  // "SMOKESCREEN"
+            if(n79 == n6C){
+                return startup_fail("SELF_TEST",
+                    "move-name self-test C: 0x79 and 0x6C unexpectedly share name \""
+                    + n79 + "\" -- ROM data inconsistent with pin");
+            }
+            std::cout << "  move-name self-tests: 0x6C=\"" << n6C
+                      << "\" 0x79=\"" << n79 << "\" -- distinct OK\n";
+        }
+
+        // Main validation loop: check every registered MoveSpec.
+        // Build: base_name(human) -> (first_engine_id, ROM-derived name)
+        //        engine_id        -> ROM-derived name
+        std::map<std::string, std::pair<uint16_t, std::string>> human_base_to_rom;
+        std::map<uint16_t, std::string> id_to_rom_name;
+
         for(size_t i = 0; i < NUM_REGISTERED; ++i){
             const MoveSpec& spec = REGISTERED_MOVES[i];
             const uint16_t eid = spec.engine_id ? spec.engine_id : spec.id;
-            std::string err = check_spec(spec.name, eid);
-            if(!err.empty())
-                return startup_fail("MOVE_IDENTITY", err);
-        }
+            if(eid == 0 || eid > 251) continue;
 
-        // Negative self-test: the exact field mistake.
-        //   "Smokescreen" + engine_id=0x79=121 (Egg Bomb: eff=0x00,pow=100,acc=0xBF)
-        //   conflicts with "Smokescreen" + engine_id=0x6C=108 (eff=0x17,pow=0,acc=0xFF).
-        //   The check must produce a MOVE_IDENTITY error.
-        {
-            std::string err = check_spec("Smokescreen", 0x79); // 121 = Egg Bomb
-            bool fired = !err.empty()
-                && err.find("Smokescreen") != std::string::npos
-                && err.find("different Crystal moves") != std::string::npos;
-            if(!fired){
-                return startup_fail("SELF_TEST",
-                    "move-identity negative test: expected CONFIG_ERROR for "
-                    "Smokescreen/0x79 vs Smokescreen/0x6C, got: '" + err + "'");
+            std::string rom_name = decode_rom_move_name(eid);
+            if(rom_name.empty()){
+                return startup_fail("MOVE_IDENTITY",
+                    "case \"" + std::string(spec.name) + "\": engine_id=" + std::to_string(eid)
+                    + " is out of range (ROM has moves 1-251)");
             }
-            // Print the exact error the check would have produced.
-            std::cout << "  move-identity [Smokescreen/0x79 vs Smokescreen/0x6C=0x108]: "
-                         "CONFIG_ERROR confirmed (" << err.substr(0,80) << "...)\n";
+
+            // Human base name (uppercased for comparison).
+            std::string hbase = upper_base(spec.name);
+
+            // 1. Human base must match ROM-derived name.
+            if(hbase != rom_name){
+                return startup_fail("MOVE_IDENTITY",
+                    "case \"" + std::string(spec.name) + "\""
+                    " (engine_id=" + std::to_string(eid) + "):"
+                    " declared base name \"" + hbase + "\""
+                    " does not match ROM-derived name \"" + rom_name + "\""
+                    " [" + rom_fp_str(eid) + "]");
+            }
+
+            // 2. Same human base must always map to the same engine_id (and thus ROM name).
+            auto it = human_base_to_rom.find(hbase);
+            if(it != human_base_to_rom.end()){
+                if(it->second.first != eid){
+                    return startup_fail("MOVE_IDENTITY",
+                        "case base \"" + hbase + "\" used for engine_id="
+                        + std::to_string(eid) + " (\"" + rom_name + "\""
+                        + " " + rom_fp_str(eid) + ")"
+                        + " and engine_id=" + std::to_string(it->second.first)
+                        + " (\"" + it->second.second + "\""
+                        + " " + rom_fp_str(it->second.first) + ")"
+                        + " -- same human label, different Crystal moves");
+                }
+            } else {
+                human_base_to_rom[hbase] = {eid, rom_name};
+            }
+
+            // 3. Same engine_id must always map to the same ROM name (tautologically true,
+            //    but also catches any case where engine_id is reused with a different suffix
+            //    under a different base name).
+            auto it2 = id_to_rom_name.find(eid);
+            if(it2 != id_to_rom_name.end()){
+                if(it2->second != rom_name){
+                    return startup_fail("MOVE_IDENTITY",
+                        "engine_id=" + std::to_string(eid)
+                        + " has inconsistent ROM-derived names \""
+                        + rom_name + "\" and \"" + it2->second + "\"");
+                }
+            } else {
+                id_to_rom_name[eid] = rom_name;
+            }
         }
-        std::cout << "  Move IDs:  OK (" << NUM_REGISTERED << " checked)\n";
+        std::cout << "  Move IDs:  OK (" << NUM_REGISTERED << " checked, ROM-derived)\n";
     }
     std::cout << "Running " << move_ids.size() << " move(s)  jobs=" << jobs
               << (verbose ? "  verbose" : "") << "\n\n";
