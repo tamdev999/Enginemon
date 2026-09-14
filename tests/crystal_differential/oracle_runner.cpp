@@ -687,6 +687,7 @@ enum class StopReason {
     GB_INIT_FAILED,
     WRAM_ACCESS_FAILED,
     REGS_ACCESS_FAILED,
+    HARNESS_GUARD_FIRED, // internal guard (__HARNESS_ERROR__) tripped during execution
 };
 static const char* stop_reason_str(StopReason r){
     switch(r){
@@ -697,6 +698,7 @@ static const char* stop_reason_str(StopReason r){
     case StopReason::GB_INIT_FAILED:     return "GB_INIT_FAILED";
     case StopReason::WRAM_ACCESS_FAILED: return "WRAM_ACCESS_FAILED";
     case StopReason::REGS_ACCESS_FAILED: return "REGS_ACCESS_FAILED";
+    case StopReason::HARNESS_GUARD_FIRED: return "HARNESS_GUARD_FIRED";
     }
     return "?";
 }
@@ -1575,6 +1577,14 @@ static CrystalRunResult run_crystal_case(
     }
     if(exec_ctx.triggered_sink && std::string(exec_ctx.triggered_sink)=="__TIMEOUT__"){
         GB_free(&gb); res.stop_reason=StopReason::WALL_CLOCK_TIMEOUT; return res;
+    }
+    // Any sink whose name starts with __HARNESS_ERROR__ is an internal guard
+    // (stack escape, bad emulate_ret, ByteFill, etc.).  Return immediately --
+    // before re-acquiring WRAM -- so run_case sees a non-SINK_HIT stop reason
+    // and classifies the case as HARNESS_ERROR rather than a legitimate outcome.
+    if(exec_ctx.triggered_sink &&
+       std::string(exec_ctx.triggered_sink).rfind("__HARNESS_ERROR__", 0) == 0){
+        GB_free(&gb); res.stop_reason=StopReason::HARNESS_GUARD_FIRED; return res;
     }
     if(rng_ctx && rng_ctx->exhausted){
         GB_free(&gb); res.stop_reason=StopReason::RNG_TAPE_EXHAUSTED; return res;
@@ -2905,6 +2915,12 @@ static CaseResult run_case(
             r.detail = std::string("Crystal run (")+lbl+") failed: "
                      + stop_reason_str(cr[pi].stop_reason)
                      + " after "+std::to_string(cr[pi].insn_count)+" insn";
+            // For HARNESS_GUARD_FIRED, append the guard message so the case detail
+            // retains the original __HARNESS_ERROR__ string (e.g. stack escape text).
+            if(cr[pi].stop_reason == StopReason::HARNESS_GUARD_FIRED
+               && cr[pi].sink_name && cr[pi].sink_name[0]){
+                r.detail += std::string(": ") + cr[pi].sink_name;
+            }
             return r;
         }
     }
@@ -3822,9 +3838,9 @@ int run_harness_negative_tests(const char* rom_path, const char* sym_path, bool 
         auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
 
         // The guard fires before any instruction, so insn_count must be 0.
-        // stop_reason is SINK_HIT (exec_ctx.triggered=true via the guard branch).
+        // stop_reason is HARNESS_GUARD_FIRED (early return before WRAM re-acquire).
         // sink_name must start with __HARNESS_ERROR__ and contain the key fields.
-        bool sink_hit   = (res.stop_reason == StopReason::SINK_HIT);
+        bool sink_hit   = (res.stop_reason == StopReason::HARNESS_GUARD_FIRED);
         bool no_insns   = (res.insn_count == 0);
         bool has_err    = (res.sink_name != nullptr);
         bool has_tag    = has_err && (std::string(res.sink_name).find("__HARNESS_ERROR__") == 0);
