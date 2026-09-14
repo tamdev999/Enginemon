@@ -2749,7 +2749,12 @@ static void magnitude_config(const SymCache& sym, CrystalRunConfig* out){
 
 // Tapes: acc=0xE5 or acc=0xD8 moves need one hit byte; Protect needs one protect byte.
 static constexpr uint8_t TAPE_HIT[]     = { 0x30 };   // 48 < 229 (0xE5) and < 216 (0xD8)
-static constexpr uint8_t TAPE_PROTECT[] = { 0x40 };   // 0x40-1=0x3F < 0xFF â†’ ProtectChance success
+static constexpr uint8_t TAPE_PROTECT[] = { 0x40 };   // 0x40-1=0x3F < 0xFF
+// Miss tapes: byte >= accuracy causes miss (CheckHit: CALL BattleRandom; CP B; JR NC, .miss)
+// Screech  acc=0xD8=216: use 0xF0=240 >= 216 -> miss
+// StringShot acc=0xF2=242: use 0xF8=248 >= 242 -> miss
+static constexpr uint8_t TAPE_SCREECH_MISS[]    = { 0xF0 };  // 240 >= 216 -> CheckHit miss
+static constexpr uint8_t TAPE_STRINGSHOT_MISS[] = { 0xF8 };  // 248 >= 242 -> CheckHit miss â†’ ProtectChance success
 
 static void seismictoss_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x45, nullptr, 0); }
@@ -2821,6 +2826,10 @@ static void screech_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x67, TAPE_HIT, sizeof(TAPE_HIT)); }
 static void stringshot_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x51, TAPE_HIT, sizeof(TAPE_HIT)); }
+static void screech_miss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x67, TAPE_SCREECH_MISS, sizeof(TAPE_SCREECH_MISS)); }
+static void stringshot_miss_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x51, TAPE_STRINGSHOT_MISS, sizeof(TAPE_STRINGSHOT_MISS)); }
 static void agility_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x61, nullptr,  0); }
 static void amnesia_config(const SymCache& sym, CrystalRunConfig* out){
@@ -2954,6 +2963,10 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 0x67, 0x67, "Screech",      100000, TAPE_HIT,      sizeof(TAPE_HIT),     screech_config,     nullptr },
     // String Shot (0x51, EFFECT_SPEED_DOWN): enemy SPD -1. acc=0xE5=229. 1 RNG.
     { 0x51, 0x51, "StringShot",   100000, TAPE_HIT,      sizeof(TAPE_HIT),     stringshot_config,  nullptr },
+    // Screech miss (0xF0=240 >= acc=0xD8=216): CheckHit misses, no stat change. 1 RNG byte.
+    { 671,  0x67, "Screech/miss",  100000, TAPE_SCREECH_MISS,    sizeof(TAPE_SCREECH_MISS),    screech_miss_config,    nullptr },
+    // StringShot miss (0xF8=248 >= acc=0xF2=242): CheckHit misses, no stat change. 1 RNG byte.
+    { 811,  0x51, "StringShot/miss", 100000, TAPE_STRINGSHOT_MISS, sizeof(TAPE_STRINGSHOT_MISS), stringshot_miss_config, nullptr },
     // Agility (0x61, EFFECT_SPEED_UP2): player SPD +2. acc=0xFF. 0 RNG.
     { 0x61, 0x61, "Agility",      100000, nullptr,       0,                    agility_config,     nullptr },
     // Amnesia (0x85, EFFECT_SPECIAL_ATK_UP2): player SATK +2. acc=0xFF. 0 RNG.
