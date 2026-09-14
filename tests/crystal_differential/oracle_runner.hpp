@@ -53,4 +53,20 @@ struct RunnerConfig {
 // ============================================================================
 int runner_main(int argc, char* argv[], RunnerConfig defaults = {});
 
+// ============================================================================
+// run_harness_negative_tests
+//
+// Exercises the six fail-closed harness paths that cannot be reached via normal
+// CLI usage. Intended for use by oracle_harness_negative_test only.
+//
+// rom_path:  path to the pinned Crystal ROM (SHA-verified internally)
+// sym_path:  path to the pinned .sym file
+// verbose:   if true, prints each test name and result to stdout
+//
+// Returns 0 if ALL six negative controls produce HARNESS_ERROR as expected.
+// Returns non-zero on any unexpected outcome (test infrastructure failure).
+// ============================================================================
+int run_harness_negative_tests(const char* rom_path, const char* sym_path,
+                                bool verbose = false);
+
 } // namespace crystal::oracle

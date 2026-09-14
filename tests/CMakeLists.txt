@@ -272,6 +272,39 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     # Not added to ctest — requires ROM+sym path arguments
 endif()
 
+if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
+    # =========================================================================
+    # oracle_harness_negative_test
+    #   Standalone CTest executable that exercises the six fail-closed harness
+    #   paths that cannot be triggered from the normal CLI.
+    #   Each test deliberately injects a bad condition and asserts HARNESS_ERROR.
+    #   CTest label: oracle-diff (runs with the rest of the oracle suite).
+    # =========================================================================
+    add_executable(oracle_harness_negative_test
+        crystal_differential/oracle_harness_negative_test.cpp
+    )
+    target_link_libraries(oracle_harness_negative_test PRIVATE oracle_runner_lib)
+    target_include_directories(oracle_harness_negative_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(oracle_harness_negative_test PRIVATE /bigobj)
+    endif()
+
+    if(ENGINEMON_ROM_PATH)
+        set(_NEG_SYM "${CMAKE_SOURCE_DIR}/references/pokecrystal-symbols/pokecrystal11.sym")
+        add_test(NAME oracle_harness_negative_test
+            COMMAND $<TARGET_FILE:oracle_harness_negative_test>
+                    "${ENGINEMON_ROM_PATH}"
+                    "${_NEG_SYM}")
+        set_tests_properties(oracle_harness_negative_test
+            PROPERTIES
+                LABELS  "oracle-diff"
+                TIMEOUT 120
+                PASS_REGULAR_EXPRESSION "Negative controls: 6/6 passed")
+    endif()
+endif()
+
 # Lua Runtime tests (end-to-end script execution)
 # Requires engine library (with Lua) + crystal frontend
 if(ENGINEMON_ENABLE_ENGINE)
