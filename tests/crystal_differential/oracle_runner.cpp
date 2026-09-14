@@ -1716,6 +1716,15 @@ static CrystalRunResult run_crystal_case(
                 emulate_ret(r, "LoadAnim(0D:7E44)");
                 did_skip = true;
             }
+            // PlayOpponentBattleAnim (0D:7E54) -- opponent-side animation player.
+            // Called from BattleCommand_Confuse after setting confusion turns.
+            // Writes wFXAnimID, flips hBattleTurn (via SwitchTurn), calls PlayBattleAnim
+            // (bank 33 via RST 0x08). Pure LCD/VRAM; no semantic WRAM written.
+            // Source-proven: 0D:7E54 in pokecrystal11.sym.
+            else if(pc == 0x7E54 && bank == 0x0D){
+                emulate_ret(r, "PlayOpponentBattleAnim(0D:7E54)");
+                did_skip = true;
+            }
             // BattleCommand_StatUpAnim (0D:4FD1) -- stat-raise animation.
             // Called from stat-up scripts (SwordsDance, Agility, Amnesia, Barrier, etc.)
             // after the stat stage is already written to wPlayerStatLevels.
@@ -2919,7 +2928,21 @@ static constexpr uint8_t TAPE_STRINGSHOT_MISS[] = { 0xF8 };  // 248 >= 242 -> Ch
 // Flash    acc=0xB2=178: miss 0xC0=192 >= 178
 // Kinesis  acc=0xCC=204: miss 0xD0=208 >= 204
 static constexpr uint8_t TAPE_FLASH_MISS[]   = { 0xC0 };  // 192 >= 178 -> miss
-static constexpr uint8_t TAPE_KINESIS_MISS[] = { 0xD0 };  // 208 >= 204 -> miss â†’ ProtectChance success
+static constexpr uint8_t TAPE_KINESIS_MISS[] = { 0xD0 };  // 208 >= 204 -> miss
+// Status-mechanics sweep tapes
+static constexpr uint8_t TAPE_MISS_BF[]          = { 0xC0 };          // 192 >= 191 -> miss (PoisonPowder/StunSpore/Glare/SleepPowder/LovelyKiss)
+static constexpr uint8_t TAPE_MISS_8C[]          = { 0x90 };          // 144 >= 140 -> miss (PoisonGas/Sing/Supersonic)
+static constexpr uint8_t TAPE_MISS_99[]          = { 0xA0 };          // 160 >= 153 -> miss (Hypnosis)
+static constexpr uint8_t TAPE_STATUS_HIT_BF[]    = { 0x30 };          // hit acc=0xBF (48 < 191)
+static constexpr uint8_t TAPE_CONFUSE_TURNS[]    = { 0x01 };          // confusion_turns byte: (0x01&3)+2=3 turns
+static constexpr uint8_t TAPE_CONFUSE_HIT_8C[]   = { 0x30, 0x01 };    // hit acc=0x8C + confuse_turns
+static constexpr uint8_t TAPE_SLEEP_HIT_BF[]     = { 0x30, 0x01 };    // hit acc=0xBF + sleep_turns (0x01: exits loop, turns=2)
+static constexpr uint8_t TAPE_SLEEP_HIT_8C[]     = { 0x30, 0x01 };    // hit acc=0x8C + sleep_turns (0x01 exits loop)
+static constexpr uint8_t TAPE_SLEEP_HIT_99[]     = { 0x30, 0x01 };    // hit acc=0x99 + sleep_turns (0x01 exits loop)
+static constexpr uint8_t TAPE_SLEEP_HIT_FF[]     = { 0x01 };          // acc=0xFF no checkhit + sleep_turns (0x01 exits loop)
+static constexpr uint8_t TAPE_SLEEP_MISS_BF[]    = { 0xC0 };          // 192 >= 191 miss (no sleep_turns)
+static constexpr uint8_t TAPE_SLEEP_MISS_8C[]    = { 0x90 };          // 144 >= 140 miss
+static constexpr uint8_t TAPE_SLEEP_MISS_99[]    = { 0xA0 };          // 160 >= 153 miss â†’ ProtectChance success
 
 static void seismictoss_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x45, nullptr, 0); }
@@ -3031,6 +3054,36 @@ static void minimize_config(const SymCache& sym, CrystalRunConfig* out){
 // SweetScent (0xE6, eff=0x18): EvasionDown1 on enemy. acc=0xFF 0 RNG.
 static void sweetscent_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0xE6, nullptr, 0); }
+// ============================================================================
+// Batch 6: Status-mechanics sweep
+// ============================================================================
+// -- Poison (eff=0x42) --
+static void poisonpowder_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x4D, TAPE_STATUS_HIT_BF, sizeof(TAPE_STATUS_HIT_BF)); }
+static void poisonpowder_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x4D, TAPE_MISS_BF, sizeof(TAPE_MISS_BF)); }
+static void poisongas_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x8B, TAPE_STATUS_HIT_BF, sizeof(TAPE_STATUS_HIT_BF)); }
+static void poisongas_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x8B, TAPE_MISS_8C, sizeof(TAPE_MISS_8C)); }
+// -- Paralysis (eff=0x43) --
+static void thunderwave_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x56, nullptr, 0); }
+static void stunspore_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x4E, TAPE_STATUS_HIT_BF, sizeof(TAPE_STATUS_HIT_BF)); }
+static void stunspore_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x4E, TAPE_MISS_BF, sizeof(TAPE_MISS_BF)); }
+static void glare_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x89, TAPE_STATUS_HIT_BF, sizeof(TAPE_STATUS_HIT_BF)); }
+static void glare_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x89, TAPE_MISS_BF, sizeof(TAPE_MISS_BF)); }
+// -- Sleep (eff=0x01) --
+static void hypnosis_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x5F, TAPE_SLEEP_HIT_99, sizeof(TAPE_SLEEP_HIT_99)); }
+static void hypnosis_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x5F, TAPE_SLEEP_MISS_99, sizeof(TAPE_SLEEP_MISS_99)); }
+static void sing_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x2F, TAPE_SLEEP_HIT_8C, sizeof(TAPE_SLEEP_HIT_8C)); }
+static void sing_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x2F, TAPE_SLEEP_MISS_8C, sizeof(TAPE_SLEEP_MISS_8C)); }
+static void sleeppowder_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x4F, TAPE_SLEEP_HIT_BF, sizeof(TAPE_SLEEP_HIT_BF)); }
+static void sleeppowder_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x4F, TAPE_SLEEP_MISS_BF, sizeof(TAPE_SLEEP_MISS_BF)); }
+static void spore_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x93, TAPE_SLEEP_HIT_FF, sizeof(TAPE_SLEEP_HIT_FF)); }
+static void lovelykiss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x8E, TAPE_SLEEP_HIT_BF, sizeof(TAPE_SLEEP_HIT_BF)); }
+static void lovelykiss_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x8E, TAPE_SLEEP_MISS_BF, sizeof(TAPE_SLEEP_MISS_BF)); }
+// -- Confuse (eff=0x31) --
+static void confuseray_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x6D, TAPE_CONFUSE_TURNS, sizeof(TAPE_CONFUSE_TURNS)); }
+static void supersonic_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x30, TAPE_CONFUSE_HIT_8C, sizeof(TAPE_CONFUSE_HIT_8C)); }
+static void supersonic_miss_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0x30, TAPE_MISS_8C, sizeof(TAPE_MISS_8C)); }
+// -- HealBell (eff=0x66) --
+static void healbell_config(const SymCache& sym, CrystalRunConfig* out){ generic_fullscript_config(sym, out, 0xD7, nullptr, 0); }
 
 // ============================================================================
 // Registered moves -- adding a move requires:
@@ -3187,6 +3240,49 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 0x6B, 0x6B, "Minimize",     100000, nullptr,           0,                          minimize_config,         nullptr },
     // SweetScent (0xE6, eff=0x18 EvasionDown1, acc=0xFF): 0 RNG.
     { 0xE6, 0xE6, "Sweet Scent",   100000, nullptr,           0,                          sweetscent_config,       nullptr },
+    // ========================================================================
+    // Batch 6: Status-mechanics sweep (DoMove -> EndMoveEffect)
+    // ========================================================================
+    // -- Poison (eff=0x42, DoPoison script): checkhit + stab + safeguard + poison --
+    // PoisonPowder acc=0xBF=191. hit=0x30(48<191), miss=0xC0(192>=191). 1 RNG.
+    { 0x4D, 0x4D, "POISONPOWDER",      100000, TAPE_STATUS_HIT_BF,  sizeof(TAPE_STATUS_HIT_BF),  poisonpowder_config,      nullptr },
+    {  773, 0x4D, "POISONPOWDER/miss", 100000, TAPE_MISS_BF,         sizeof(TAPE_MISS_BF),         poisonpowder_miss_config, nullptr },
+    // PoisonGas acc=0x8C=140. hit=0x30, miss=0x90. 1 RNG.
+    { 0x8B, 0x8B, "POISON GAS",         100000, TAPE_STATUS_HIT_BF,  sizeof(TAPE_STATUS_HIT_BF),  poisongas_config,         nullptr },
+    {  779, 0x8B, "POISON GAS/miss",    100000, TAPE_MISS_8C,         sizeof(TAPE_MISS_8C),         poisongas_miss_config,    nullptr },
+    // -- Paralysis (eff=0x43, DoParalyze script): stab + checkhit + safeguard + paralyze --
+    // ThunderWave acc=0xFF. 0 RNG (stab+checkhit both no BattleRandom for 0xFF).
+    { 0x56, 0x56, "THUNDER WAVE",       100000, nullptr,              0,                           thunderwave_config,       nullptr },
+    // StunSpore acc=0xBF=191. hit=0x30, miss=0xC0. 1 RNG.
+    { 0x4E, 0x4E, "STUN SPORE",         100000, TAPE_STATUS_HIT_BF,  sizeof(TAPE_STATUS_HIT_BF),  stunspore_config,         nullptr },
+    {  782, 0x4E, "STUN SPORE/miss",    100000, TAPE_MISS_BF,         sizeof(TAPE_MISS_BF),         stunspore_miss_config,    nullptr },
+    // Glare acc=0xBF=191. hit=0x30, miss=0xC0. 1 RNG.
+    { 0x89, 0x89, "GLARE",              100000, TAPE_STATUS_HIT_BF,  sizeof(TAPE_STATUS_HIT_BF),  glare_config,             nullptr },
+    {  777, 0x89, "GLARE/miss",         100000, TAPE_MISS_BF,         sizeof(TAPE_MISS_BF),         glare_miss_config,        nullptr },
+    // -- Sleep (eff=0x01, DoSleep script): checkhit + safeguard + sleep_target(1 RNG for turns) --
+    // Hypnosis acc=0x99=153. hit={0x30,0xC0}=2 RNG, miss={0xA0}=1 RNG.
+    { 0x5F, 0x5F, "HYPNOSIS",           100000, TAPE_SLEEP_HIT_99,   sizeof(TAPE_SLEEP_HIT_99),   hypnosis_config,          nullptr },
+    {  959, 0x5F, "HYPNOSIS/miss",      100000, TAPE_SLEEP_MISS_99,  sizeof(TAPE_SLEEP_MISS_99),  hypnosis_miss_config,     nullptr },
+    // Sing acc=0x8C=140. hit={0x30,0xC0}=2 RNG, miss={0x90}=1 RNG.
+    { 0x2F, 0x2F, "SING",               100000, TAPE_SLEEP_HIT_8C,   sizeof(TAPE_SLEEP_HIT_8C),   sing_config,              nullptr },
+    {  847, 0x2F, "SING/miss",          100000, TAPE_SLEEP_MISS_8C,  sizeof(TAPE_SLEEP_MISS_8C),  sing_miss_config,         nullptr },
+    // Sleep Powder acc=0xBF=191. hit={0x30,0xC0}=2 RNG, miss={0xC0}=1 RNG.
+    { 0x4F, 0x4F, "SLEEP POWDER",       100000, TAPE_SLEEP_HIT_BF,   sizeof(TAPE_SLEEP_HIT_BF),   sleeppowder_config,       nullptr },
+    {  879, 0x4F, "SLEEP POWDER/miss",  100000, TAPE_SLEEP_MISS_BF,  sizeof(TAPE_SLEEP_MISS_BF),  sleeppowder_miss_config,  nullptr },
+    // Spore acc=0xFF. no checkhit RNG; just sleep_turns={0xC0}=1 byte.
+    { 0x93, 0x93, "SPORE",              100000, TAPE_SLEEP_HIT_FF,   sizeof(TAPE_SLEEP_HIT_FF),   spore_config,             nullptr },
+    // Lovely Kiss acc=0xBF=191. hit={0x30,0xC0}=2 RNG, miss={0xC0}=1 RNG.
+    { 0x8E, 0x8E, "LOVELY KISS",        100000, TAPE_SLEEP_HIT_BF,   sizeof(TAPE_SLEEP_HIT_BF),   lovelykiss_config,        nullptr },
+    {  898, 0x8E, "LOVELY KISS/miss",   100000, TAPE_SLEEP_MISS_BF,  sizeof(TAPE_SLEEP_MISS_BF),  lovelykiss_miss_config,   nullptr },
+    // -- Confuse (eff=0x31, DoConfuse script): checkhit + safeguard + confuse --
+    // Confuse Ray acc=0xFF. 0 RNG.
+    { 0x6D, 0x6D, "CONFUSE RAY",        100000, TAPE_CONFUSE_TURNS,   sizeof(TAPE_CONFUSE_TURNS),  confuseray_config,        nullptr },
+    // Supersonic acc=0x8C=140. hit=0x30(1 RNG), miss=0x90(1 RNG).
+    { 0x30, 0x30, "SUPERSONIC",         100000, TAPE_CONFUSE_HIT_8C, sizeof(TAPE_CONFUSE_HIT_8C), supersonic_config,        nullptr },
+    {  848, 0x30, "SUPERSONIC/miss",    100000, TAPE_MISS_8C,         sizeof(TAPE_MISS_8C),         supersonic_miss_config,   nullptr },
+    // -- HealBell (eff=0x66, HealBell script): healbell (cures party) --
+    // Heal Bell acc=0xFF. 0 RNG. Enginemon is_heal_bell not yet implemented -> UNSUPPORTED expected.
+    { 0xD7, 0xD7, "HEAL BELL",          100000, nullptr,              0,                           healbell_config,          nullptr },
 };
 static constexpr size_t NUM_REGISTERED = sizeof(REGISTERED_MOVES)/sizeof(REGISTERED_MOVES[0]);
 static const MoveSpec* find_move(uint16_t id){
