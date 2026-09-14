@@ -1250,6 +1250,9 @@ struct CrystalRunConfig {
     // this value immediately before the pre-step loop. Used by negative tests to violate
     // presentation-skip preconditions without modifying production fixtures.
     uint8_t     force_woptions_before_loop = 0;
+    // If non-zero, overrides wBattleMonHP (Crystal) and stats.hp (Enginemon) to this value.
+    // MaxHP remains P_HP=300. Use to test heal moves that restore HP. Zero = use P_HP default.
+    uint16_t    init_player_hp = 0;
 };
 
 
@@ -1357,6 +1360,12 @@ static CrystalRunResult run_crystal_case(
         GB_write_memory(&gb, sym.wPartyMon1PP.addr,   P_PP);
     }
 
+    // init_player_hp override: if set, write to wBattleMonHP after all fixtures.
+    // MaxHP (wBattleMonMaxHP) remains P_HP=300 so the Heal/Rest formula is well-defined.
+    if(cfg.init_player_hp != 0){
+        GB_write_memory(&gb, sym.wBattleMonHP.addr,     (uint8_t)(cfg.init_player_hp >> 8));
+        GB_write_memory(&gb, sym.wBattleMonHP.addr + 1, (uint8_t)(cfg.init_player_hp & 0xFF));
+    }
     // Capture initial semantic state (after all fixture writes, before any execution)
     res.initial = capture_crystal_initial(wram, sym);
 
@@ -1873,7 +1882,8 @@ static thread_local uint32_t g_eng_fault_mask = 0;
 static std::optional<EngineSnapshot> run_enginemon_case(
     enginemon::MoveId move_id,
     const EngineData& ed,
-    const uint8_t* rng_tape, size_t rng_tape_len)
+    const uint8_t* rng_tape, size_t rng_tape_len,
+    uint16_t init_player_hp = 0)
 {
     const enginemon::MoveData* md=ed.moves.get(move_id);
     if(!md||!md->effect_desc.is_supported) return std::nullopt;
@@ -1903,6 +1913,8 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     };
     bat.player_pokemon()   = make(move_id,P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,PLAYER_DELTA);
     bat.opponent_pokemon() = make(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,ENEMY_DELTA);
+    // init_player_hp: override current HP without changing max HP.
+    if(init_player_hp != 0) bat.player_pokemon().stats.hp = init_player_hp;
 
     // Feed tape to Enginemon's RNG (same bytes, same order)
     size_t rng_idx = 0;
@@ -2964,6 +2976,12 @@ static void bellydrum_config(const SymCache& sym, CrystalRunConfig* out){
 
 static void rest_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0x9C, nullptr, 0); }
+// Rest/low-hp: player starts at 150/300 HP. Verifies immediate full-HP restore and SLP status.
+// No RNG (acc=0xFF). init_player_hp=150 overrides both Crystal wBattleMonHP and Enginemon stats.hp.
+static void rest_low_config(const SymCache& sym, CrystalRunConfig* out){
+    generic_fullscript_config(sym, out, 0x9C, nullptr, 0);
+    out->init_player_hp = 150;
+}
 
 static void protect_config(const SymCache& sym, CrystalRunConfig* out){
     generic_fullscript_config(sym, out, 0xB6, TAPE_PROTECT, sizeof(TAPE_PROTECT)); }
@@ -3184,6 +3202,9 @@ static const MoveSpec REGISTERED_MOVES[] = {
     { 0xBB, 0xBB, "Belly Drum",     100000, nullptr,       0,                    bellydrum_config,   nullptr },
     // Heal script REST branch; no RNG; player_hpâ†’max, player_statusâ†’SLP.
     { 0x9C, 0x9C, "Rest",          100000, nullptr,       0,                    rest_config,        nullptr },
+    // Rest/low-hp: player starts at 150/300 HP; verifies immediate full restore and SLP.
+    // No RNG. init_player_hp=150 applied to both Crystal and Enginemon initial state.
+    { 1560, 0x9C, "Rest/low-hp",    100000, nullptr,       0,                    rest_low_config,    nullptr },
     // Protect script; 1 RNG byte (TAPE_PROTECT); wPlayerProtectCount=0 â†’ success.
     { 0xB6, 0xB6, "Protect",       100000, TAPE_PROTECT,  sizeof(TAPE_PROTECT), protect_config,     nullptr },
     // Protect script (identical to Protect); 1 RNG byte.
@@ -3449,7 +3470,7 @@ static CaseResult run_case(
         }
     }
 
-    auto eng = run_enginemon_case(spec.engine_id, ed, spec.rng_tape, spec.rng_tape_len);
+    auto eng = run_enginemon_case(spec.engine_id, ed, spec.rng_tape, spec.rng_tape_len, cfg.init_player_hp);
     if(!eng){
         // Crystal execution completed (has_crystal=true, poison-stable verified above).
         // Enginemon cannot compute this move â€” not a harness failure.
