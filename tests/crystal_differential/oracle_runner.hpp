@@ -151,6 +151,6 @@ int run_damagecalc_matrix(const char* rom_path, const char* sym_path);
 // Returns 0 if all cases match, 1 on any mismatch/harness error.
 // ============================================================================
 int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path,
-                                 int jobs = 1);
+                                 int jobs = 1, int shard_max_atk = 255);
 
 } // namespace crystal::oracle

@@ -8406,6 +8406,7 @@ struct AtkDefRowResult {
     uint32_t mismatched;
     uint32_t harness_errors;
     uint64_t rng_consumed;
+    uint64_t crystal_execs; // actual Crystal runs attempted (incremented per poison attempt)
     struct MismatchRecord {
         uint8_t  d, e, b, c, crit;
         uint16_t crystal_val;
@@ -8414,7 +8415,7 @@ struct AtkDefRowResult {
     std::vector<MismatchRecord> mismatches; // up to 5 per row
 };
 
-int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int jobs)
+int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int jobs, int shard_max_atk)
 {
     if(jobs < 1)  jobs = 1;
     if(jobs > 64) jobs = 64; // sanity cap
@@ -8450,8 +8451,8 @@ int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int 
     static constexpr uint8_t  POISON_PATTERNS[4] = { 0x00, 0xA5, 0x5A, 0xFF };
 
     // Expected counts
-    static constexpr uint32_t EXPECTED_LOGICAL = 255u * 255u * 2u;   // 130050
-    static constexpr uint64_t EXPECTED_CRYSTAL  = (uint64_t)EXPECTED_LOGICAL * 4u; // 520200
+    const uint32_t EXPECTED_LOGICAL = (uint32_t)shard_max_atk * 255u * 2u;
+    const uint64_t EXPECTED_CRYSTAL  = (uint64_t)EXPECTED_LOGICAL * 4u;
 
     std::cout << "=== Attack×Defense Grid (exhaustive) ===\n"
               << "  Entry:  0x" << std::hex << (int)sym.BattleCommand_DamageCalc.bank
@@ -8523,6 +8524,7 @@ int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int 
                     CrystalRunResult r = run_crystal_case(
                         rom_bytes, sym, POISON_PATTERNS[pi], cfg, &no_stop);
                     row.rng_consumed += r.rng_bytes_consumed;
+                    ++row.crystal_execs; // count each actual Crystal execution
                     if(r.stop_reason != StopReason::SINK_HIT){
                         ++row.harness_errors;
                         harness_ok = false;
@@ -8581,15 +8583,16 @@ int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int 
     uint32_t total_matched    = 0;
     uint32_t total_mismatched = 0;
     uint32_t total_harness    = 0;
-    uint64_t total_rng        = 0;
+    uint64_t total_rng          = 0;
+    uint64_t total_crystal_execs  = 0;
     std::vector<AtkDefRowResult::MismatchRecord> all_mismatches;
 
     // Dispatch attack rows 1..255 in batches of `jobs`
     int next_atk = 1;
     int dot_counter = 0;
     std::cout << "Progress (each dot = " << jobs << " attack rows): " << std::flush;
-    while(next_atk <= 255){
-        int batch_end = std::min(next_atk + jobs - 1, 255);
+    while(next_atk <= shard_max_atk){
+        int batch_end = std::min(next_atk + jobs - 1, shard_max_atk);
         const int batch_size = batch_end - next_atk + 1;
 
         std::vector<std::future<AtkDefRowResult>> futures;
@@ -8607,6 +8610,7 @@ int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int 
             total_mismatched += row.mismatched;
             total_harness    += row.harness_errors;
             total_rng        += row.rng_consumed;
+            total_crystal_execs += row.crystal_execs;
             for(auto& m : row.mismatches){
                 if(all_mismatches.size() < 20) all_mismatches.push_back(m);
             }
@@ -8624,7 +8628,7 @@ int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int 
     // ---- Count check --------------------------------------------------------
     // logical cases: harness errors count as cases executed (harness ran, just failed).
     // matched + mismatched = successful Crystal runs. harness_errors = failed Crystal runs.
-    const bool count_ok = (total_logical == EXPECTED_LOGICAL);
+    const bool count_ok = (total_logical == EXPECTED_LOGICAL) && (total_crystal_execs == EXPECTED_CRYSTAL);
 
     // ---- Anti-confirmation --------------------------------------------------
     // Crystal ground truth: run power=80, level=50, atk=110, def=110, crit=0 once.
@@ -8707,7 +8711,7 @@ int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int 
               << "  Logical cases:      " << total_logical
               << " (expected " << EXPECTED_LOGICAL << ")\n"
               << "  Count correct:      " << (count_ok ? "yes" : "NO") << "\n"
-              << "  Crystal executions: " << (uint64_t)total_logical * 4u
+              << "  Crystal executions: " << total_crystal_execs
                                            << " (expected " << EXPECTED_CRYSTAL << ")\n"
               << "  MATCH:              " << total_matched    << "\n"
               << "  MISMATCH:           " << total_mismatched << "\n"
