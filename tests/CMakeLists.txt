@@ -426,6 +426,22 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # ============================================================================
+    # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
+    # 12,000 logical cases, 48,000 Crystal executions.
+    # Usage: damagecalc_edge_grid <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(damagecalc_edge_grid
+        crystal_differential/damagecalc_edge_grid.cpp
+    )
+    target_link_libraries(damagecalc_edge_grid PRIVATE oracle_runner_lib)
+    target_include_directories(damagecalc_edge_grid PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(damagecalc_edge_grid PRIVATE /bigobj)
+    endif()
+
     # damagecalc_lv_pw_grid -- level x power DamageCalc sweep
     # level 1..100 x power 1..255 x crit {0,1} = 51,000 logical cases.
     # Usage: damagecalc_lv_pw_grid <rom_path> <sym_path> [--jobs N] [--shard-max-lv N]

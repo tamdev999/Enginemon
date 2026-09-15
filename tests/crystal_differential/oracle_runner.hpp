@@ -166,4 +166,17 @@ int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path,
 int run_damagecalc_level_power_grid(const char* rom_path, const char* sym_path,
                                      int jobs = 1, int shard_max_lv = 100);
 
+// ============================================================================
+// run_damagecalc_edge_grid
+//
+// Dense edge grid across all four DamageCalc arithmetic inputs simultaneously.
+// level={1,2,3,10,50,100} x power={1,2,3,10,50,100,127,128,254,255}
+// x attack=same x defense=same x crit={0,1}
+// = 12,000 logical cases, 48,000 Crystal executions.
+// Purpose: catch combined intermediate-width / truncation / operation-order
+// differences that separate 2-D sweeps cannot detect.
+// Returns 0 if all cases match, 1 on any mismatch/harness error.
+// ============================================================================
+int run_damagecalc_edge_grid(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle
