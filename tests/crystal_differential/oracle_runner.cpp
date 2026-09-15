@@ -5885,6 +5885,16 @@ static int run_accuracy_sweep_after_startup(
         int b_total = 0, b_diffs = 0, b_harness = 0;
         int off_by_one = 0; // cases where boundary differs by exactly 1 rng_byte
 
+        // RNG accounting — reported in PARTB_DONE line for verification
+        int b_rng_attempted    = 0; // total Crystal executions attempted
+        int b_rng_sink_hit     = 0; // executions that reached SINK_HIT
+        int b_rng_exhausted    = 0; // executions that hit RNG_TAPE_EXHAUSTED
+        int b_rng_guard        = 0; // executions that hit HARNESS_GUARD_FIRED
+        int b_rng_other        = 0; // any other stop reason
+        int b_rng_zero_bytes   = 0; // executions that consumed 0 RNG bytes
+        int b_rng_one_byte     = 0; // executions that consumed exactly 1 RNG byte
+        int b_rng_gt_one_bytes = 0; // executions that consumed >1 RNG bytes
+
         // Track per-stage-combination boundary differences
         struct BoundaryDiff {
             int acc_stage_raw; // Crystal raw [1..13]
@@ -5975,6 +5985,21 @@ static int run_accuracy_sweep_after_startup(
                     bool all_sink2=true;
                     for(int pi=0;pi<4;pi++){
                         cr2[pi]=run_crystal_case_from_snapshot(gb_snap,sym,partb_snapshot.data(),snap_sz,B_POISONS[pi],cfg,&no_stop);
+                        ++b_rng_attempted;
+                        // RNG accounting per execution
+                        switch(cr2[pi].stop_reason){
+                            case StopReason::SINK_HIT:           ++b_rng_sink_hit;   break;
+                            case StopReason::RNG_TAPE_EXHAUSTED: ++b_rng_exhausted;  break;
+                            case StopReason::HARNESS_GUARD_FIRED:++b_rng_guard;      break;
+                            default:                              ++b_rng_other;      break;
+                        }
+                        if(cr2[pi].stop_reason == StopReason::SINK_HIT ||
+                           cr2[pi].stop_reason == StopReason::RNG_TAPE_UNUSED){
+                            // Count RNG bytes consumed for successful executions
+                            if(cr2[pi].rng_bytes_consumed == 0)       ++b_rng_zero_bytes;
+                            else if(cr2[pi].rng_bytes_consumed == 1)  ++b_rng_one_byte;
+                            else                                       ++b_rng_gt_one_bytes;
+                        }
                         if(cr2[pi].stop_reason!=StopReason::SINK_HIT &&
                            cr2[pi].stop_reason!=StopReason::RNG_TAPE_UNUSED){
                             all_sink2=false; b_harness++;
@@ -6058,6 +6083,14 @@ static int run_accuracy_sweep_after_startup(
                       << " comparisons=" << b_total
                       << " harness=" << b_harness
                       << " diffs=" << b_diffs
+                      << " rng_attempted=" << b_rng_attempted
+                      << " rng_sink_hit=" << b_rng_sink_hit
+                      << " rng_exhausted=" << b_rng_exhausted
+                      << " rng_guard=" << b_rng_guard
+                      << " rng_other=" << b_rng_other
+                      << " rng_0byte=" << b_rng_zero_bytes
+                      << " rng_1byte=" << b_rng_one_byte
+                      << " rng_gt1byte=" << b_rng_gt_one_bytes
                       << "\n" << std::flush;
         } else {
             std::cout << "\n--- Part B Summary ---\n";
@@ -6073,6 +6106,15 @@ static int run_accuracy_sweep_after_startup(
             std::cout << "  Off-by-one errors:   " << off_by_one << "\n";
             std::cout << "  Harness errors:      " << b_harness << "\n";
             std::cout << "  Time:                " << std::fixed << std::setprecision(1) << elapsed_s << "s\n";
+            std::cout << "\n  RNG accounting (per Crystal execution):\n";
+            std::cout << "    Attempted:         " << b_rng_attempted    << "\n";
+            std::cout << "    SINK_HIT:          " << b_rng_sink_hit     << "\n";
+            std::cout << "    RNG_EXHAUSTED:     " << b_rng_exhausted    << "\n";
+            std::cout << "    HARNESS_GUARD:     " << b_rng_guard        << "\n";
+            std::cout << "    Other failure:     " << b_rng_other        << "\n";
+            std::cout << "    0 bytes consumed:  " << b_rng_zero_bytes   << "\n";
+            std::cout << "    1 byte consumed:   " << b_rng_one_byte     << "\n";
+            std::cout << "    >1 bytes consumed: " << b_rng_gt_one_bytes << "\n";
 
             if(!b_boundary_diffs.empty()){
                 std::cout << "\nFORMULA DIFFERENCES:\n";
@@ -6288,91 +6330,37 @@ int run_accuracy_sweep_benchmark(const char* rom_path, const char* sym_path, int
               << "  HARNESS_ERROR=" << baseline_harness << "\n" << std::flush;
 
     // ====================================================================
-    // REUSE PATH: for each (acc, eva) pair:
-    //   Setup GB once (identical to run_crystal_case setup), save snapshot.
-    //   For each (rb, pi): restore + run the identical execution loop.
-    //   Compare every result field against baseline.
+    // REUSE PATH: clean pre-fixture snapshot + real per-pi poison
+    //
+    // For each (acc, eva) pair:
+    //   1. GB_init + ROM load + bootstrap (once)
+    //   2. Save clean machine state BEFORE any WRAM/fixture writes
+    //   3. For each (rb, pi): call run_crystal_case_from_snapshot(B_POISONS[pi])
+    //      which genuinely applies poison[pi] to WRAM before fixture runs.
+    //
+    // This matches the production Part-B path exactly.
+    // Compare every result field against the fresh baseline for all 13,312
+    // executions (13 EVA × 256 RNG × 4 poison).
     // ====================================================================
-    std::cout << "  Running REUSE (snapshot restore per execution)...\n" << std::flush;
+    std::cout << "  Running REUSE (clean snapshot + real per-pi poison)...\n" << std::flush;
 
-    // Reuse path execution loop — IDENTICAL to run_crystal_case's loop.
-    // Takes a pre-setup GB (post-fixture, post-PC/SP, state restored from snapshot).
-    // RngCtx and ExecCtx are freshly constructed (not part of the GB state).
-    auto run_from_state = [&](GB_gameboy_t& gb, const CrystalRunConfig& cfg,
-                               const uint8_t* snapshot, size_t snap_sz,
-                               std::atomic<bool>* stop_flag) -> CrystalRunResult {
-        CrystalRunResult res{};
-        res.stop_reason = StopReason::GB_INIT_FAILED;
-        res.min_sp      = 0xFFFF;
+    // Store per-(eva,rng) reuse results for pairwise comparison
+    std::vector<std::vector<std::array<CRR,4>>> reuse_cr_all(
+        N_EVA, std::vector<std::array<CRR,4>>(N_RNG));
 
-        // Restore to post-fixture pre-execution state
-        if(GB_load_state_from_buffer(&gb, snapshot, snap_sz) != 0){
-            res.stop_reason = StopReason::WRAM_ACCESS_FAILED;
-            return res;
-        }
-
-        // Capture initial semantic state from restored WRAM
-        {
-            size_t wsz=0; uint16_t wb=0;
-            uint8_t* wram=static_cast<uint8_t*>(
-                GB_get_direct_access(&gb, GB_DIRECT_ACCESS_RAM, &wsz, &wb));
-            if(!wram){ res.stop_reason=StopReason::WRAM_ACCESS_FAILED; return res; }
-            res.initial = capture_crystal_initial(wram, sym);
-            for(const char* side : {"player", "enemy"}){
-                std::string err = check_crystal_unmapped_state(wram, sym, side);
-                if(!err.empty()){
-                    static char unmapped_err[256];
-                    std::memcpy(unmapped_err,err.c_str(),std::min(err.size()+1,sizeof(unmapped_err)-1));
-                    unmapped_err[sizeof(unmapped_err)-1]='\0';
-                    res.sink_name=unmapped_err;
-                    res.stop_reason=StopReason::HARNESS_GUARD_FIRED;
-                    return res;
-                }
-            }
-        }
-
-        // Build ExecCtx and RngCtx
-        std::unique_ptr<RngCtx> rng_ctx;
-        if(cfg.rng_tape && cfg.rng_tape_len > 0){
-            rng_ctx = std::make_unique<RngCtx>();
-            rng_ctx->tape=cfg.rng_tape; rng_ctx->tape_len=cfg.rng_tape_len;
-            rng_ctx->tape_idx=0; rng_ctx->exhausted=false;
-        }
-        ExecCtx exec_ctx{};
-        for(size_t i=0;i<cfg.num_sinks;++i){
-            exec_ctx.sink_pcs[i]=cfg.sink_pcs[i];
-            exec_ctx.sink_names[i]=cfg.sink_names[i];
-        }
-        exec_ctx.num_sinks=cfg.num_sinks;
-        exec_ctx.triggered=false; exec_ctx.triggered_sink=nullptr;
-        exec_ctx.insn_count=0; exec_ctx.stop_flag=stop_flag;
-        exec_ctx.rng_ctx=rng_ctx.get();
-        GB_set_user_data(&gb, &exec_ctx);
-        GB_set_execution_callback(&gb, exec_cb);
-
-        // Invoke shared certified execution core
-        CrystalRunResult loop_res = execute_crystal_run_loop(gb, cfg, exec_ctx, rng_ctx.get(), sym);
-        loop_res.initial = res.initial;
-        return loop_res;
-    };
-
-    // Run the reuse path
     int reuse_harness    = 0;
     int reuse_diffs      = 0;
     int reuse_comps      = 0;
-    int equiv_count      = 0; // executions with identical results vs baseline pi=0
     int total_execs      = 0;
     double reuse_time    = 0.0;
-    double t_save        = 0.0;
-    double t_load        = 0.0;
 
     {
         auto t0 = Clk::now();
 
         for(int eva_raw = STAGE_MIN; eva_raw <= STAGE_MAX; ++eva_raw){
-            // One GB_init per (acc, eva) pair
+            // One GB_init per (acc, eva) pair — clean machine state
             GB_gameboy_t gb;
-            if(!GB_init(&gb, GB_MODEL_CGB_E)){ std::cerr << "GB_init failed\n"; return 1; }
+            if(!GB_init(&gb, GB_MODEL_CGB_E)){ std::cerr << "REUSE: GB_init failed\n"; return 1; }
             static thread_local uint32_t bench_pix[160*144];
             GB_set_log_callback(&gb, sb_log_nop);
             GB_set_rgb_encode_callback(&gb, sb_rgb_nop);
@@ -6381,124 +6369,92 @@ int run_accuracy_sweep_benchmark(const char* rom_path, const char* sym_path, int
             GB_set_turbo_mode(&gb, true, true);
             GB_load_rom_from_buffer(&gb, rom_bytes.data(), rom_bytes.size());
             GB_write_memory(&gb, 0xFF50, 1);
-            GB_write_memory(&gb, 0x2000, screech_ms->build_config ? 0x0D : 0x0D);
 
-            // Build config with poison=0x00 to establish fixture for snapshot
-            // (poison value only affects WRAM memset; fixture overwrites all semantic fields)
-            CrystalRunConfig snap_cfg = make_cfg((uint8_t)acc_raw, (uint8_t)eva_raw, nullptr, 0);
-            GB_write_memory(&gb, 0x2000, snap_cfg.entry.bank);
-
-            size_t wram_sz=0; uint16_t wb_=0;
-            uint8_t* wram=static_cast<uint8_t*>(GB_get_direct_access(&gb,GB_DIRECT_ACCESS_RAM,&wram_sz,&wb_));
-            if(!wram||wram_sz<0x2000){ GB_free(&gb); std::cerr<<"WRAM\n"; return 1; }
-
-            // IDENTICAL fixture application (matching run_crystal_case with poison=0x00)
-            std::memset(wram, 0x00, wram_sz);
-            fixture_common(&gb, wram, sym);
-            GB_write_memory(&gb, sym.hROMBank.addr, snap_cfg.entry.bank);
-            if(snap_cfg.extra_fixture){
-                struct Guard{
-                    ~Guard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
-                } guard;
-                if(snap_cfg.extra_fixture == generic_fullscript_fixture_adapter){
-                    g_generic_rom_bytes_ptr = &rom_bytes;
-                    g_generic_move_id       = snap_cfg.engine_move_id;
-                    g_generic_pp            = P_PP;
-                }
-                snap_cfg.extra_fixture(&gb, wram, sym);
-            }
-            if(snap_cfg.engine_move_id){
-                GB_write_memory(&gb, sym.wBattleMonMoves.addr, (uint8_t)(snap_cfg.engine_move_id&0xFF));
-                GB_write_memory(&gb, sym.wBattleMonPP.addr, P_PP);
-                GB_write_memory(&gb, sym.wPartyMon1PP.addr, P_PP);
-            }
-            if(snap_cfg.init_player_acc_stage_raw != 0xFF)
-                wram[wram_off((uint16_t)(sym.wPlayerStatLevels.addr+5))] = snap_cfg.init_player_acc_stage_raw;
-            if(snap_cfg.init_enemy_eva_stage_raw != 0xFF)
-                wram[wram_off((uint16_t)(sym.wEnemyStatLevels.addr+6))]  = snap_cfg.init_enemy_eva_stage_raw;
-            // Stack + PC setup — IDENTICAL to run_crystal_case
-            GB_registers_t* regs = GB_get_registers(&gb);
-            if(!regs){ GB_free(&gb); std::cerr<<"regs\n"; return 1; }
-            uint16_t ret_addr = snap_cfg.sink_pcs[0];
-            GB_write_memory(&gb, 0xC0FF-1, (ret_addr>>8)&0xFF);
-            GB_write_memory(&gb, 0xC0FF-2, ret_addr&0xFF);
-            regs->sp = 0xC0FF - 2;
-            regs->pc = snap_cfg.entry.addr;
-
-            // Save state — this is the pre-execution snapshot
+            // Capture CLEAN machine state — before any WRAM/fixture writes.
+            // run_crystal_case_from_snapshot applies poison + fixture per call.
             size_t snap_sz = GB_get_save_state_size(&gb);
             std::vector<uint8_t> snapshot(snap_sz);
-            {
-                auto ts = Clk::now();
-                GB_save_state_to_buffer(&gb, snapshot.data());
-                t_save += Dur(Clk::now()-ts).count();
-            }
+            GB_save_state_to_buffer(&gb, snapshot.data());
 
             int crystal_threshold = -1, enginemon_threshold = -1;
 
             for(int rb = 0; rb < N_RNG; ++rb){
-                uint8_t rng_byte = (uint8_t)rb;
-                uint8_t tape[1]  = { rng_byte };
+                uint8_t tape[1] = {(uint8_t)rb};
                 CrystalRunConfig cfg = make_cfg((uint8_t)acc_raw, (uint8_t)eva_raw, tape, 1);
 
-                // Bind fixture adapters for cfg (snapshot already applied, but run_from_state
-                // calls extra_fixture? No — run_from_state does NOT call extra_fixture again;
-                // it restores the snapshot which already has the fixture applied.
-                // We only need the guard for the Guard destructor side-effect (cleanup).
-                struct RunGuard{
-                    ~RunGuard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
-                } rguard;
+                // Bind ROM globals for fixture adapter (globals read by extra_fixture)
+                struct Guard{
+                    ~Guard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+                } guard;
                 if(cfg.extra_fixture == generic_fullscript_fixture_adapter){
-                    // The fixture is already baked into the snapshot. However, run_from_state
-                    // restores from snapshot so no extra_fixture call is needed there.
-                    // But run_from_state's capture_crystal_initial reads WRAM from the
-                    // restored snapshot — which already has the correct fixture state.
-                    // Still need to bind g_generic_* for any internal guard that might check.
                     g_generic_rom_bytes_ptr = &rom_bytes;
                     g_generic_move_id       = cfg.engine_move_id;
                     g_generic_pp            = P_PP;
                 }
 
                 bool all_sink = true;
-                std::array<CRR,4> reuse_cr{};
-
                 for(int pi = 0; pi < 4; ++pi){
-                    auto tl = Clk::now();
-                    reuse_cr[pi] = run_from_state(gb, cfg, snapshot.data(), snap_sz, &no_stop);
-                    t_load += Dur(Clk::now()-tl).count();
+                    // Production path: clean snapshot + real B_POISONS[pi]
+                    reuse_cr_all[eva_raw-STAGE_MIN][rb][pi] =
+                        run_crystal_case_from_snapshot(gb, sym, snapshot.data(), snap_sz,
+                                                       B_POISONS[pi], cfg, &no_stop);
                     ++total_execs;
-
-                    if(reuse_cr[pi].stop_reason != StopReason::SINK_HIT &&
-                       reuse_cr[pi].stop_reason != StopReason::RNG_TAPE_UNUSED){
+                    if(reuse_cr_all[eva_raw-STAGE_MIN][rb][pi].stop_reason != StopReason::SINK_HIT &&
+                       reuse_cr_all[eva_raw-STAGE_MIN][rb][pi].stop_reason != StopReason::RNG_TAPE_UNUSED){
                         all_sink = false; ++reuse_harness; break;
                     }
                 }
                 if(!all_sink) continue;
 
                 bool stable = true;
-                for(int pi=1;pi<4;++pi)
-                    if(!crystal_run_results_equal(reuse_cr[0], reuse_cr[pi])){ stable=false; break; }
+                for(int pi = 1; pi < 4; ++pi)
+                    if(!crystal_run_results_equal(reuse_cr_all[eva_raw-STAGE_MIN][rb][0],
+                                                   reuse_cr_all[eva_raw-STAGE_MIN][rb][pi]))
+                        { stable = false; break; }
                 if(!stable){ ++reuse_harness; continue; }
 
                 ++reuse_comps;
-                if(detect_crystal_hit(reuse_cr[0], 0)) crystal_threshold = rb;
+                if(detect_crystal_hit(reuse_cr_all[eva_raw-STAGE_MIN][rb][0], 0))
+                    crystal_threshold = rb;
 
                 int8_t p_acc = (int8_t)(acc_raw-7), e_eva = (int8_t)(eva_raw-7);
                 auto eng = run_enginemon_case(SCREECH_ID, ed, tape, 1, 0, 0, p_acc, e_eva);
                 if(eng && detect_enginemon_hit(*eng)) enginemon_threshold = rb;
-
-                // Compare reuse vs baseline for all 4 poison patterns
-                const auto& bline = baseline_cr[eva_raw-STAGE_MIN][rb];
-                for(int pi = 0; pi < 4; ++pi){
-                    if(crystal_run_results_equal(reuse_cr[pi], bline[pi]))
-                        ++equiv_count;
-                }
             }
 
             if(crystal_threshold != enginemon_threshold) ++reuse_diffs;
             GB_free(&gb);
         }
         reuse_time = Dur(Clk::now()-t0).count();
+    }
+
+    // ====================================================================
+    // Pairwise per-execution equivalence: 13 EVA × 256 RNG × 4 poison
+    // Compare fresh (run_crystal_case) vs snapshot (run_crystal_case_from_snapshot)
+    // for every individual Crystal execution.
+    // ====================================================================
+    int equiv_count     = 0;
+    int nonequiv_count  = 0;
+    int total_pairs     = N_EVA * N_RNG * 4;
+
+    for(int eva_idx = 0; eva_idx < N_EVA; ++eva_idx){
+        for(int rb = 0; rb < N_RNG; ++rb){
+            for(int pi = 0; pi < 4; ++pi){
+                const auto& b = baseline_cr[eva_idx][rb][pi];
+                const auto& r = reuse_cr_all[eva_idx][rb][pi];
+                // Only compare executions where both reached a valid terminal state
+                if(b.stop_reason == StopReason::SINK_HIT &&
+                   r.stop_reason == StopReason::SINK_HIT){
+                    if(crystal_run_results_equal(b, r)) ++equiv_count;
+                    else                               ++nonequiv_count;
+                } else if(b.stop_reason == r.stop_reason){
+                    // Both hit the same non-SINK_HIT terminal (e.g. both HARNESS_ERROR)
+                    ++equiv_count;
+                } else {
+                    ++nonequiv_count;
+                }
+            }
+        }
     }
 
     // ====================================================================
@@ -6515,26 +6471,27 @@ int run_accuracy_sweep_benchmark(const char* rom_path, const char* sym_path, int
               << "    Comparisons:      " << baseline_comps << "\n"
               << "    Differences:      " << baseline_diffs << "\n"
               << "    HARNESS_ERROR:    " << baseline_harness << "\n"
-              << "\n  REUSE\n"
+              << "\n  REUSE (production path: clean snapshot + real poison)\n"
               << "    Time:             " << reuse_time << "s\n"
               << "    Crystal execs:    " << total_execs << "\n"
               << "    Comparisons:      " << reuse_comps << "\n"
               << "    Differences:      " << reuse_diffs << "\n"
               << "    HARNESS_ERROR:    " << reuse_harness << "\n"
-              << std::setprecision(4)
-              << "    GB_save total:    " << t_save << "s\n"
-              << "    GB_load total:    " << t_load << "s\n"
               << std::setprecision(2)
-              << "\n  COMPARISON\n"
-              << "    Executions identical: " << equiv_count << "/" << total_execs << "\n"
-              << "    Row speedup:      " << speedup << "x\n"
-              << "    Semantics match:  " << (equiv_count == total_execs ? "YES" : "NO") << "\n"
+              << "\n  PER-EXECUTION EQUIVALENCE (all 13 EVA x 256 RNG x 4 poison)\n"
+              << "    Total pairs:      " << total_pairs << "\n"
+              << "    Equivalent:       " << equiv_count << "\n"
+              << "    Non-equivalent:   " << nonequiv_count << "\n"
+              << "    Pairwise result:  " << (nonequiv_count == 0 ? "PASS" : "FAIL")
+              << " (" << equiv_count << "/" << total_pairs << " equivalent)\n"
+              << "\n  Speedup:          " << speedup << "x\n"
+              << "    Semantics match:  " << (nonequiv_count == 0 ? "YES" : "NO") << "\n"
               << "    Diffs match:      " << (baseline_diffs == reuse_diffs ? "YES" : "NO") << "\n"
               << "\n  Overall: " << ((baseline_harness == 0 && reuse_harness == 0 &&
-                                      equiv_count == total_execs &&
+                                      nonequiv_count == 0 &&
                                       baseline_diffs == reuse_diffs) ? "PASS" : "FAIL") << "\n";
 
-    return (reuse_harness == 0 && equiv_count == total_execs &&
+    return (reuse_harness == 0 && nonequiv_count == 0 &&
             baseline_diffs == reuse_diffs) ? 0 : 1;
 }
 } // namespace crystal::oracle
