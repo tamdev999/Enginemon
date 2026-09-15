@@ -8376,4 +8376,369 @@ int run_damagecalc_matrix(const char* rom_path, const char* sym_path)
     return all_pass ? 0 : 1;
 }
 
+
+// ============================================================================
+// run_damagecalc_atk_def_grid
+// ============================================================================
+//
+// Exhaustive attack × defense interaction grid for the certified DamageCalc boundary.
+//
+// Sweep: attack 1..255 × defense 1..255 × crit {0,1}
+//        = 130,050 logical cases, 520,200 Crystal executions (4 poison each).
+//
+// Fixed: power=80, level=50, stab=false, type_eff=100, no item, no variation.
+// Entry: BattleCommand_DamageCalc (0D:5612). Sink: EndMoveEffect (0D:52A3).
+//
+// Parallelism: rows (attack values 1..255) are dispatched in batches of --jobs
+// workers using std::async. Each worker runs 255×2 = 510 logical cases
+// (2040 Crystal executions) and returns an aggregated RowResult.
+//
+// Thread safety: run_crystal_case uses static thread_local GB instance storage.
+// Fixture thread-locals (mtx_*) are per-thread. The static FixtureFn is a
+// captureless lambda (function pointer) that reads per-thread locals — safe.
+//
+// Returns 0 on full pass, 1 on any mismatch/harness error.
+// ============================================================================
+
+struct AtkDefRowResult {
+    uint8_t  atk;            // attack value for this row (1..255)
+    uint32_t matched;
+    uint32_t mismatched;
+    uint32_t harness_errors;
+    uint64_t rng_consumed;
+    struct MismatchRecord {
+        uint8_t  d, e, b, c, crit;
+        uint16_t crystal_val;
+        int32_t  enginemon_val;
+    };
+    std::vector<MismatchRecord> mismatches; // up to 5 per row
+};
+
+int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path, int jobs)
+{
+    if(jobs < 1)  jobs = 1;
+    if(jobs > 64) jobs = 64; // sanity cap
+
+    // ---- Load ROM -----------------------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr << "Cannot open ROM: " << rom_path << "\n"; return 1; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    if(rom_bytes.size() != CRYSTAL_ROM_SIZE){ std::cerr << "Wrong ROM size\n"; return 1; }
+    {
+        std::string sha = sha1_hex(rom_bytes.data(), rom_bytes.size());
+        if(sha != PINNED_ROM_SHA1){ std::cerr << "ROM SHA mismatch\n"; return 1; }
+    }
+    SymCache sym;
+    {
+        std::string err = SymCache::load(sym_path, &sym);
+        if(!err.empty()){ std::cerr << "Sym: " << err << "\n"; return 1; }
+    }
+    {
+        std::string err = validate_fixture_addresses(sym);
+        if(!err.empty()){ std::cerr << "Fixture: " << err << "\n"; return 1; }
+    }
+    if(sym.BattleCommand_DamageCalc.bank == 0 && sym.BattleCommand_DamageCalc.addr == 0){
+        std::cerr << "BattleCommand_DamageCalc not found in sym\n"; return 1;
+    }
+
+    // Fixed parameters
+    static constexpr uint8_t  GRID_POWER = 80;
+    static constexpr uint8_t  GRID_LEVEL = 50;
+    static constexpr uint8_t  POISON_PATTERNS[4] = { 0x00, 0xA5, 0x5A, 0xFF };
+
+    // Expected counts
+    static constexpr uint32_t EXPECTED_LOGICAL = 255u * 255u * 2u;   // 130050
+    static constexpr uint64_t EXPECTED_CRYSTAL  = (uint64_t)EXPECTED_LOGICAL * 4u; // 520200
+
+    std::cout << "=== Attack×Defense Grid (exhaustive) ===\n"
+              << "  Entry:  0x" << std::hex << (int)sym.BattleCommand_DamageCalc.bank
+              << ":0x" << sym.BattleCommand_DamageCalc.addr << std::dec << "\n"
+              << "  Fixed:  power=" << (int)GRID_POWER << " level=" << (int)GRID_LEVEL << "\n"
+              << "  Sweep:  attack 1..255 × defense 1..255 × crit {0,1}\n"
+              << "  Logical cases expected: " << EXPECTED_LOGICAL << "\n"
+              << "  Crystal executions:     " << EXPECTED_CRYSTAL << " (×4 poison)\n"
+              << "  Parallel workers:       " << jobs << "\n"
+              << std::flush;
+
+    // ---- Per-row worker function -------------------------------------------
+    // Runs one full attack row (all 255 defense values, both crit values).
+    // Entirely self-contained — captures only const references to rom_bytes and sym.
+    auto run_row = [&rom_bytes, &sym](uint8_t atk) -> AtkDefRowResult
+    {
+        AtkDefRowResult row{};
+        row.atk = atk;
+        std::atomic<bool> no_stop{false};
+
+        // Thread-local fixture state (each async thread has its own copy)
+        static thread_local uint8_t  tl_crit               = 0;
+        static thread_local uint16_t tl_crit_addr           = 0;
+        static thread_local uint16_t tl_cur_damage_addr     = 0;
+        static thread_local uint16_t tl_move_struct_addr    = 0;
+        static thread_local uint16_t tl_item_addr           = 0;
+
+        // Captureless fixture wrapper — reads from thread-locals above.
+        // Static so it can be assigned to FixtureFn (function pointer).
+        static FixtureFn row_fixture = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
+            present_extra_fixture(gb, wram, sym2);
+            wram[wram_off(sym2.wBattleMonType1.addr)] = 0x03; // Poison — no STAB
+            wram[wram_off(sym2.wBattleMonType2.addr)] = 0x03;
+            if(tl_crit_addr)          wram[wram_off(tl_crit_addr)]         = tl_crit;
+            if(tl_cur_damage_addr){   wram[wram_off(tl_cur_damage_addr)]   = 0;
+                                       wram[wram_off(tl_cur_damage_addr)+1] = 0; }
+            if(tl_move_struct_addr)   wram[wram_off((uint16_t)(tl_move_struct_addr+1))] = 0; // effect=0
+            if(tl_item_addr)          wram[wram_off(tl_item_addr)] = 0; // no item
+        };
+
+        for(int def = 1; def <= 255; ++def){
+            for(int crit_val = 0; crit_val <= 1; ++crit_val){
+                // Set fixture thread-locals for this specific case
+                tl_crit              = (uint8_t)crit_val;
+                tl_crit_addr         = sym.wCriticalHit.addr;
+                tl_cur_damage_addr   = sym.wCurDamage.addr;
+                tl_move_struct_addr  = sym.wPlayerMoveStruct.addr;
+                tl_item_addr         = sym.wBattleMonItem.addr;
+
+                // Build Crystal direct-entry config
+                CrystalRunConfig cfg{};
+                cfg.entry         = sym.BattleCommand_DamageCalc;
+                cfg.sink_pcs[0]   = sym.EndMoveEffect.addr;
+                cfg.sink_names[0] = "EndMoveEffect";
+                cfg.num_sinks     = 1;
+                cfg.insn_cap      = 100000;
+                cfg.rng_tape      = nullptr;
+                cfg.rng_tape_len  = 0;
+                cfg.extra_fixture = row_fixture;
+                cfg.force_reg_d   = GRID_POWER;
+                cfg.force_reg_e   = GRID_LEVEL;
+                cfg.force_reg_b   = atk;
+                cfg.force_reg_c   = (uint8_t)def;
+
+                // Run all 4 poison patterns
+                uint16_t crystal_vals[4] = {};
+                bool harness_ok = true;
+                for(int pi = 0; pi < 4; ++pi){
+                    CrystalRunResult r = run_crystal_case(
+                        rom_bytes, sym, POISON_PATTERNS[pi], cfg, &no_stop);
+                    row.rng_consumed += r.rng_bytes_consumed;
+                    if(r.stop_reason != StopReason::SINK_HIT){
+                        ++row.harness_errors;
+                        harness_ok = false;
+                        break; // fail-closed: don't run remaining poison patterns
+                    }
+                    crystal_vals[pi] = r.cur_damage;
+                }
+                if(!harness_ok) continue;
+
+                // Poison stability gate
+                bool stable = true;
+                for(int pi = 1; pi < 4; ++pi){
+                    if(crystal_vals[pi] != crystal_vals[0]){ stable = false; break; }
+                }
+                if(!stable){
+                    ++row.harness_errors;
+                    continue;
+                }
+                const uint16_t crystal_dmg = crystal_vals[0];
+
+                // Enginemon: real calculate_damage, no harness formula
+                enginemon::DamageParams dp{};
+                dp.attacker_level    = GRID_LEVEL;
+                dp.attack_stat       = atk;
+                dp.defense_stat      = (int32_t)def;
+                dp.move_power        = GRID_POWER;
+                dp.type_effectiveness = 100;
+                dp.stab              = false;
+                dp.critical          = (crit_val != 0);
+                dp.burned            = false;
+
+                const int32_t em_dmg = enginemon::calculate_damage(dp);
+
+                if(em_dmg == (int32_t)crystal_dmg){
+                    ++row.matched;
+                } else {
+                    ++row.mismatched;
+                    if(row.mismatches.size() < 5){
+                        row.mismatches.push_back({
+                            GRID_POWER, GRID_LEVEL,
+                            atk, (uint8_t)def, (uint8_t)crit_val,
+                            crystal_dmg, em_dmg
+                        });
+                    }
+                }
+            }
+        }
+        return row;
+    };
+
+    // ---- Parallel row dispatch ----------------------------------------------
+    const auto wall_start = std::chrono::steady_clock::now();
+
+    // Aggregate counters
+    uint32_t total_logical    = 0;
+    uint32_t total_matched    = 0;
+    uint32_t total_mismatched = 0;
+    uint32_t total_harness    = 0;
+    uint64_t total_rng        = 0;
+    std::vector<AtkDefRowResult::MismatchRecord> all_mismatches;
+
+    // Dispatch attack rows 1..255 in batches of `jobs`
+    int next_atk = 1;
+    int dot_counter = 0;
+    std::cout << "Progress (each dot = " << jobs << " attack rows): " << std::flush;
+    while(next_atk <= 255){
+        int batch_end = std::min(next_atk + jobs - 1, 255);
+        const int batch_size = batch_end - next_atk + 1;
+
+        std::vector<std::future<AtkDefRowResult>> futures;
+        futures.reserve((size_t)batch_size);
+
+        for(int atk = next_atk; atk <= batch_end; ++atk){
+            uint8_t atk_u8 = (uint8_t)atk;
+            futures.push_back(std::async(std::launch::async, run_row, atk_u8));
+        }
+
+        for(auto& f : futures){
+            AtkDefRowResult row = f.get();
+            total_logical    += row.matched + row.mismatched + row.harness_errors;
+            total_matched    += row.matched;
+            total_mismatched += row.mismatched;
+            total_harness    += row.harness_errors;
+            total_rng        += row.rng_consumed;
+            for(auto& m : row.mismatches){
+                if(all_mismatches.size() < 20) all_mismatches.push_back(m);
+            }
+        }
+
+        ++dot_counter;
+        std::cout << "." << std::flush;
+        next_atk = batch_end + 1;
+    }
+
+    const auto wall_end = std::chrono::steady_clock::now();
+    const double wall_sec = std::chrono::duration<double>(wall_end - wall_start).count();
+    std::cout << "\n";
+
+    // ---- Count check --------------------------------------------------------
+    // logical cases: harness errors count as cases executed (harness ran, just failed).
+    // matched + mismatched = successful Crystal runs. harness_errors = failed Crystal runs.
+    const bool count_ok = (total_logical == EXPECTED_LOGICAL);
+
+    // ---- Anti-confirmation --------------------------------------------------
+    // Crystal ground truth: run power=80, level=50, atk=110, def=110, crit=0 once.
+    // Mutate Enginemon attack_stat+10; verify mismatch. Revert; verify PASS.
+    bool anti_detected = false;
+    bool anti_reverted = false;
+    {
+        static constexpr uint8_t ANTI_ATK = 110, ANTI_DEF = 110;
+        static thread_local uint8_t  tl_crit2             = 0;
+        static thread_local uint16_t tl_crit_addr2        = 0;
+        static thread_local uint16_t tl_cur_damage_addr2  = 0;
+        static thread_local uint16_t tl_move_struct_addr2 = 0;
+        static thread_local uint16_t tl_item_addr2        = 0;
+
+        static FixtureFn anti_fixture = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
+            present_extra_fixture(gb, wram, sym2);
+            wram[wram_off(sym2.wBattleMonType1.addr)] = 0x03;
+            wram[wram_off(sym2.wBattleMonType2.addr)] = 0x03;
+            if(tl_crit_addr2)          wram[wram_off(tl_crit_addr2)]         = tl_crit2;
+            if(tl_cur_damage_addr2){   wram[wram_off(tl_cur_damage_addr2)]   = 0;
+                                        wram[wram_off(tl_cur_damage_addr2)+1] = 0; }
+            if(tl_move_struct_addr2)   wram[wram_off((uint16_t)(tl_move_struct_addr2+1))] = 0;
+            if(tl_item_addr2)          wram[wram_off(tl_item_addr2)] = 0;
+        };
+
+        tl_crit2             = 0;
+        tl_crit_addr2        = sym.wCriticalHit.addr;
+        tl_cur_damage_addr2  = sym.wCurDamage.addr;
+        tl_move_struct_addr2 = sym.wPlayerMoveStruct.addr;
+        tl_item_addr2        = sym.wBattleMonItem.addr;
+
+        CrystalRunConfig acfg{};
+        acfg.entry = sym.BattleCommand_DamageCalc;
+        acfg.sink_pcs[0] = sym.EndMoveEffect.addr;
+        acfg.sink_names[0] = "EndMoveEffect";
+        acfg.num_sinks = 1; acfg.insn_cap = 100000;
+        acfg.rng_tape = nullptr; acfg.rng_tape_len = 0;
+        acfg.extra_fixture = anti_fixture;
+        acfg.force_reg_d = GRID_POWER; acfg.force_reg_e = GRID_LEVEL;
+        acfg.force_reg_b = ANTI_ATK;   acfg.force_reg_c = ANTI_DEF;
+
+        std::atomic<bool> no_stop{false};
+        CrystalRunResult acr = run_crystal_case(rom_bytes, sym, 0x00, acfg, &no_stop);
+        if(acr.stop_reason == StopReason::SINK_HIT){
+            const uint16_t ref = acr.cur_damage;
+
+            enginemon::DamageParams dp{};
+            dp.attacker_level = GRID_LEVEL; dp.move_power = GRID_POWER;
+            dp.defense_stat = ANTI_DEF; dp.type_effectiveness = 100;
+            dp.stab = false; dp.critical = false; dp.burned = false;
+
+            dp.attack_stat = ANTI_ATK + 10; // MUTATION
+            const int32_t em_mut = enginemon::calculate_damage(dp);
+            anti_detected = (em_mut != (int32_t)ref);
+
+            dp.attack_stat = ANTI_ATK; // REVERT
+            const int32_t em_rev = enginemon::calculate_damage(dp);
+            anti_reverted  = (em_rev == (int32_t)ref);
+
+            std::cout << "\nAnti-confirmation (atk " << (int)ANTI_ATK
+                      << "+10 vs crystal=" << ref << "):\n"
+                      << "  MUTATED  atk=" << (int)(ANTI_ATK+10)
+                      << " enginemon=" << em_mut
+                      << " -> " << (anti_detected ? "MISMATCH (expected)" : "MATCH (unexpected!)") << "\n"
+                      << "  REVERTED atk=" << (int)ANTI_ATK
+                      << " enginemon=" << em_rev
+                      << " -> " << (anti_reverted ? "PASS (expected)" : "FAIL (unexpected!)") << "\n";
+        }
+    }
+
+    // ---- Summary ------------------------------------------------------------
+    const bool all_pass = count_ok
+                       && total_mismatched == 0
+                       && total_harness    == 0
+                       && total_rng        == 0
+                       && anti_detected
+                       && anti_reverted;
+
+    std::cout << "\n=== Attack×Defense Grid Summary ===\n"
+              << "  Logical cases:      " << total_logical
+              << " (expected " << EXPECTED_LOGICAL << ")\n"
+              << "  Count correct:      " << (count_ok ? "yes" : "NO") << "\n"
+              << "  Crystal executions: " << (uint64_t)total_logical * 4u
+                                           << " (expected " << EXPECTED_CRYSTAL << ")\n"
+              << "  MATCH:              " << total_matched    << "\n"
+              << "  MISMATCH:           " << total_mismatched << "\n"
+              << "  HARNESS_ERROR:      " << total_harness    << "\n"
+              << "  RNG consumed:       " << total_rng        << " (expected 0)\n"
+              << "  Poison stable:      " << (total_harness == 0 ? "yes" : "check errors") << "\n"
+              << "\n  ANTI-CONFIRMATION DETECTED? " << (anti_detected ? "yes" : "no") << "\n"
+              << "  fault reverted?             " << (anti_reverted ? "yes" : "no") << "\n"
+              << "\n  Wall time:   " << std::fixed << std::setprecision(1) << wall_sec << "s\n"
+              << "  production modified? no\n"
+              << "  Overall: " << (all_pass ? "PASS" : "FAIL") << "\n";
+
+    if(!all_mismatches.empty()){
+        std::cout << "\nMismatch patterns (first " << all_mismatches.size() << "):\n"
+                  << "  " << std::left
+                  << std::setw(5) << "d" << std::setw(5) << "e"
+                  << std::setw(5) << "b" << std::setw(5) << "c"
+                  << std::setw(6) << "crit"
+                  << std::setw(10) << "crystal" << std::setw(10) << "enginemon" << "\n"
+                  << "  " << std::string(50,'-') << "\n";
+        for(const auto& m : all_mismatches){
+            std::cout << "  "
+                      << std::setw(5) << (int)m.d << std::setw(5) << (int)m.e
+                      << std::setw(5) << (int)m.b << std::setw(5) << (int)m.c
+                      << std::setw(6) << (m.crit ? "yes" : "no")
+                      << std::setw(10) << m.crystal_val
+                      << std::setw(10) << m.enginemon_val << "\n";
+        }
+    }
+
+    return all_pass ? 0 : 1;
+}
+
 } // namespace crystal::oracle

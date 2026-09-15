@@ -140,4 +140,17 @@ int run_damagecalc_pilot(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_damagecalc_matrix(const char* rom_path, const char* sym_path);
 
+// ============================================================================
+// run_damagecalc_atk_def_grid
+//
+// Exhaustive attack×defense sweep: attack 1..255 × defense 1..255 × crit {0,1}
+// = 130,050 logical cases, 520,200 Crystal executions.
+// Fixed: power=80, level=50, no STAB, no type, no item, no variation.
+// Entry: BattleCommand_DamageCalc (0D:5612). Sink: EndMoveEffect.
+// Parallelized by attack row using std::async with `jobs` workers.
+// Returns 0 if all cases match, 1 on any mismatch/harness error.
+// ============================================================================
+int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path,
+                                 int jobs = 1);
+
 } // namespace crystal::oracle

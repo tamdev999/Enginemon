@@ -426,6 +426,23 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # damagecalc_atk_def_grid -- exhaustive attack×defense sweep
+    # attack 1..255 × defense 1..255 × crit {0,1} = 130,050 logical cases.
+    # Usage: damagecalc_atk_def_grid <rom_path> <sym_path> [--jobs N]
+    # Not added to ctest by default (long-running conformance sweep).
+    # ============================================================================
+    add_executable(damagecalc_atk_def_grid
+        crystal_differential/damagecalc_atk_def_grid.cpp
+    )
+    target_link_libraries(damagecalc_atk_def_grid PRIVATE oracle_runner_lib)
+    target_include_directories(damagecalc_atk_def_grid PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(damagecalc_atk_def_grid PRIVATE /bigobj)
+    endif()
+
+    # ============================================================================
     # damagecalc_matrix -- Crystal BattleCommand_DamageCalc vs Enginemon
     #                       calculate_damage conformance matrix.
     # Sweep A: power/level/attack/defense 1..255 (1..100 for level) x crit 0/1.
