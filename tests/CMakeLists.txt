@@ -340,6 +340,24 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # oracle_accuracy_sweep -- exhaustive accuracy conformance suite
+    #   Part A: 256-byte acc RNG sweep for all registered moves
+    #   Part B: Screech ACC×EVA stage matrix (14×14×256)
+    # oracle_accuracy_sweep <rom> <sym> --part-a | --part-b | --all
+    # ============================================================================
+    add_executable(oracle_accuracy_sweep
+        crystal_differential/oracle_accuracy_sweep.cpp
+    )
+    target_link_libraries(oracle_accuracy_sweep PRIVATE oracle_runner_lib)
+    target_include_directories(oracle_accuracy_sweep PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(oracle_accuracy_sweep PRIVATE /bigobj)
+    endif()
+    # Not added to ctest by default (runtime is ~2-5 minutes; run manually)
+
+    # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
     # Legacy entry point kept for compatibility.
     # Requires: <rom_path> <sym_path> [--jobs N]

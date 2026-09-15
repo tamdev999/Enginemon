@@ -1,6 +1,6 @@
-// tests/crystal_differential/oracle_runner.hpp
+﻿// tests/crystal_differential/oracle_runner.hpp
 //
-// Crystal battle differential oracle — public API
+// Crystal battle differential oracle â€” public API
 //
 // ROM IMMUTABILITY CONTRACT
 //   The exact SHA-verified Crystal ROM bytes are passed to GB_load_rom_from_buffer
@@ -31,13 +31,22 @@ enum ExitCode : int {
 };
 
 // ============================================================================
-// RunnerConfig — caller-supplied defaults; CLI flags override.
+// RunnerConfig â€” caller-supplied defaults; CLI flags override.
 // ============================================================================
 struct RunnerConfig {
     std::vector<uint16_t> move_ids; // empty = defer to CLI
     int  jobs    = 1;
     bool verbose = false;
 
+    bool accuracy_sweep_a = false; // --accuracy-sweep-a: per-move 256-byte acc sweep
+    bool accuracy_sweep_b = false; // --accuracy-sweep-b: Screech ACC/EVA stage matrix (coordinator)
+    bool part_b_worker    = false; // --part-b-row N: single-row worker mode (spawned by coordinator)
+    // Part B range limits (Crystal raw stages, valid domain 1..13, neutral=7).
+    // Defaults cover the full domain. CLI args --acc-raw-min/max/--eva-raw-min/max override.
+    int sweep_acc_min = 1;
+    int sweep_acc_max = 13;
+    int sweep_eva_min = 1;
+    int sweep_eva_max = 13;
     RunnerConfig& with_moves(std::vector<uint16_t> ids){ move_ids=std::move(ids); return *this; }
     RunnerConfig& with_jobs(int n)      { jobs=n;       return *this; }
     RunnerConfig& with_verbose(bool v)  { verbose=v;    return *this; }

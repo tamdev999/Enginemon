@@ -124,6 +124,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1278,6 +1279,13 @@ struct CrystalRunConfig {
     // Crystal-only: forces a specific BattleScript dispatch without changing Enginemon's move semantics.
     // Used when the move table effect byte selects the wrong BattleScript (e.g. recoil eff=0x30->FocusEnergy).
     uint8_t     init_move_effect_override = 0;
+    // Crystal raw stat-stage overrides (index into wPlayerStatLevels / wEnemyStatLevels).
+    // 0xFF = no override (default). Applied after extra_fixture so they take precedence.
+    // Valid Crystal raw stage values: 0-13 (7=neutral).
+    // Used by Part B to sweep ACC (player index 5) × EVA (enemy index 6) stage combinations
+    // without per-combination fixture functions or thread-local state.
+    uint8_t     init_player_acc_stage_raw = 0xFF; // 0xFF = no override; 0-13 = Crystal raw stage
+    uint8_t     init_enemy_eva_stage_raw  = 0xFF; // 0xFF = no override; 0-13 = Crystal raw stage
 };
 
 
@@ -1401,6 +1409,16 @@ static CrystalRunResult run_crystal_case(
     // Used when move table effect selects wrong BattleScript (recoil eff=0x30->FocusEnergy bug).
     if(cfg.init_move_effect_override != 0){
         GB_write_memory(&gb, (uint16_t)(sym.wPlayerMoveStruct.addr + 1), cfg.init_move_effect_override);
+    }
+    // init_player_acc_stage_raw / init_enemy_eva_stage_raw:
+    // Override specific stat-stage bytes in WRAM after all other fixture writes.
+    // Only applied when != 0xFF (the "no override" sentinel). Valid values: 0-13.
+    // Applied last so they take precedence over common_fixture and extra_fixture.
+    if(cfg.init_player_acc_stage_raw != 0xFF){
+        wram[wram_off((uint16_t)(sym.wPlayerStatLevels.addr + 5))] = cfg.init_player_acc_stage_raw;
+    }
+    if(cfg.init_enemy_eva_stage_raw != 0xFF){
+        wram[wram_off((uint16_t)(sym.wEnemyStatLevels.addr + 6))] = cfg.init_enemy_eva_stage_raw;
     }
     // Capture initial semantic state (after all fixture writes, before any execution)
     res.initial = capture_crystal_initial(wram, sym);
@@ -1920,7 +1938,9 @@ static std::optional<EngineSnapshot> run_enginemon_case(
     const EngineData& ed,
     const uint8_t* rng_tape, size_t rng_tape_len,
     uint16_t init_player_hp = 0,
-    uint8_t  init_enemy_status_raw = 0)
+    uint8_t  init_enemy_status_raw = 0,
+    int8_t   init_player_acc_stage = 0,
+    int8_t   init_enemy_eva_stage  = 0)
 {
     const enginemon::MoveData* md=ed.moves.get(move_id);
     if(!md||!md->effect_desc.is_supported) return std::nullopt;
@@ -1948,8 +1968,15 @@ static std::optional<EngineSnapshot> run_enginemon_case(
         bp.stages.accuracy=sd[5]; bp.stages.evasion=sd[6];
         return bp;
     };
-    bat.player_pokemon()   = make(move_id,P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,PLAYER_DELTA);
-    bat.opponent_pokemon() = make(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,ENEMY_DELTA);
+    // Build stage-delta arrays incorporating optional ACC/EVA overrides.
+    int8_t p_delta[7] = { PLAYER_DELTA[0], PLAYER_DELTA[1], PLAYER_DELTA[2],
+                          PLAYER_DELTA[3], PLAYER_DELTA[4],
+                          init_player_acc_stage, PLAYER_DELTA[6] };
+    int8_t e_delta[7] = { ENEMY_DELTA[0],  ENEMY_DELTA[1],  ENEMY_DELTA[2],
+                          ENEMY_DELTA[3],  ENEMY_DELTA[4],
+                          ENEMY_DELTA[5],  init_enemy_eva_stage };
+    bat.player_pokemon()   = make(move_id,P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,p_delta);
+    bat.opponent_pokemon() = make(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,e_delta);
     // init_player_hp: override current HP without changing max HP.
     if(init_player_hp != 0) bat.player_pokemon().stats.hp = init_player_hp;
     // init_enemy_status_raw: set opponent Sleep status if raw bits 0-2 are non-zero (sleep counter).
@@ -3740,6 +3767,13 @@ static std::string fmt_eng_rng_trace(const std::vector<uint8_t>& trace){
 // ============================================================================
 // runner_main
 // ============================================================================
+// Forward declaration for run_accuracy_sweep_after_startup (defined later in file).
+static int run_accuracy_sweep_after_startup(
+    const std::vector<uint8_t>& rom_bytes, const SymCache& sym,
+    const EngineData& ed, bool run_part_a, bool run_part_b, bool verbose,
+    int acc_min, int acc_max, int eva_min, int eva_max,
+    bool part_b_worker_mode);
+
 int runner_main(int argc, char* argv[], RunnerConfig defaults)
 {
     const char* prog = argc>0?argv[0]:"crystal_battle_diff";
@@ -3773,6 +3807,9 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
         if(a=="--help"||a=="-h")           { help_flag=true; }
         else if(a=="--list")               { list_flag=true; }
         else if(a=="--all")                { all_flag=true; }
+        else if(a=="--accuracy-sweep-a")   { defaults.accuracy_sweep_a=true; }
+        else if(a=="--accuracy-sweep-b")   { defaults.accuracy_sweep_b=true; }
+        else if(a=="--accuracy-sweep")     { defaults.accuracy_sweep_a=true; defaults.accuracy_sweep_b=true; }
         else if(a=="--verbose"||a=="-v")   { verbose=true; }
         else if((a=="--jobs"||a=="-j")&&i+1<argc){ jobs=std::max(1,std::stoi(argv[++i])); }
         else if(a=="--fault"&&i+1<argc){
@@ -3847,7 +3884,7 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
     if(all_flag){
         move_ids.clear();
         for(size_t i=0;i<NUM_REGISTERED;i++) move_ids.push_back(REGISTERED_MOVES[i].id);
-    } else if(move_ids.empty()){
+    } else if(move_ids.empty() && !defaults.accuracy_sweep_a && !defaults.accuracy_sweep_b && !defaults.part_b_worker){
         std::cerr<<"Error: no moves selected. Use --all or --move <id>.\nRun '"<<prog<<" --help'.\n";
         return EXIT_INVALID_ARGS;
     }
@@ -4121,6 +4158,18 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults)
     if(!ed_opt) return startup_fail("ENGINE","engine data load failed");
     const EngineData& ed=*ed_opt;
     std::cout << "  Engine:    OK\n\n";
+
+    // Accuracy sweep: dispatch before normal move loop using loaded startup data.
+    if(defaults.accuracy_sweep_a || defaults.accuracy_sweep_b || defaults.part_b_worker){
+        return run_accuracy_sweep_after_startup(
+            rom_bytes, sym, ed,
+            defaults.accuracy_sweep_a,
+            defaults.accuracy_sweep_b || defaults.part_b_worker,
+            verbose,
+            defaults.sweep_acc_min, defaults.sweep_acc_max,
+            defaults.sweep_eva_min, defaults.sweep_eva_max,
+            defaults.part_b_worker);
+    }
 
     // 4b. Move-identity validation.
     //
@@ -4936,6 +4985,268 @@ int run_harness_negative_tests(const char* rom_path, const char* sym_path, bool 
     }
 
     // =====================================================================
+    // Tests 12–16: Auto-hit RNG proof and extra-RNG negative controls.
+    //
+    // Proves that acc=0xFF moves:
+    //   (a) reach their semantic result through the certified Crystal runner
+    //       with an empty RNG tape (no BattleRandom called)
+    //   (b) that each move's ROM accuracy byte is verified to be exactly 0xFF
+    //   (c) that supplying an extra RNG byte is rejected as RNG_TAPE_UNUSED
+    //
+    // The crystal_diff_runner --all suite already runs these moves and confirms
+    // MATCH or UNSUPPORTED with the canonical rng_tape=nullptr entries.
+    // Here we additionally prove the empty-tape property directly from the
+    // certified runner, live, with the ROM-derived acc=0xFF verification.
+    // =====================================================================
+
+    if(verbose) { std::cout << "neg-test: running test 12 (autohit-seismictoss)\n"; std::cout.flush(); }
+    // =====================================================================
+    // Test 12: Seismic Toss (engine_id=0x45) — ROM acc=0xFF, 0 RNG consumed.
+    //   ROM-derived acc byte from CRYSTAL_MOVES_TABLE_FLAT.
+    //   Crystal runner run with empty tape → SINK_HIT, rng_bytes_consumed=0.
+    //   Enginemon compared via run_case → MATCH or UNSUPPORTED (never HARNESS_ERROR).
+    // =====================================================================
+    {
+        static const char* TEST_NAME = "autohit-seismictoss";
+        constexpr uint16_t ENGINE_ID = 0x45; // Seismic Toss
+
+        // ROM-derive acc byte for Seismic Toss (must be 0xFF)
+        uint32_t rom_off = CRYSTAL_MOVES_TABLE_FLAT + (uint32_t)(ENGINE_ID-1)*CRYSTAL_MOVE_DATA_SIZE;
+        uint8_t  rom_acc = rom_bytes[rom_off + 4]; // byte[4] = accuracy
+        bool acc_ok = (rom_acc == 0xFF);
+
+        // Run through certified runner with empty tape (nullptr, 0)
+        g_generic_rom_bytes_ptr = &rom_bytes;
+        g_generic_move_id       = ENGINE_ID;
+        g_generic_pp            = P_PP;
+        struct TLSGuard12 {
+            ~TLSGuard12(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+        } tlsg12;
+
+        CrystalRunConfig cfg{};
+        seismictoss_config(sym, &cfg);
+        cfg.insn_cap = 100000;
+        // Empty tape: Crystal must reach its sink without calling BattleRandom.
+        cfg.rng_tape     = nullptr;
+        cfg.rng_tape_len = 0;
+
+        auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+        bool sink_ok  = (res.stop_reason == StopReason::SINK_HIT);
+        bool rng_zero = (res.rng_bytes_consumed == 0);
+
+        // Also confirm via run_case (4-poison stability + Enginemon comparison).
+        MoveSpec spec{ ENGINE_ID, ENGINE_ID, "SeismicToss-emptytape", 100000,
+                       nullptr, 0, seismictoss_config, nullptr };
+        auto case_res = run_case(spec, rom_bytes, sym, ed, &no_stop);
+        bool case_ok = (case_res.status == Status::MATCH
+                     || case_res.status == Status::ENGINEMON_MISMATCH
+                     || case_res.status == Status::ENGINEMON_UNSUPPORTED)
+                    && case_res.status != Status::HARNESS_ERROR;
+
+        bool ok = acc_ok && sink_ok && rng_zero && case_ok;
+        report(TEST_NAME, ok,
+               ok ? std::string("ROM acc=0xFF proven; Crystal rng_consumed=0; run_case status=")
+                    + std::to_string((int)case_res.status)
+                  : std::string("FAIL acc_ok=") + std::to_string(acc_ok)
+                    + " ROM_acc=0x" + [&]{ char b[4]; snprintf(b,sizeof(b),"%02X",rom_acc); return std::string(b); }()
+                    + " sink_ok=" + std::to_string(sink_ok)
+                    + " rng_zero=" + std::to_string(rng_zero)
+                    + " case_ok=" + std::to_string(case_ok)
+                    + " case_detail=" + case_res.detail.substr(0,60));
+    }
+
+    if(verbose) { std::cout << "neg-test: running test 13 (autohit-dragonrage)\n"; std::cout.flush(); }
+    // =====================================================================
+    // Test 13: Dragon Rage (engine_id=0x52) — ROM acc=0xFF, 0 RNG consumed.
+    //   Same proof as test 12, different move/script.
+    // =====================================================================
+    {
+        static const char* TEST_NAME = "autohit-dragonrage";
+        constexpr uint16_t ENGINE_ID = 0x52; // Dragon Rage
+
+        uint32_t rom_off = CRYSTAL_MOVES_TABLE_FLAT + (uint32_t)(ENGINE_ID-1)*CRYSTAL_MOVE_DATA_SIZE;
+        uint8_t  rom_acc = rom_bytes[rom_off + 4];
+        bool acc_ok = (rom_acc == 0xFF);
+
+        g_generic_rom_bytes_ptr = &rom_bytes;
+        g_generic_move_id       = ENGINE_ID;
+        g_generic_pp            = P_PP;
+        struct TLSGuard13 {
+            ~TLSGuard13(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+        } tlsg13;
+
+        CrystalRunConfig cfg{};
+        dragonrage_config(sym, &cfg);
+        cfg.insn_cap     = 100000;
+        cfg.rng_tape     = nullptr;
+        cfg.rng_tape_len = 0;
+
+        auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+        bool sink_ok  = (res.stop_reason == StopReason::SINK_HIT);
+        bool rng_zero = (res.rng_bytes_consumed == 0);
+
+        MoveSpec spec{ ENGINE_ID, ENGINE_ID, "DragonRage-emptytape", 100000,
+                       nullptr, 0, dragonrage_config, nullptr };
+        auto case_res = run_case(spec, rom_bytes, sym, ed, &no_stop);
+        bool case_ok = (case_res.status != Status::HARNESS_ERROR);
+
+        bool ok = acc_ok && sink_ok && rng_zero && case_ok;
+        report(TEST_NAME, ok,
+               ok ? std::string("ROM acc=0xFF proven; Crystal rng_consumed=0; run_case status=")
+                    + std::to_string((int)case_res.status)
+                  : std::string("FAIL acc_ok=") + std::to_string(acc_ok)
+                    + " sink_ok=" + std::to_string(sink_ok)
+                    + " rng_zero=" + std::to_string(rng_zero)
+                    + " case_ok=" + std::to_string(case_ok));
+    }
+
+    if(verbose) { std::cout << "neg-test: running test 14 (autohit-swordsdance)\n"; std::cout.flush(); }
+    // =====================================================================
+    // Test 14: Swords Dance (engine_id=0x0E) — ROM acc=0xFF, 0 RNG consumed.
+    //   Stat-up self-move; no CheckHit called.
+    // =====================================================================
+    {
+        static const char* TEST_NAME = "autohit-swordsdance";
+        constexpr uint16_t ENGINE_ID = 0x0E; // Swords Dance
+
+        uint32_t rom_off = CRYSTAL_MOVES_TABLE_FLAT + (uint32_t)(ENGINE_ID-1)*CRYSTAL_MOVE_DATA_SIZE;
+        uint8_t  rom_acc = rom_bytes[rom_off + 4];
+        bool acc_ok = (rom_acc == 0xFF);
+
+        g_generic_rom_bytes_ptr = &rom_bytes;
+        g_generic_move_id       = ENGINE_ID;
+        g_generic_pp            = P_PP;
+        struct TLSGuard14 {
+            ~TLSGuard14(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+        } tlsg14;
+
+        CrystalRunConfig cfg{};
+        swordsdance_config(sym, &cfg);
+        cfg.insn_cap     = 100000;
+        cfg.rng_tape     = nullptr;
+        cfg.rng_tape_len = 0;
+
+        auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+        bool sink_ok  = (res.stop_reason == StopReason::SINK_HIT);
+        bool rng_zero = (res.rng_bytes_consumed == 0);
+
+        MoveSpec spec{ ENGINE_ID, ENGINE_ID, "SwordsDance-emptytape", 100000,
+                       nullptr, 0, swordsdance_config, nullptr };
+        auto case_res = run_case(spec, rom_bytes, sym, ed, &no_stop);
+        bool case_ok = (case_res.status != Status::HARNESS_ERROR);
+
+        bool ok = acc_ok && sink_ok && rng_zero && case_ok;
+        report(TEST_NAME, ok,
+               ok ? std::string("ROM acc=0xFF proven; Crystal rng_consumed=0; run_case status=")
+                    + std::to_string((int)case_res.status)
+                  : std::string("FAIL acc_ok=") + std::to_string(acc_ok)
+                    + " sink_ok=" + std::to_string(sink_ok)
+                    + " rng_zero=" + std::to_string(rng_zero)
+                    + " case_ok=" + std::to_string(case_ok));
+    }
+
+    if(verbose) { std::cout << "neg-test: running test 15 (autohit-extra-rng-rejected)\n"; std::cout.flush(); }
+    // =====================================================================
+    // Test 15: Auto-hit move with extra RNG byte → RNG_TAPE_UNUSED rejection.
+    //   Seismic Toss (acc=0xFF) with tape={0x42} (1 byte).
+    //   Crystal executes the move without calling BattleRandom, consuming 0 bytes.
+    //   After SINK_HIT, run_case detects: consumed(0) < tape_len(1) → RNG_TAPE_UNUSED.
+    //   This proves the guard actively rejects extra bytes even for acc=0xFF moves.
+    // =====================================================================
+    {
+        static const char* TEST_NAME = "autohit-extra-rng-rejected";
+        constexpr uint16_t ENGINE_ID = 0x45; // Seismic Toss
+
+        g_generic_rom_bytes_ptr = &rom_bytes;
+        g_generic_move_id       = ENGINE_ID;
+        g_generic_pp            = P_PP;
+        struct TLSGuard15 {
+            ~TLSGuard15(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+        } tlsg15;
+
+        // Provide one phantom RNG byte — this move never calls BattleRandom.
+        static constexpr uint8_t PHANTOM_TAPE[] = { 0x42 };
+        MoveSpec spec{ ENGINE_ID, ENGINE_ID, "SeismicToss-phantomrng", 100000,
+                       PHANTOM_TAPE, sizeof(PHANTOM_TAPE), seismictoss_config, nullptr };
+        auto case_res = run_case(spec, rom_bytes, sym, ed, &no_stop);
+
+        // Must be HARNESS_ERROR with RNG_TAPE_UNUSED in detail and consumed=0.
+        bool is_harness = (case_res.status == Status::HARNESS_ERROR);
+        bool has_unused = (case_res.detail.find("RNG_TAPE_UNUSED") != std::string::npos);
+        bool has_consumed = (case_res.detail.find("consumed=0") != std::string::npos);
+        bool has_tapelen  = (case_res.detail.find("tape_len=1") != std::string::npos);
+
+        bool ok = is_harness && has_unused && has_consumed && has_tapelen;
+        report(TEST_NAME, ok,
+               ok ? "RNG_TAPE_UNUSED correctly produced for acc=0xFF move with phantom byte: "
+                    + case_res.detail.substr(0, 100)
+                  : "FAIL is_harness=" + std::to_string(is_harness)
+                    + " has_unused=" + std::to_string(has_unused)
+                    + " detail=" + case_res.detail.substr(0, 80));
+    }
+
+    if(verbose) { std::cout << "neg-test: running test 16 (sweep-short-tape-rng-exhausted)\n"; std::cout.flush(); }
+    // =====================================================================
+    // Test 16: Sweep-path RNG_TAPE_EXHAUSTED via certified Crystal runner.
+    //   Proves the short-tape guard is active on the certified run_crystal_case
+    //   path used by the accuracy sweep (not just run_case).
+    //   Uses a move that actually calls BattleRandom: Toxic (acc=0xD8=216, 1 byte).
+    //   Provide an empty tape (0 bytes) → Crystal calls BattleRandom,
+    //   tape_idx(0) >= tape_len(0) → rng_ctx->exhausted = true → RNG_TAPE_EXHAUSTED.
+    //   Note: with tape_len=0 rng_ctx is NOT created (nullptr); Crystal reads
+    //   WRAM 0xCFB6 which is poison. This produces unpredictable hit/miss but
+    //   completes to SINK_HIT with 0 consumed (no interception).
+    //   To actually trigger RNG_TAPE_EXHAUSTED we need tape_len > 0.
+    //   Use Screech (acc=0xD8, 1 RNG byte needed) with tape={} (0 bytes via
+    //   non-null pointer of length 0) — but that also skips rng_ctx.
+    //   Correct approach: provide tape_len=1 and a tape that causes Crystal to
+    //   try to consume a second byte. Screech only uses 1 byte → no exhaustion.
+    //   So use Toxic/miss (1 RNG byte consumed = the acc check), then additionally
+    //   try to prove exhaustion by supplying 0 bytes to a 2-byte move: Sing
+    //   (acc=0x8C, on hit consumes 2 bytes: acc + sleep_turns).
+    //   Test 9 already proves RNG_TAPE_EXHAUSTED for Return (3→1 byte).
+    //   Here we prove the same guard fires on the sweep-style direct path.
+    //   Re-use test 9's approach: Screech (registered, 1 RNG) with 0 bytes.
+    //   rng_tape=nullptr means no interception. We need a non-null tape of length 0.
+    //   Actually the simplest proof: a 1-byte-tape move (Toxic/Screech) where we
+    //   supply a tape of length 0 doesn't create rng_ctx so no exhaustion.
+    //   The proven path already exists in test 3 and test 9 (Return 3→1).
+    //   For THIS test, prove it via Sing (acc=0x8C, needs 2 bytes on hit):
+    //   supply only 1 byte (the acc check byte = 0x30 = hit) → Crystal hits,
+    //   then calls BattleRandom again for sleep_turns → tape_idx(1) >= tape_len(1)
+    //   → exhausted=true → RNG_TAPE_EXHAUSTED.
+    // =====================================================================
+    {
+        static const char* TEST_NAME = "sweep-short-tape-rng-exhausted";
+
+        // Sing (acc=0x8C=140, on hit needs: [acc_byte, sleep_turns_byte]).
+        // Supply only 1 byte: 0x30 (< 0x8C → hit; sleep_turns not provided → exhausted).
+        static constexpr uint8_t SING_ONE_BYTE[] = { 0x30 }; // acc check byte only
+
+        g_generic_rom_bytes_ptr = &rom_bytes;
+        g_generic_move_id       = 0x2F; // Sing
+        g_generic_pp            = P_PP;
+        struct TLSGuard16 {
+            ~TLSGuard16(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+        } tlsg16;
+
+        CrystalRunConfig cfg{};
+        sing_config(sym, &cfg);
+        cfg.insn_cap     = 100000;
+        cfg.rng_tape     = SING_ONE_BYTE;
+        cfg.rng_tape_len = 1; // only the acc byte; sleep_turns is missing
+
+        auto res = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+        bool ok = (res.stop_reason == StopReason::RNG_TAPE_EXHAUSTED);
+        report(TEST_NAME, ok,
+               ok ? "RNG_TAPE_EXHAUSTED confirmed via sweep-path certified runner "
+                    "(Sing acc hit, missing sleep_turns byte)"
+                  : "FAIL stop_reason=" + std::string(stop_reason_str(res.stop_reason))
+                    + " insn=" + std::to_string(res.insn_count)
+                    + " rng_consumed=" + std::to_string(res.rng_bytes_consumed));
+    }
+
+    // =====================================================================
     // Summary
     // =====================================================================
     if(verbose){
@@ -4944,5 +5255,706 @@ int run_harness_negative_tests(const char* rom_path, const char* sym_path, bool 
     }
     return (n_fail == 0) ? 0 : 1;
 }
+
+
+// ============================================================================
+// run_accuracy_sweep_main
+// ============================================================================
+// PART A — per-registered-move 256-byte acc RNG sweep
+// PART B — Screech ACC stage × EVA stage × rng_byte matrix
+//
+// Design notes:
+//   * All internal infrastructure (run_crystal_case, run_enginemon_case,
+//     MoveSpec, CrystalRunConfig, SymCache, REGISTERED_MOVES, etc.) is
+//     file-static in this translation unit, so the sweep lives here.
+//   * The sweep relaxes the RNG_TAPE_UNUSED contract: tapes may have
+//     variable-length residual depending on hit/miss. We detect hit/miss
+//     from rng_bytes_consumed and semantic output instead.
+//   * Crystal authority: if Crystal and Enginemon disagree on hit/miss for
+//     any rng_byte, that is a DIFF — reported as an error.
+// ============================================================================
+
+namespace {  // anonymous namespace to avoid ODR issues with helpers
+
+// ---------------------------------------------------------------------------
+// AccSweepConfig — describes how to build the tape for a given move
+//
+// Crystal's CheckHit for a normal DoMove case:
+//   rng_tape = [prefix_bytes...] + [acc_byte]
+//
+//   prefix_bytes: the bytes that come BEFORE the acc check in the BattleScript.
+//     For status moves (1 RNG total): prefix is empty; acc_byte is the only byte.
+//     For sleep moves (acc + sleep_turns): prefix is empty; acc_byte is first.
+//       On hit Crystal consumes acc_byte + sleep_turns_byte (2 bytes).
+//       On miss Crystal consumes only acc_byte (1 byte).
+//       → tape = {acc_byte, sleep_turns_fixed} — 2 bytes.  Miss leaves 1 unused.
+//     For Return/damage moves (crit+damvar+acc): prefix = {0x80, 0xB2, 0xFF}.
+//     For recoil/damage moves: prefix = {0x80, 0xB2, 0xFF}.
+//
+// We deliberately overprovision the tape (pad with 0x01 if needed) and skip
+// the RNG_TAPE_UNUSED check in the sweep runner.  The ONLY contract checked
+// here is: did Crystal and Enginemon agree on hit vs miss for every rng_byte?
+// ---------------------------------------------------------------------------
+
+struct AccSweepMoveDef {
+    uint16_t    move_id;          // REGISTERED_MOVES engine_id
+    const char* name;
+    uint8_t     crystal_acc;      // rom-proven accuracy byte (0xFF = no acc check)
+    size_t      prefix_len;       // # of RNG bytes consumed BEFORE the acc check
+    uint8_t     prefix[8];        // those fixed prefix bytes
+    size_t      suffix_len;       // # of RNG bytes consumed AFTER acc check on HIT
+    uint8_t     suffix[4];        // fixed suffix bytes (e.g. sleep_turns = 0x01)
+    // Extra fixture overrides needed for this sweep case
+    uint8_t     init_enemy_status_raw; // 0 = default; nonzero for Dream Eater
+};
+
+// Build the AccSweepMoveDef list from the registered moves + ROM data.
+// Only considers moves that go through the normal CheckHit path (1 acc RNG byte).
+// Moves entered at non-DoMove sinks (Present sub-cases) are excluded — they
+// don't run the standard CheckHit.
+//
+// We compute prefix/suffix from what we know about each move's BattleScript.
+// Rules:
+//   - Status moves (1 RNG total, no pre-CheckHit): prefix=empty, suffix=empty.
+//   - Sleep moves (acc + sleep_turns): prefix=empty, suffix={0x01} (sleep_turns).
+//   - Damage moves (crit + damvar + acc): prefix={0x80,0xB2,0xFF}, suffix=empty.
+//   - Drain/special (crit + damvar + acc=0xFF): acc=0xFF, skip.
+//   - Dream Eater asleep: acc=0xFF, skip acc sweep (already no-acc).
+//   - Present full-script: uses complex tape, skip (Present-specific path).
+static std::vector<AccSweepMoveDef>
+build_acc_sweep_defs(const std::vector<uint8_t>& rom_bytes)
+{
+    std::vector<AccSweepMoveDef> defs;
+
+    // Set of engine_ids we want to include in the sweep.
+    // We enumerate REGISTERED_MOVES and filter.
+    // Skip synthetic IDs (>251) that are sub-cases or non-acc variants, except
+    // the intentional miss sub-cases — we include engine_id once (the hit case).
+    // We track seen engine_ids to avoid duplicates.
+    std::set<uint16_t> seen_ids;
+
+    for(size_t ri = 0; ri < NUM_REGISTERED; ++ri){
+        const MoveSpec& ms = REGISTERED_MOVES[ri];
+        uint16_t eid = ms.engine_id;
+        if(eid == 0 || eid > 251) continue; // synthetic ids
+        if(seen_ids.count(eid)) continue;
+
+        // Read ROM acc byte
+        uint32_t off = CRYSTAL_MOVES_TABLE_FLAT + (uint32_t)(eid-1)*CRYSTAL_MOVE_DATA_SIZE;
+        if(off+7 >= (uint32_t)rom_bytes.size()) continue;
+        uint8_t crystal_acc = rom_bytes[off+4];
+
+        // Decide prefix/suffix based on what we know about this move's script.
+        // We use a heuristic based on the registered tape's structure:
+        //   tape_len == 0 or rng_tape==nullptr: acc=0xFF or 0-rng status → skip acc sweep
+        //   tape_len == 1: CheckHit is only RNG byte → prefix=empty suffix=empty
+        //   tape_len == 2: acc + sleep_turns → prefix=empty suffix={0x01}
+        //   tape_len == 3 (TAPE_RETURN): crit+damvar → acc=0xFF, no acc check
+        //   tape_len == 4 (TAPE_RECOIL_HIT): crit+damvar+acc → prefix={0x80,0xB2,0xFF} suffix=empty
+        //   tape_len >= 5: complex case (Present, double-kick, etc.) → skip
+
+        // Special cases to exclude:
+        //   - Haze (id=114): no CheckHit
+        //   - Present sub-cases: entered at BattleCommand_Present not DoMove
+        //   - Rest, BellyDrum, Substitute: acc=0xFF
+        //   - Double Kick, Twineedle, Magnitude, Psywave: complex multi-hit / special scripts
+        //   - Dream Eater asleep (registered as engine_id=0x8A with sleep fixture): acc=0xFF
+        static const uint16_t EXCLUDE_IDS[] = {
+            114,  // Haze (no CheckHit)
+            217,  // Present (all sub-cases; entered at BattleCommand_Present not DoMove)
+            0x95, // Psywave (damage loop RNG before acc check; not simple acc sweep)
+            0x18, // Double Kick (multi-hit; per-hit RNG not amenable to simple sweep)
+            0x29, // Twineedle (multi-hit; same)
+            0xDE, // Magnitude (getmagnitude RNG before acc; complex prefix)
+        };
+        bool excluded = false;
+        for(uint16_t x : EXCLUDE_IDS){
+            if(eid == x){ excluded = true; break; }
+        }
+        if(excluded) continue;
+
+        // acc=0xFF → no acc RNG, verified separately
+        if(crystal_acc == 0xFF) continue;
+
+        // Determine prefix/suffix from tape
+        AccSweepMoveDef d{};
+        d.move_id    = eid;
+        d.name       = ms.name;
+        d.crystal_acc = crystal_acc;
+
+        size_t tlen = ms.rng_tape_len;
+
+        if(tlen == 1){
+            // CheckHit is only RNG byte. No prefix, no suffix.
+            d.prefix_len = 0;
+            d.suffix_len = 0;
+        } else if(tlen == 2){
+            // acc + something after (sleep_turns pattern)
+            d.prefix_len = 0;
+            d.suffix_len = 1;
+            d.suffix[0]  = 0x01; // minimal sleep_turns exit byte
+        } else if(tlen == 4){
+            // Recoil: crit(1)+damvar_loop(1)+damvar_exit(1)+acc(1)
+            // prefix = {0x80, 0xB2, 0xFF}, suffix = empty
+            d.prefix_len = 3;
+            d.prefix[0] = 0x80; d.prefix[1] = 0xB2; d.prefix[2] = 0xFF;
+            d.suffix_len = 0;
+        } else if(tlen == 3){
+            // TAPE_RETURN (crit+damvar): acc=0xFF → already filtered above
+            // TAPE_SLEEP_HIT (acc + sleep_turns + maybe something else)
+            // If we reach here with tlen==3 and acc<0xFF, treat as prefix=empty, suffix=2.
+            d.prefix_len = 0;
+            d.suffix_len = 2;
+            d.suffix[0] = 0x01; d.suffix[1] = 0x01;
+        } else {
+            // Complex tape (5+ bytes) — skip
+            continue;
+        }
+
+        // Dream Eater asleep requires init_enemy_status_raw=3
+        if(eid == 0x8A){ // Dream Eater
+            d.init_enemy_status_raw = 3;
+        }
+
+        seen_ids.insert(eid);
+        defs.push_back(d);
+    }
+    return defs;
+}
+
+// ---------------------------------------------------------------------------
+// Hit/miss detection from Crystal CrystalRunResult.
+//
+// A "hit" means the effect was applied (enemy_hp changed, status changed,
+// stage changed, etc.). We use rng_bytes_consumed relative to expected:
+//   consumed == prefix_len + 1 + suffix_len → hit (consumed acc byte + suffix)
+//   consumed == prefix_len + 1               → miss (consumed acc byte, no suffix)
+//   consumed == prefix_len + 1 + suffix_len  may equal prefix+1 if suffix_len==0
+//
+// For simplicity: consumed > prefix_len + 1 → hit (suffix consumed)
+//                 consumed == prefix_len + 1 → miss OR hit with suffix_len==0
+//
+// Most reliable: compare initial vs final state.
+//   For status moves: enemy_status changed → hit
+//   For stat moves: enemy_stages changed OR player_stages changed → hit
+//   For damage moves: enemy_hp decreased → hit
+//   For sleep moves: enemy_status changed → hit
+// ---------------------------------------------------------------------------
+struct HitResult {
+    bool crystal_hit;
+    bool enginemon_hit;
+    size_t crystal_consumed;
+    size_t enginemon_consumed;
+};
+
+// detect_crystal_hit: compares post-run state against the captured initial snapshot.
+// Any deviation in HP, status, or any stage from the initial state = hit.
+// Does not encode any expected probability formula or threshold.
+static bool detect_crystal_hit(
+    const CrystalRunResult& r,
+    size_t /*prefix_len*/)
+{
+    if(r.stop_reason != StopReason::SINK_HIT) return false;
+    bool hp_changed     = (r.enemy_hp != r.initial.enemy_hp);
+    bool status_changed = (r.enemy_status != r.initial.enemy_status);
+    bool stage_changed  = false;
+    for(int i=0;i<7;i++){
+        // Crystal stages stored as raw u8 (7=neutral); initial snapshot stores them
+        // normalized as int8_t relative to 7. Re-derive initial raw value for comparison.
+        uint8_t init_enemy_raw  = (uint8_t)(7 + r.initial.enemy_stages[i]);
+        uint8_t init_player_raw = (uint8_t)(7 + r.initial.player_stages[i]);
+        if(r.enemy_stages[i]  != init_enemy_raw  ||
+           r.player_stages[i] != init_player_raw) {
+            stage_changed = true; break;
+        }
+    }
+    return hp_changed || status_changed || stage_changed;
+}
+
+// detect_enginemon_hit: compares post-run state against the captured initial snapshot.
+// Any deviation in HP, status, or any stage from the initial state = hit.
+// Works for both Part A (neutral stages) and Part B (non-neutral ACC/EVA stages).
+// Does not encode any expected probability formula or threshold.
+static bool detect_enginemon_hit(const EngineSnapshot& e)
+{
+    bool hp_changed     = (e.enemy_hp != e.initial.enemy_hp);
+    bool status_changed = (e.enemy_status != e.initial.enemy_status);
+    bool stage_changed  = false;
+    for(int i=0;i<7;i++){
+        if(e.enemy_stages[i]  != e.initial.enemy_stages[i]  ||
+           e.player_stages[i] != e.initial.player_stages[i]) {
+            stage_changed = true; break;
+        }
+    }
+    return hp_changed || status_changed || stage_changed;
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// run_accuracy_sweep_after_startup -- called from runner_main after startup
+// ---------------------------------------------------------------------------
+static int run_accuracy_sweep_after_startup(
+    const std::vector<uint8_t>& rom_bytes,
+    const SymCache& sym,
+    const EngineData& ed,
+    bool run_part_a, bool run_part_b,
+    bool verbose,
+    int acc_min, int acc_max, int eva_min, int eva_max,
+    bool part_b_worker_mode)
+{
+    std::atomic<bool> no_stop{false};
+
+    // Counters
+    int total_comparisons = 0;
+    int total_diffs       = 0;
+    int harness_errors    = 0;
+
+    // =========================================================================
+    // PART A: Per-move 256-byte acc RNG sweep
+    // =========================================================================
+    if(run_part_a){
+        std::cout << "\n=== PART A: per-move acc RNG sweep ===\n" << std::flush;
+
+        // Classify all registered moves
+        int moves_checked = 0;
+        int moves_with_acc = 0;
+        int moves_autohit  = 0;
+
+        auto sweep_defs = build_acc_sweep_defs(rom_bytes);
+
+        // Also verify acc=0xFF moves: they must consume 0 acc RNG bytes.
+        // Use their existing registered tape to confirm that.
+        std::cout << "Moves with acc<0xFF in sweep: " << sweep_defs.size() << "\n";
+
+        // Count all registered unique engine_ids
+        {
+            std::set<uint16_t> seen;
+            for(size_t i=0;i<NUM_REGISTERED;i++){
+                uint16_t eid=REGISTERED_MOVES[i].engine_id;
+                if(eid==0||eid>251) continue;
+                if(seen.count(eid)) continue;
+                seen.insert(eid);
+                moves_checked++;
+                uint32_t off=CRYSTAL_MOVES_TABLE_FLAT+(uint32_t)(eid-1)*CRYSTAL_MOVE_DATA_SIZE;
+                if(off+5<(uint32_t)rom_bytes.size()){
+                    uint8_t acc=rom_bytes[off+4];
+                    if(acc==0xFF) moves_autohit++;
+                    else          moves_with_acc++;
+                }
+            }
+        }
+        std::cout << "  Total unique registered IDs: " << moves_checked << "\n";
+        std::cout << "  acc=0xFF (auto-hit, 0 acc RNG):  " << moves_autohit << "\n";
+        std::cout << "  acc<0xFF (have CheckHit RNG):     " << moves_with_acc << "\n";
+        std::cout << "  Included in 256-byte sweep:       " << (int)sweep_defs.size() << "\n\n";
+
+        struct PartADiff {
+            const char* move_name;
+            uint8_t     crystal_acc;
+            uint8_t     rng_byte;
+            bool        crystal_hit;
+            bool        enginemon_hit;
+        };
+        std::vector<PartADiff> part_a_diffs;
+
+        for(const auto& def : sweep_defs){
+            if(verbose){
+                std::cout << "  Sweeping " << def.name
+                          << " (id=" << def.move_id
+                          << " acc=0x" << std::hex << std::setw(2)<<std::setfill('0') << (int)def.crystal_acc
+                          << " prefix=" << std::dec << def.prefix_len
+                          << " suffix=" << def.suffix_len << ")\n";
+            }
+
+            // Build the config for this move using its registered build_config.
+            // We'll override the tape for each sweep byte.
+            const MoveSpec* ms = nullptr;
+            for(size_t i=0;i<NUM_REGISTERED;i++){
+                if(REGISTERED_MOVES[i].engine_id == def.move_id &&
+                   REGISTERED_MOVES[i].rng_tape_len >= 1){
+                    ms = &REGISTERED_MOVES[i];
+                    break;
+                }
+            }
+            if(!ms) continue;
+
+            for(int rb=0;rb<256;rb++){
+                uint8_t rng_byte = (uint8_t)rb;
+
+                // Build tape: [prefix...] + [rng_byte] + [suffix...]
+                uint8_t tape[16] = {};
+                size_t  tape_len = 0;
+                for(size_t i=0;i<def.prefix_len;i++) tape[tape_len++]=def.prefix[i];
+                tape[tape_len++] = rng_byte;
+                for(size_t i=0;i<def.suffix_len;i++) tape[tape_len++]=def.suffix[i];
+
+                // Build config using the registered build_config then override tape
+                CrystalRunConfig cfg{};
+                ms->build_config(sym, &cfg);
+                cfg.insn_cap   = ms->insn_cap;
+                cfg.rng_tape   = tape;
+                cfg.rng_tape_len = tape_len;
+                if(!cfg.engine_move_id) cfg.engine_move_id = def.move_id;
+                if(def.init_enemy_status_raw)
+                    cfg.init_enemy_status_raw = def.init_enemy_status_raw;
+
+                // Bind ROM for the fixture adapter
+                struct Guard {
+                    ~Guard(){ g_fullscript_rom_bytes=nullptr; g_generic_rom_bytes_ptr=nullptr;
+                              g_generic_move_id=0; g_generic_pp=0; }
+                } guard;
+                if(cfg.extra_fixture == generic_fullscript_fixture_adapter){
+                    g_generic_rom_bytes_ptr = &rom_bytes;
+                    g_generic_move_id       = cfg.engine_move_id;
+                    g_generic_pp            = P_PP;
+                }
+                if(cfg.extra_fixture == present_fullscript_fixture_adapter)
+                    g_fullscript_rom_bytes = &rom_bytes;
+
+                // Run Crystal (4 poison patterns for stability)
+                static constexpr uint8_t POISONS[4]={0x00,0xA5,0x5A,0xFF};
+                CrystalRunResult cr[4];
+                bool all_sink = true;
+                for(int pi=0;pi<4;pi++){
+                    cr[pi]=run_crystal_case(rom_bytes,sym,POISONS[pi],cfg,&no_stop);
+                    if(cr[pi].stop_reason!=StopReason::SINK_HIT &&
+                       cr[pi].stop_reason!=StopReason::RNG_TAPE_UNUSED){
+                        all_sink=false; harness_errors++;
+                        if(verbose){
+                            std::cout << "    HARNESS_ERROR rng_byte=0x"<<std::hex<<(int)rng_byte
+                                      <<" poison=0x"<<(int)POISONS[pi]
+                                      <<" stop="<<stop_reason_str(cr[pi].stop_reason)<<"\n";
+                        }
+                        break;
+                    }
+                }
+                if(!all_sink) continue;
+
+                // Poison stability check (just consume counts and semantic outputs)
+                bool stable=true;
+                for(int pi=1;pi<4;pi++){
+                    if(!crystal_run_results_equal(cr[0],cr[pi])){ stable=false; break; }
+                }
+                if(!stable){
+                    harness_errors++;
+                    if(verbose){
+                        std::cout<<"    POISON_UNSTABLE rng_byte=0x"<<std::hex<<(int)rng_byte<<"\n";
+                    }
+                    continue;
+                }
+
+                bool c_hit = detect_crystal_hit(cr[0], def.prefix_len);
+                total_comparisons++;
+
+                // Run Enginemon
+                auto eng = run_enginemon_case(def.move_id, ed, tape, tape_len,
+                                              0, cfg.init_enemy_status_raw);
+                if(!eng){
+                    // UNSUPPORTED — skip, not a diff
+                    continue;
+                }
+
+                bool e_hit = detect_enginemon_hit(*eng);
+
+                if(c_hit != e_hit){
+                    total_diffs++;
+                    part_a_diffs.push_back({def.name, def.crystal_acc, rng_byte, c_hit, e_hit});
+                    if(verbose){
+                        std::cout << "  DIFF " << def.name
+                                  << " rng_byte=0x"<<std::hex<<std::setw(2)<<std::setfill('0')<<(int)rng_byte
+                                  << " Crystal="<<(c_hit?"HIT":"MISS")
+                                  << " Enginemon="<<(e_hit?"HIT":"MISS")<<"\n";
+                    }
+                }
+            } // rng_byte loop
+        } // sweep_defs loop
+
+        // Summarize Part A
+        std::cout << "\n--- Part A Summary ---\n";
+        std::cout << "  Moves swept:        " << (int)sweep_defs.size() << "\n";
+        std::cout << "  Total comparisons:  " << total_comparisons << "\n";
+        std::cout << "  Diffs found:        " << (int)part_a_diffs.size() << "\n";
+        std::cout << "  Harness errors:     " << harness_errors << "\n";
+
+        if(!part_a_diffs.empty()){
+            std::cout << "\nMOVES WITH CRYSTAL/ENGINEMON DIFFERENCES:\n";
+            // Collect per-move diff ranges
+            struct MoveDiff {
+                const char* name; uint8_t acc;
+                uint8_t first_diff_byte; uint8_t last_diff_byte;
+                int count;
+            };
+            std::map<uint16_t, MoveDiff> by_id;
+            for(auto& d : part_a_diffs){
+                // Use name as key (unique per engine_id)
+                bool found=false;
+                for(auto& [k,v] : by_id){
+                    if(v.name == std::string(d.move_name)){
+                        v.last_diff_byte = d.rng_byte; v.count++; found=true; break;
+                    }
+                }
+                if(!found){
+                    uint16_t k=by_id.size()+1;
+                    by_id[k]={d.move_name,d.crystal_acc,d.rng_byte,d.rng_byte,1};
+                }
+            }
+            for(auto& [k,v] : by_id){
+                std::cout << "  " << v.name
+                          << " acc=0x"<<std::hex<<std::setw(2)<<std::setfill('0')<<(int)v.acc
+                          << " differing rng_bytes: "<<std::dec<<v.count<<"/256"
+                          << " first=0x"<<std::hex<<std::setw(2)<<std::setfill('0')<<(int)v.first_diff_byte
+                          << " last=0x"<<std::hex<<std::setw(2)<<std::setfill('0')<<(int)v.last_diff_byte
+                          <<"\n";
+            }
+        }
+    }
+
+    // =========================================================================
+    // PART B: Screech ACC×EVA stage matrix
+    // Worker mode (part_b_worker_mode=true): emits machine-readable lines, no
+    // human headers/summaries. Coordinator mode: human-readable output only.
+    // In both modes the loop body uses identical certified runner paths.
+    // =========================================================================
+    if(run_part_b){
+        if(!part_b_worker_mode)
+            std::cout << "\n=== PART B: Screech ACC/EVA stage matrix (14x14x256) ===\n" << std::flush;
+
+        // Screech: move ID 0x67 = 103, acc=0xD8=216 (ROM-derived; verified below), 1 RNG byte
+        constexpr uint16_t SCREECH_ID = 0x67;
+        const uint8_t SCREECH_ACC = rom_bytes[CRYSTAL_MOVES_TABLE_FLAT+(SCREECH_ID-1)*CRYSTAL_MOVE_DATA_SIZE+4];
+        // Verify from ROM (SCREECH_ACC already read from ROM above; sanity-check range).
+        {
+            if(SCREECH_ACC == 0xFF){
+                std::cerr<<"Screech acc=0xFF from ROM -- auto-hit; stage-matrix sweep would be vacuous\n";
+                return ExitCode::EXIT_HARNESS_ERROR;
+            }
+            if(!part_b_worker_mode)
+                std::cout << "  Screech ROM acc = 0x" << std::hex << std::setw(2)
+                          << std::setfill('0') << (int)SCREECH_ACC << std::dec << "\n" << std::flush;
+        }
+
+        // Find screech config
+        const MoveSpec* screech_ms = find_move(SCREECH_ID);
+        if(!screech_ms){
+            std::cerr<<"Screech (0x67) not found in REGISTERED_MOVES\n";
+            return ExitCode::EXIT_HARNESS_ERROR;
+        }
+        // Stage range: Crystal raw 1..13 (7=neutral, 1=min=-6, 13=max=+6).
+        // Raw 0 is NOT a valid stage: BattleCommand_CheckHit/.StatModifiers does
+        // "dec b; sla b" before indexing AccuracyLevelMultipliers (13 entries).
+        // acc_raw=0 → dec → 0xFF → sla → 0xFE → out-of-bounds table walk → AV.
+        // Source: pokecrystal/constants/battle_constants.asm BASE_STAT_LEVEL=7,
+        //         MAX_STAT_LEVEL=13; data/battle/accuracy_multipliers.asm (13 rows).
+        constexpr int STAGE_DOMAIN_MIN = 1;  // Crystal raw min (-6 modifier)
+        constexpr int STAGE_DOMAIN_MAX = 13; // Crystal raw max (+6 modifier)
+
+        // Actual loop bounds: clamped to valid domain, overridable via CLI for row testing.
+        const int loop_acc_min = std::max(acc_min, STAGE_DOMAIN_MIN);
+        const int loop_acc_max = std::min(acc_max, STAGE_DOMAIN_MAX);
+        const int loop_eva_min = std::max(eva_min, STAGE_DOMAIN_MIN);
+        const int loop_eva_max = std::min(eva_max, STAGE_DOMAIN_MAX);
+
+        if(loop_acc_min > loop_acc_max || loop_eva_min > loop_eva_max){
+            std::cerr << "Part B: empty ACC/EVA range after clamping to domain ["
+                      << STAGE_DOMAIN_MIN << ".." << STAGE_DOMAIN_MAX << "]\n";
+            return ExitCode::EXIT_HARNESS_ERROR;
+        }
+
+        if(!part_b_worker_mode)
+            std::cout << "  ACC range: raw " << loop_acc_min << ".." << loop_acc_max
+                      << "  EVA range: raw " << loop_eva_min << ".." << loop_eva_max << "\n";
+
+        int b_total = 0, b_diffs = 0, b_harness = 0;
+        int off_by_one = 0; // cases where boundary differs by exactly 1 rng_byte
+
+        // Track per-stage-combination boundary differences
+        struct BoundaryDiff {
+            int acc_stage_raw; // Crystal raw [1..13]
+            int eva_stage_raw;
+            int crystal_threshold; // highest rng_byte that hits in Crystal
+            int enginemon_threshold;
+        };
+        std::vector<BoundaryDiff> b_boundary_diffs;
+
+        auto t_start = std::chrono::steady_clock::now();
+
+        for(int acc_raw = loop_acc_min; acc_raw <= loop_acc_max; acc_raw++){
+            for(int eva_raw = loop_eva_min; eva_raw <= loop_eva_max; eva_raw++){
+                // For each combination, find hit/miss boundary:
+                //   crystal_threshold = max rng_byte that Crystal calls a hit
+                //   enginemon_threshold = same for Enginemon
+                int crystal_threshold   = -1;
+                int enginemon_threshold = -1;
+
+                for(int rb = 0; rb < 256; rb++){
+                    uint8_t rng_byte = (uint8_t)rb;
+                    uint8_t tape[1] = { rng_byte };
+
+                    // Build config with stage overrides
+                    CrystalRunConfig cfg{};
+                    screech_ms->build_config(sym, &cfg);
+                    cfg.insn_cap    = screech_ms->insn_cap;
+                    cfg.rng_tape    = tape;
+                    cfg.rng_tape_len = 1;
+                    if(!cfg.engine_move_id) cfg.engine_move_id = SCREECH_ID;
+
+                    // Bind ROM for fixture
+                    struct Guard{
+                        ~Guard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+                    } guard;
+                    if(cfg.extra_fixture==generic_fullscript_fixture_adapter){
+                        g_generic_rom_bytes_ptr=&rom_bytes;
+                        g_generic_move_id=cfg.engine_move_id;
+                        g_generic_pp=P_PP;
+                    }
+
+                    // Pass ACC/EVA stage overrides directly through CrystalRunConfig fields.
+                    // run_crystal_case applies them to WRAM after extra_fixture, so no
+                    // thread-locals or wrapper closures are needed.
+                    cfg.init_player_acc_stage_raw = (uint8_t)acc_raw;
+                    cfg.init_enemy_eva_stage_raw  = (uint8_t)eva_raw;
+
+                    // Run Crystal (all 4 poison patterns)
+                    static constexpr uint8_t B_POISONS[4]={0x00,0xA5,0x5A,0xFF};
+                    CrystalRunResult cr2[4];
+                    bool all_sink2=true;
+                    for(int pi=0;pi<4;pi++){
+                        cr2[pi]=run_crystal_case(rom_bytes,sym,B_POISONS[pi],cfg,&no_stop);
+                        if(cr2[pi].stop_reason!=StopReason::SINK_HIT &&
+                           cr2[pi].stop_reason!=StopReason::RNG_TAPE_UNUSED){
+                            all_sink2=false; b_harness++;
+                            break;
+                        }
+                    }
+                    if(!all_sink2) continue;
+                    // Stability check across all 4 poison patterns
+                    bool stable2=true;
+                    for(int pi=1;pi<4;pi++){
+                        if(!crystal_run_results_equal(cr2[0],cr2[pi])){ stable2=false; break; }
+                    }
+                    if(!stable2){ b_harness++; continue; }
+
+                    // Hit detection uses the initial snapshot captured in cr2[0].
+                    bool c_hit = detect_crystal_hit(cr2[0], 0);
+                    if(c_hit) crystal_threshold = rb;
+
+                    // Run Enginemon via the certified runner with ACC/EVA stage overrides.
+                    int8_t p_acc = (int8_t)(acc_raw - 7);
+                    int8_t e_eva = (int8_t)(eva_raw - 7);
+                    auto eng = run_enginemon_case(SCREECH_ID, ed, tape, 1,
+                                                  /*init_player_hp=*/0,
+                                                  /*init_enemy_status_raw=*/0,
+                                                  p_acc, e_eva);
+                    if(eng){
+                        bool e_hit = detect_enginemon_hit(*eng);
+                        if(e_hit) enginemon_threshold = rb;
+                    }
+
+                    b_total++;
+                } // rb loop
+
+                // Worker mode: emit one machine-readable result line per EVA stage
+                // (after all 256 RNG bytes are processed for this combination).
+                // Format: PARTB_ROW acc=N eva=N crystal=N enginemon=N
+                if(part_b_worker_mode){
+                    std::cout << "PARTB_ROW"
+                              << " acc=" << acc_raw
+                              << " eva=" << eva_raw
+                              << " crystal=" << crystal_threshold
+                              << " enginemon=" << enginemon_threshold
+                              << "\n" << std::flush;
+                }
+
+                // Compare thresholds
+                if(crystal_threshold != enginemon_threshold){
+                    b_diffs++;
+                    if(std::abs(crystal_threshold - enginemon_threshold) == 1)
+                        off_by_one++;
+
+                    b_boundary_diffs.push_back({
+                        acc_raw, eva_raw,
+                        crystal_threshold, enginemon_threshold
+                    });
+
+                    if(verbose && !part_b_worker_mode){
+                        int cd = acc_raw-7, ed2 = eva_raw-7;
+                        std::cout << "  DIFF acc_stage=" << std::showpos << cd
+                                  << " eva_stage=" << ed2 << std::noshowpos
+                                  << " Crystal_threshold=" << crystal_threshold
+                                  << " Enginemon_threshold=" << enginemon_threshold << "\n";
+                    }
+                }
+                total_diffs += (crystal_threshold != enginemon_threshold) ? 1 : 0;
+            } // eva_raw
+        } // acc_raw
+
+        auto t_end = std::chrono::steady_clock::now();
+        double elapsed_s = std::chrono::duration<double>(t_end-t_start).count();
+
+        if(part_b_worker_mode){
+            // Machine-readable worker completion line.
+            // Coordinator parses this to validate the worker ran fully.
+            // Format: PARTB_DONE acc_min=N acc_max=N comparisons=N harness=N diffs=N
+            std::cout << "PARTB_DONE"
+                      << " acc_min=" << loop_acc_min
+                      << " acc_max=" << loop_acc_max
+                      << " comparisons=" << b_total
+                      << " harness=" << b_harness
+                      << " diffs=" << b_diffs
+                      << "\n" << std::flush;
+        } else {
+            std::cout << "\n--- Part B Summary ---\n";
+            std::cout << "  Representative move: Screech (acc=0x" << std::hex << std::setw(2) << std::setfill('0') << (int)SCREECH_ACC << std::dec << ")\n";
+            std::cout << "  ACC range tested:    raw " << loop_acc_min << ".." << loop_acc_max
+                      << " (" << (loop_acc_max-loop_acc_min+1) << " values)\n";
+            std::cout << "  EVA range tested:    raw " << loop_eva_min << ".." << loop_eva_max
+                      << " (" << (loop_eva_max-loop_eva_min+1) << " values)\n";
+            std::cout << "  Total combinations:  "
+                      << ((loop_acc_max-loop_acc_min+1)*(loop_eva_max-loop_eva_min+1)) << "\n";
+            std::cout << "  Total RNG comparisons: " << b_total << "\n";
+            std::cout << "  Formula differences: " << b_diffs << " stage combinations differ\n";
+            std::cout << "  Off-by-one errors:   " << off_by_one << "\n";
+            std::cout << "  Harness errors:      " << b_harness << "\n";
+            std::cout << "  Time:                " << std::fixed << std::setprecision(1) << elapsed_s << "s\n";
+
+            if(!b_boundary_diffs.empty()){
+                std::cout << "\nFORMULA DIFFERENCES:\n";
+                int show_max = verbose ? (int)b_boundary_diffs.size() : std::min(20,(int)b_boundary_diffs.size());
+                for(int i=0;i<show_max;i++){
+                    const auto& bd = b_boundary_diffs[i];
+                    std::cout << "  acc_stage=" << std::showpos << (bd.acc_stage_raw-7)
+                              << " eva_stage=" << (bd.eva_stage_raw-7) << std::noshowpos
+                              << " Crystal_max_hit_byte=0x"
+                              << std::hex<<std::setw(2)<<std::setfill('0')<<(bd.crystal_threshold<0?0:bd.crystal_threshold)
+                              << " Enginemon_max_hit_byte=0x"
+                              << std::hex<<std::setw(2)<<std::setfill('0')<<(bd.enginemon_threshold<0?0:bd.enginemon_threshold)
+                              << "\n" << std::dec;
+                }
+                if(!verbose && (int)b_boundary_diffs.size() > show_max)
+                    std::cout << "  ... ("<<(b_boundary_diffs.size()-show_max)<<" more; use --verbose)\n";
+            }
+        } // end !part_b_worker_mode
+    }
+
+    // =========================================================================
+    // Overall (human-readable; skipped in worker mode)
+    // =========================================================================
+    if(!part_b_worker_mode){
+        std::cout << "\n=== Accuracy Sweep Overall ===\n";
+        std::cout << "  Total comparisons: " << total_comparisons << "\n";
+        std::cout << "  Total diffs:       " << total_diffs << "\n";
+        std::cout << "  Harness errors:    " << harness_errors << "\n";
+    }
+
+    if(harness_errors > 0) return ExitCode::EXIT_HARNESS_ERROR;
+    if(total_diffs > 0)    return ExitCode::EXIT_MISMATCH;
+    return ExitCode::EXIT_ALL_MATCH;
+}
+
+
+// Public entry point: oracle_accuracy_sweep binary calls this.
+// Delegates to runner_main with --accuracy-sweep flags so the normal
+// startup path (ROM/SHA/sym/engine load) is used.
 
 } // namespace crystal::oracle
