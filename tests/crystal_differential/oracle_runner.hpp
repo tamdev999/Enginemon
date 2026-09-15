@@ -100,4 +100,12 @@ int run_harness_negative_tests(const char* rom_path, const char* sym_path,
 int run_accuracy_sweep_benchmark(const char* rom_path, const char* sym_path,
                                   int acc_raw = 7);
 
+// ============================================================================
+// run_checkhit_pilot
+//
+// Direct BattleCommand_CheckHit entry pilot (Pilot A + Pilot B).
+// Returns 0 on full pass, 1 on any failure or semantic disagreement.
+// ============================================================================
+int run_checkhit_pilot(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle

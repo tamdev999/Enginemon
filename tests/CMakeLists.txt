@@ -392,6 +392,23 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # sweep_checkhit_pilot -- direct BattleCommand_CheckHit entry pilot
+    # Proves bit-identical hit/miss, RNG trace, stop-reason vs frozen full-script.
+    # Usage: sweep_checkhit_pilot <rom_path> <sym_path>
+    # Not added to ctest by default (manual pilot only).
+    # ============================================================================
+    add_executable(sweep_checkhit_pilot
+        crystal_differential/sweep_checkhit_pilot.cpp
+    )
+    target_link_libraries(sweep_checkhit_pilot PRIVATE oracle_runner_lib)
+    target_include_directories(sweep_checkhit_pilot PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(sweep_checkhit_pilot PRIVATE /bigobj)
+    endif()
+
+    # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
     # Legacy entry point kept for compatibility.
     # Requires: <rom_path> <sym_path> [--jobs N]
