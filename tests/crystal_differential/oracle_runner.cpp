@@ -266,6 +266,8 @@ struct SymCache {
     Sym BattleCommand_CheckHit;  // 0D:4D32 -- direct accuracy-check entry (full pipeline)
     // DamageCalc direct entry -- used by the DamageCalc pilot
     Sym BattleCommand_DamageCalc; // 0D:5612 -- damage arithmetic entry
+    // DamageStats entry -- full stat-selection pipeline (physical/special, stages, crit, screens)
+    Sym BattleCommand_DamageStats; // 0D:52DC -- stat selection entry (precedes DamageCalc)
     // Present -- entry is BattleCommand_Present directly (not DoMove)
     Sym BattleCommand_Present;   // 0D:7874 -- direct entry for all Present cases
     Sym AnimateCurrentMoveEitherSide; // 0D:7DE9 -- damage path sink (called inside Present, before ret)
@@ -386,6 +388,7 @@ struct SymCache {
             {"BattleRandom",                   &out->BattleRandom},
             {"BattleCommand_CheckHit",         &out->BattleCommand_CheckHit},
             {"BattleCommand_DamageCalc",       &out->BattleCommand_DamageCalc},
+            {"BattleCommand_DamageStats",       &out->BattleCommand_DamageStats},
             {"DoMove",                         &out->DoMove},
             {"BattleCommand_Present",          &out->BattleCommand_Present},
             {"AnimateCurrentMoveEitherSide",   &out->AnimateCurrentMoveEitherSide},
@@ -9405,6 +9408,417 @@ int run_damagecalc_edge_grid(const char* rom_path, const char* sym_path)
     }
 
     return all_pass ? 0 : 1;
+}
+
+
+// ============================================================================
+// run_damagestats_crit_pilot
+// ============================================================================
+//
+// Live-proves the Crystal vs Enginemon DamageStats crit-stat divergence.
+//
+// For each (atk_stage, def_stage, screen_on, crit) combination:
+//
+//   Crystal:
+//     Entry  = BattleCommand_DamageStats (0D:52DC)
+//     Sink   = EndMoveEffect (0D:52A3)
+//     Fixture sets:
+//       wPlayerStatLevels[ATK]  = 7 + atk_stage_delta   (raw Crystal byte)
+//       wEnemyStatLevels[DEF]   = 7 + def_stage_delta
+//       wPlayerStats (wPlayerAttack region) = staged attacker stat
+//                                         = floor(P_ATK * mult_num / mult_den)
+//       wEnemyStats (wEnemyDefense region)  = staged defender stat
+//       wEnemyMonDefense (bank-1 raw)       = P_ATK baseline (unstaged path reference)
+//       wEnemyScreens   = SCREENS_REFLECT (bit4=0x10) if screen_on, else 0
+//       wCriticalHit    = 1 if crit, else 0
+//     Output: wCurDamage extracted from result.cur_damage
+//             Crystal B,C captured live at PC 0D:5612 via sampling hook
+//
+//   Enginemon:
+//     Constructs BattlePokemon with same base stats and explicit stage values.
+//     Sets field_.reflect_opponent = 5 (turns) if screen_on.
+//     Calls bat.execute_turn() → execute_move_damaging → calculate_damage.
+//     Output: E_HP - opponent_pokemon().stats.hp
+//
+//   Physical move: Return (move ID 216, power = happiness*10/25, P_ATK=110, E_DEF=110).
+//   No STAB (player types = Normal 0x00; Return is Normal-type).
+//   Neutral type effectiveness (Normal vs Normal = 1x).
+//   Variation = full-pass-through (tape: 0x80=no-crit-roll, 0xB2=DamVar-loop, 0xFF=DamVar-exit).
+//   No item, no recoil, no secondary.
+//
+// Stage multipliers (Crystal data/battle/stat_multipliers.asm, index = raw-1):
+//   raw 5 (stage -2) = 50/100    raw 7 (stage 0) = 1/1
+//   raw 6 (stage -1) = 66/100    raw 8 (stage +1) = 15/10
+//                                raw 9 (stage +2) = 2/1
+// ============================================================================
+
+int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path)
+{
+    // ---- Load ROM -----------------------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr << "Cannot open ROM: " << rom_path << "\n"; return 1; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    if(rom_bytes.size() != CRYSTAL_ROM_SIZE){ std::cerr << "Wrong ROM size\n"; return 1; }
+    {
+        std::string sha = sha1_hex(rom_bytes.data(), rom_bytes.size());
+        if(sha != PINNED_ROM_SHA1){ std::cerr << "ROM SHA mismatch\n"; return 1; }
+    }
+    SymCache sym;
+    {
+        std::string err = SymCache::load(sym_path, &sym);
+        if(!err.empty()){ std::cerr << "Sym: " << err << "\n"; return 1; }
+    }
+    {
+        std::string err = validate_fixture_addresses(sym);
+        if(!err.empty()){ std::cerr << "Fixture: " << err << "\n"; return 1; }
+    }
+    if(sym.BattleCommand_DamageStats.addr == 0){
+        std::cerr << "BattleCommand_DamageStats not found in sym\n"; return 1;
+    }
+
+    // Load EngineData (move registry + battle rules from ROM)
+    auto rom_data = crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){ std::cerr << "RomData::load failed\n"; return 1; }
+    const crystal::ExtractionProfile* profile =
+        crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
+    if(!profile){ std::cerr << "no profile for ROM\n"; return 1; }
+    auto ed_opt = load_engine_data(*rom_data, *profile);
+    if(!ed_opt){ std::cerr << "load_engine_data failed\n"; return 1; }
+    const EngineData& ed = *ed_opt;
+
+    // Return move
+    static constexpr uint16_t RETURN_MOVE_ID = 216;
+    const enginemon::MoveId eng_move_id = (enginemon::MoveId)RETURN_MOVE_ID;
+
+    std::cout << "=== DamageStats Crit Pilot ===\n"
+              << "  Entry: BattleCommand_DamageStats 0x"
+              << std::hex << (int)sym.BattleCommand_DamageStats.bank
+              << ":0x" << sym.BattleCommand_DamageStats.addr << std::dec << "\n"
+              << "  Move:  Return (id=" << RETURN_MOVE_ID << ") physical, Normal-type\n"
+              << "  Base:  P_ATK=" << P_ATK << " E_DEF=" << E_DEF
+              << " P_LEVEL=" << (int)P_LEVEL << "\n"
+              << "  Poison patterns: 0x00 0xA5 0x5A 0xFF\n"
+              << std::flush;
+
+    // RNG tape: crit byte = 0x10 (<17 → crit), DamVar bytes = 0xB2 + 0xFF (variation=1.0).
+    // For non-crit: byte 0 = 0x80 (>=17 → no-crit).
+    static constexpr uint8_t TAPE_CRIT_FULLVAR[] = { 0x10, 0xB2, 0xFF };
+    static constexpr uint8_t TAPE_NOCRIT_FULLVAR[] = { 0x80, 0xB2, 0xFF };
+
+    // Stage multiplier table (Crystal raw index = raw - 1, 0-indexed, raw 1..13)
+    // Crystal StatLevelMultipliers: pairs {num, den} for stages -6..+6
+    auto crystal_staged_stat = [](uint16_t base, int delta) -> uint16_t {
+        // delta = Enginemon stage (-6..+6); raw = 7 + delta; index = raw - 1 = 6 + delta
+        static constexpr uint16_t kNum[13] = { 25,28,33,40,50,66,  1,15, 2,25, 3,35, 4 };
+        static constexpr uint16_t kDen[13] = {100,100,100,100,100,100,1,10,1,10,1,10,1 };
+        int idx = 6 + delta; // neutral delta=0 → idx=6 → {1,1}
+        if(idx < 0)  idx = 0;
+        if(idx > 12) idx = 12;
+        // Crystal CalcBattleStats: result = floor(base * num / den), min 1
+        uint32_t r = ((uint32_t)base * kNum[idx]) / kDen[idx];
+        if(r == 0) r = 1;
+        return (uint16_t)r;
+    };
+
+    // Stage index in wPlayerStatLevels / wEnemyStatLevels:
+    // [0]=ATK [1]=DEF [2]=SPD [3]=SATK [4]=SDEF [5]=ACC [6]=EVA
+    static constexpr int ATK_IDX = 0;
+    static constexpr int DEF_IDX = 1;
+    static constexpr uint8_t SCREENS_REFLECT_BIT = 0x10; // bit 4
+
+    // Fixture thread-locals for this pilot
+    static thread_local int8_t  g_ds_atk_delta  = 0;   // Enginemon stage delta for attacker atk
+    static thread_local int8_t  g_ds_def_delta  = 0;   // Enginemon stage delta for defender def
+    static thread_local bool    g_ds_screen_on  = false;
+    static thread_local bool    g_ds_crit       = false;
+    static thread_local uint16_t g_ds_crit_addr  = 0;
+    static thread_local uint16_t g_ds_screens_addr = 0;
+    static thread_local uint16_t g_ds_player_stat_lvl_addr = 0;
+    static thread_local uint16_t g_ds_enemy_stat_lvl_addr  = 0;
+    // wPlayerStats = stage-modified attacker stats (wPlayerAttack region)
+    static thread_local uint16_t g_ds_player_stats_addr = 0;
+    // wEnemyStats = stage-modified defender stats (wEnemyDefense region)
+    static thread_local uint16_t g_ds_enemy_stats_addr  = 0;
+    // wEnemyMonDefense (bank-1) = raw unmodified defender defense (for UNSTAGED crit path)
+    static thread_local uint16_t g_ds_enemy_mon_def_addr = 0;
+
+    static FixtureFn ds_fixture = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
+        // 1. Generic full-script fixture: loads wPlayerMoveStruct from ROM (power, effect, type correct for Return)
+        //    Also sets wBattleMon*, wEnemyMon*, HP, PP, types, misc battle state.
+        generic_fullscript_fixture_adapter(gb, wram, sym2);
+
+        // 2. Stat stage level bytes (Crystal raw: 7 = neutral, 1..13 range)
+        {
+            uint8_t* psl = wram + wram_off(g_ds_player_stat_lvl_addr);
+            uint8_t* esl = wram + wram_off(g_ds_enemy_stat_lvl_addr);
+            for(int i=0;i<8;i++){ psl[i]=7; esl[i]=7; } // reset all to neutral
+            psl[ATK_IDX] = (uint8_t)(7 + g_ds_atk_delta); // player ATK stage
+            esl[DEF_IDX] = (uint8_t)(7 + g_ds_def_delta);  // enemy DEF stage
+        }
+
+        // 3. wPlayerStats (=wPlayerAttack region): staged attacker stat
+        //    wEnemyStats (=wEnemyAttack region): staged defender stat
+        //    Crystal DamageStats STAGED path reads these (non-crit, or crit where def<=atk).
+        {
+            static constexpr uint16_t kNum[13] = { 25,28,33,40,50,66,  1,15, 2,25, 3,35, 4 };
+            static constexpr uint16_t kDen[13] = {100,100,100,100,100,100,1,10,1,10,1,10,1 };
+            auto staged = [](uint16_t base, int delta) -> uint16_t {
+                int idx = 6 + delta;
+                if(idx<0) idx=0; if(idx>12) idx=12;
+                uint32_t r = ((uint32_t)base * kNum[idx]) / kDen[idx];
+                return (uint16_t)(r==0?1:r);
+            };
+            auto be16 = [](uint8_t* d, uint16_t v){ d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF); };
+            // wPlayerStats = wPlayerAttack region (0xC6B6): staged attack
+            uint8_t* ps = wram + wram_off(g_ds_player_stats_addr);
+            be16(ps+0, staged(P_ATK, g_ds_atk_delta)); // ATK staged
+            be16(ps+2, P_DEF);
+            be16(ps+4, P_SPD);
+            be16(ps+6, P_SATK);
+            be16(ps+8, P_SDEF);
+            // wEnemyStats = wEnemyAttack region (0xC6C1): staged defense
+            uint8_t* es = wram + wram_off(g_ds_enemy_stats_addr);
+            be16(es+0, E_ATK);
+            be16(es+2, staged(E_DEF, g_ds_def_delta)); // DEF staged
+            be16(es+4, E_SPD);
+            be16(es+6, E_SATK);
+            be16(es+8, E_SDEF);
+        }
+
+        // 4. wEnemyMonDefense (bank-1, 0xD21C): RAW unstaged defender defense
+        //    Crystal UNSTAGED crit path reads this (def_stage < atk_stage).
+        {
+            auto be16 = [](uint8_t* d, uint16_t v){ d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF); };
+            be16(wram + wram_off(g_ds_enemy_mon_def_addr), E_DEF);
+        }
+
+        // 5. Screen: Reflect on enemy's side (enemy is defending, player is attacking)
+        wram[wram_off(sym2.wEnemyScreens.addr)] = g_ds_screen_on ? SCREENS_REFLECT_BIT : 0;
+        wram[wram_off(sym2.wPlayerScreens.addr)] = 0;
+
+        // 6. Player types = Normal (0x00) — no STAB for Normal-type Return
+        wram[wram_off(sym2.wBattleMonType1.addr)] = 0x00;
+        wram[wram_off(sym2.wBattleMonType2.addr)] = 0x00;
+
+        // 7. wCriticalHit is set by the RNG tape (0x10 < 17 = crit, 0x80 >= 17 = no-crit).
+        //    We also pre-set it to force the correct path in CheckDamageStatsCritical.
+        //    This overrides any stale value left from fixture.
+        wram[wram_off(g_ds_crit_addr)] = g_ds_crit ? 1 : 0;
+    };
+    // ---- Test cases ---------------------------------------------------------
+    struct DSCase {
+        const char* name;
+        int8_t  atk_delta;    // attacker ATK stage delta (-6..+6)
+        int8_t  def_delta;    // defender DEF stage delta (-6..+6)
+        bool    screen_on;    // Reflect active on defender side
+        bool    crit;         // force crit
+        bool    is_control;   // non-crit control case
+    };
+
+    const DSCase cases[] = {
+        // --- Crit cases: stage pairs from the analysis ---
+        { "crit/-2/ 0/screen-off", -2,  0, false, true,  false },
+        { "crit/-2/ 0/screen-ON",  -2,  0, true,  true,  false },
+        { "crit/ 0/+2/screen-off",  0, +2, false, true,  false },
+        { "crit/ 0/+2/screen-ON",   0, +2, true,  true,  false },
+        { "crit/+2/+1/screen-off", +2, +1, false, true,  false },
+        { "crit/+2/+1/screen-ON",  +2, +1, true,  true,  false },
+        { "crit/+1/+2/screen-off", +1, +2, false, true,  false },
+        { "crit/+1/+2/screen-ON",  +1, +2, true,  true,  false },
+        { "crit/+2/-1/screen-off", +2, -1, false, true,  false },
+        { "crit/+2/-1/screen-ON",  +2, -1, true,  true,  false },
+        { "crit/-1/-2/screen-off", -1, -2, false, true,  false },
+        { "crit/-1/-2/screen-ON",  -1, -2, true,  true,  false },
+        // --- Non-crit controls (neutral stages) ---
+        { "nocrit/0/0/screen-off",   0,  0, false, false, true  },
+        { "nocrit/0/0/screen-ON",    0,  0, true,  false, true  },
+    };
+    const int total = (int)(sizeof(cases)/sizeof(cases[0]));
+
+    static constexpr uint8_t POISON_PATTERNS[4] = { 0x00, 0xA5, 0x5A, 0xFF };
+
+    int passed = 0, mismatched = 0, harness_errors = 0;
+
+    std::cout << "\n  " << std::left << std::setw(30) << "Case"
+              << std::right
+              << std::setw(8) << "CrysBC"
+              << std::setw(8) << "CrDmg"
+              << std::setw(8) << "EngDmg"
+              << "  match\n"
+              << "  " << std::string(62,'-') << "\n";
+
+    std::atomic<bool> no_stop{false};
+    const MoveSpec* ms = find_move(RETURN_MOVE_ID);
+    if(!ms){ std::cerr << "Return not registered\n"; return 1; }
+
+    for(const auto& tc : cases){
+        // ---- Bind fixture thread-locals ----
+        g_ds_atk_delta          = tc.atk_delta;
+        g_ds_def_delta          = tc.def_delta;
+        g_ds_screen_on          = tc.screen_on;
+        g_ds_crit               = tc.crit;
+        g_ds_crit_addr          = sym.wCriticalHit.addr;
+        g_ds_screens_addr       = sym.wEnemyScreens.addr;
+        g_ds_player_stat_lvl_addr = sym.wPlayerStatLevels.addr;
+        g_ds_enemy_stat_lvl_addr  = sym.wEnemyStatLevels.addr;
+        g_ds_player_stats_addr  = sym.wPlayerStats.addr;   // wPlayerAttack region (0xC6B6)
+        g_ds_enemy_stats_addr   = sym.wEnemyStats.addr;    // wEnemyAttack region (0xC6C1)
+        g_ds_enemy_mon_def_addr = sym.wEnemyMonDefense.addr; // bank-1 raw def (0xD21C)
+
+        // ---- Crystal run ----
+        CrystalRunConfig cfg{};
+        cfg.entry         = sym.DoMove;  // full-script: DoMove runs NormalHit script (DamageStats->DamageCalc)
+        cfg.sink_pcs[0]   = sym.EndMoveEffect.addr;
+        cfg.sink_names[0] = "EndMoveEffect";
+        cfg.num_sinks     = 1;
+        cfg.insn_cap      = ms->insn_cap;
+        cfg.rng_tape      = tc.crit ? TAPE_CRIT_FULLVAR : TAPE_NOCRIT_FULLVAR;
+        cfg.rng_tape_len  = 3;
+        cfg.extra_fixture  = ds_fixture;
+        cfg.engine_move_id = RETURN_MOVE_ID;
+        // Bind globals that generic_fullscript_fixture_adapter reads
+        struct FxGuard { ~FxGuard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; } } fxguard;
+        g_generic_rom_bytes_ptr = &rom_bytes;
+        g_generic_move_id       = RETURN_MOVE_ID;
+        g_generic_pp            = P_PP;
+
+
+
+        // Run all 4 poison patterns — capture wCurDamage and live B,C snapshot
+        uint16_t crystal_damage_vals[4] = {};
+        uint8_t  crystal_b_vals[4]      = {};
+        uint8_t  crystal_c_vals[4]      = {};
+        bool harness_ok = true;
+        for(int pi = 0; pi < 4; ++pi){
+            CrystalRunResult r = run_crystal_case(rom_bytes, sym, POISON_PATTERNS[pi], cfg, &no_stop);
+            if(r.stop_reason != StopReason::SINK_HIT){
+                std::cerr << "  HARNESS_ERROR " << tc.name << " pi=" << pi
+                          << " stop=" << stop_reason_str(r.stop_reason) << "\n";
+                ++harness_errors;
+                harness_ok = false;
+                break;
+            }
+            // Use HP difference for full-script damage (wCurDamage may reset after applydamage).
+            const uint16_t hp_diff = (r.enemy_hp < E_HP) ? (uint16_t)(E_HP - r.enemy_hp) : 0u;
+            crystal_damage_vals[pi] = hp_diff;
+            crystal_b_vals[pi] = r.damage_calc_entry.sampled ? r.damage_calc_entry.b : 0xFF;
+        }
+        if(!harness_ok) continue;
+
+        // Poison stability check
+        bool stable = true;
+        for(int pi = 1; pi < 4; ++pi){
+            if(crystal_damage_vals[pi] != crystal_damage_vals[0] ||
+               crystal_b_vals[pi] != crystal_b_vals[0] ||
+               crystal_c_vals[pi] != crystal_c_vals[0]){ stable = false; break; }
+        }
+        if(!stable){
+            std::cerr << "  POISON_UNSTABLE " << tc.name << "\n";
+            ++harness_errors;
+            continue;
+        }
+        const uint16_t cr_damage = crystal_damage_vals[0];
+        const uint8_t  cr_b      = crystal_b_vals[0];
+        const uint8_t  cr_c      = crystal_c_vals[0];
+
+        // ---- Enginemon run ----
+        // Build stages matching the Crystal fixture: ATK at atk_delta, DEF at def_delta, rest neutral.
+        int8_t p_stages[7] = { tc.atk_delta, 0, 0, 0, 0, 0, 0 };  // [ATK DEF SPD SATK SDEF ACC EVA]
+        int8_t e_stages[7] = { 0, tc.def_delta, 0, 0, 0, 0, 0 };
+
+        auto eng_opt = [&]() -> std::optional<uint16_t> {
+            enginemon::Registries reg{}; reg.moves = ed.moves;
+            enginemon::Party party;
+            { enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+              pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm); }
+            enginemon::Battle bat(enginemon::BattleType::Wild, party, reg, ed.rules);
+
+            auto make_bp = [&](enginemon::MoveId mid, uint16_t atk, uint16_t def,
+                                uint16_t spd, uint16_t satk, uint16_t sdef,
+                                uint16_t hp, uint8_t lvl, const int8_t* sd){
+                enginemon::BattlePokemon bp{};
+                bp.species=1; bp.type1=0; bp.type2=0; bp.level=lvl; // Normal types
+                bp.stats.hp=bp.stats.max_hp=hp; bp.base_stats.hp=bp.base_stats.max_hp=hp;
+                bp.stats.attack=bp.base_stats.attack=atk;
+                bp.stats.defense=bp.base_stats.defense=def;
+                bp.stats.speed=bp.base_stats.speed=spd;
+                bp.stats.special_attack=bp.base_stats.special_attack=satk;
+                bp.stats.special_defense=bp.base_stats.special_defense=sdef;
+                bp.happiness=200; bp.dv_atk=bp.dv_def=bp.dv_spd=bp.dv_spc=15;
+                bp.moves[0].move=mid; bp.moves[0].pp=bp.moves[0].max_pp=P_PP;
+                bp.stages.attack=sd[0]; bp.stages.defense=sd[1]; bp.stages.speed=sd[2];
+                bp.stages.special_attack=sd[3]; bp.stages.special_defense=sd[4];
+                bp.stages.accuracy=sd[5]; bp.stages.evasion=sd[6];
+                return bp;
+            };
+
+            bat.player_pokemon()   = make_bp(eng_move_id, P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF, P_HP, P_LEVEL, p_stages);
+            bat.opponent_pokemon() = make_bp(enginemon::MOVE_NONE, E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF, E_HP, E_LEVEL, e_stages);
+
+            // Screen: Reflect on opponent's side (enemy is defending)
+            if(tc.screen_on){
+                bat.set_field_screens(0, 0, 5, 0); // reflect_opponent=5 turns
+            }
+
+            // Feed RNG tape
+            const uint8_t* tape     = tc.crit ? TAPE_CRIT_FULLVAR : TAPE_NOCRIT_FULLVAR;
+            size_t         tape_len = 3;
+            size_t rng_idx = 0;
+            bat.set_rng_callback([tape, tape_len, &rng_idx]()->uint32_t{
+                if(rng_idx >= tape_len) return 0xFF;
+                return (uint32_t)tape[rng_idx++];
+            });
+
+            bat.set_player_action(enginemon::ActionFight{0, 0});
+            bat.set_opponent_action(enginemon::ActionFight{0, 0});
+            bat.execute_turn();
+
+            const uint16_t opp_hp   = (uint16_t)bat.opponent_pokemon().stats.hp;
+            const uint16_t opp_max  = E_HP;
+            if(opp_hp >= opp_max) return (uint16_t)0; // no damage
+            return (uint16_t)(opp_max - opp_hp);
+        }();
+
+        if(!eng_opt){
+            std::cerr << "  Enginemon run failed for " << tc.name << "\n";
+            ++harness_errors;
+            continue;
+        }
+        const uint16_t eng_damage = *eng_opt;
+
+        const bool match = (cr_damage == eng_damage);
+        if(match) ++passed;
+        else       ++mismatched;
+
+        // Print: B,C as "B=xx,C=yy"
+        char bc_str[16]; snprintf(bc_str, sizeof(bc_str), "%3d,%3d", (int)cr_b, (int)cr_c);
+
+        std::cout << "  " << std::left << std::setw(30) << tc.name
+                  << std::right
+                  << std::setw(8) << bc_str
+                  << std::setw(8) << cr_damage
+                  << std::setw(8) << eng_damage
+                  << "  " << (match ? "PASS" : "MISMATCH") << "\n";
+    }
+
+    const int crit_cases    = 12;
+    const int control_cases = 2;
+    const int crit_matched  = std::max(0, std::min(passed, crit_cases));
+    const int ctrl_matched  = std::max(0, passed - crit_matched);
+
+    std::cout << "\n--- Summary ---\n"
+              << "  Total: " << passed << "/" << total << " match"
+              << "  MISMATCH=" << mismatched << "  HARNESS_ERROR=" << harness_errors << "\n"
+              << "  Crit cases: " << crit_matched << "/" << crit_cases << "\n"
+              << "  Non-crit controls: " << ctrl_matched << "/" << control_cases << "\n"
+              << "  DOES LIVE ORACLE CONFIRM CRIT-STAT DIVERGENCE? "
+              << (mismatched > 0 ? "yes" : "no") << "\n"
+              << "\n  production modified? no\n";
+
+    return (harness_errors == 0) ? 0 : 1;
 }
 
 } // namespace crystal::oracle

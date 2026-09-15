@@ -179,4 +179,17 @@ int run_damagecalc_level_power_grid(const char* rom_path, const char* sym_path,
 // ============================================================================
 int run_damagecalc_edge_grid(const char* rom_path, const char* sym_path);
 
+// ============================================================================
+// run_damagestats_crit_pilot
+//
+// Live-proves the DamageStats crit-stat divergence between Crystal and Enginemon.
+// Tests 6 (atk_stage, def_stage) crit pairs × screen OFF/ON = 12 crit cases
+// plus 2 non-crit neutral controls.
+// Physical Return (move 216), P_ATK=110, E_DEF=110, P_LEVEL=50.
+// Crystal entry: BattleCommand_DamageStats (0D:52DC).
+// Reports Crystal B,C at DamageCalc entry for each case.
+// Returns 0 if all cases ran (exit code independent of match/mismatch).
+// ============================================================================
+int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle

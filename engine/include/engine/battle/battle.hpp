@@ -407,6 +407,15 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         field_.spikes_opponent = opponent_side;
     }
 
+    // Used to inject screen state for differential tests.
+    void set_field_screens(uint8_t reflect_player, uint8_t light_screen_player,
+                           uint8_t reflect_opponent, uint8_t light_screen_opponent) {
+        field_.reflect_player        = reflect_player;
+        field_.light_screen_player   = light_screen_player;
+        field_.reflect_opponent      = reflect_opponent;
+        field_.light_screen_opponent = light_screen_opponent;
+    }
+
     // Registry access for AI and other consumers
     const Registries& registries() const { return registries_; }
 
