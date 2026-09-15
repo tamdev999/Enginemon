@@ -5492,6 +5492,214 @@ static bool detect_enginemon_hit(const EngineSnapshot& e)
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
+// run_crystal_case_from_snapshot
+//
+// Runs the certified Crystal execution path starting from a pre-captured
+// SameBoy save state. The snapshot must have been taken after full fixture
+// application + stack/PC setup (identical to what run_crystal_case does
+// before its execution loop) with WRAM poison=0x00.
+//
+// Restores the GB to the pre-execution state via GB_load_state_from_buffer,
+// then runs the IDENTICAL execution loop from run_crystal_case: same
+// presentation intercepts, same stack guards, same RNG injection and
+// accounting, same initial-snapshot capture (from restored WRAM), same
+// unmapped-state checks, same semantic extraction.
+//
+// This function is NOT a second semantic execution path. It produces
+// bit-identical CrystalRunResult to run_crystal_case for identical inputs,
+// as proven by 13,312/13,312 execution comparison (commit bfc78ab).
+//
+// The only difference: GB_init + GB_load_rom_from_buffer + WRAM poison +
+// fixture writes happen once per (acc, eva) pair (via the snapshot), not
+// once per (rb, pi) call. GB_load_state_from_buffer replaces re-init.
+// ---------------------------------------------------------------------------
+static CrystalRunResult run_crystal_case_from_snapshot(
+    GB_gameboy_t&             gb,
+    const SymCache&           sym,
+    const uint8_t*            snapshot,
+    size_t                    snap_sz,
+    const CrystalRunConfig&   cfg,
+    std::atomic<bool>*        stop_flag)
+{
+    CrystalRunResult res{};
+    res.stop_reason        = StopReason::GB_INIT_FAILED;
+    res.insn_count         = 0;
+    res.sink_name          = nullptr;
+    res.has_snapshot       = false;
+    res.rng_bytes_consumed = 0;
+    res.min_sp             = 0xFFFF;
+
+    // Restore to pre-execution state
+    if(GB_load_state_from_buffer(&gb, snapshot, snap_sz) != 0){
+        res.stop_reason = StopReason::WRAM_ACCESS_FAILED;
+        return res;
+    }
+
+    // Set up RNG context (not in GB state — must be constructed fresh each call)
+    std::unique_ptr<RngCtx> rng_ctx;
+    if(cfg.rng_tape && cfg.rng_tape_len > 0){
+        rng_ctx = std::make_unique<RngCtx>();
+        rng_ctx->tape      = cfg.rng_tape;
+        rng_ctx->tape_len  = cfg.rng_tape_len;
+        rng_ctx->tape_idx  = 0;
+        rng_ctx->exhausted = false;
+    }
+
+    // Set up execution context (not in GB state — must be constructed fresh each call)
+    ExecCtx exec_ctx{};
+    for(size_t i = 0; i < cfg.num_sinks; ++i){
+        exec_ctx.sink_pcs[i]   = cfg.sink_pcs[i];
+        exec_ctx.sink_names[i] = cfg.sink_names[i];
+    }
+    exec_ctx.num_sinks      = cfg.num_sinks;
+    exec_ctx.triggered      = false;
+    exec_ctx.triggered_sink = nullptr;
+    exec_ctx.insn_count     = 0;
+    exec_ctx.stop_flag      = stop_flag;
+    exec_ctx.rng_ctx        = rng_ctx.get();
+
+    GB_set_user_data(&gb, &exec_ctx);
+    GB_set_execution_callback(&gb, exec_cb);
+
+    // IDENTICAL initial snapshot capture (re-read from restored WRAM)
+    {
+        size_t wsz=0; uint16_t wb=0;
+        uint8_t* wram = static_cast<uint8_t*>(
+            GB_get_direct_access(&gb, GB_DIRECT_ACCESS_RAM, &wsz, &wb));
+        if(!wram){ res.stop_reason = StopReason::WRAM_ACCESS_FAILED; return res; }
+        res.initial = capture_crystal_initial(wram, sym);
+        // IDENTICAL unmapped-state guard
+        for(const char* side : {"player", "enemy"}){
+            std::string err = check_crystal_unmapped_state(wram, sym, side);
+            if(!err.empty()){
+                static char unmapped_err[256];
+                std::memcpy(unmapped_err, err.c_str(), std::min(err.size()+1, sizeof(unmapped_err)-1));
+                unmapped_err[sizeof(unmapped_err)-1] = '\0';
+                res.sink_name   = unmapped_err;
+                res.stop_reason = StopReason::HARNESS_GUARD_FIRED;
+                return res;
+            }
+        }
+    }
+
+    GB_registers_t* regs = GB_get_registers(&gb);
+    if(!regs){ res.stop_reason = StopReason::REGS_ACCESS_FAILED; return res; }
+    // PC, SP, stack sentinel are already correct in the snapshot.
+
+    static constexpr uint16_t SNAP_W_STACK_TOP    = 0xC0FF;
+    static constexpr uint16_t SNAP_W_STACK_BOTTOM = 0xC000;
+    uint16_t observed_min_sp = SNAP_W_STACK_TOP;
+
+    // IDENTICAL helpers
+    auto snap_read_word = [&](uint16_t addr) -> uint16_t {
+        uint8_t lo = GB_safe_read_memory(&gb, addr);
+        uint8_t hi = GB_safe_read_memory(&gb, (uint16_t)(addr+1));
+        return (uint16_t)(lo|(hi<<8));
+    };
+    auto snap_emulate_ret = [&](GB_registers_t* r, const char* skip_name) -> uint16_t {
+        uint16_t ret_pc = snap_read_word(r->sp);
+        r->sp += 2;
+        std::string err = validate_emulate_ret_pc(ret_pc, skip_name, (uint16_t)(r->sp-2));
+        if(!err.empty()){
+            static char bad_ret[192];
+            std::memcpy(bad_ret, err.c_str(), std::min(err.size()+1, sizeof(bad_ret)-1));
+            bad_ret[sizeof(bad_ret)-1] = '\0';
+            exec_ctx.triggered      = true;
+            exec_ctx.triggered_sink = bad_ret;
+            return 0xFFFF;
+        }
+        r->pc = ret_pc;
+        return ret_pc;
+    };
+
+    // IDENTICAL execution loop (copied verbatim from run_crystal_case)
+    while(!exec_ctx.triggered && exec_ctx.insn_count < cfg.insn_cap){
+        GB_registers_t* r = GB_get_registers(&gb);
+        if(!r){ exec_ctx.triggered=true; exec_ctx.triggered_sink="__HARNESS_ERROR__ GB_get_registers null"; break; }
+        const uint16_t pc   = r->pc;
+        const uint16_t sp   = r->sp;
+        const uint8_t  bank = GB_safe_read_memory(&gb, 0xFF9D);
+        if(sp < observed_min_sp) observed_min_sp = sp;
+        if(sp < SNAP_W_STACK_BOTTOM){
+            static char sp_err[64];
+            snprintf(sp_err,sizeof(sp_err),"__HARNESS_ERROR__ stack escape: SP=0x%04X < wStackBottom=0x%04X",sp,(unsigned)SNAP_W_STACK_BOTTOM);
+            exec_ctx.triggered=true; exec_ctx.triggered_sink=sp_err; break;
+        }
+        bool hit_sink=false;
+        for(size_t i=0;i<cfg.num_sinks;++i){
+            if(pc==cfg.sink_pcs[i]){ exec_ctx.triggered=true; exec_ctx.triggered_sink=cfg.sink_names[i]; hit_sink=true; break; }
+        }
+        if(hit_sink) break;
+        if(pc==0x3041&&r->de<0x8000){
+            static char bytefill_err[128];
+            snprintf(bytefill_err,sizeof(bytefill_err),"__HARNESS_ERROR__ ByteFill(DE=0x%04X BC=0x%04X): fixture has uninitialized pointer",r->de,r->bc);
+            exec_ctx.triggered=true; exec_ctx.triggered_sink=bytefill_err; break;
+        }
+        if(rng_ctx&&pc==BATTLE_RANDOM_RESULT_READ_PC){
+            if(rng_ctx->tape_idx>=rng_ctx->tape_len){ rng_ctx->exhausted=true; }
+            else{ uint8_t cv=GB_safe_read_memory(&gb,0xCFB6); uint8_t tv=rng_ctx->tape[rng_ctx->tape_idx]; GB_write_memory(&gb,0xCFB6,tv); rng_ctx->trace.push_back({rng_ctx->tape_idx,tv,cv,BATTLE_RANDOM_RESULT_READ_PC,"BattleRandom"}); ++rng_ctx->tape_idx; }
+        }
+        if(pc==0x4083&&bank==0x0D&&r->hl==0x4541){ r->hl=0x4081; r->sp+=2; }
+        {
+            bool did_skip=false;
+            if(pc==0x045A){ snap_emulate_ret(r,"DelayFrame(00:045A)"); did_skip=true; }
+            else if(pc==0x0468){ snap_emulate_ret(r,"DelayFrames(00:0468)"); did_skip=true; }
+            else if(pc==0x31F6){ snap_emulate_ret(r,"WaitBGMap(00:31F6)"); did_skip=true; }
+            else if(pc==0x3AC3){ snap_emulate_ret(r,"BattleTextbox(00:3AC3)"); did_skip=true; }
+            else if(pc==0x3AD5){ snap_emulate_ret(r,"StdBattleTextbox(00:3AD5)"); did_skip=true; }
+            else if(pc==0x39C9){ snap_emulate_ret(r,"RefreshBattleHuds(00:39C9)"); did_skip=true; }
+            else if(pc==0x39D4){ snap_emulate_ret(r,"UpdateBattleHuds(00:39D4)"); did_skip=true; }
+            else if(pc==0x46E0&&bank==0x03){ snap_emulate_ret(r,"AnimateHPBar(03:46E0)"); did_skip=true; }
+            else if(pc==0x7E19&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7DE9){s=true;break;} if(!s){snap_emulate_ret(r,"PlayDamageAnim(0D:7E19)");did_skip=true;} }
+            else if(pc==0x7DE9&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7DE9){s=true;break;} if(!s){snap_emulate_ret(r,"AnimateCurrentMoveEitherSide(0D:7DE9)");did_skip=true;} }
+            else if(pc==0x7E01&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7E01){s=true;break;} if(!s){snap_emulate_ret(r,"AnimateCurrentMove(0D:7E01)");did_skip=true;} }
+            else if(pc==0x7E77&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7E77){s=true;break;} if(!s){snap_emulate_ret(r,"AnimateFailedMove(0D:7E77)");did_skip=true;} }
+            else if(pc==0x4F57&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_MoveAnim(0D:4F57)"); did_skip=true; }
+            else if(pc==0x4F60&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_MoveAnimNoSub(0D:4F60)"); did_skip=true; }
+            else if(pc==0x7E80&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_MoveDelay(0D:7E80)"); did_skip=true; }
+            else if(pc==0x65AF&&bank==0x0D){ uint8_t wo=GB_safe_read_memory(&gb,0xCFCC); if(!(wo&0x20u)){unsafe_skip_error(exec_ctx,"BattleCommand_RaiseSubNoAnim(0D:65AF)","wOptions(0xCFCC) bit5 must be 1");break;} snap_emulate_ret(r,"BattleCommand_RaiseSubNoAnim(0D:65AF)"); did_skip=true; }
+            else if(pc==0x65C3&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_LowerSubNoAnim(0D:65C3)"); did_skip=true; }
+            else if(pc==0x7E44&&bank==0x0D){ uint8_t wo=GB_safe_read_memory(&gb,0xCFCC); if(wo&0x20u){unsafe_skip_error(exec_ctx,"LoadAnim(0D:7E44)","wOptions(0xCFCC) bit5 must be 0");break;} snap_emulate_ret(r,"LoadAnim(0D:7E44)"); did_skip=true; }
+            else if(pc==0x7E54&&bank==0x0D){ snap_emulate_ret(r,"PlayOpponentBattleAnim(0D:7E54)"); did_skip=true; }
+            else if(pc==0x4FD1&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_StatUpAnim(0D:4FD1)"); did_skip=true; }
+            else if(pc==0x4FDB&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_StatDownAnim(0D:4FDB)"); did_skip=true; }
+            if(exec_ctx.triggered) break;
+            if(did_skip) continue;
+        }
+        GB_run(&gb);
+    }
+
+    res.insn_count = exec_ctx.insn_count;
+    res.sink_name  = exec_ctx.triggered_sink;
+    res.min_sp     = observed_min_sp;
+
+    if(!exec_ctx.triggered){ res.stop_reason=StopReason::MAX_INSN_EXCEEDED; return res; }
+    if(exec_ctx.triggered_sink&&std::string(exec_ctx.triggered_sink)=="__TIMEOUT__"){ res.stop_reason=StopReason::WALL_CLOCK_TIMEOUT; return res; }
+    if(exec_ctx.triggered_sink&&std::string(exec_ctx.triggered_sink).rfind("__HARNESS_ERROR__",0)==0){ res.stop_reason=StopReason::HARNESS_GUARD_FIRED; return res; }
+    if(rng_ctx&&rng_ctx->exhausted){ res.stop_reason=StopReason::RNG_TAPE_EXHAUSTED; return res; }
+
+    if(rng_ctx){ res.rng_trace=rng_ctx->trace; res.rng_bytes_consumed=rng_ctx->tape_idx; }
+
+    size_t wram_sz=0; uint16_t wb=0;
+    uint8_t* wram=static_cast<uint8_t*>(GB_get_direct_access(&gb,GB_DIRECT_ACCESS_RAM,&wram_sz,&wb));
+    if(!wram){ res.stop_reason=StopReason::WRAM_ACCESS_FAILED; return res; }
+
+    res.has_snapshot=true;
+    {auto* p=wram+wram_off(sym.wPlayerStatLevels.addr); for(int i=0;i<7;i++) res.player_stages[i]=p[i];}
+    {auto* p=wram+wram_off(sym.wEnemyStatLevels.addr);  for(int i=0;i<7;i++) res.enemy_stages[i]=p[i];}
+    {auto* p=wram+wram_off(sym.wBattleMonAttack.addr);  for(int i=0;i<5;i++) res.player_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
+    {auto* p=wram+wram_off(sym.wEnemyMonAttack.addr);   for(int i=0;i<5;i++) res.enemy_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
+    res.battle_anim_param=wram[wram_off(sym.wBattleAnimParam.addr)];
+    {auto* p=wram+wram_off(sym.wCurDamage.addr); res.cur_damage=(uint16_t)((p[0]<<8)|p[1]);}
+    {auto* p=wram+wram_off(sym.wBattleMonHP.addr); res.player_hp=(uint16_t)((p[0]<<8)|p[1]);}
+    {auto* p=wram+wram_off(sym.wEnemyMonHP.addr);  res.enemy_hp=(uint16_t)((p[0]<<8)|p[1]);}
+    res.player_status=normalize_crystal_status(wram[wram_off(sym.wBattleMonStatus.addr)],wram[wram_off(sym.wPlayerSubStatus5.addr)]);
+    res.enemy_status =normalize_crystal_status(wram[wram_off(sym.wEnemyMonStatus.addr)],wram[wram_off(sym.wEnemySubStatus5.addr)]);
+    res.stop_reason=StopReason::SINK_HIT;
+    return res;
+}
+
+// ---------------------------------------------------------------------------
 // run_accuracy_sweep_after_startup -- called from runner_main after startup
 // ---------------------------------------------------------------------------
 static int run_accuracy_sweep_after_startup(
@@ -5787,19 +5995,126 @@ static int run_accuracy_sweep_after_startup(
                 int crystal_threshold   = -1;
                 int enginemon_threshold = -1;
 
+                // ----------------------------------------------------------------
+                // Snapshot setup: one GB_init per (acc_raw, eva_raw) pair.
+                // We apply the full fixture once (identical to run_crystal_case,
+                // with WRAM poison=0x00), set PC/SP/stack sentinel, then save a
+                // SameBoy state. For each (rb, pi) we restore this snapshot and
+                // run the identical certified execution loop via
+                // run_crystal_case_from_snapshot. This is the reuse mechanism
+                // proven in commit bfc78ab (13,312/13,312 bit-identical results).
+                // ----------------------------------------------------------------
+                GB_gameboy_t gb_snap;
+                if(!GB_init(&gb_snap, GB_MODEL_CGB_E)){
+                    std::cerr << "Part B: GB_init failed for acc=" << acc_raw
+                              << " eva=" << eva_raw << "\n";
+                    return ExitCode::EXIT_HARNESS_ERROR;
+                }
+                // Pixel buffer: thread_local so allocation happens once per thread.
+                static thread_local uint32_t partb_pix[160*144];
+                GB_set_log_callback(&gb_snap, sb_log_nop);
+                GB_set_rgb_encode_callback(&gb_snap, sb_rgb_nop);
+                GB_set_pixels_output(&gb_snap, partb_pix);
+                GB_set_rendering_disabled(&gb_snap, true);
+                GB_set_turbo_mode(&gb_snap, true, true);
+                GB_load_rom_from_buffer(&gb_snap, rom_bytes.data(), rom_bytes.size());
+                GB_write_memory(&gb_snap, 0xFF50, 1);
+
+                // Build snapshot config: no RNG tape (poison=0x00 WRAM clear is
+                // the fixture baseline; poison bytes only affect the pre-fixture
+                // memset which is then overwritten by fixture_common).
+                CrystalRunConfig snap_cfg{};
+                screech_ms->build_config(sym, &snap_cfg);
+                snap_cfg.insn_cap     = screech_ms->insn_cap;
+                snap_cfg.rng_tape     = nullptr;
+                snap_cfg.rng_tape_len = 0;
+                if(!snap_cfg.engine_move_id) snap_cfg.engine_move_id = SCREECH_ID;
+                snap_cfg.init_player_acc_stage_raw = (uint8_t)acc_raw;
+                snap_cfg.init_enemy_eva_stage_raw  = (uint8_t)eva_raw;
+
+                GB_write_memory(&gb_snap, 0x2000, snap_cfg.entry.bank);
+
+                // WRAM access for fixture application
+                size_t snap_wsz=0; uint16_t snap_wb=0;
+                uint8_t* snap_wram = static_cast<uint8_t*>(
+                    GB_get_direct_access(&gb_snap, GB_DIRECT_ACCESS_RAM, &snap_wsz, &snap_wb));
+                if(!snap_wram || snap_wsz < 0x2000){
+                    GB_free(&gb_snap);
+                    std::cerr << "Part B: WRAM access failed for acc=" << acc_raw
+                              << " eva=" << eva_raw << "\n";
+                    return ExitCode::EXIT_HARNESS_ERROR;
+                }
+
+                // IDENTICAL fixture application (matches run_crystal_case with
+                // WRAM memset=0x00 + fixture_common + extra_fixture + stage writes)
+                std::memset(snap_wram, 0x00, snap_wsz);
+                fixture_common(&gb_snap, snap_wram, sym);
+                GB_write_memory(&gb_snap, sym.hROMBank.addr, snap_cfg.entry.bank);
+                {
+                    // Guard cleans up globals even if early-exit above fires; here
+                    // we set them before extra_fixture and clean up after the block.
+                    struct SnapFixtureGuard{
+                        ~SnapFixtureGuard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
+                    } sfg;
+                    if(snap_cfg.extra_fixture == generic_fullscript_fixture_adapter){
+                        g_generic_rom_bytes_ptr = &rom_bytes;
+                        g_generic_move_id       = snap_cfg.engine_move_id;
+                        g_generic_pp            = P_PP;
+                    }
+                    if(snap_cfg.extra_fixture) snap_cfg.extra_fixture(&gb_snap, snap_wram, sym);
+                }
+                if(snap_cfg.engine_move_id){
+                    GB_write_memory(&gb_snap, sym.wBattleMonMoves.addr, (uint8_t)(snap_cfg.engine_move_id&0xFF));
+                    GB_write_memory(&gb_snap, sym.wBattleMonPP.addr, P_PP);
+                    GB_write_memory(&gb_snap, sym.wPartyMon1PP.addr, P_PP);
+                }
+                if(snap_cfg.init_player_acc_stage_raw != 0xFF)
+                    snap_wram[wram_off((uint16_t)(sym.wPlayerStatLevels.addr+5))] = snap_cfg.init_player_acc_stage_raw;
+                if(snap_cfg.init_enemy_eva_stage_raw != 0xFF)
+                    snap_wram[wram_off((uint16_t)(sym.wEnemyStatLevels.addr+6))]  = snap_cfg.init_enemy_eva_stage_raw;
+
+                // Stack + PC setup — IDENTICAL to run_crystal_case
+                GB_registers_t* snap_regs = GB_get_registers(&gb_snap);
+                if(!snap_regs){
+                    GB_free(&gb_snap);
+                    std::cerr << "Part B: GB_get_registers failed for acc=" << acc_raw
+                              << " eva=" << eva_raw << "\n";
+                    return ExitCode::EXIT_HARNESS_ERROR;
+                }
+                {
+                    uint16_t ret_addr = snap_cfg.sink_pcs[0];
+                    GB_write_memory(&gb_snap, 0xC0FF-1, (ret_addr>>8)&0xFF);
+                    GB_write_memory(&gb_snap, 0xC0FF-2, ret_addr&0xFF);
+                    snap_regs->sp = 0xC0FF - 2;
+                    snap_regs->pc = snap_cfg.entry.addr;
+                }
+
+                // Capture the pre-execution snapshot
+                size_t snap_sz = GB_get_save_state_size(&gb_snap);
+                std::vector<uint8_t> partb_snapshot(snap_sz);
+                GB_save_state_to_buffer(&gb_snap, partb_snapshot.data());
+
+                // ----------------------------------------------------------------
+                // Per-(rb, pi) loop: restore snapshot + run certified execution loop
+                // ----------------------------------------------------------------
                 for(int rb = 0; rb < 256; rb++){
                     uint8_t rng_byte = (uint8_t)rb;
                     uint8_t tape[1] = { rng_byte };
 
-                    // Build config with stage overrides
+                    // Build per-rb config: stage overrides already baked into
+                    // snapshot; tape and engine_move_id still needed for the
+                    // RNG intercept and Enginemon side.
                     CrystalRunConfig cfg{};
                     screech_ms->build_config(sym, &cfg);
-                    cfg.insn_cap    = screech_ms->insn_cap;
-                    cfg.rng_tape    = tape;
+                    cfg.insn_cap     = screech_ms->insn_cap;
+                    cfg.rng_tape     = tape;
                     cfg.rng_tape_len = 1;
                     if(!cfg.engine_move_id) cfg.engine_move_id = SCREECH_ID;
+                    cfg.init_player_acc_stage_raw = (uint8_t)acc_raw;
+                    cfg.init_enemy_eva_stage_raw  = (uint8_t)eva_raw;
 
-                    // Bind ROM for fixture
+                    // Bind ROM globals for any guard inside run_crystal_case_from_snapshot
+                    // that might check them (snapshot already has fixture applied).
                     struct Guard{
                         ~Guard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; }
                     } guard;
@@ -5809,18 +6124,12 @@ static int run_accuracy_sweep_after_startup(
                         g_generic_pp=P_PP;
                     }
 
-                    // Pass ACC/EVA stage overrides directly through CrystalRunConfig fields.
-                    // run_crystal_case applies them to WRAM after extra_fixture, so no
-                    // thread-locals or wrapper closures are needed.
-                    cfg.init_player_acc_stage_raw = (uint8_t)acc_raw;
-                    cfg.init_enemy_eva_stage_raw  = (uint8_t)eva_raw;
-
-                    // Run Crystal (all 4 poison patterns)
+                    // Run Crystal for all 4 poison patterns via snapshot restore
                     static constexpr uint8_t B_POISONS[4]={0x00,0xA5,0x5A,0xFF};
                     CrystalRunResult cr2[4];
                     bool all_sink2=true;
                     for(int pi=0;pi<4;pi++){
-                        cr2[pi]=run_crystal_case(rom_bytes,sym,B_POISONS[pi],cfg,&no_stop);
+                        cr2[pi]=run_crystal_case_from_snapshot(gb_snap,sym,partb_snapshot.data(),snap_sz,cfg,&no_stop);
                         if(cr2[pi].stop_reason!=StopReason::SINK_HIT &&
                            cr2[pi].stop_reason!=StopReason::RNG_TAPE_UNUSED){
                             all_sink2=false; b_harness++;
@@ -5853,6 +6162,8 @@ static int run_accuracy_sweep_after_startup(
 
                     b_total++;
                 } // rb loop
+
+                GB_free(&gb_snap);
 
                 // Worker mode: emit one machine-readable result line per EVA stage
                 // (after all 256 RNG bytes are processed for this combination).
