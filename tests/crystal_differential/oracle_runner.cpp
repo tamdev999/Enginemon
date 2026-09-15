@@ -263,6 +263,8 @@ struct SymCache {
     Sym BattleRandom;            // 00:2F9F -- entry of the stub; 0x2FAD is the result-read PC
     // CheckHit direct entry -- used by the direct-CheckHit pilot
     Sym BattleCommand_CheckHit;  // 0D:4D32 -- direct accuracy-check entry (full pipeline)
+    // DamageCalc direct entry -- used by the DamageCalc pilot
+    Sym BattleCommand_DamageCalc; // 0D:5612 -- damage arithmetic entry
     // Present -- entry is BattleCommand_Present directly (not DoMove)
     Sym BattleCommand_Present;   // 0D:7874 -- direct entry for all Present cases
     Sym AnimateCurrentMoveEitherSide; // 0D:7DE9 -- damage path sink (called inside Present, before ret)
@@ -382,6 +384,7 @@ struct SymCache {
             {"AnimateCurrentMove",             &out->AnimateCurrentMove},
             {"BattleRandom",                   &out->BattleRandom},
             {"BattleCommand_CheckHit",         &out->BattleCommand_CheckHit},
+            {"BattleCommand_DamageCalc",       &out->BattleCommand_DamageCalc},
             {"DoMove",                         &out->DoMove},
             {"BattleCommand_Present",          &out->BattleCommand_Present},
             {"AnimateCurrentMoveEitherSide",   &out->AnimateCurrentMoveEitherSide},
@@ -1293,7 +1296,13 @@ struct CrystalRunConfig {
     // Crystal-only: forces a specific BattleScript dispatch without changing Enginemon's move semantics.
     // Used when the move table effect byte selects the wrong BattleScript (e.g. recoil eff=0x30->FocusEnergy).
     uint8_t     init_move_effect_override = 0;
-    // Crystal raw stat-stage overrides (index into wPlayerStatLevels / wEnemyStatLevels).
+    // TEST-ONLY: override SM83 registers d/e/b/c before the execution loop.
+    // Used by the DamageCalc pilot to inject pre-computed stats directly.
+    // 0 = no override (default). Non-zero values are applied after all other setup.
+    uint8_t     force_reg_d = 0;    // SM83 D register (high byte of DE)
+    uint8_t     force_reg_e = 0;    // SM83 E register (low byte of DE)
+    uint8_t     force_reg_b = 0;    // SM83 B register (high byte of BC)
+    uint8_t     force_reg_c = 0;    // SM83 C register (low byte of BC)
     // 0xFF = no override (default). Applied after extra_fixture so they take precedence.
     // Valid Crystal raw stage values: 0-13 (7=neutral).
     // Used by Part B to sweep ACC (player index 5) × EVA (enemy index 6) stage combinations
@@ -1698,6 +1707,12 @@ static CrystalRunResult run_crystal_case(
     if(cfg.force_sp_before_loop) regs->sp = cfg.force_sp_before_loop;
     // TEST-ONLY: override wOptions before the execution loop.
     if(cfg.force_woptions_before_loop) GB_write_memory(&gb, 0xCFCC, cfg.force_woptions_before_loop);
+    // TEST-ONLY: override SM83 registers d/e/b/c before the execution loop.
+    // Used by the DamageCalc pilot to inject pre-computed stats directly.
+    if(cfg.force_reg_d) regs->de = (uint16_t)((cfg.force_reg_d << 8) | (regs->de & 0xFF));
+    if(cfg.force_reg_e) regs->de = (uint16_t)((regs->de & 0xFF00) | cfg.force_reg_e);
+    if(cfg.force_reg_b) regs->bc = (uint16_t)((cfg.force_reg_b << 8) | (regs->bc & 0xFF));
+    if(cfg.force_reg_c) regs->bc = (uint16_t)((regs->bc & 0xFF00) | cfg.force_reg_c);
 
     // --- Invoke the shared certified execution core ---
     // (force_sp/force_woptions hooks above are test-only and apply pre-loop.)
@@ -5655,8 +5670,11 @@ static CrystalRunResult run_crystal_case_from_snapshot(
         regs->sp = 0xC0FF - 2;
         regs->pc = cfg.entry.addr;
     }
-
-    // Set up RNG context (not in GB state — must be constructed fresh each call)
+    // TEST-ONLY: override SM83 registers d/e/b/c for direct-entry pilots.
+    if(cfg.force_reg_d) regs->de = (uint16_t)((cfg.force_reg_d << 8) | (regs->de & 0xFF));
+    if(cfg.force_reg_e) regs->de = (uint16_t)((regs->de & 0xFF00) | cfg.force_reg_e);
+    if(cfg.force_reg_b) regs->bc = (uint16_t)((cfg.force_reg_b << 8) | (regs->bc & 0xFF));
+    if(cfg.force_reg_c) regs->bc = (uint16_t)((regs->bc & 0xFF00) | cfg.force_reg_c);
     std::unique_ptr<RngCtx> rng_ctx;
     if(cfg.rng_tape && cfg.rng_tape_len > 0){
         rng_ctx = std::make_unique<RngCtx>();
@@ -7290,6 +7308,341 @@ int run_checkhit_pilot(const char* rom_path, const char* sym_path)
             pilot_b_equiv == pilot_b_execs && pilot_b_harness == 0 &&
             pilot_c_equiv == pilot_c_execs && pilot_c_harness == 0 &&
             threshold_match) ? 0 : 1;
+}
+
+// ============================================================================
+// run_damagecalc_pilot
+//
+// Certifies direct entry into BattleCommand_DamageCalc (0D:5612).
+//
+// For each test case:
+//   1. Run full-script Crystal to obtain wCurDamage after DamageCalc.
+//      Uses moves where DamageVariation byte = 0xFF (multiplier=255 → damage×255/255=damage),
+//      and type = Normal vs Normal (no STAB, no type modifier) so wCurDamage at
+//      EndMoveEffect equals the exact DamageCalc output.
+//   2. Direct-call BattleCommand_DamageCalc with the same d/e/b/c/wCriticalHit.
+//   3. Compare wCurDamage outputs exactly.
+//
+// Design notes:
+//   - TAPE_RETURN = {0x80, 0xB2, 0xFF}: byte0=crit(0x80→no-crit), byte1=DamVar-loop,
+//     byte2=DamVar-exit(0xFF→multiplier=255→variation×255/255=unchanged).
+//   - Normal move vs Normal/Normal types: no STAB, no type matchup change → Stab unchanged.
+//   - Sink for full-script: EndMoveEffect (0D:52A3); wCurDamage = E_HP - enemy_hp.
+//   - Sink for direct DamageCalc: EndMoveEffect (DamageCalc ends with `ret` to caller).
+// ============================================================================
+int run_damagecalc_pilot(const char* rom_path, const char* sym_path)
+{
+    // ---- Load ROM -------------------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr << "Cannot open ROM: " << rom_path << "\n"; return 1; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    if(rom_bytes.size() != CRYSTAL_ROM_SIZE){ std::cerr << "Wrong ROM size\n"; return 1; }
+    {
+        std::string sha = sha1_hex(rom_bytes.data(), rom_bytes.size());
+        if(sha != PINNED_ROM_SHA1){ std::cerr << "ROM SHA mismatch\n"; return 1; }
+    }
+    SymCache sym;
+    {
+        std::string err = SymCache::load(sym_path, &sym);
+        if(!err.empty()){ std::cerr << "Sym: " << err << "\n"; return 1; }
+    }
+    {
+        std::string err = validate_fixture_addresses(sym);
+        if(!err.empty()){ std::cerr << "Fixture: " << err << "\n"; return 1; }
+    }
+    if(sym.BattleCommand_DamageCalc.bank == 0 && sym.BattleCommand_DamageCalc.addr == 0){
+        std::cerr << "BattleCommand_DamageCalc not found in sym file\n"; return 1;
+    }
+
+    std::cout << "=== Direct BattleCommand_DamageCalc Pilot ===\n"
+              << "  Entry: 0x" << std::hex << (int)sym.BattleCommand_DamageCalc.bank
+              << ":0x" << sym.BattleCommand_DamageCalc.addr << std::dec << "\n"
+              << std::flush;
+
+    std::atomic<bool> no_stop{false};
+
+    // ---- Helper: extract wCurDamage from a SINK_HIT result ---------------
+    // For full-script: wCurDamage = E_HP - enemy_hp (enemy took that much damage).
+    // For direct DamageCalc: wCurDamage is in the extracted cur_damage field.
+    // But since DamageCalc writes wCurDamage and then `ret`s, and our sink is EndMoveEffect,
+    // the execution stops before ApplyDamage — so enemy HP is unchanged.
+    // We read wCurDamage directly from the result's cur_damage field.
+    // Note: execute_crystal_run_loop extracts wCurDamage into res.cur_damage.
+    auto extract_cur_damage_direct = [](const CrystalRunResult& r) -> uint16_t {
+        return r.cur_damage; // wCurDamage extracted by execute_crystal_run_loop
+    };
+    // For full-script ending at EndMoveEffect after applydamage:
+    // wCurDamage is already consumed into enemy HP, but we can read damage from HP diff.
+    // Actually the full-script result also has cur_damage populated from extraction.
+    // However after applydamage, wCurDamage may be reset. Let's read from HP diff.
+    auto extract_full_script_damage = [](const CrystalRunResult& r) -> uint16_t {
+        // E_HP = 300 (fixture constant), enemy_hp = post-damage HP
+        static constexpr uint16_t E_HP_CONST = 300;
+        if(r.enemy_hp >= E_HP_CONST) return 0; // no damage or HP somehow higher
+        return E_HP_CONST - r.enemy_hp;
+    };
+
+    // ---- Test case definition -------------------------------------------
+    struct DamCalcCase {
+        const char* name;
+        uint16_t    full_script_move_id; // Crystal move ID for full-script path
+        const uint8_t* tape;             // RNG tape for full-script
+        size_t      tape_len;
+        uint8_t     force_move_effect;   // 0 = use from ROM, non-zero = override wPlayerMoveStructEffect
+        uint8_t     d_power;             // power to inject for direct call (0 = derive from ROM)
+        uint8_t     e_level;             // level (0 = use fixture P_LEVEL=50)
+        uint8_t     b_attack;            // Attack stat (0 = derive from fixture)
+        uint8_t     c_defense;           // Defense stat (0 = derive from fixture)
+        uint8_t     crit;                // wCriticalHit (0=no, 1=yes)
+        bool        no_hp_diff;          // if true, full-script does NOT decrement HP (auto-hit zero-dmg)
+    };
+
+    // TAPE_RETURN = {0x80, 0xB2, 0xFF}: no-crit, DamVar loop byte, DamVar exit byte(0xFF→mult=255→unchanged)
+    static constexpr uint8_t TAPE_NOCRIT_FULLVAR[] = { 0x80, 0xB2, 0xFF }; // crit=no, var=unchanged
+    static constexpr uint8_t TAPE_CRIT_FULLVAR[]   = { 0x10, 0xB2, 0xFF }; // crit=yes(0x10<17), var=unchanged
+
+    // Stats: P_ATK=110, E_DEF=110, P_SATK=95, E_SDEF=80, P_LEVEL=50
+    // TruncateHL_BC for 110 and 110: both fit in 8 bits unchanged → b=110, c=110
+    // TruncateHL_BC for 95 and 80: both fit in 8 bits unchanged → b=95, c=80
+    // Return power = happiness*10/25 = 200*10/25 = 80 (physical, EFFECT_RETURN=0x79)
+    // Absorb power = 20 (special, EFFECT_LEECH_HIT=0x03)
+    // Mega Drain power = 40 (special, EFFECT_LEECH_HIT=0x03)
+    // DoubleEdge power = 100 (physical, EFFECT_RECOIL=0x30)
+    // wPlayerMoveStructEffect: Return=0x79, Absorb/MegaDrain=0x03, DoubleEdge=0x30
+    // Selfdestruct: use explicit force_move_effect=7 (EFFECT_SELFDESTRUCT) with power/level/stats
+    // Note: EFFECT_SELFDESTRUCT halves c before the formula
+
+    // For direct DamageCalc, we need to inject d/e/b/c.
+    // From fixture: P_LEVEL=50→e=50, physical: b=110 (P_ATK), c=110 (E_DEF); special: b=95 (P_SATK), c=80 (E_SDEF)
+    // Return power=80, no-crit: expected = floor((floor(50*2/5)+2)*80*110/110/50) + 2 = floor(22*80/50)+2 = floor(35.2)+2 = 37
+    // Return power=80, crit: × 2 before division: result × 2 = 70 (approx)
+    // Absorb power=20, no-crit: floor((22)*20*95/80/50)+2 = floor(22*20*95/4000)+2 = floor(41800/4000)+2 = floor(10.45)+2 = 12
+    // Mega Drain power=40: floor(22*40*95/80/50)+2 = floor(83600/4000)+2 = floor(20.9)+2 = 22
+    // DoubleEdge power=100 (physical, effect=0x30 not SELFDESTRUCT): floor(22*100*110/110/50)+2 = floor(44)+2 = 46
+    // Selfdestruct-style: power=250, physical, c_before_halve=110, c_after_halve=55
+    //   floor(22*250*110/55/50)+2 = floor(22*250*2/50)+2 = floor(220)+2 = 222
+    //   For direct: c=55 (pre-halved), force_move_effect=0x07 so DamageCalc halves c again →
+    //   Actually DamageCalc does the halving: if effect==SELFDESTRUCT: c >>= 1. So we provide c=110 and DamageCalc makes it 55.
+    //   But for comparison: full-script path also passes c=110 to DamageCalc (DamageStats TruncateHL_BC gives c=110).
+    //   BOTH paths do: DamageCalc receives c=110, checks effect==SELFDESTRUCT, halves to 55.
+    //   So for direct test: set c=110 (same as what DamageStats would provide), let DamageCalc halve it.
+
+    const DamCalcCase cases[] = {
+        // Case 1: Return (physical, no-crit, power=80, level=50, b=110 P_ATK, c=110 E_DEF)
+        { "Return/phys/no-crit", 216, TAPE_NOCRIT_FULLVAR, 3, 0, 80, 50, 110, 110, 0, false },
+        // Case 2: Return (physical, crit, same stats)
+        { "Return/phys/crit",    216, TAPE_CRIT_FULLVAR,   3, 0, 80, 50, 110, 110, 1, false },
+        // Case 3: Absorb (special, no-crit, power=20, b=95 P_SATK, c=80 E_SDEF)
+        { "Absorb/spec/no-crit", 0x47, TAPE_NOCRIT_FULLVAR, 3, 0x03, 20, 50, 95, 80, 0, false },
+        // Case 4: Mega Drain (special, no-crit, power=40, b=95, c=80)
+        { "MegaDrain/spec/no-crit", 0x48, TAPE_NOCRIT_FULLVAR, 3, 0x03, 40, 50, 95, 80, 0, false },
+        // Case 5: Absorb (special, crit)
+        { "Absorb/spec/crit",    0x47, TAPE_CRIT_FULLVAR,   3, 0x03, 20, 50, 95, 80, 1, false },
+        // Case 6: DoubleEdge (physical recoil, ROM power=120=0x78, no-crit, effect=0x30 NOT selfdestruct)
+        { "DoubleEdge/phys/no-crit", 0x26, TAPE_NOCRIT_FULLVAR, 3, 0x30, 120, 50, 110, 110, 0, false },
+        // Case 7: DoubleEdge (physical, crit, ROM power=120)
+        { "DoubleEdge/phys/crit", 0x26, TAPE_CRIT_FULLVAR,   3, 0x30, 120, 50, 110, 110, 1, false },
+        // Case 8: Selfdestruct path (effect=0x07 halves defense c=110->55 inside DamageCalc).
+        //   DoubleEdge ROM power=120. DamageCalc gets c=110, halves to 55.
+        //   Expected: floor((floor(50*2/5)+2)*120*110/55/50)+2 = floor(22*120*2/50)+2 = floor(105.6)+2 = 107
+        //   Both full-script and direct receive c=110; DamageCalc halves inside.
+        //   force_move_effect=0x07 overrides wPlayerMoveStructEffect for both paths.
+        //   Full-script: effect=0x07 is read by DoMove to select Selfdestruct script;
+        //   script has DamageStats->DamageCalc in sequence. DamageCalc halves c.
+        { "Selfdestruct-path/phys/no-crit", 0x26, TAPE_NOCRIT_FULLVAR, 3, 0x07, 120, 50, 110, 110, 0, false },
+        // Case 9: LeechLife (physical Bug, ROM power=10, no-crit, effect=0x03=LEECH_HIT)
+        //   floor((floor(50*2/5)+2)*10*110/110/50)+2 = floor(22*10/50)+2 = floor(4.4)+2 = 6
+        //   Note: LeechLife drain mechanic irrelevant - DamageCalc just computes base damage.
+        //   wBattleMonLevel provides floor for HP drain; here we just check wCurDamage.
+        { "LeechLife/phys-low-power/no-crit", 0x8D, TAPE_NOCRIT_FULLVAR, 3, 0x03, 20, 50, 110, 110, 0, false },
+    };
+
+    int passed = 0;
+    int total  = (int)(sizeof(cases)/sizeof(cases[0]));
+    int harness_errors = 0;
+    int rng_consumed_direct_total = 0;
+
+    std::cout << "\n  "
+              << std::left << std::setw(34) << "Case"
+              << std::setw(5) << "d"
+              << std::setw(5) << "e"
+              << std::setw(5) << "b"
+              << std::setw(5) << "c"
+              << std::setw(6) << "crit"
+              << std::setw(8) << "full"
+              << std::setw(8) << "direct"
+              << "match\n"
+              << "  " << std::string(80,'-') << "\n";
+
+    for(const auto& tc : cases){
+        // --- Full-script run ---
+        CrystalRunConfig fcfg{};
+        // Find the MoveSpec for this move
+        const MoveSpec* ms = find_move((uint16_t)tc.full_script_move_id);
+        if(!ms){
+            std::cerr << "  " << tc.name << ": move 0x" << std::hex << tc.full_script_move_id
+                      << " not registered\n" << std::dec;
+            ++harness_errors;
+            continue;
+        }
+        ms->build_config(sym, &fcfg);
+        fcfg.rng_tape     = tc.tape;
+        fcfg.rng_tape_len = tc.tape_len;
+        fcfg.insn_cap     = ms->insn_cap;
+        if(tc.force_move_effect) fcfg.init_move_effect_override = tc.force_move_effect;
+
+        // Bind ROM globals for generic fixture
+        struct Guard{ ~Guard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; } } guard;
+        if(fcfg.extra_fixture == generic_fullscript_fixture_adapter){
+            g_generic_rom_bytes_ptr = &rom_bytes;
+            g_generic_move_id       = fcfg.engine_move_id;
+            g_generic_pp            = P_PP;
+        }
+
+        // Wrap the full-script fixture to also set player types = Poison (no STAB for any test move)
+        static FixtureFn s_full_inner_fixture = nullptr;
+        s_full_inner_fixture = fcfg.extra_fixture;
+        static FixtureFn full_fixture_wrapper = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
+            if(s_full_inner_fixture) s_full_inner_fixture(gb, wram, sym2);
+            wram[wram_off(sym2.wBattleMonType1.addr)] = 0x03; // Poison — no STAB
+            wram[wram_off(sym2.wBattleMonType2.addr)] = 0x03;
+        };
+        fcfg.extra_fixture = full_fixture_wrapper;
+
+        CrystalRunResult fr = run_crystal_case(rom_bytes, sym, 0x00, fcfg, &no_stop);
+        if(fr.stop_reason != StopReason::SINK_HIT){
+            std::cerr << "  " << tc.name << ": full-script HARNESS stop="
+                      << stop_reason_str(fr.stop_reason) << "\n";
+            ++harness_errors;
+            continue;
+        }
+
+        // Extract full-script damage from HP difference
+        uint16_t full_damage = extract_full_script_damage(fr);
+
+        // --- Direct DamageCalc run ---
+        // Fixture: same generic fullscript fixture, but entry = BattleCommand_DamageCalc
+        // Set wCurDamage=0 via wram (fixture_common doesn't set it; we need an extra write)
+        // Set wCriticalHit from tc.crit
+        // Set registers d/e/b/c via force_reg fields
+        // Use EndMoveEffect as sink (DamageCalc `ret`s to its caller = our sentinel)
+
+        // Build config for direct DamageCalc
+        CrystalRunConfig dcfg{};
+        // inherit fixture from the same move spec (populates wPlayerMoveStruct from ROM)
+        ms->build_config(sym, &dcfg);
+        dcfg.entry         = sym.BattleCommand_DamageCalc;  // 0D:5612
+        dcfg.sink_pcs[0]   = sym.EndMoveEffect.addr;        // 0D:52A3
+        dcfg.sink_names[0] = "EndMoveEffect";
+        dcfg.num_sinks     = 1;
+        dcfg.insn_cap      = ms->insn_cap;
+        dcfg.rng_tape      = nullptr;    // DamageCalc consumes NO RNG bytes
+        dcfg.rng_tape_len  = 0;
+        if(tc.force_move_effect) dcfg.init_move_effect_override = tc.force_move_effect;
+        // Force registers: d=power, e=level, b=attack, c=defense
+        dcfg.force_reg_d   = tc.d_power;
+        dcfg.force_reg_e   = (tc.e_level  ? tc.e_level  : (uint8_t)P_LEVEL);
+        dcfg.force_reg_b   = (tc.b_attack  ? tc.b_attack  : (uint8_t)0xFF); // 0xFF would be caught
+        dcfg.force_reg_c   = (tc.c_defense ? tc.c_defense : (uint8_t)0xFF);
+        // Note: force_reg_* uses 0 as "no override" → e/b/c must be non-zero for overrides to apply
+        // P_ATK=110, E_DEF=110, P_SATK=95, E_SDEF=80 are all non-zero — OK
+        // Override wCriticalHit and wCurDamage via the fixture
+        struct DirectFixtureData {
+            uint8_t crit;
+        };
+        static thread_local DirectFixtureData s_direct_fixture_data{};
+        s_direct_fixture_data.crit = tc.crit;
+
+        // Use a lambda-based extra_fixture to set wCriticalHit and wCurDamage=0
+        // We can't use a lambda as FixtureFn (not convertible to function pointer).
+        // Instead, use a thread-local callback pattern like the existing g_generic pattern.
+        static thread_local uint8_t g_damagecalc_crit = 0;
+        g_damagecalc_crit = tc.crit;
+        struct DcGuard{ ~DcGuard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; g_damagecalc_crit=0; } } dcguard;
+        if(dcfg.extra_fixture == generic_fullscript_fixture_adapter){
+            g_generic_rom_bytes_ptr = &rom_bytes;
+            g_generic_move_id       = dcfg.engine_move_id;
+            g_generic_pp            = P_PP;
+        }
+
+        // Run with a custom extra_fixture that additionally writes wCriticalHit and clears wCurDamage
+        // We chain the existing extra_fixture with an inline write after setup.
+        // Approach: run with generic fixture first, then apply overrides via init_move_effect_override
+        // For wCriticalHit and wCurDamage: add them to a second fixture invocation.
+        // Simplest: write them via the init_move_effect_override pipeline isn't enough.
+        // Use a wrapper fixture that calls the original then writes the extra fields.
+        // Since FixtureFn = void(*)(GB_gameboy_t*, uint8_t*, const SymCache&), we can set it
+        // to a static function that reads from thread-locals.
+
+        static FixtureFn s_chained_inner_fixture = nullptr;
+        static thread_local uint8_t  g_dc_crit   = 0;
+        static thread_local uint16_t g_dc_sym_cur_damage_addr = 0;
+        static thread_local uint16_t g_dc_sym_critical_hit_addr = 0;
+        s_chained_inner_fixture = dcfg.extra_fixture;
+        g_dc_crit = tc.crit;
+        g_dc_sym_cur_damage_addr     = sym.wCurDamage.addr;
+        g_dc_sym_critical_hit_addr   = sym.wCriticalHit.addr;
+
+        // Static wrapper: calls inner fixture, then sets wCriticalHit and clears wCurDamage
+        // Also sets player type to Poison (0x03) so Normal-type moves don't get STAB.
+        // Absorb/MegaDrain/LeechLife are Grass-type moves — no STAB on Poison player.
+        // This ensures full-script HP diff equals DamageCalc output exactly.
+        static FixtureFn dc_fixture_wrapper = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
+            if(s_chained_inner_fixture) s_chained_inner_fixture(gb, wram, sym2);
+            // Set wCriticalHit
+            wram[wram_off(g_dc_sym_critical_hit_addr)] = g_dc_crit;
+            // Clear wCurDamage (DamageCalc accumulates into it; must be 0 on entry)
+            wram[wram_off(g_dc_sym_cur_damage_addr)]     = 0;
+            wram[wram_off(g_dc_sym_cur_damage_addr) + 1] = 0;
+            // Set player types to Poison (0x03) so no STAB for any move type in test cases.
+            // Normal-type (0x00) moves: no STAB on Poison player. Grass-type: no STAB on Poison.
+            // Enemy types remain Normal (0x00): Normal 1× for all test move types.
+            wram[wram_off(sym2.wBattleMonType1.addr)] = 0x03; // Poison
+            wram[wram_off(sym2.wBattleMonType2.addr)] = 0x03; // Poison
+        };
+        dcfg.extra_fixture = dc_fixture_wrapper;
+
+        CrystalRunResult dr = run_crystal_case(rom_bytes, sym, 0x00, dcfg, &no_stop);
+        if(dr.stop_reason != StopReason::SINK_HIT){
+            std::cerr << "  " << tc.name << ": direct HARNESS stop="
+                      << stop_reason_str(dr.stop_reason) << "\n";
+            ++harness_errors;
+            continue;
+        }
+        rng_consumed_direct_total += (int)dr.rng_bytes_consumed;
+
+        // For direct DamageCalc, sink fires before ApplyDamage, so enemy HP unchanged.
+        // wCurDamage is in dr.cur_damage (extracted by execute_crystal_run_loop).
+        uint16_t direct_damage = extract_cur_damage_direct(dr);
+
+        bool match = (full_damage == direct_damage);
+        if(match) ++passed;
+
+        std::cout << "  "
+                  << std::left  << std::setw(34) << tc.name
+                  << std::right << std::setw(5)  << (int)tc.d_power
+                  << std::setw(5)  << (int)(tc.e_level ? tc.e_level : P_LEVEL)
+                  << std::setw(5)  << (int)tc.b_attack
+                  << std::setw(5)  << (int)tc.c_defense
+                  << std::setw(6)  << (tc.crit ? "yes" : "no")
+                  << std::setw(8)  << full_damage
+                  << std::setw(8)  << direct_damage
+                  << "  " << (match ? "PASS" : "FAIL") << "\n";
+    }
+
+    std::cout << "\n--- Summary ---\n"
+              << "  Matched: " << passed << "/" << total << "\n"
+              << "  HARNESS_ERROR: " << harness_errors << "\n"
+              << "  Direct RNG consumed total: " << rng_consumed_direct_total
+              << " (expected 0)\n"
+              << "\n  Direct entry: bank=0x" << std::hex << (int)sym.BattleCommand_DamageCalc.bank
+              << " addr=0x" << sym.BattleCommand_DamageCalc.addr << std::dec << "\n"
+              << "\n  Overall: " << ((passed == total && harness_errors == 0 && rng_consumed_direct_total == 0) ? "PASS" : "FAIL") << "\n";
+
+    return (passed == total && harness_errors == 0 && rng_consumed_direct_total == 0) ? 0 : 1;
 }
 
 } // namespace crystal::oracle

@@ -409,6 +409,23 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # damagecalc_pilot -- direct BattleCommand_DamageCalc entry pilot
+    # Certifies identical wCurDamage output between direct-entry and full-script.
+    # Usage: damagecalc_pilot <rom_path> <sym_path>
+    # Not added to ctest by default (manual pilot only).
+    # ============================================================================
+    add_executable(damagecalc_pilot
+        crystal_differential/damagecalc_pilot.cpp
+    )
+    target_link_libraries(damagecalc_pilot PRIVATE oracle_runner_lib)
+    target_include_directories(damagecalc_pilot PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(damagecalc_pilot PRIVATE /bigobj)
+    endif()
+
+    # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
     # Legacy entry point kept for compatibility.
     # Requires: <rom_path> <sym_path> [--jobs N]

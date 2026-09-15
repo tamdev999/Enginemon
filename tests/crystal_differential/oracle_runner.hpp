@@ -108,4 +108,14 @@ int run_accuracy_sweep_benchmark(const char* rom_path, const char* sym_path,
 // ============================================================================
 int run_checkhit_pilot(const char* rom_path, const char* sym_path);
 
+// ============================================================================
+// run_damagecalc_pilot
+//
+// Direct BattleCommand_DamageCalc (0D:5612) entry pilot.
+// Certifies that direct-called DamageCalc produces identical output to
+// the full-script path for several ordinary damaging move cases.
+// Returns 0 on full pass, 1 on any failure.
+// ============================================================================
+int run_damagecalc_pilot(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle
