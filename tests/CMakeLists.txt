@@ -375,6 +375,23 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     # Not added to ctest by default (benchmark/research only)
 
     # ============================================================================
+    # sweep_benchmark -- real Part B cost breakdown using certified oracle path
+    # Measures GB_init/ROM-load, fixture, GB_run, Enginemon, snapshot reuse.
+    # Usage: sweep_benchmark <rom_path> <sym_path> [acc_raw]
+    # Not added to ctest by default (manual benchmark only).
+    # ============================================================================
+    add_executable(sweep_benchmark
+        crystal_differential/sweep_benchmark.cpp
+    )
+    target_link_libraries(sweep_benchmark PRIVATE oracle_runner_lib)
+    target_include_directories(sweep_benchmark PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(sweep_benchmark PRIVATE /bigobj)
+    endif()
+
+    # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
     # Legacy entry point kept for compatibility.
     # Requires: <rom_path> <sym_path> [--jobs N]

@@ -78,4 +78,26 @@ int runner_main(int argc, char* argv[], RunnerConfig defaults = {});
 int run_harness_negative_tests(const char* rom_path, const char* sym_path,
                                 bool verbose = false);
 
+// ============================================================================
+// run_accuracy_sweep_benchmark
+//
+// Measures the real cost breakdown of the certified Part B accuracy sweep
+// for ONE complete ACC row (13 EVA × 256 RNG × 4 poison = 3,328 Crystal runs).
+//
+// Instruments:
+//   - GB_init + ROM load time
+//   - Fixture/setup time
+//   - GB_run (Crystal execution) time
+//   - Enginemon execute_turn time
+//   - Total per-row time (baseline: fresh init per run)
+//   - Total per-row time (reuse: one init + snapshot restore per run)
+//
+// Validates that reuse-path outputs are identical to baseline (poison=0x00).
+//
+// acc_raw: Crystal raw stage value for the ACC row to benchmark (1..13, 7=neutral).
+// Returns 0 on success, 1 on failure.
+// ============================================================================
+int run_accuracy_sweep_benchmark(const char* rom_path, const char* sym_path,
+                                  int acc_raw = 7);
+
 } // namespace crystal::oracle
