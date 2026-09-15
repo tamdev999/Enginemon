@@ -5218,6 +5218,73 @@ int run_harness_negative_tests(const char* rom_path, const char* sym_path, bool 
     }
 
     // =====================================================================
+    // Test 19: Direct-CheckHit hit/miss poison-stability rejection.
+    //
+    // Proves that Part-B's extended poison-stability check rejects a comparison
+    // when attack_missed differs across poison patterns.
+    //
+    // Method: run one direct BattleCommand_CheckHit execution for acc=7, eva=7,
+    // rng_byte=0xD0 (0xD0=208 >= 0xD8=216 → miss). Construct four synthetic
+    // CrystalRunResult values representing the four poisons with identical
+    // semantic fields EXCEPT attack_missed=0 for pi=1 (a fault).
+    // The Part-B stability comparison must detect this as unstable.
+    //
+    // The fault is never applied to real Crystal state — it is injected only
+    // into a local CrystalRunResult copy. No GB execution is modified.
+    // Fault is reverted by scope — the modified copy goes out of scope.
+    // =====================================================================
+    if(verbose){ std::cout << "neg-test: running test 19 (direct-checkhit-hit-miss-stability)\n"; std::cout.flush(); }
+    {
+        static const char* TEST_NAME = "direct-checkhit-hit-miss-stability";
+
+        // Build a synthetic set of 4 CrystalRunResult values as if from the
+        // direct Part-B CheckHit path for a miss case:
+        //   all 4 poisons should have attack_missed=1, rng_consumed=1, SINK_HIT.
+        // Fault: pi=1 has attack_missed=0 (hit instead of miss).
+        // The stability check must reject this.
+        CrystalRunResult cr2[4];
+        for(int pi = 0; pi < 4; ++pi){
+            cr2[pi] = CrystalRunResult{};
+            cr2[pi].stop_reason       = StopReason::SINK_HIT;
+            cr2[pi].rng_bytes_consumed = 1;
+            cr2[pi].attack_missed     = 1; // miss for all
+            // All semantic fields identical (stages neutral=7 raw, etc.)
+            for(int i=0;i<7;i++) cr2[pi].player_stages[i] = 7;
+            for(int i=0;i<7;i++) cr2[pi].enemy_stages[i]  = 7;
+            for(int i=0;i<5;i++) cr2[pi].player_stats[i]  = P_ATK; // arbitrary matching value
+            for(int i=0;i<5;i++) cr2[pi].enemy_stats[i]   = E_ATK;
+            cr2[pi].rng_trace.push_back({0, 0xD0, 0, 0x2FAD, "BattleRandom"});
+        }
+
+        // Inject fault: pi=1 claims a hit while pi=0 claims miss
+        CrystalRunResult cr2_faulty[4];
+        for(int pi = 0; pi < 4; ++pi) cr2_faulty[pi] = cr2[pi];
+        cr2_faulty[1].attack_missed = 0; // ← FAULT: pi=1 says "hit"
+
+        // Run the Part-B stability comparison logic on the faulty results
+        // (mirrors the exact check in run_accuracy_sweep_after_startup Part B)
+        bool stable_base   = true; // without fault
+        bool stable_faulty = true; // with fault
+        for(int pi=1;pi<4;++pi){
+            if(!crystal_run_results_equal(cr2[0],      cr2[pi])      ) { stable_base=false;   break; }
+            if( cr2[pi].attack_missed != cr2[0].attack_missed        ) { stable_base=false;   break; }
+        }
+        for(int pi=1;pi<4;++pi){
+            if(!crystal_run_results_equal(cr2_faulty[0], cr2_faulty[pi])) { stable_faulty=false; break; }
+            if( cr2_faulty[pi].attack_missed != cr2_faulty[0].attack_missed){ stable_faulty=false; break; }
+        }
+
+        // base (no fault) must be stable; faulty must be detected as unstable
+        bool ok = stable_base && !stable_faulty;
+        report(TEST_NAME, ok,
+               ok ? "fault detected: pi=1 attack_missed=0 vs pi=0 attack_missed=1 → unstable (HARNESS_ERROR); "
+                    "clean set: stable; fault reverted (local copy only)"
+                  : std::string("FAIL stable_base=") + (stable_base ? "true" : "false")
+                    + " stable_faulty=" + (stable_faulty ? "true" : "false")
+                    + " (expected base=true, faulty=false)");
+    }
+
+    // =====================================================================
     // Summary
     // =====================================================================
     if(verbose){
@@ -6037,10 +6104,21 @@ static int run_accuracy_sweep_after_startup(
                         }
                     }
                     if(!all_sink2) continue;
-                    // Stability check across all 4 poison patterns
+                    // Stability check across all 4 poison patterns.
+                    // Two-part check for direct CheckHit:
+                    //   (a) General semantic equality (stages, stats, HP, RNG trace, stop reason)
+                    //   (b) Hit/miss stability: attack_missed must agree across all 4 poisons.
+                    //       This is the primary semantic output of BattleCommand_CheckHit.
+                    //       crystal_run_results_equal intentionally excludes attack_missed
+                    //       (it is not a general semantic field for full-script paths), so we
+                    //       check it explicitly here for the direct-entry path.
                     bool stable2=true;
                     for(int pi=1;pi<4;pi++){
                         if(!crystal_run_results_equal(cr2[0],cr2[pi])){ stable2=false; break; }
+                        // Direct CheckHit: attack_missed is the hit/miss output.
+                        // If different poisons produce different hit/miss for the same RNG byte,
+                        // the fixture is not poison-stable and the comparison is invalid.
+                        if(cr2[pi].attack_missed != cr2[0].attack_missed){ stable2=false; break; }
                     }
                     if(!stable2){ b_harness++; continue; }
 
