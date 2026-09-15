@@ -98,6 +98,7 @@
 
 #include "engine/battle/battle.hpp"
 #include "engine/battle/battle_rules.hpp"
+#include "engine/battle/calculator.hpp"
 #include "engine/core/types.hpp"
 #include "engine/party/party.hpp"
 #include "engine/party/pokemon.hpp"
@@ -7508,6 +7509,14 @@ int run_damagecalc_pilot(const char* rom_path, const char* sym_path)
               << "  " << std::string(85,'-') << "\n";
 
     int passed         = 0;
+    // Accumulate per-case results for Enginemon cross-check below.
+    struct CaseSummary {
+        const char* name;
+        ExecCtx::DamageCalcSnapshot snap;
+        uint16_t full_damage;
+        bool excluded; // true = wrapper-level case, skip Enginemon core check
+    };
+    std::vector<CaseSummary> case_summaries;
     int harness_errors = 0;
     int rng_consumed_direct_total = 0;
 
@@ -7697,6 +7706,11 @@ int run_damagecalc_pilot(const char* rom_path, const char* sym_path)
         }
 
         bool match = (full_damage == direct_damage);
+        // Accumulate for Enginemon cross-check. Exclude wrapper-level cases.
+        // Selfdestruct (force_effect=0x07) and type-boost item (item_id!=0)
+        // exercise paths that are NOT inside calculate_damage() itself.
+        bool excluded_from_core = (tc.force_effect == 0x07) || (tc.item_id != 0);
+        case_summaries.push_back({ tc.name, snap, full_damage, excluded_from_core });
         if(match) ++passed;
 
         std::cout << "  "
@@ -7837,6 +7851,115 @@ int run_damagecalc_pilot(const char* rom_path, const char* sym_path)
         }
     }
     anti_done:;
+    // ================================================================
+    // ENGINEMON CORE CROSS-CHECK
+    // Certify: enginemon::calculate_damage(DamageParams) == Crystal wCurDamage
+    // for non-excluded cases (no Selfdestruct, no type-boost item).
+    //
+    // PARAMETER SEMANTICS PROOF:
+    //   DamageParams::stab            = false
+    //     Reason: all pilot full-script runs set player types = Poison so no
+    //     STAB fires in Crystal. Crystal STAB is a separate command AFTER
+    //     DamageCalc's ret. Therefore wCurDamage at DamageCalc ret is pre-STAB.
+    //     stab=false skips the n += n/2 block, matching that boundary.
+    //
+    //   DamageParams::type_effectiveness = 100
+    //     Reason: all pilot enemy types = Normal; move types are Normal/Grass/Bug
+    //     -- all 1x. Crystal type matching fires AFTER DamageCalc ret.
+    //     type_effectiveness=100 => n*100/100=n (identity, same boundary).
+    //
+    //   variation: NOT applied. calculate_damage() returns the pre-variation
+    //     deterministic result. Pilot tape has rrca(0xFF)=0xFF accepted, so
+    //     damage*0xFF/0xFF = damage unchanged -- full_damage equals pre-variation.
+    //
+    // EXCLUDED (wrapper-level -- separate production tests required):
+    //   Selfdestruct: defense halving in execute_move_damaging BEFORE calculate_damage.
+    //   type-boost item: boost applied in execute_move_damaging AFTER calculate_damage.
+    // ================================================================
+    {
+        std::cout << "\n--- Enginemon core cross-check (calculate_damage vs Crystal DamageCalc) ---\n";
+        std::cout << "  stab=false  type_effectiveness=100  (pre-STAB/pre-type/pre-variation boundary)\n";
+        std::cout << "  Excluded wrapper cases: Selfdestruct-effect, type-boost item\n";
+        std::cout << "\n  "
+                  << std::left  << std::setw(40) << "Case"
+                  << std::right << std::setw(8)  << "Crystal"
+                  << std::setw(9)  << "Enginemon"
+                  << "  match\n"
+                  << "  " << std::string(62,'-') << "\n";
+
+        int em_passed = 0;
+        int em_total  = 0;
+        int em_anti_idx = -1;
+        uint16_t em_anti_crystal_val = 0;
+
+        for(int ci = 0; ci < (int)case_summaries.size(); ++ci){
+            const auto& cs = case_summaries[ci];
+            if(cs.excluded){
+                std::cout << "  " << std::left << std::setw(40) << cs.name
+                          << "  [excluded: wrapper-level]\n";
+                continue;
+            }
+            ++em_total;
+            if(em_anti_idx < 0){ em_anti_idx = ci; em_anti_crystal_val = cs.full_damage; }
+
+            // Build DamageParams from live Crystal snapshot -- no harness formula.
+            enginemon::DamageParams dp{};
+            dp.attacker_level    = cs.snap.e;         // Crystal E = level
+            dp.attack_stat       = cs.snap.b;         // Crystal B = attack/spAtk
+            dp.defense_stat      = cs.snap.c;         // Crystal C = defense/spDef
+            dp.move_power        = cs.snap.d;         // Crystal D = move power
+            dp.type_effectiveness = 100;              // pre-type boundary (1x = identity)
+            dp.stab              = false;             // pre-STAB boundary
+            dp.critical          = (cs.snap.wCriticalHit != 0); // live Crystal crit flag
+            dp.burned            = false;
+
+            const int32_t em_damage = enginemon::calculate_damage(dp);
+
+            const bool em_match = ((int32_t)cs.full_damage == em_damage);
+            if(em_match) ++em_passed;
+            std::cout << "  "
+                      << std::left  << std::setw(40) << cs.name
+                      << std::right << std::setw(8)  << (int)cs.full_damage
+                      << std::setw(9)  << em_damage
+                      << "  " << (em_match ? "PASS" : "FAIL") << "\n";
+        }
+
+        // ---- Enginemon anti-confirmation ------------------------------------
+        bool em_anti_detected = false;
+        bool em_anti_reverted = false;
+        std::cout << "\n  [Enginemon anti-confirm: attack_stat+10 on '" ;
+        if(em_anti_idx >= 0) std::cout << case_summaries[em_anti_idx].name;
+        std::cout << "']\n";
+        if(em_anti_idx >= 0){
+            const auto& cs = case_summaries[em_anti_idx];
+            enginemon::DamageParams dp{};
+            dp.attacker_level    = cs.snap.e;
+            dp.attack_stat       = cs.snap.b + 10; // MUTATION: +10
+            dp.defense_stat      = cs.snap.c;
+            dp.move_power        = cs.snap.d;
+            dp.type_effectiveness = 100;
+            dp.stab = false; dp.critical = (cs.snap.wCriticalHit != 0); dp.burned = false;
+            const int32_t em_mut = enginemon::calculate_damage(dp);
+            em_anti_detected = ((int32_t)em_anti_crystal_val != em_mut);
+            std::cout << "  [MUTATED  atk=" << (int)(cs.snap.b+10) << "] "
+                      << "crystal=" << (int)em_anti_crystal_val
+                      << " enginemon=" << em_mut
+                      << " -> " << (em_anti_detected ? "MISMATCH (expected)" : "MATCH (unexpected!)") << "\n";
+
+            dp.attack_stat = cs.snap.b; // REVERT
+            const int32_t em_rev = enginemon::calculate_damage(dp);
+            em_anti_reverted = ((int32_t)em_anti_crystal_val == em_rev);
+            std::cout << "  [REVERTED atk=" << (int)cs.snap.b << "] "
+                      << "crystal=" << (int)em_anti_crystal_val
+                      << " enginemon=" << em_rev
+                      << " -> " << (em_anti_reverted ? "PASS (expected)" : "FAIL (unexpected!)") << "\n";
+        }
+
+        std::cout << "\n  ENGINEMON CORE MATCHED: " << em_passed << "/" << em_total
+                  << "  ANTI-CONFIRM: " << (em_anti_detected ? "yes" : "no")
+                  << "  fault reverted: " << (em_anti_reverted ? "yes" : "no") << "\n";
+        std::cout.flush();
+    }
 
     // ================================================================
     // SUMMARY
