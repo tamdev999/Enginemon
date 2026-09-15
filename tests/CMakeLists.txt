@@ -358,6 +358,23 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     # Not added to ctest by default (runtime is ~2-5 minutes; run manually)
 
     # ============================================================================
+    # sweep_state_reuse_test -- prototype: SameBoy state reuse for sweep speedup
+    # Measures fresh-init vs snapshot-restore for one (acc_raw,eva_raw) pair.
+    # Not added to ctest by default (manual benchmark only).
+    # ============================================================================
+    add_executable(sweep_state_reuse_test
+        crystal_differential/sweep_state_reuse_test.cpp
+    )
+    target_link_libraries(sweep_state_reuse_test PRIVATE oracle_runner_lib)
+    target_include_directories(sweep_state_reuse_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(sweep_state_reuse_test PRIVATE /bigobj)
+    endif()
+    # Not added to ctest by default (benchmark/research only)
+
+    # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
     # Legacy entry point kept for compatibility.
     # Requires: <rom_path> <sym_path> [--jobs N]
