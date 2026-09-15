@@ -426,6 +426,23 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # damagecalc_lv_pw_grid -- level x power DamageCalc sweep
+    # level 1..100 x power 1..255 x crit {0,1} = 51,000 logical cases.
+    # Usage: damagecalc_lv_pw_grid <rom_path> <sym_path> [--jobs N] [--shard-max-lv N]
+    # Not added to ctest by default (long-running conformance sweep).
+    # ============================================================================
+    add_executable(damagecalc_lv_pw_grid
+        crystal_differential/damagecalc_lv_pw_grid.cpp
+    )
+    target_link_libraries(damagecalc_lv_pw_grid PRIVATE oracle_runner_lib)
+    target_include_directories(damagecalc_lv_pw_grid PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(damagecalc_lv_pw_grid PRIVATE /bigobj)
+    endif()
+
+    # ============================================================================
     # damagecalc_atk_def_grid -- exhaustive attack×defense sweep
     # attack 1..255 × defense 1..255 × crit {0,1} = 130,050 logical cases.
     # Usage: damagecalc_atk_def_grid <rom_path> <sym_path> [--jobs N]

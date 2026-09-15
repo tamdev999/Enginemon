@@ -153,4 +153,17 @@ int run_damagecalc_matrix(const char* rom_path, const char* sym_path);
 int run_damagecalc_atk_def_grid(const char* rom_path, const char* sym_path,
                                  int jobs = 1, int shard_max_atk = 255);
 
+// ============================================================================
+// run_damagecalc_level_power_grid
+//
+// Exhaustive level x power sweep: level 1..100 x power 1..255 x crit {0,1}
+// = 51,000 logical cases, 204,000 Crystal executions.
+// Fixed: attack=110, defense=110 (certified baseline from atk x def grid).
+// Entry: BattleCommand_DamageCalc (0D:5612). Sink: EndMoveEffect.
+// --shard-max-lv N: limit level sweep to 1..N (determinism shard tests).
+// Returns 0 if all cases match, 1 on any mismatch/harness error.
+// ============================================================================
+int run_damagecalc_level_power_grid(const char* rom_path, const char* sym_path,
+                                     int jobs = 1, int shard_max_lv = 100);
+
 } // namespace crystal::oracle
