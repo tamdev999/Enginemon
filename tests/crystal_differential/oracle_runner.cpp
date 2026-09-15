@@ -1,4 +1,4 @@
-﻿// tests/crystal_differential/oracle_runner.cpp
+// tests/crystal_differential/oracle_runner.cpp
 //
 // Crystal battle differential oracle -- hardened parallel runner with RNG interception.
 //
@@ -1304,6 +1304,223 @@ static uint16_t unsafe_skip_error(ExecCtx& ctx, const char* symbol, const char* 
     ctx.triggered_sink = unsafe_err;
     return 0xFFFF;
 }
+// ============================================================================
+// execute_crystal_run_loop
+//
+// Shared execution core for all Crystal run modes (fresh-init and snapshot).
+//
+// Preconditions (caller must guarantee):
+//   - gb is fully prepared: ROM loaded, WRAM poisoned, fixture applied,
+//     stage overrides written, PC/SP/sentinel set, exec_cb installed,
+//     exec_ctx attached via GB_set_user_data.
+//   - exec_ctx is freshly initialised (triggered=false, insn_count=0).
+//   - rng_ctx is freshly initialised or nullptr.
+//
+// Owns exclusively:
+//   presentation intercepts + skip preconditions
+//   stack/ByteFill/JP-HL guards
+//   instruction cap
+//   sink detection
+//   BattleRandom interception
+//   RNG exhaustion/trace
+//   stop-reason propagation
+//   final semantic extraction
+//
+// Does NOT call GB_free — caller is responsible for GB lifetime.
+// res.initial must already be filled by the caller before calling this.
+// ============================================================================
+static CrystalRunResult execute_crystal_run_loop(
+    GB_gameboy_t&           gb,
+    const CrystalRunConfig& cfg,
+    ExecCtx&                exec_ctx,
+    RngCtx*                 rng_ctx,
+    const SymCache&         sym)
+{
+    CrystalRunResult res{};
+    res.insn_count         = 0;
+    res.sink_name          = nullptr;
+    res.has_snapshot       = false;
+    res.rng_bytes_consumed = 0;
+    res.min_sp             = 0xFFFF;
+    res.stop_reason        = StopReason::GB_INIT_FAILED; // overwritten below
+
+    static constexpr uint16_t W_STACK_TOP    = 0xC0FF;
+    static constexpr uint16_t W_STACK_BOTTOM = 0xC000;
+    uint16_t observed_min_sp = W_STACK_TOP;
+
+    // Helper: read little-endian word at addr from SameBoy's memory
+    auto read_word = [&](uint16_t addr) -> uint16_t {
+        uint8_t lo = GB_safe_read_memory(&gb, addr);
+        uint8_t hi = GB_safe_read_memory(&gb, (uint16_t)(addr + 1));
+        return (uint16_t)(lo | (hi << 8));
+    };
+
+    // Emulate a RET: pop [SP] as new PC, SP += 2.
+    auto emulate_ret = [&](GB_registers_t* r, const char* skip_name) -> uint16_t {
+        uint16_t ret_pc = read_word(r->sp);
+        r->sp += 2;
+        std::string err = validate_emulate_ret_pc(ret_pc, skip_name, (uint16_t)(r->sp - 2));
+        if(!err.empty()){
+            static char bad_ret[192];
+            std::memcpy(bad_ret, err.c_str(), std::min(err.size()+1, sizeof(bad_ret)-1));
+            bad_ret[sizeof(bad_ret)-1] = '\0';
+            exec_ctx.triggered      = true;
+            exec_ctx.triggered_sink = bad_ret;
+            return 0xFFFF;
+        }
+        r->pc = ret_pc;
+        return ret_pc;
+    };
+
+    while(!exec_ctx.triggered && exec_ctx.insn_count < cfg.insn_cap){
+        GB_registers_t* r = GB_get_registers(&gb);
+        if(!r){ exec_ctx.triggered = true; exec_ctx.triggered_sink = "__HARNESS_ERROR__ GB_get_registers null"; break; }
+
+        const uint16_t pc   = r->pc;
+        const uint16_t sp   = r->sp;
+        const uint8_t  bank = GB_safe_read_memory(&gb, 0xFF9D); // hROMBank
+
+        if(sp < observed_min_sp) observed_min_sp = sp;
+        if(sp < W_STACK_BOTTOM){
+            static char sp_err[64];
+            snprintf(sp_err, sizeof(sp_err),
+                "__HARNESS_ERROR__ stack escape: SP=0x%04X < wStackBottom=0x%04X",
+                sp, (unsigned)W_STACK_BOTTOM);
+            exec_ctx.triggered      = true;
+            exec_ctx.triggered_sink = sp_err;
+            break;
+        }
+
+        bool hit_sink = false;
+        for(size_t i = 0; i < cfg.num_sinks; ++i){
+            if(pc == cfg.sink_pcs[i]){
+                exec_ctx.triggered      = true;
+                exec_ctx.triggered_sink = cfg.sink_names[i];
+                hit_sink = true;
+                break;
+            }
+        }
+        if(hit_sink) break;
+
+        if(pc == 0x3041 && r->de < 0x8000){
+            static char bytefill_err[128];
+            snprintf(bytefill_err, sizeof(bytefill_err),
+                "__HARNESS_ERROR__ ByteFill(DE=0x%04X BC=0x%04X): "
+                "fixture has uninitialized pointer",
+                r->de, r->bc);
+            exec_ctx.triggered      = true;
+            exec_ctx.triggered_sink = bytefill_err;
+            break;
+        }
+
+        if(rng_ctx && pc == BATTLE_RANDOM_RESULT_READ_PC){
+            if(rng_ctx->tape_idx >= rng_ctx->tape_len){
+                rng_ctx->exhausted = true;
+            } else {
+                uint8_t crystal_val = GB_safe_read_memory(&gb, 0xCFB6);
+                uint8_t tape_val    = rng_ctx->tape[rng_ctx->tape_idx];
+                GB_write_memory(&gb, 0xCFB6, tape_val);
+                rng_ctx->trace.push_back({rng_ctx->tape_idx, tape_val, crystal_val,
+                                          BATTLE_RANDOM_RESULT_READ_PC, "BattleRandom"});
+                ++rng_ctx->tape_idx;
+            }
+        }
+
+        if(pc == 0x4083 && bank == 0x0D && r->hl == 0x4541){
+            r->hl  = 0x4081;
+            r->sp += 2;
+        }
+
+        {
+            bool did_skip = false;
+            if(pc == 0x045A){ emulate_ret(r, "DelayFrame(00:045A)"); did_skip = true; }
+            else if(pc == 0x0468){ emulate_ret(r, "DelayFrames(00:0468)"); did_skip = true; }
+            else if(pc == 0x31F6){ emulate_ret(r, "WaitBGMap(00:31F6)"); did_skip = true; }
+            else if(pc == 0x3AC3){ emulate_ret(r, "BattleTextbox(00:3AC3)"); did_skip = true; }
+            else if(pc == 0x3AD5){ emulate_ret(r, "StdBattleTextbox(00:3AD5)"); did_skip = true; }
+            else if(pc == 0x39C9){ emulate_ret(r, "RefreshBattleHuds(00:39C9)"); did_skip = true; }
+            else if(pc == 0x39D4){ emulate_ret(r, "UpdateBattleHuds(00:39D4)"); did_skip = true; }
+            else if(pc == 0x46E0 && bank == 0x03){ emulate_ret(r, "AnimateHPBar(03:46E0)"); did_skip = true; }
+            else if(pc == 0x7E19 && bank == 0x0D){
+                bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7DE9){s=true;break;}
+                if(!s){ emulate_ret(r, "PlayDamageAnim(0D:7E19)"); did_skip = true; }
+            }
+            else if(pc == 0x7DE9 && bank == 0x0D){
+                bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7DE9){s=true;break;}
+                if(!s){ emulate_ret(r, "AnimateCurrentMoveEitherSide(0D:7DE9)"); did_skip = true; }
+            }
+            else if(pc == 0x7E01 && bank == 0x0D){
+                bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7E01){s=true;break;}
+                if(!s){ emulate_ret(r, "AnimateCurrentMove(0D:7E01)"); did_skip = true; }
+            }
+            else if(pc == 0x7E77 && bank == 0x0D){
+                bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7E77){s=true;break;}
+                if(!s){ emulate_ret(r, "AnimateFailedMove(0D:7E77)"); did_skip = true; }
+            }
+            else if(pc == 0x4F57 && bank == 0x0D){ emulate_ret(r, "BattleCommand_MoveAnim(0D:4F57)"); did_skip = true; }
+            else if(pc == 0x4F60 && bank == 0x0D){ emulate_ret(r, "BattleCommand_MoveAnimNoSub(0D:4F60)"); did_skip = true; }
+            else if(pc == 0x7E80 && bank == 0x0D){ emulate_ret(r, "BattleCommand_MoveDelay(0D:7E80)"); did_skip = true; }
+            else if(pc == 0x65AF && bank == 0x0D){
+                uint8_t wo = GB_safe_read_memory(&gb, 0xCFCC);
+                if(!(wo & 0x20u)){ unsafe_skip_error(exec_ctx, "BattleCommand_RaiseSubNoAnim(0D:65AF)", "wOptions(0xCFCC) bit5 (BATTLE_SCENE) must be 1 -- clear means Crystal should have reached LoadAnim"); break; }
+                emulate_ret(r, "BattleCommand_RaiseSubNoAnim(0D:65AF)"); did_skip = true;
+            }
+            else if(pc == 0x65C3 && bank == 0x0D){ emulate_ret(r, "BattleCommand_LowerSubNoAnim(0D:65C3)"); did_skip = true; }
+            else if(pc == 0x7E44 && bank == 0x0D){
+                uint8_t wo = GB_safe_read_memory(&gb, 0xCFCC);
+                if(wo & 0x20u){ unsafe_skip_error(exec_ctx, "LoadAnim(0D:7E44)", "wOptions(0xCFCC) bit5 (BATTLE_SCENE) must be 0 -- set means Crystal should have reached RaiseSubNoAnim"); break; }
+                emulate_ret(r, "LoadAnim(0D:7E44)"); did_skip = true;
+            }
+            else if(pc == 0x7E54 && bank == 0x0D){ emulate_ret(r, "PlayOpponentBattleAnim(0D:7E54)"); did_skip = true; }
+            else if(pc == 0x4FD1 && bank == 0x0D){ emulate_ret(r, "BattleCommand_StatUpAnim(0D:4FD1)"); did_skip = true; }
+            else if(pc == 0x4FDB && bank == 0x0D){ emulate_ret(r, "BattleCommand_StatDownAnim(0D:4FDB)"); did_skip = true; }
+            if(exec_ctx.triggered) break;
+            if(did_skip) continue;
+        }
+
+        GB_run(&gb);
+    }
+
+    res.insn_count = exec_ctx.insn_count;
+    res.sink_name  = exec_ctx.triggered_sink;
+    res.min_sp     = observed_min_sp;
+
+    if(!exec_ctx.triggered){ res.stop_reason = StopReason::MAX_INSN_EXCEEDED; return res; }
+    if(exec_ctx.triggered_sink && std::string(exec_ctx.triggered_sink) == "__TIMEOUT__"){
+        res.stop_reason = StopReason::WALL_CLOCK_TIMEOUT; return res;
+    }
+    if(exec_ctx.triggered_sink &&
+       std::string(exec_ctx.triggered_sink).rfind("__HARNESS_ERROR__", 0) == 0){
+        res.stop_reason = StopReason::HARNESS_GUARD_FIRED; return res;
+    }
+    if(rng_ctx && rng_ctx->exhausted){
+        res.stop_reason = StopReason::RNG_TAPE_EXHAUSTED; return res;
+    }
+
+    if(rng_ctx){ res.rng_trace = rng_ctx->trace; res.rng_bytes_consumed = rng_ctx->tape_idx; }
+
+    size_t extr_wram_sz = 0; uint16_t extr_wb = 0;
+    uint8_t* extr_wram = static_cast<uint8_t*>(
+        GB_get_direct_access(&gb, GB_DIRECT_ACCESS_RAM, &extr_wram_sz, &extr_wb));
+    if(!extr_wram){ res.stop_reason = StopReason::WRAM_ACCESS_FAILED; return res; }
+
+    res.has_snapshot = true;
+    {auto* p=extr_wram+wram_off(sym.wPlayerStatLevels.addr); for(int i=0;i<7;i++) res.player_stages[i]=p[i];}
+    {auto* p=extr_wram+wram_off(sym.wEnemyStatLevels.addr);  for(int i=0;i<7;i++) res.enemy_stages[i]=p[i];}
+    {auto* p=extr_wram+wram_off(sym.wBattleMonAttack.addr);  for(int i=0;i<5;i++) res.player_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
+    {auto* p=extr_wram+wram_off(sym.wEnemyMonAttack.addr);   for(int i=0;i<5;i++) res.enemy_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
+    res.battle_anim_param = extr_wram[wram_off(sym.wBattleAnimParam.addr)];
+    {auto* p=extr_wram+wram_off(sym.wCurDamage.addr); res.cur_damage=(uint16_t)((p[0]<<8)|p[1]);}
+    {auto* p=extr_wram+wram_off(sym.wBattleMonHP.addr); res.player_hp=(uint16_t)((p[0]<<8)|p[1]);}
+    {auto* p=extr_wram+wram_off(sym.wEnemyMonHP.addr);  res.enemy_hp=(uint16_t)((p[0]<<8)|p[1]);}
+    res.player_status = normalize_crystal_status(extr_wram[wram_off(sym.wBattleMonStatus.addr)],
+                                                  extr_wram[wram_off(sym.wPlayerSubStatus5.addr)]);
+    res.enemy_status  = normalize_crystal_status(extr_wram[wram_off(sym.wEnemyMonStatus.addr)],
+                                                  extr_wram[wram_off(sym.wEnemySubStatus5.addr)]);
+    res.stop_reason = StopReason::SINK_HIT;
+    return res;
+}
+
 static CrystalRunResult run_crystal_case(
     const std::vector<uint8_t>& rom_bytes,
     const SymCache& sym,
@@ -1467,408 +1684,16 @@ static CrystalRunResult run_crystal_case(
     // TEST-ONLY: override wOptions before the execution loop.
     if(cfg.force_woptions_before_loop) GB_write_memory(&gb, 0xCFCC, cfg.force_woptions_before_loop);
 
-    // Track minimum SP observed across the entire run.
-    uint16_t observed_min_sp = W_STACK_TOP;
-
-    // -------------------------------------------------------------------------
-    // Pre-step execution loop.
-    //
-    // Before each GB_run() we inspect the current PC and handle:
-    //   1. Sink detection   â€” stop before the instruction executes
-    //   2. Presentation skips â€” emulate a RET without entering the function
-    //   3. RNG injection    â€” write tape byte to 0xCFB6 before BattleRandom reads it
-    //   4. UsedMoveText skip via JP HL redirect at DoMoveEffectCommand
-    //
-    // None of these mutate PC/SP from exec_cb. exec_cb only counts instructions
-    // and handles wall-clock timeout.
-    //
-    // Presentation skips (all CALL-entered, pure display, no gameplay writes):
-    //
-    //   DelayFrame      (00:045A)  CALL-entered, HALTs for VBlank. RET conv.
-    //   DelayFrames     (00:0468)  calls DelayFrame in a loop. RET conv.
-    //   WaitBGMap       (00:31F6)  calls DelayFrames. RET conv.
-    //   BattleTextbox   (00:3AC3)  renders text tiles. RET conv.
-    //   StdBattleTextbox(00:3AD5)  sets HL, tail-calls BattleTextbox. RET conv.
-    //   RefreshBattleHuds(00:39C9) calls WaitBGMap + HUD update. RET conv.
-    //   AnimateHPBar    (03:46E0)  bank-guarded (hROMBank==03). RET conv.
-    //   PlayDamageAnim  (0D:7E19)  bank-guarded (hROMBank==0D). RET conv.
-    //     PlayDamageAnim is called from inside AnimateCurrentMoveEitherSide after
-    //     all callee-saves; the return addr on the stack is 0x7DFA (return inside
-    //     AnimateCurrentMoveEitherSide). Emulating RET here lets LowerSub +
-    //     RaiseSub + epilogue complete normally, restoring the caller's stack.
-    //
-    //   NOT skipped: AnimateCurrentMoveEitherSide itself â€” it is a registered sink
-    //     for cases 2171/2174 and must trigger the sink handler, not be skipped.
-    //
-    // For each skip, we emulate RET:
-    //   lo = mem[SP]; hi = mem[SP+1]; SP += 2; PC = (hi<<8)|lo
-    //   Fail-closed: if the popped address is outside the valid code range
-    //   (ROM: 0x0000â€“0x7FFF, or banked ROM in 0x4000â€“0x7FFF), report HARNESS_ERROR.
-    //
-    // DoMove UsedMoveText skip (DoMoveEffectCommand = 0D:4083, JP HL):
-    //   When hROMBank==0D and PC==0x4083 (JP HL) and HL==0x4541 (UsedMoveText),
-    //   we redirect JP HL by setting HL=0x4081 and SP+=2 before GB_run.
-    //   JP HL executes and lands on 0x4081 (JR .ReadMoveEffectCommand) with
-    //   a balanced stack. This is the same mechanism that already works for
-    //   the other cases; it remains a pre-step action, not an exec_cb mutation.
-
-    // Helper: read little-endian word at addr from SameBoy's memory
-    auto read_word = [&](uint16_t addr) -> uint16_t {
-        uint8_t lo = GB_safe_read_memory(&gb, addr);
-        uint8_t hi = GB_safe_read_memory(&gb, (uint16_t)(addr + 1));
-        return (uint16_t)(lo | (hi << 8));
-    };
-
-    // Emulate a RET: pop [SP] as new PC, SP += 2. Returns the new PC, or 0xFFFF
-    // (HARNESS_ERROR sentinel) if the return address is implausible.
-    auto emulate_ret = [&](GB_registers_t* r, const char* skip_name) -> uint16_t {
-        uint16_t ret_pc = read_word(r->sp);
-        r->sp += 2;
-        // Valid return destinations are executable ROM space: 0x0000â€“0x7FFF.
-        // Any address >= 0x8000 (VRAM 0x8000â€“0x9FFF, cart RAM 0xA000â€“0xBFFF,
-        // WRAM 0xC000â€“0xDFFF, echo/OAM/IO 0xE000â€“0xFEFF, HRAM/IE 0xFF00â€“0xFFFF)
-        // is not legitimate ROM code and indicates a corrupt presentation-skip call frame.
-        {
-            std::string err = validate_emulate_ret_pc(ret_pc, skip_name, (uint16_t)(r->sp - 2));
-            if(!err.empty()){
-                static char bad_ret[192];
-                std::memcpy(bad_ret, err.c_str(), std::min(err.size()+1, sizeof(bad_ret)-1));
-                bad_ret[sizeof(bad_ret)-1] = '\0';
-                exec_ctx.triggered      = true;
-                exec_ctx.triggered_sink = bad_ret;
-                return 0xFFFF;
-            }
-        }
-        r->pc = ret_pc;
-        return ret_pc;
-    };
-
-    while(!exec_ctx.triggered && exec_ctx.insn_count < cfg.insn_cap){
-        GB_registers_t* r = GB_get_registers(&gb);
-        if(!r){ exec_ctx.triggered = true; exec_ctx.triggered_sink = "__HARNESS_ERROR__ GB_get_registers null"; break; }
-
-        const uint16_t pc  = r->pc;
-        const uint16_t sp  = r->sp;
-        const uint8_t  bank = GB_safe_read_memory(&gb, 0xFF9D); // hROMBank
-
-        // --- Stack min-SP tracking and bounds check -----------------------
-        // Record low-water mark. SP must stay >= W_STACK_BOTTOM = 0xC000.
-        // Crystal's actual stack occupies 0xC000-0xC0FF (wStackBottomâ€“wStackTop).
-        if(sp < observed_min_sp) observed_min_sp = sp;
-        if(sp < W_STACK_BOTTOM){
-            static char sp_err[64];
-            snprintf(sp_err, sizeof(sp_err),
-                "__HARNESS_ERROR__ stack escape: SP=0x%04X < wStackBottom=0x%04X",
-                sp, (unsigned)W_STACK_BOTTOM);
-            exec_ctx.triggered      = true;
-            exec_ctx.triggered_sink = sp_err;
-            break;
-        }
-
-        // --- Sink detection (pre-step) ------------------------------------
-        bool hit_sink = false;
-        for(size_t i = 0; i < cfg.num_sinks; ++i){
-            if(pc == cfg.sink_pcs[i]){
-                exec_ctx.triggered      = true;
-                exec_ctx.triggered_sink = cfg.sink_names[i];
-                hit_sink = true;
-                break;
-            }
-        }
-        if(hit_sink) break;
-
-        // --- ByteFill guard (0x3041) --------------------------------------
-        // Destination in DE < 0x8000 means a fixture field is uninitialized.
-        if(pc == 0x3041 && r->de < 0x8000){
-            static char bytefill_err[128];
-            snprintf(bytefill_err, sizeof(bytefill_err),
-                "__HARNESS_ERROR__ ByteFill(DE=0x%04X BC=0x%04X): "
-                "fixture has uninitialized pointer",
-                r->de, r->bc);
-            exec_ctx.triggered      = true;
-            exec_ctx.triggered_sink = bytefill_err;
-            break;
-        }
-
-        // --- RNG injection (pre-step) -------------------------------------
-        // PC == 0x2FAD: about to execute LD A,(0xCFB6) inside BattleRandom.
-        // Write our tape byte first so the instruction loads it naturally.
-        if(rng_ctx && pc == BATTLE_RANDOM_RESULT_READ_PC){
-            if(rng_ctx->tape_idx >= rng_ctx->tape_len){
-                rng_ctx->exhausted = true;
-                // Fall through â€” let the case exhaust; we report it later.
-            } else {
-                uint8_t crystal_val = GB_safe_read_memory(&gb, 0xCFB6);
-                uint8_t tape_val    = rng_ctx->tape[rng_ctx->tape_idx];
-                GB_write_memory(&gb, 0xCFB6, tape_val);
-                rng_ctx->trace.push_back({rng_ctx->tape_idx, tape_val, crystal_val,
-                                          BATTLE_RANDOM_RESULT_READ_PC, "BattleRandom"});
-                ++rng_ctx->tape_idx;
-            }
-        }
-
-        // --- UsedMoveText skip via JP HL redirect (pre-step) --------------
-        // At DoMove.DoMoveEffectCommand (0D:4083 = JP HL), when HL == 0x4541
-        // (BattleCommand_UsedMoveText), redirect JP HL to 0x4081 and discard
-        // the return address pushed by `call .DoMoveEffectCommand`.
-        // JP HL then executes and lands on JR .ReadMoveEffectCommand (0x4081)
-        // with a balanced stack.
-        if(pc == 0x4083 && bank == 0x0D && r->hl == 0x4541){
-            r->hl  = 0x4081; // JP HL lands here
-            r->sp += 2;      // discard 0x4081 pushed by call .DoMoveEffectCommand
-            // Fall through to GB_run() â€” JP HL executes with the modified HL.
-        }
-
-        // --- Presentation skips (pre-step RET emulation) ------------------
-        // Each skip: emulate one RET before GB_run() to avoid the function body.
-        // The function never executes. The return address is validated.
-        {
-            bool did_skip = false;
-
-            // DelayFrame (00:045A) â€” HALTs for VBlank; pure timing, no game state
-            if(pc == 0x045A){
-                emulate_ret(r, "DelayFrame(00:045A)");
-                did_skip = true;
-            }
-            // DelayFrames (00:0468) â€” calls DelayFrame in a loop; pure timing
-            else if(pc == 0x0468){
-                emulate_ret(r, "DelayFrames(00:0468)");
-                did_skip = true;
-            }
-            // WaitBGMap (00:31F6) â€” calls DelayFrames; BG map sync, no game state
-            else if(pc == 0x31F6){
-                emulate_ret(r, "WaitBGMap(00:31F6)");
-                did_skip = true;
-            }
-            // BattleTextbox (00:3AC3) â€” renders text tiles; no game state
-            else if(pc == 0x3AC3){
-                emulate_ret(r, "BattleTextbox(00:3AC3)");
-                did_skip = true;
-            }
-            // StdBattleTextbox (00:3AD5) â€” sets HL, calls BattleTextbox
-            else if(pc == 0x3AD5){
-                emulate_ret(r, "StdBattleTextbox(00:3AD5)");
-                did_skip = true;
-            }
-            // RefreshBattleHuds (00:39C9) â€” WaitBGMap + HUD tiles; no game state
-            else if(pc == 0x39C9){
-                emulate_ret(r, "RefreshBattleHuds(00:39C9)");
-                did_skip = true;
-            }
-            // UpdateBattleHuds (00:39D4) â€” updates HP bars and HUD tiles; no game state.
-            // Called from UpdateHPBarBattleHuds (0F:4D36) which is called from RestoreHP
-            // during the Present heal path. Pure display; no battle state written.
-            else if(pc == 0x39D4){
-                emulate_ret(r, "UpdateBattleHuds(00:39D4)");
-                did_skip = true;
-            }
-            // AnimateHPBar (03:46E0) â€” bank-guarded; HP bar animation
-            else if(pc == 0x46E0 && bank == 0x03){
-                emulate_ret(r, "AnimateHPBar(03:46E0)");
-                did_skip = true;
-            }
-            // PlayDamageAnim (0D:7E19) â€” bank-guarded; damage flash animation.
-            // Called from AnimateCurrentMoveEitherSide after all callee-saves.
-            // The return addr on the stack is 0x7DFA (inside AnimateCMES); popping
-            // it lets BattleCommand_LowerSub (already done), POP AF, BattleCommand_
-            // RaiseSub, and the AnimateCMES epilogue (POP BC/DE/HL, RET) execute
-            // normally, correctly restoring the BattleCommand_Present call frame.
-            // Not skipped when AnimateCurrentMoveEitherSide is a registered sink.
-            else if(pc == 0x7E19 && bank == 0x0D){
-                bool acmes_is_sink = false;
-                for(size_t i = 0; i < cfg.num_sinks; ++i)
-                    if(cfg.sink_pcs[i] == 0x7DE9){ acmes_is_sink = true; break; }
-                if(!acmes_is_sink){
-                    emulate_ret(r, "PlayDamageAnim(0D:7E19)");
-                    did_skip = true;
-                }
-            }
-            // AnimateCurrentMoveEitherSide (0D:7DE9) â€” CALL-entered damage anim.
-            // Skipped only when NOT a registered sink (full-script cases 2176-2180
-            // need execution to continue past it to EndMoveEffect).
-            else if(pc == 0x7DE9 && bank == 0x0D){
-                bool is_sink = false;
-                for(size_t i = 0; i < cfg.num_sinks; ++i)
-                    if(cfg.sink_pcs[i] == 0x7DE9){ is_sink = true; break; }
-                if(!is_sink){
-                    emulate_ret(r, "AnimateCurrentMoveEitherSide(0D:7DE9)");
-                    did_skip = true;
-                }
-            }
-            // AnimateCurrentMove (0D:7E01) â€” CALL-entered heal/general anim.
-            // Skipped only when NOT a registered sink.
-            else if(pc == 0x7E01 && bank == 0x0D){
-                bool is_sink = false;
-                for(size_t i = 0; i < cfg.num_sinks; ++i)
-                    if(cfg.sink_pcs[i] == 0x7E01){ is_sink = true; break; }
-                if(!is_sink){
-                    emulate_ret(r, "AnimateCurrentMove(0D:7E01)");
-                    did_skip = true;
-                }
-            }
-            // AnimateFailedMove (0D:7E77) â€” miss/immune animation.
-            // Reached via `jp AnimateFailedMove` (tail jump) from BattleCommand_Present.
-            // At that point the stack top holds the DoMove dispatcher return (0x4081).
-            // Skipped only when NOT a registered sink.
-            else if(pc == 0x7E77 && bank == 0x0D){
-                bool is_sink = false;
-                for(size_t i = 0; i < cfg.num_sinks; ++i)
-                    if(cfg.sink_pcs[i] == 0x7E77){ is_sink = true; break; }
-                if(!is_sink){
-                    emulate_ret(r, "AnimateFailedMove(0D:7E77)");
-                    did_skip = true;
-                }
-            }
-            // BattleCommand_MoveAnim (0D:4F57) â€” script command for move animation.
-            // Calls BattleCommand_LowerSub, PlayUserBattleAnim (bank 0x33 via callfar),
-            // BattleCommand_RaiseSub. Pure presentation; no battle state written.
-            // The callfar PlayBattleAnim path (bank 0x33) calls display hardware and
-            // does not converge via WaitBGMap alone â€” skipping the whole command here
-            // is cleaner and equivalent to skipping at WaitBGMap depth.
-            else if(pc == 0x4F57 && bank == 0x0D){
-                emulate_ret(r, "BattleCommand_MoveAnim(0D:4F57)");
-                did_skip = true;
-            }
-            // BattleCommand_MoveAnimNoSub (0D:4F60) â€” move animation without substitute.
-            // Used by multi-hit move scripts (startloop/endloop) as the per-hit animation
-            // command. Same presentation content as MoveAnim; no battle state writes.
-            else if(pc == 0x4F60 && bank == 0x0D){
-                emulate_ret(r, "BattleCommand_MoveAnimNoSub(0D:4F60)");
-                did_skip = true;
-            }
-            // BattleCommand_MoveDelay (0D:7E80) â€” delay 40 frames between HP bar anim.
-            // Does `jp DelayFrames`; DelayFrames is already in our skip list via 0x0468.
-            // Pre-step skip here avoids the JP dispatch overhead.
-            else if(pc == 0x7E80 && bank == 0x0D){
-                emulate_ret(r, "BattleCommand_MoveDelay(0D:7E80)");
-                did_skip = true;
-            }
-            // BattleCommand_RaiseSubNoAnim (0D:65AF) -- draws the player's back sprite.
-            // Called by BattleCommand_Substitute when wOptions bit5 (BATTLE_SCENE) is SET.
-            // Source-proven: Substitute 0D:6EE8 = CALL 0x65AF, reached only when
-            // _CheckBattleScene returned carry (SCENE_ACTIVE). If SCENE_CLEAR, LoadAnim runs.
-            // Precondition: wOptions(0xCFCC) bit5 must be 1 (BATTLE_SCENE set).
-            else if(pc == 0x65AF && bank == 0x0D){
-                {
-                    uint8_t wopts = GB_safe_read_memory(&gb, 0xCFCC);
-                    if(!(wopts & 0x20u)){ unsafe_skip_error(exec_ctx, "BattleCommand_RaiseSubNoAnim(0D:65AF)", "wOptions(0xCFCC) bit5 (BATTLE_SCENE) must be 1 -- clear means Crystal should have reached LoadAnim"); break; }
-                }
-                emulate_ret(r, "BattleCommand_RaiseSubNoAnim(0D:65AF)");
-                did_skip = true;
-            }
-            // BattleCommand_LowerSubNoAnim (0D:65C3) -- hides the player sub sprite without animation.
-            // Used by DoubleTeam/Minimize effect scripts after EvasionUp.
-            // Writes only hBGMapMode (0xFFD4, display register). Reads hBattleTurn for sprite
-            // selection only. The EvasionUp stage change runs BEFORE this command.
-            // Ends with JP WaitBGMap (0x31F6) which is already in the skip list.
-            // Source-proven: BattleCommand_LowerSubNoAnim at 0D:65C3 in pokecrystal11.sym.
-            else if(pc == 0x65C3 && bank == 0x0D){
-                emulate_ret(r, "BattleCommand_LowerSubNoAnim(0D:65C3)");
-                did_skip = true;
-            }
-            // LoadAnim (0D:7E44) -- writes wFXAnimID then calls PlayBattleAnim (LCD/VRAM).
-            // Called by BattleCommand_Substitute when wOptions bit5 (BATTLE_SCENE) is CLEAR.
-            // Source-proven: Substitute 0D:6ED2 calls _CheckBattleScene; JR C to RaiseSubNoAnim
-            // if SCENE_ACTIVE; falls through to LoadAnim if SCENE_CLEAR.
-            // Precondition: wOptions(0xCFCC) bit5 must be 0.
-            else if(pc == 0x7E44 && bank == 0x0D){
-                {
-                    uint8_t wopts = GB_safe_read_memory(&gb, 0xCFCC);
-                    if(wopts & 0x20u){ unsafe_skip_error(exec_ctx, "LoadAnim(0D:7E44)", "wOptions(0xCFCC) bit5 (BATTLE_SCENE) must be 0 -- set means Crystal should have reached RaiseSubNoAnim"); break; }
-                }
-                emulate_ret(r, "LoadAnim(0D:7E44)");
-                did_skip = true;
-            }
-            // PlayOpponentBattleAnim (0D:7E54) -- opponent-side animation player.
-            // Called from BattleCommand_Confuse after setting confusion turns.
-            // Writes wFXAnimID, flips hBattleTurn (via SwitchTurn), calls PlayBattleAnim
-            // (bank 33 via RST 0x08). Pure LCD/VRAM; no semantic WRAM written.
-            // Source-proven: 0D:7E54 in pokecrystal11.sym.
-            else if(pc == 0x7E54 && bank == 0x0D){
-                emulate_ret(r, "PlayOpponentBattleAnim(0D:7E54)");
-                did_skip = true;
-            }
-            // BattleCommand_StatUpAnim (0D:4FD1) -- stat-raise animation.
-            // Called from stat-up scripts (SwordsDance, Agility, Amnesia, Barrier, etc.)
-            // after the stat stage is already written to wPlayerStatLevels.
-            // Calls PlayFXAnimID -> FarCall PlayBattleAnim (33:40D6) -> DelayFrames loop.
-            // Pure LCD/VRAM presentation; no semantic WRAM written after stage change.
-            // Source-proven: BattleCommand_StatUpAnim at 0D:4FD1 in pokecrystal11.sym.
-            else if(pc == 0x4FD1 && bank == 0x0D){
-                emulate_ret(r, "BattleCommand_StatUpAnim(0D:4FD1)");
-                did_skip = true;
-            }
-            // BattleCommand_StatDownAnim (0D:4FDB) -- stat-lower animation.
-            // Called from stat-down scripts (Growl, Leer, TailWhip, Screech, StringShot, Charm)
-            // after the stage is already decremented. Same display path as StatUpAnim.
-            // Source-proven: BattleCommand_StatDownAnim at 0D:4FDB in pokecrystal11.sym.
-            else if(pc == 0x4FDB && bank == 0x0D){
-                emulate_ret(r, "BattleCommand_StatDownAnim(0D:4FDB)");
-                did_skip = true;
-            }
-
-            if(exec_ctx.triggered) break; // emulate_ret set HARNESS_ERROR
-            if(did_skip) continue;        // skip GB_run() for this step
-        }
-
-        // --- Execute one instruction ---------------------------------------
-        GB_run(&gb);
-    }
-
-    res.insn_count = exec_ctx.insn_count;
-    res.sink_name  = exec_ctx.triggered_sink;
-    res.min_sp     = observed_min_sp;
-
-    // Check termination cause
-    if(!exec_ctx.triggered){
-        GB_free(&gb); res.stop_reason=StopReason::MAX_INSN_EXCEEDED; return res;
-    }
-    if(exec_ctx.triggered_sink && std::string(exec_ctx.triggered_sink)=="__TIMEOUT__"){
-        GB_free(&gb); res.stop_reason=StopReason::WALL_CLOCK_TIMEOUT; return res;
-    }
-    // Any sink whose name starts with __HARNESS_ERROR__ is an internal guard
-    // (stack escape, bad emulate_ret, ByteFill, etc.).  Return immediately --
-    // before re-acquiring WRAM -- so run_case sees a non-SINK_HIT stop reason
-    // and classifies the case as HARNESS_ERROR rather than a legitimate outcome.
-    if(exec_ctx.triggered_sink &&
-       std::string(exec_ctx.triggered_sink).rfind("__HARNESS_ERROR__", 0) == 0){
-        GB_free(&gb); res.stop_reason=StopReason::HARNESS_GUARD_FIRED; return res;
-    }
-    if(rng_ctx && rng_ctx->exhausted){
-        GB_free(&gb); res.stop_reason=StopReason::RNG_TAPE_EXHAUSTED; return res;
-    }
-
-    // Populate RNG trace
-    if(rng_ctx){
-        res.rng_trace = rng_ctx->trace;
-        res.rng_bytes_consumed = rng_ctx->tape_idx;
-    }
-
-    // Re-acquire WRAM
-    wram_sz=0;
-    wram=static_cast<uint8_t*>(GB_get_direct_access(&gb,GB_DIRECT_ACCESS_RAM,&wram_sz,&wbank));
-    if(!wram){ GB_free(&gb); res.stop_reason=StopReason::WRAM_ACCESS_FAILED; return res; }
-
-    res.has_snapshot = true;
-    // Stages + computed stats (Haze outputs)
-    {auto* p=wram+wram_off(sym.wPlayerStatLevels.addr); for(int i=0;i<7;i++) res.player_stages[i]=p[i];}
-    {auto* p=wram+wram_off(sym.wEnemyStatLevels.addr);  for(int i=0;i<7;i++) res.enemy_stages[i]=p[i];}
-    {auto* p=wram+wram_off(sym.wBattleMonAttack.addr);  for(int i=0;i<5;i++) res.player_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
-    {auto* p=wram+wram_off(sym.wEnemyMonAttack.addr);   for(int i=0;i<5;i++) res.enemy_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
-    // Present-specific outputs
-    res.battle_anim_param = wram[wram_off(sym.wBattleAnimParam.addr)];
-    {auto* p=wram+wram_off(sym.wCurDamage.addr); res.cur_damage=(uint16_t)((p[0]<<8)|p[1]);}
-    {auto* p=wram+wram_off(sym.wBattleMonHP.addr); res.player_hp=(uint16_t)((p[0]<<8)|p[1]);}
-    {auto* p=wram+wram_off(sym.wEnemyMonHP.addr);  res.enemy_hp=(uint16_t)((p[0]<<8)|p[1]);}
-    res.player_status = normalize_crystal_status(
-        wram[wram_off(sym.wBattleMonStatus.addr)],
-        wram[wram_off(sym.wPlayerSubStatus5.addr)]);
-    res.enemy_status  = normalize_crystal_status(
-        wram[wram_off(sym.wEnemyMonStatus.addr)],
-        wram[wram_off(sym.wEnemySubStatus5.addr)]);
-    res.stop_reason = StopReason::SINK_HIT;
-    return res;
+    // --- Invoke the shared certified execution core ---
+    // (force_sp/force_woptions hooks above are test-only and apply pre-loop.)
+    CrystalRunResult res2 = execute_crystal_run_loop(gb, cfg, exec_ctx, rng_ctx.get(), sym);
+    // Preserve the initial semantic snapshot captured before execution above.
+    res2.initial = res.initial;
+    GB_free(&gb);
+    return res2;
 }
+
+// ============================================================================
 
 // ============================================================================
 // Enginemon side
@@ -5775,118 +5600,12 @@ static CrystalRunResult run_crystal_case_from_snapshot(
     GB_set_user_data(&gb, &exec_ctx);
     GB_set_execution_callback(&gb, exec_cb);
 
-    static constexpr uint16_t SNAP_W_STACK_TOP    = 0xC0FF;
-    static constexpr uint16_t SNAP_W_STACK_BOTTOM = 0xC000;
-    uint16_t observed_min_sp = SNAP_W_STACK_TOP;
-
-    // IDENTICAL helpers
-    auto snap_read_word = [&](uint16_t addr) -> uint16_t {
-        uint8_t lo = GB_safe_read_memory(&gb, addr);
-        uint8_t hi = GB_safe_read_memory(&gb, (uint16_t)(addr+1));
-        return (uint16_t)(lo|(hi<<8));
-    };
-    auto snap_emulate_ret = [&](GB_registers_t* r, const char* skip_name) -> uint16_t {
-        uint16_t ret_pc = snap_read_word(r->sp);
-        r->sp += 2;
-        std::string err = validate_emulate_ret_pc(ret_pc, skip_name, (uint16_t)(r->sp-2));
-        if(!err.empty()){
-            static char bad_ret[192];
-            std::memcpy(bad_ret, err.c_str(), std::min(err.size()+1, sizeof(bad_ret)-1));
-            bad_ret[sizeof(bad_ret)-1] = '\0';
-            exec_ctx.triggered      = true;
-            exec_ctx.triggered_sink = bad_ret;
-            return 0xFFFF;
-        }
-        r->pc = ret_pc;
-        return ret_pc;
-    };
-
-    // IDENTICAL execution loop (copied verbatim from run_crystal_case)
-    while(!exec_ctx.triggered && exec_ctx.insn_count < cfg.insn_cap){
-        GB_registers_t* r = GB_get_registers(&gb);
-        if(!r){ exec_ctx.triggered=true; exec_ctx.triggered_sink="__HARNESS_ERROR__ GB_get_registers null"; break; }
-        const uint16_t pc   = r->pc;
-        const uint16_t sp   = r->sp;
-        const uint8_t  bank = GB_safe_read_memory(&gb, 0xFF9D);
-        if(sp < observed_min_sp) observed_min_sp = sp;
-        if(sp < SNAP_W_STACK_BOTTOM){
-            static char sp_err[64];
-            snprintf(sp_err,sizeof(sp_err),"__HARNESS_ERROR__ stack escape: SP=0x%04X < wStackBottom=0x%04X",sp,(unsigned)SNAP_W_STACK_BOTTOM);
-            exec_ctx.triggered=true; exec_ctx.triggered_sink=sp_err; break;
-        }
-        bool hit_sink=false;
-        for(size_t i=0;i<cfg.num_sinks;++i){
-            if(pc==cfg.sink_pcs[i]){ exec_ctx.triggered=true; exec_ctx.triggered_sink=cfg.sink_names[i]; hit_sink=true; break; }
-        }
-        if(hit_sink) break;
-        if(pc==0x3041&&r->de<0x8000){
-            static char bytefill_err[128];
-            snprintf(bytefill_err,sizeof(bytefill_err),"__HARNESS_ERROR__ ByteFill(DE=0x%04X BC=0x%04X): fixture has uninitialized pointer",r->de,r->bc);
-            exec_ctx.triggered=true; exec_ctx.triggered_sink=bytefill_err; break;
-        }
-        if(rng_ctx&&pc==BATTLE_RANDOM_RESULT_READ_PC){
-            if(rng_ctx->tape_idx>=rng_ctx->tape_len){ rng_ctx->exhausted=true; }
-            else{ uint8_t cv=GB_safe_read_memory(&gb,0xCFB6); uint8_t tv=rng_ctx->tape[rng_ctx->tape_idx]; GB_write_memory(&gb,0xCFB6,tv); rng_ctx->trace.push_back({rng_ctx->tape_idx,tv,cv,BATTLE_RANDOM_RESULT_READ_PC,"BattleRandom"}); ++rng_ctx->tape_idx; }
-        }
-        if(pc==0x4083&&bank==0x0D&&r->hl==0x4541){ r->hl=0x4081; r->sp+=2; }
-        {
-            bool did_skip=false;
-            if(pc==0x045A){ snap_emulate_ret(r,"DelayFrame(00:045A)"); did_skip=true; }
-            else if(pc==0x0468){ snap_emulate_ret(r,"DelayFrames(00:0468)"); did_skip=true; }
-            else if(pc==0x31F6){ snap_emulate_ret(r,"WaitBGMap(00:31F6)"); did_skip=true; }
-            else if(pc==0x3AC3){ snap_emulate_ret(r,"BattleTextbox(00:3AC3)"); did_skip=true; }
-            else if(pc==0x3AD5){ snap_emulate_ret(r,"StdBattleTextbox(00:3AD5)"); did_skip=true; }
-            else if(pc==0x39C9){ snap_emulate_ret(r,"RefreshBattleHuds(00:39C9)"); did_skip=true; }
-            else if(pc==0x39D4){ snap_emulate_ret(r,"UpdateBattleHuds(00:39D4)"); did_skip=true; }
-            else if(pc==0x46E0&&bank==0x03){ snap_emulate_ret(r,"AnimateHPBar(03:46E0)"); did_skip=true; }
-            else if(pc==0x7E19&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7DE9){s=true;break;} if(!s){snap_emulate_ret(r,"PlayDamageAnim(0D:7E19)");did_skip=true;} }
-            else if(pc==0x7DE9&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7DE9){s=true;break;} if(!s){snap_emulate_ret(r,"AnimateCurrentMoveEitherSide(0D:7DE9)");did_skip=true;} }
-            else if(pc==0x7E01&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7E01){s=true;break;} if(!s){snap_emulate_ret(r,"AnimateCurrentMove(0D:7E01)");did_skip=true;} }
-            else if(pc==0x7E77&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7E77){s=true;break;} if(!s){snap_emulate_ret(r,"AnimateFailedMove(0D:7E77)");did_skip=true;} }
-            else if(pc==0x4F57&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_MoveAnim(0D:4F57)"); did_skip=true; }
-            else if(pc==0x4F60&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_MoveAnimNoSub(0D:4F60)"); did_skip=true; }
-            else if(pc==0x7E80&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_MoveDelay(0D:7E80)"); did_skip=true; }
-            else if(pc==0x65AF&&bank==0x0D){ uint8_t wo=GB_safe_read_memory(&gb,0xCFCC); if(!(wo&0x20u)){unsafe_skip_error(exec_ctx,"BattleCommand_RaiseSubNoAnim(0D:65AF)","wOptions(0xCFCC) bit5 must be 1");break;} snap_emulate_ret(r,"BattleCommand_RaiseSubNoAnim(0D:65AF)"); did_skip=true; }
-            else if(pc==0x65C3&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_LowerSubNoAnim(0D:65C3)"); did_skip=true; }
-            else if(pc==0x7E44&&bank==0x0D){ uint8_t wo=GB_safe_read_memory(&gb,0xCFCC); if(wo&0x20u){unsafe_skip_error(exec_ctx,"LoadAnim(0D:7E44)","wOptions(0xCFCC) bit5 must be 0");break;} snap_emulate_ret(r,"LoadAnim(0D:7E44)"); did_skip=true; }
-            else if(pc==0x7E54&&bank==0x0D){ snap_emulate_ret(r,"PlayOpponentBattleAnim(0D:7E54)"); did_skip=true; }
-            else if(pc==0x4FD1&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_StatUpAnim(0D:4FD1)"); did_skip=true; }
-            else if(pc==0x4FDB&&bank==0x0D){ snap_emulate_ret(r,"BattleCommand_StatDownAnim(0D:4FDB)"); did_skip=true; }
-            if(exec_ctx.triggered) break;
-            if(did_skip) continue;
-        }
-        GB_run(&gb);
-    }
-
-    res.insn_count = exec_ctx.insn_count;
-    res.sink_name  = exec_ctx.triggered_sink;
-    res.min_sp     = observed_min_sp;
-
-    if(!exec_ctx.triggered){ res.stop_reason=StopReason::MAX_INSN_EXCEEDED; return res; }
-    if(exec_ctx.triggered_sink&&std::string(exec_ctx.triggered_sink)=="__TIMEOUT__"){ res.stop_reason=StopReason::WALL_CLOCK_TIMEOUT; return res; }
-    if(exec_ctx.triggered_sink&&std::string(exec_ctx.triggered_sink).rfind("__HARNESS_ERROR__",0)==0){ res.stop_reason=StopReason::HARNESS_GUARD_FIRED; return res; }
-    if(rng_ctx&&rng_ctx->exhausted){ res.stop_reason=StopReason::RNG_TAPE_EXHAUSTED; return res; }
-
-    if(rng_ctx){ res.rng_trace=rng_ctx->trace; res.rng_bytes_consumed=rng_ctx->tape_idx; }
-
-    // Re-acquire WRAM pointer after execution (same wram/wram_sz from fixture setup above)
-    wram_sz=0;
-    wram=static_cast<uint8_t*>(GB_get_direct_access(&gb,GB_DIRECT_ACCESS_RAM,&wram_sz,&wbank));
-    if(!wram){ res.stop_reason=StopReason::WRAM_ACCESS_FAILED; return res; }
-
-    res.has_snapshot=true;
-    {auto* p=wram+wram_off(sym.wPlayerStatLevels.addr); for(int i=0;i<7;i++) res.player_stages[i]=p[i];}
-    {auto* p=wram+wram_off(sym.wEnemyStatLevels.addr);  for(int i=0;i<7;i++) res.enemy_stages[i]=p[i];}
-    {auto* p=wram+wram_off(sym.wBattleMonAttack.addr);  for(int i=0;i<5;i++) res.player_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
-    {auto* p=wram+wram_off(sym.wEnemyMonAttack.addr);   for(int i=0;i<5;i++) res.enemy_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
-    res.battle_anim_param=wram[wram_off(sym.wBattleAnimParam.addr)];
-    {auto* p=wram+wram_off(sym.wCurDamage.addr); res.cur_damage=(uint16_t)((p[0]<<8)|p[1]);}
-    {auto* p=wram+wram_off(sym.wBattleMonHP.addr); res.player_hp=(uint16_t)((p[0]<<8)|p[1]);}
-    {auto* p=wram+wram_off(sym.wEnemyMonHP.addr);  res.enemy_hp=(uint16_t)((p[0]<<8)|p[1]);}
-    res.player_status=normalize_crystal_status(wram[wram_off(sym.wBattleMonStatus.addr)],wram[wram_off(sym.wPlayerSubStatus5.addr)]);
-    res.enemy_status =normalize_crystal_status(wram[wram_off(sym.wEnemyMonStatus.addr)],wram[wram_off(sym.wEnemySubStatus5.addr)]);
-    res.stop_reason=StopReason::SINK_HIT;
-    return res;
+    // --- Invoke the shared certified execution core ---
+    // (res.initial and unmapped-state guard already handled above)
+    CrystalRunResult loop_res = execute_crystal_run_loop(gb, cfg, exec_ctx, rng_ctx.get(), sym);
+    // Preserve the initial snapshot captured before execution
+    loop_res.initial = res.initial;
+    return loop_res;
 }
 
 // ---------------------------------------------------------------------------
@@ -6583,183 +6302,58 @@ int run_accuracy_sweep_benchmark(const char* rom_path, const char* sym_path, int
                                const uint8_t* snapshot, size_t snap_sz,
                                std::atomic<bool>* stop_flag) -> CrystalRunResult {
         CrystalRunResult res{};
-        res.stop_reason    = StopReason::GB_INIT_FAILED;
-        res.insn_count     = 0;
-        res.sink_name      = nullptr;
-        res.has_snapshot   = false;
-        res.rng_bytes_consumed = 0;
-        res.min_sp         = 0xFFFF;
+        res.stop_reason = StopReason::GB_INIT_FAILED;
+        res.min_sp      = 0xFFFF;
 
-        // Restore to pre-execution state
+        // Restore to post-fixture pre-execution state
         if(GB_load_state_from_buffer(&gb, snapshot, snap_sz) != 0){
             res.stop_reason = StopReason::WRAM_ACCESS_FAILED;
             return res;
         }
 
-        // Set up RNG context (not in GB state)
-        std::unique_ptr<RngCtx> rng_ctx;
-        if(cfg.rng_tape && cfg.rng_tape_len > 0){
-            rng_ctx = std::make_unique<RngCtx>();
-            rng_ctx->tape      = cfg.rng_tape;
-            rng_ctx->tape_len  = cfg.rng_tape_len;
-            rng_ctx->tape_idx  = 0;
-            rng_ctx->exhausted = false;
-        }
-
-        // Set up execution context (not in GB state)
-        ExecCtx exec_ctx{};
-        for(size_t i = 0; i < cfg.num_sinks; ++i){
-            exec_ctx.sink_pcs[i]   = cfg.sink_pcs[i];
-            exec_ctx.sink_names[i] = cfg.sink_names[i];
-        }
-        exec_ctx.num_sinks      = cfg.num_sinks;
-        exec_ctx.triggered      = false;
-        exec_ctx.triggered_sink = nullptr;
-        exec_ctx.insn_count     = 0;
-        exec_ctx.stop_flag      = stop_flag;
-        exec_ctx.rng_ctx        = rng_ctx.get();
-
-        GB_set_user_data(&gb, &exec_ctx);
-        GB_set_execution_callback(&gb, exec_cb);
-
-        // IDENTICAL initial snapshot capture (re-read from restored WRAM)
+        // Capture initial semantic state from restored WRAM
         {
             size_t wsz=0; uint16_t wb=0;
-            uint8_t* wram = static_cast<uint8_t*>(
+            uint8_t* wram=static_cast<uint8_t*>(
                 GB_get_direct_access(&gb, GB_DIRECT_ACCESS_RAM, &wsz, &wb));
-            if(!wram){ res.stop_reason = StopReason::WRAM_ACCESS_FAILED; return res; }
+            if(!wram){ res.stop_reason=StopReason::WRAM_ACCESS_FAILED; return res; }
             res.initial = capture_crystal_initial(wram, sym);
-            // IDENTICAL unmapped-state guard
             for(const char* side : {"player", "enemy"}){
                 std::string err = check_crystal_unmapped_state(wram, sym, side);
                 if(!err.empty()){
                     static char unmapped_err[256];
-                    std::memcpy(unmapped_err, err.c_str(), std::min(err.size()+1, sizeof(unmapped_err)-1));
-                    unmapped_err[sizeof(unmapped_err)-1] = '\0';
-                    res.sink_name   = unmapped_err;
-                    res.stop_reason = StopReason::HARNESS_GUARD_FIRED;
+                    std::memcpy(unmapped_err,err.c_str(),std::min(err.size()+1,sizeof(unmapped_err)-1));
+                    unmapped_err[sizeof(unmapped_err)-1]='\0';
+                    res.sink_name=unmapped_err;
+                    res.stop_reason=StopReason::HARNESS_GUARD_FIRED;
                     return res;
                 }
             }
         }
 
-        GB_registers_t* regs = GB_get_registers(&gb);
-        if(!regs){ res.stop_reason = StopReason::REGS_ACCESS_FAILED; return res; }
-
-        // NOTE: PC, SP, stack sentinel are already set in the snapshot.
-        // No need to re-write them.
-
-        static constexpr uint16_t W_STACK_TOP_R    = 0xC0FF;
-        static constexpr uint16_t W_STACK_BOTTOM_R = 0xC000;
-        uint16_t observed_min_sp = W_STACK_TOP_R;
-
-        // IDENTICAL helper lambdas
-        auto read_word_r = [&](uint16_t addr) -> uint16_t {
-            uint8_t lo = GB_safe_read_memory(&gb, addr);
-            uint8_t hi = GB_safe_read_memory(&gb, (uint16_t)(addr+1));
-            return (uint16_t)(lo|(hi<<8));
-        };
-        auto emulate_ret_r = [&](GB_registers_t* r, const char* skip_name) -> uint16_t {
-            uint16_t ret_pc = read_word_r(r->sp);
-            r->sp += 2;
-            std::string err = validate_emulate_ret_pc(ret_pc, skip_name, (uint16_t)(r->sp-2));
-            if(!err.empty()){
-                static char bad_ret[192];
-                std::memcpy(bad_ret, err.c_str(), std::min(err.size()+1, sizeof(bad_ret)-1));
-                bad_ret[sizeof(bad_ret)-1] = '\0';
-                exec_ctx.triggered      = true;
-                exec_ctx.triggered_sink = bad_ret;
-                return 0xFFFF;
-            }
-            r->pc = ret_pc;
-            return ret_pc;
-        };
-
-        // IDENTICAL execution loop
-        while(!exec_ctx.triggered && exec_ctx.insn_count < cfg.insn_cap){
-            GB_registers_t* r = GB_get_registers(&gb);
-            if(!r){ exec_ctx.triggered=true; exec_ctx.triggered_sink="__HARNESS_ERROR__ GB_get_registers null"; break; }
-            const uint16_t pc   = r->pc;
-            const uint16_t sp   = r->sp;
-            const uint8_t  bank = GB_safe_read_memory(&gb, 0xFF9D);
-            if(sp < observed_min_sp) observed_min_sp = sp;
-            if(sp < W_STACK_BOTTOM_R){
-                static char sp_err[64];
-                snprintf(sp_err,sizeof(sp_err),"__HARNESS_ERROR__ stack escape: SP=0x%04X < wStackBottom=0x%04X",sp,(unsigned)W_STACK_BOTTOM_R);
-                exec_ctx.triggered=true; exec_ctx.triggered_sink=sp_err; break;
-            }
-            bool hit_sink=false;
-            for(size_t i=0;i<cfg.num_sinks;++i){
-                if(pc==cfg.sink_pcs[i]){ exec_ctx.triggered=true; exec_ctx.triggered_sink=cfg.sink_names[i]; hit_sink=true; break; }
-            }
-            if(hit_sink) break;
-            if(pc==0x3041&&r->de<0x8000){
-                static char bytefill_err[128];
-                snprintf(bytefill_err,sizeof(bytefill_err),"__HARNESS_ERROR__ ByteFill(DE=0x%04X BC=0x%04X): fixture has uninitialized pointer",r->de,r->bc);
-                exec_ctx.triggered=true; exec_ctx.triggered_sink=bytefill_err; break;
-            }
-            if(rng_ctx&&pc==BATTLE_RANDOM_RESULT_READ_PC){
-                if(rng_ctx->tape_idx>=rng_ctx->tape_len){ rng_ctx->exhausted=true; }
-                else{ uint8_t cv=GB_safe_read_memory(&gb,0xCFB6); uint8_t tv=rng_ctx->tape[rng_ctx->tape_idx]; GB_write_memory(&gb,0xCFB6,tv); rng_ctx->trace.push_back({rng_ctx->tape_idx,tv,cv,BATTLE_RANDOM_RESULT_READ_PC,"BattleRandom"}); ++rng_ctx->tape_idx; }
-            }
-            if(pc==0x4083&&bank==0x0D&&r->hl==0x4541){ r->hl=0x4081; r->sp+=2; }
-            {
-                bool did_skip=false;
-                if(pc==0x045A){ emulate_ret_r(r,"DelayFrame(00:045A)"); did_skip=true; }
-                else if(pc==0x0468){ emulate_ret_r(r,"DelayFrames(00:0468)"); did_skip=true; }
-                else if(pc==0x31F6){ emulate_ret_r(r,"WaitBGMap(00:31F6)"); did_skip=true; }
-                else if(pc==0x3AC3){ emulate_ret_r(r,"BattleTextbox(00:3AC3)"); did_skip=true; }
-                else if(pc==0x3AD5){ emulate_ret_r(r,"StdBattleTextbox(00:3AD5)"); did_skip=true; }
-                else if(pc==0x39C9){ emulate_ret_r(r,"RefreshBattleHuds(00:39C9)"); did_skip=true; }
-                else if(pc==0x39D4){ emulate_ret_r(r,"UpdateBattleHuds(00:39D4)"); did_skip=true; }
-                else if(pc==0x46E0&&bank==0x03){ emulate_ret_r(r,"AnimateHPBar(03:46E0)"); did_skip=true; }
-                else if(pc==0x7E19&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7DE9){s=true;break;} if(!s){emulate_ret_r(r,"PlayDamageAnim(0D:7E19)");did_skip=true;} }
-                else if(pc==0x7DE9&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7DE9){s=true;break;} if(!s){emulate_ret_r(r,"AnimateCurrentMoveEitherSide(0D:7DE9)");did_skip=true;} }
-                else if(pc==0x7E01&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7E01){s=true;break;} if(!s){emulate_ret_r(r,"AnimateCurrentMove(0D:7E01)");did_skip=true;} }
-                else if(pc==0x7E77&&bank==0x0D){ bool s=false; for(size_t i=0;i<cfg.num_sinks;++i) if(cfg.sink_pcs[i]==0x7E77){s=true;break;} if(!s){emulate_ret_r(r,"AnimateFailedMove(0D:7E77)");did_skip=true;} }
-                else if(pc==0x4F57&&bank==0x0D){ emulate_ret_r(r,"BattleCommand_MoveAnim(0D:4F57)"); did_skip=true; }
-                else if(pc==0x4F60&&bank==0x0D){ emulate_ret_r(r,"BattleCommand_MoveAnimNoSub(0D:4F60)"); did_skip=true; }
-                else if(pc==0x7E80&&bank==0x0D){ emulate_ret_r(r,"BattleCommand_MoveDelay(0D:7E80)"); did_skip=true; }
-                else if(pc==0x65AF&&bank==0x0D){ uint8_t wo=GB_safe_read_memory(&gb,0xCFCC); if(!(wo&0x20u)){unsafe_skip_error(exec_ctx,"BattleCommand_RaiseSubNoAnim(0D:65AF)","wOptions(0xCFCC) bit5 must be 1");break;} emulate_ret_r(r,"BattleCommand_RaiseSubNoAnim(0D:65AF)"); did_skip=true; }
-                else if(pc==0x65C3&&bank==0x0D){ emulate_ret_r(r,"BattleCommand_LowerSubNoAnim(0D:65C3)"); did_skip=true; }
-                else if(pc==0x7E44&&bank==0x0D){ uint8_t wo=GB_safe_read_memory(&gb,0xCFCC); if(wo&0x20u){unsafe_skip_error(exec_ctx,"LoadAnim(0D:7E44)","wOptions(0xCFCC) bit5 must be 0");break;} emulate_ret_r(r,"LoadAnim(0D:7E44)"); did_skip=true; }
-                else if(pc==0x7E54&&bank==0x0D){ emulate_ret_r(r,"PlayOpponentBattleAnim(0D:7E54)"); did_skip=true; }
-                else if(pc==0x4FD1&&bank==0x0D){ emulate_ret_r(r,"BattleCommand_StatUpAnim(0D:4FD1)"); did_skip=true; }
-                else if(pc==0x4FDB&&bank==0x0D){ emulate_ret_r(r,"BattleCommand_StatDownAnim(0D:4FDB)"); did_skip=true; }
-                if(exec_ctx.triggered) break;
-                if(did_skip) continue;
-            }
-            GB_run(&gb);
+        // Build ExecCtx and RngCtx
+        std::unique_ptr<RngCtx> rng_ctx;
+        if(cfg.rng_tape && cfg.rng_tape_len > 0){
+            rng_ctx = std::make_unique<RngCtx>();
+            rng_ctx->tape=cfg.rng_tape; rng_ctx->tape_len=cfg.rng_tape_len;
+            rng_ctx->tape_idx=0; rng_ctx->exhausted=false;
         }
+        ExecCtx exec_ctx{};
+        for(size_t i=0;i<cfg.num_sinks;++i){
+            exec_ctx.sink_pcs[i]=cfg.sink_pcs[i];
+            exec_ctx.sink_names[i]=cfg.sink_names[i];
+        }
+        exec_ctx.num_sinks=cfg.num_sinks;
+        exec_ctx.triggered=false; exec_ctx.triggered_sink=nullptr;
+        exec_ctx.insn_count=0; exec_ctx.stop_flag=stop_flag;
+        exec_ctx.rng_ctx=rng_ctx.get();
+        GB_set_user_data(&gb, &exec_ctx);
+        GB_set_execution_callback(&gb, exec_cb);
 
-        res.insn_count = exec_ctx.insn_count;
-        res.sink_name  = exec_ctx.triggered_sink;
-        res.min_sp     = observed_min_sp;
-
-        if(!exec_ctx.triggered){ res.stop_reason=StopReason::MAX_INSN_EXCEEDED; return res; }
-        if(exec_ctx.triggered_sink&&std::string(exec_ctx.triggered_sink)=="__TIMEOUT__"){ res.stop_reason=StopReason::WALL_CLOCK_TIMEOUT; return res; }
-        if(exec_ctx.triggered_sink&&std::string(exec_ctx.triggered_sink).rfind("__HARNESS_ERROR__",0)==0){ res.stop_reason=StopReason::HARNESS_GUARD_FIRED; return res; }
-        if(rng_ctx&&rng_ctx->exhausted){ res.stop_reason=StopReason::RNG_TAPE_EXHAUSTED; return res; }
-
-        if(rng_ctx){ res.rng_trace=rng_ctx->trace; res.rng_bytes_consumed=rng_ctx->tape_idx; }
-
-        size_t wram_sz=0; uint16_t wb=0;
-        uint8_t* wram=static_cast<uint8_t*>(GB_get_direct_access(&gb,GB_DIRECT_ACCESS_RAM,&wram_sz,&wb));
-        if(!wram){ res.stop_reason=StopReason::WRAM_ACCESS_FAILED; return res; }
-
-        res.has_snapshot=true;
-        {auto* p=wram+wram_off(sym.wPlayerStatLevels.addr); for(int i=0;i<7;i++) res.player_stages[i]=p[i];}
-        {auto* p=wram+wram_off(sym.wEnemyStatLevels.addr);  for(int i=0;i<7;i++) res.enemy_stages[i]=p[i];}
-        {auto* p=wram+wram_off(sym.wBattleMonAttack.addr);  for(int i=0;i<5;i++) res.player_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
-        {auto* p=wram+wram_off(sym.wEnemyMonAttack.addr);   for(int i=0;i<5;i++) res.enemy_stats[i]=(uint16_t)((p[i*2]<<8)|p[i*2+1]);}
-        res.battle_anim_param=wram[wram_off(sym.wBattleAnimParam.addr)];
-        {auto* p=wram+wram_off(sym.wCurDamage.addr); res.cur_damage=(uint16_t)((p[0]<<8)|p[1]);}
-        {auto* p=wram+wram_off(sym.wBattleMonHP.addr); res.player_hp=(uint16_t)((p[0]<<8)|p[1]);}
-        {auto* p=wram+wram_off(sym.wEnemyMonHP.addr);  res.enemy_hp=(uint16_t)((p[0]<<8)|p[1]);}
-        res.player_status=normalize_crystal_status(wram[wram_off(sym.wBattleMonStatus.addr)],wram[wram_off(sym.wPlayerSubStatus5.addr)]);
-        res.enemy_status =normalize_crystal_status(wram[wram_off(sym.wEnemyMonStatus.addr)],wram[wram_off(sym.wEnemySubStatus5.addr)]);
-        res.stop_reason=StopReason::SINK_HIT;
-        return res;
+        // Invoke shared certified execution core
+        CrystalRunResult loop_res = execute_crystal_run_loop(gb, cfg, exec_ctx, rng_ctx.get(), sym);
+        loop_res.initial = res.initial;
+        return loop_res;
     };
 
     // Run the reuse path
