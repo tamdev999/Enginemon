@@ -930,6 +930,8 @@ struct CrystalRunResult {
     // Status (burn/para/sleep/poison/freeze)
     uint8_t  player_status;       // wBattleMonStatus byte 0
     uint8_t  enemy_status;        // wEnemyMonStatus byte 0
+    // wAttackMissed: 0=hit, 1=miss (written by BattleCommand_CheckHit)
+    uint8_t  attack_missed;       // wAttackMissed (0xC667)
     // RNG trace
     std::vector<RngEntry> rng_trace;
     size_t   rng_bytes_consumed;
@@ -951,6 +953,9 @@ static bool crystal_run_results_equal(const CrystalRunResult& a, const CrystalRu
     if(a.enemy_hp          != b.enemy_hp)          return false;
     if(a.player_status     != b.player_status)     return false;
     if(a.enemy_status      != b.enemy_status)      return false;
+    // attack_missed is intentionally NOT compared here: it is valid output for
+    // CheckHit-direct paths but not a general semantic equality criterion.
+    // Part B uses attack_missed directly for hit/miss detection, not this function.
     if(a.rng_bytes_consumed != b.rng_bytes_consumed) return false;
     for(size_t i=0; i<a.rng_trace.size() && i<b.rng_trace.size(); ++i)
         if(a.rng_trace[i].tape_value != b.rng_trace[i].tape_value) return false;
@@ -1207,6 +1212,12 @@ static void fixture_common(GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym)
     wram[wram_off(sym.wEnemyMonHP.addr)  ]  = 0x01;
     wram[wram_off(sym.wEnemyMonHP.addr)+1]  = 0x2C;
     wram[wram_off(sym.wCriticalHit.addr)]   = 0;
+    // wAttackMissed: must be 0 at fixture entry for all moves (cleared here so
+    // it is always poison-stable, regardless of whether CheckHit will run).
+    // CheckHit writes 1 on miss; DoMove/CheckTurn also clears it at script start.
+    // Without this, moves that don't run CheckHit (Haze) leave wAttackMissed
+    // at the poison byte value, making it appear as miss in direct-entry paths.
+    wram[wram_off(sym.wAttackMissed.addr)]  = 0;
     wram[wram_off(0xC665u)]                 = 0;  // wTypeModifier: bit7=STAB must be 0 for poison stability
 
     // Fields required for initial snapshot equivalence (read by capture_crystal_initial).
@@ -1520,6 +1531,7 @@ static CrystalRunResult execute_crystal_run_loop(
                                                   extr_wram[wram_off(sym.wPlayerSubStatus5.addr)]);
     res.enemy_status  = normalize_crystal_status(extr_wram[wram_off(sym.wEnemyMonStatus.addr)],
                                                   extr_wram[wram_off(sym.wEnemySubStatus5.addr)]);
+    res.attack_missed = extr_wram[wram_off(sym.wAttackMissed.addr)];
     res.stop_reason = StopReason::SINK_HIT;
     return res;
 }
@@ -5927,6 +5939,11 @@ static int run_accuracy_sweep_after_startup(
                 // sequence (memset(poison) + fixture_common + extra_fixture +
                 // stage writes + stack/PC) per call, so each pi run genuinely
                 // carries its respective poison pattern in unspecified WRAM bytes.
+                //
+                // DIRECT CheckHit entry: cfg.entry = BattleCommand_CheckHit (0D:4D32).
+                // Skip DoMove dispatch, checkobedience, usedmovetext, doturn,
+                // defensedown2 and all post-checkhit script commands.
+                // Only the certified accuracy pipeline executes.
                 // ----------------------------------------------------------------
                 GB_gameboy_t gb_snap;
                 if(!GB_init(&gb_snap, GB_MODEL_CGB_E)){
@@ -5957,11 +5974,21 @@ static int run_accuracy_sweep_after_startup(
                     uint8_t rng_byte = (uint8_t)rb;
                     uint8_t tape[1] = { rng_byte };
 
-                    // Build per-rb config: stage overrides already baked into
-                    // snapshot; tape and engine_move_id still needed for the
-                    // RNG intercept and Enginemon side.
+                    // Build per-rb config: DIRECT BattleCommand_CheckHit entry.
+                    // Entry: BattleCommand_CheckHit (0D:4D32) — skips DoMove script
+                    // overhead (checkobedience, usedmovetext, doturn, defensedown2, etc.)
+                    // and executes only the accuracy pipeline.
+                    // Sink: EndMoveEffect (0D:52A3) — CheckHit `ret` pops harness sentinel.
+                    // All other fields (fixture, poison, stage overrides, RNG tape) are
+                    // identical to the frozen full-script path.
                     CrystalRunConfig cfg{};
+                    // Use screech_ms->build_config to inherit insn_cap and extra_fixture,
+                    // then override entry/sink for direct CheckHit.
                     screech_ms->build_config(sym, &cfg);
+                    cfg.entry         = sym.BattleCommand_CheckHit; // 0D:4D32
+                    cfg.sink_pcs[0]   = sym.EndMoveEffect.addr;     // 0D:52A3
+                    cfg.sink_names[0] = "EndMoveEffect";
+                    cfg.num_sinks     = 1;
                     cfg.insn_cap     = screech_ms->insn_cap;
                     cfg.rng_tape     = tape;
                     cfg.rng_tape_len = 1;
@@ -6017,8 +6044,12 @@ static int run_accuracy_sweep_after_startup(
                     }
                     if(!stable2){ b_harness++; continue; }
 
-                    // Hit detection uses the initial snapshot captured in cr2[0].
-                    bool c_hit = detect_crystal_hit(cr2[0], 0);
+                    // Hit detection via wAttackMissed (0=hit, 1=miss).
+                    // Direct CheckHit path: wAttackMissed is written by
+                    // BattleCommand_CheckHit.Missed. Auto-hit (rng_consumed=0)
+                    // returns from .Hit without setting wAttackMissed, so it
+                    // remains 0 (pre-cleared by fixture).
+                    bool c_hit = (cr2[0].attack_missed == 0);
                     if(c_hit) crystal_threshold = rb;
 
                     // Run Enginemon via the certified runner with ACC/EVA stage overrides.
