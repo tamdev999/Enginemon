@@ -426,6 +426,25 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     endif()
 
     # ============================================================================
+    # damagecalc_matrix -- Crystal BattleCommand_DamageCalc vs Enginemon
+    #                       calculate_damage conformance matrix.
+    # Sweep A: power/level/attack/defense 1..255 (1..100 for level) x crit 0/1.
+    # Grid B:  attack x defense boundary interaction (10x10 representative values).
+    # Usage: damagecalc_matrix <rom_path> <sym_path>
+    # Not added to ctest by default (manual conformance run).
+    # ============================================================================
+    add_executable(damagecalc_matrix
+        crystal_differential/damagecalc_matrix.cpp
+    )
+    target_link_libraries(damagecalc_matrix PRIVATE oracle_runner_lib)
+    target_include_directories(damagecalc_matrix PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(damagecalc_matrix PRIVATE /bigobj)
+    endif()
+
+    # ============================================================================
     # crystal_haze_diff_test — Haze single-move oracle (delegates to runner)
     # Legacy entry point kept for compatibility.
     # Requires: <rom_path> <sym_path> [--jobs N]

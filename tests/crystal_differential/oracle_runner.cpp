@@ -7997,4 +7997,383 @@ int run_damagecalc_pilot(const char* rom_path, const char* sym_path)
 }
 
 
+
+// ============================================================================
+// run_damagecalc_matrix
+// ============================================================================
+//
+// Crystal BattleCommand_DamageCalc (0D:5612)  vs  enginemon::calculate_damage.
+//
+// Architecture
+// ------------
+// Every logical case (power, level, atk, def, crit) is run as a DIRECT entry
+// at 0D:5612 with force_reg_d/e/b/c driving the SM83 registers.  The sink is
+// EndMoveEffect (0D:52A3); wCurDamage is extracted from the result.
+//
+// The same (d,e,b,c,crit) tuple is passed to enginemon::calculate_damage with:
+//   stab            = false   (no STAB — pre-STAB boundary)
+//   type_effectiveness = 100  (no type modifier — pre-type boundary)
+//   burned          = false
+//
+// Each logical case is executed with all 4 poison patterns.
+// All 4 must agree (poison-stability gate).
+// If they agree, Crystal output == that agreed value.
+// Enginemon output must equal Crystal output exactly.
+//
+// Zero RNG bytes expected in direct DamageCalc path.
+// Any HARNESS_ERROR fails closed.
+//
+// Fixture
+// -------
+// Uses present_extra_fixture (already establishes full battle WRAM context,
+// Normal/Normal types, Poison player suppressed below, wBattleMonItem=0).
+// Matrix-specific overrides applied via a static wrapper fixture:
+//   - player types set to Poison (0x03) — ensures no STAB from any move type
+//   - wCriticalHit written from the current case's crit flag
+//   - wCurDamage cleared to 0 (DamageCalc entry precondition)
+//   - wPlayerMoveStructEffect = 0 (normal move, not Selfdestruct)
+// ============================================================================
+
+int run_damagecalc_matrix(const char* rom_path, const char* sym_path)
+{
+    // ---- Load ROM -----------------------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr << "Cannot open ROM: " << rom_path << "\n"; return 1; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    if(rom_bytes.size() != CRYSTAL_ROM_SIZE){ std::cerr << "Wrong ROM size\n"; return 1; }
+    {
+        std::string sha = sha1_hex(rom_bytes.data(), rom_bytes.size());
+        if(sha != PINNED_ROM_SHA1){ std::cerr << "ROM SHA mismatch\n"; return 1; }
+    }
+    SymCache sym;
+    {
+        std::string err = SymCache::load(sym_path, &sym);
+        if(!err.empty()){ std::cerr << "Sym: " << err << "\n"; return 1; }
+    }
+    {
+        std::string err = validate_fixture_addresses(sym);
+        if(!err.empty()){ std::cerr << "Fixture: " << err << "\n"; return 1; }
+    }
+    if(sym.BattleCommand_DamageCalc.bank == 0 && sym.BattleCommand_DamageCalc.addr == 0){
+        std::cerr << "BattleCommand_DamageCalc not found in sym\n"; return 1;
+    }
+    if(sym.EndMoveEffect.bank == 0 && sym.EndMoveEffect.addr == 0){
+        std::cerr << "EndMoveEffect not found in sym\n"; return 1;
+    }
+
+    std::cout << "=== DamageCalc Conformance Matrix ===\n"
+              << "  Entry:  0x" << std::hex << (int)sym.BattleCommand_DamageCalc.bank
+              << ":0x" << sym.BattleCommand_DamageCalc.addr << "\n"
+              << "  Sink:   EndMoveEffect 0x"
+              << sym.EndMoveEffect.addr << std::dec << "\n"
+              << "  Boundary: stab=false, type_eff=100, variation=none\n"
+              << "  Poison patterns: 0x00 0xA5 0x5A 0xFF\n"
+              << std::flush;
+
+    std::atomic<bool> no_stop{false};
+
+    // ---- Fixture thread-locals for the matrix wrapper -----------------------
+    // These are set before each run_crystal_case call and read by the static wrapper.
+    static thread_local uint8_t   mtx_crit     = 0;
+    static thread_local uint16_t  mtx_crit_addr     = 0;
+    static thread_local uint16_t  mtx_cur_damage_addr = 0;
+    static thread_local uint16_t  mtx_move_struct_addr = 0;
+    static thread_local uint16_t  mtx_item_addr = 0;
+
+    // Wrapper: present_extra_fixture baseline + matrix-specific overrides.
+    // MUST be a plain function pointer (no lambda captures).
+    static FixtureFn mtx_fixture = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
+        present_extra_fixture(gb, wram, sym2);
+        // Override player types to Poison: no STAB for Normal/Grass/Bug/etc move types.
+        wram[wram_off(sym2.wBattleMonType1.addr)] = 0x03; // Poison
+        wram[wram_off(sym2.wBattleMonType2.addr)] = 0x03; // Poison
+        // Set wCriticalHit from the current case.
+        if(mtx_crit_addr) wram[wram_off(mtx_crit_addr)] = mtx_crit;
+        // Clear wCurDamage (DamageCalc entry precondition: accumulates from 0).
+        if(mtx_cur_damage_addr){
+            wram[wram_off(mtx_cur_damage_addr)]   = 0;
+            wram[wram_off(mtx_cur_damage_addr)+1] = 0;
+        }
+        // wPlayerMoveStructEffect = 0 (normal move; not Selfdestruct/Explosion).
+        if(mtx_move_struct_addr)
+            wram[wram_off((uint16_t)(mtx_move_struct_addr + 1))] = 0;
+        // wBattleMonItem = 0 (no held item; present_extra_fixture already sets this
+        // but be explicit for the no-item contract).
+        if(mtx_item_addr) wram[wram_off(mtx_item_addr)] = 0;
+    };
+
+    // ---- Counters -----------------------------------------------------------
+    static constexpr uint8_t POISON_PATTERNS[4] = { 0x00, 0xA5, 0x5A, 0xFF };
+
+    uint32_t logical_cases    = 0;
+    uint32_t crystal_execs    = 0;
+    uint32_t matched          = 0;
+    uint32_t mismatched       = 0;
+    uint32_t harness_errors   = 0;
+    uint64_t total_rng        = 0;
+
+    // First mismatch captured for reporting
+    struct MismatchInfo {
+        uint8_t  d, e, b, c, crit;
+        uint16_t crystal_val;
+        int32_t  enginemon_val;
+    };
+    std::vector<MismatchInfo> mismatches; // collect up to 20
+
+    // ---- Helper: run one logical case ---------------------------------------
+    // Builds CrystalRunConfig, runs all 4 poison patterns, validates stability,
+    // extracts wCurDamage, calls calculate_damage, compares.
+    // Returns true on pass, false on mismatch or harness error.
+    auto run_case = [&](uint8_t d, uint8_t e, uint8_t b, uint8_t c, uint8_t crit) -> bool {
+        ++logical_cases;
+
+        // Bind fixture thread-locals
+        mtx_crit              = crit;
+        mtx_crit_addr         = sym.wCriticalHit.addr;
+        mtx_cur_damage_addr   = sym.wCurDamage.addr;
+        mtx_move_struct_addr  = sym.wPlayerMoveStruct.addr;
+        mtx_item_addr         = sym.wBattleMonItem.addr;
+
+        // Build config for direct DamageCalc entry
+        CrystalRunConfig cfg{};
+        cfg.entry         = sym.BattleCommand_DamageCalc;
+        cfg.sink_pcs[0]   = sym.EndMoveEffect.addr;
+        cfg.sink_names[0] = "EndMoveEffect";
+        cfg.num_sinks     = 1;
+        cfg.insn_cap      = 100000;
+        cfg.rng_tape      = nullptr;  // DamageCalc consumes 0 RNG
+        cfg.rng_tape_len  = 0;
+        cfg.extra_fixture = mtx_fixture;
+        // Force registers: d=power, e=level, b=attack, c=defense
+        cfg.force_reg_d = d;  // 0 sentinel means "no override"; d/e/b/c are 1..255/1..100/1..255/1..255
+        cfg.force_reg_e = e;
+        cfg.force_reg_b = b;
+        cfg.force_reg_c = c;
+        // Note: force_reg_* uses 0 as "no override". Since d,e,b,c are all >= 1 in our
+        // sweeps, this is safe. Power=0 is excluded by design (status moves, no damage).
+
+        // Run all 4 poison patterns
+        uint16_t crystal_vals[4] = {};
+        for(int pi = 0; pi < 4; ++pi){
+            CrystalRunResult r = run_crystal_case(rom_bytes, sym, POISON_PATTERNS[pi], cfg, &no_stop);
+            ++crystal_execs;
+            total_rng += r.rng_bytes_consumed;
+            if(r.stop_reason != StopReason::SINK_HIT){
+                ++harness_errors;
+                if(harness_errors <= 5){
+                    std::cerr << "  HARNESS_ERROR d=" << (int)d << " e=" << (int)e
+                              << " b=" << (int)b << " c=" << (int)c << " crit=" << (int)crit
+                              << " poison=0x" << std::hex << (int)POISON_PATTERNS[pi]
+                              << " stop=" << stop_reason_str(r.stop_reason) << std::dec << "\n";
+                }
+                return false;
+            }
+            crystal_vals[pi] = r.cur_damage;
+        }
+
+        // Poison stability: all 4 must agree
+        for(int pi = 1; pi < 4; ++pi){
+            if(crystal_vals[pi] != crystal_vals[0]){
+                ++harness_errors;
+                if(harness_errors <= 5){
+                    std::cerr << "  POISON_UNSTABLE d=" << (int)d << " e=" << (int)e
+                              << " b=" << (int)b << " c=" << (int)c << " crit=" << (int)crit
+                              << " vals=" << crystal_vals[0] << "/" << crystal_vals[1]
+                              << "/" << crystal_vals[2] << "/" << crystal_vals[3] << "\n";
+                }
+                return false;
+            }
+        }
+        const uint16_t crystal_damage = crystal_vals[0];
+
+        // Enginemon: real calculate_damage, no harness formula
+        enginemon::DamageParams dp{};
+        dp.attacker_level    = e;   // Crystal E = level
+        dp.attack_stat       = b;   // Crystal B = attack
+        dp.defense_stat      = c;   // Crystal C = defense
+        dp.move_power        = d;   // Crystal D = power
+        dp.type_effectiveness = 100; // pre-type boundary
+        dp.stab              = false; // pre-STAB boundary
+        dp.critical          = (crit != 0);
+        dp.burned            = false;
+
+        const int32_t em_damage = enginemon::calculate_damage(dp);
+
+        if(em_damage == static_cast<int32_t>(crystal_damage)){
+            ++matched;
+            return true;
+        } else {
+            ++mismatched;
+            if(mismatches.size() < 20)
+                mismatches.push_back({ d, e, b, c, crit, crystal_damage, em_damage });
+            return false;
+        }
+    };
+
+    // =========================================================================
+    // SWEEP A — single-axis exhaustive (fixed baseline: power=80, level=50,
+    //           atk=110, def=110)
+    // =========================================================================
+    static constexpr uint8_t  BASE_POWER  = 80;
+    static constexpr uint8_t  BASE_LEVEL  = 50;
+    static constexpr uint8_t  BASE_ATK    = 110;
+    static constexpr uint8_t  BASE_DEF    = 110;
+
+    std::cout << "\nSweep A1: power 1..255 (level=" << (int)BASE_LEVEL
+              << " atk=" << (int)BASE_ATK << " def=" << (int)BASE_DEF
+              << " crit=0/1)\n" << std::flush;
+    for(int pw = 1; pw <= 255; ++pw){
+        run_case((uint8_t)pw, BASE_LEVEL, BASE_ATK, BASE_DEF, 0);
+        run_case((uint8_t)pw, BASE_LEVEL, BASE_ATK, BASE_DEF, 1);
+    }
+
+    std::cout << "Sweep A2: level 1..100 (power=" << (int)BASE_POWER
+              << " atk=" << (int)BASE_ATK << " def=" << (int)BASE_DEF
+              << " crit=0/1)\n" << std::flush;
+    for(int lv = 1; lv <= 100; ++lv){
+        run_case(BASE_POWER, (uint8_t)lv, BASE_ATK, BASE_DEF, 0);
+        run_case(BASE_POWER, (uint8_t)lv, BASE_ATK, BASE_DEF, 1);
+    }
+
+    std::cout << "Sweep A3: attack 1..255 (power=" << (int)BASE_POWER
+              << " level=" << (int)BASE_LEVEL << " def=" << (int)BASE_DEF
+              << " crit=0/1)\n" << std::flush;
+    for(int atk = 1; atk <= 255; ++atk){
+        run_case(BASE_POWER, BASE_LEVEL, (uint8_t)atk, BASE_DEF, 0);
+        run_case(BASE_POWER, BASE_LEVEL, (uint8_t)atk, BASE_DEF, 1);
+    }
+
+    std::cout << "Sweep A4: defense 1..255 (power=" << (int)BASE_POWER
+              << " level=" << (int)BASE_LEVEL << " atk=" << (int)BASE_ATK
+              << " crit=0/1)\n" << std::flush;
+    for(int def = 1; def <= 255; ++def){
+        run_case(BASE_POWER, BASE_LEVEL, BASE_ATK, (uint8_t)def, 0);
+        run_case(BASE_POWER, BASE_LEVEL, BASE_ATK, (uint8_t)def, 1);
+    }
+
+    // =========================================================================
+    // GRID B — attack × defense boundary interaction
+    // {1,2,3,10,50,100,127,128,254,255} × {1,2,3,10,50,100,127,128,254,255}
+    // fixed power=80, level=50, crit=0 and crit=1
+    // =========================================================================
+    static constexpr uint8_t GRID_VALS[] = { 1, 2, 3, 10, 50, 100, 127, 128, 254, 255 };
+    static constexpr size_t  GRID_N      = sizeof(GRID_VALS);
+
+    std::cout << "Grid B: atk×def {1,2,3,10,50,100,127,128,254,255}² "
+              << "(power=" << (int)BASE_POWER << " level=" << (int)BASE_LEVEL
+              << " crit=0/1)\n" << std::flush;
+    for(size_t ai = 0; ai < GRID_N; ++ai){
+        for(size_t di = 0; di < GRID_N; ++di){
+            run_case(BASE_POWER, BASE_LEVEL, GRID_VALS[ai], GRID_VALS[di], 0);
+            run_case(BASE_POWER, BASE_LEVEL, GRID_VALS[ai], GRID_VALS[di], 1);
+        }
+    }
+
+    // =========================================================================
+    // ANTI-CONFIRMATION
+    // Mutate attack_stat by +10 for one known case; verify mismatch; revert.
+    // =========================================================================
+    std::cout << "\nAnti-confirmation (attack_stat+10 on power=" << (int)BASE_POWER
+              << " level=" << (int)BASE_LEVEL << " atk=" << (int)BASE_ATK
+              << " def=" << (int)BASE_DEF << " crit=0):\n";
+    bool anti_detected = false;
+    bool anti_reverted = false;
+
+    // Mutated run: same Crystal case (unmodified), but Enginemon gets atk+10
+    {
+        // Crystal run (ground truth, unchanged)
+        mtx_crit             = 0;
+        mtx_crit_addr        = sym.wCriticalHit.addr;
+        mtx_cur_damage_addr  = sym.wCurDamage.addr;
+        mtx_move_struct_addr = sym.wPlayerMoveStruct.addr;
+        mtx_item_addr        = sym.wBattleMonItem.addr;
+
+        CrystalRunConfig cfg{};
+        cfg.entry = sym.BattleCommand_DamageCalc;
+        cfg.sink_pcs[0] = sym.EndMoveEffect.addr;
+        cfg.sink_names[0] = "EndMoveEffect";
+        cfg.num_sinks = 1; cfg.insn_cap = 100000;
+        cfg.rng_tape = nullptr; cfg.rng_tape_len = 0;
+        cfg.extra_fixture = mtx_fixture;
+        cfg.force_reg_d = BASE_POWER;
+        cfg.force_reg_e = BASE_LEVEL;
+        cfg.force_reg_b = BASE_ATK;
+        cfg.force_reg_c = BASE_DEF;
+
+        CrystalRunResult cr = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+        if(cr.stop_reason == StopReason::SINK_HIT){
+            const uint16_t crystal_ref = cr.cur_damage;
+
+            // MUTATED Enginemon call
+            enginemon::DamageParams dp{};
+            dp.attacker_level = BASE_LEVEL;
+            dp.attack_stat    = BASE_ATK + 10;  // MUTATION
+            dp.defense_stat   = BASE_DEF;
+            dp.move_power     = BASE_POWER;
+            dp.type_effectiveness = 100;
+            dp.stab = false; dp.critical = false; dp.burned = false;
+            const int32_t em_mut = enginemon::calculate_damage(dp);
+            anti_detected = (em_mut != (int32_t)crystal_ref);
+            std::cout << "  [MUTATED  atk=" << (int)(BASE_ATK+10) << "] "
+                      << "crystal=" << crystal_ref << " enginemon=" << em_mut
+                      << " -> " << (anti_detected ? "MISMATCH (expected)" : "MATCH (unexpected!)") << "\n";
+
+            // REVERTED Enginemon call
+            dp.attack_stat = BASE_ATK;          // REVERT
+            const int32_t em_rev = enginemon::calculate_damage(dp);
+            anti_reverted = (em_rev == (int32_t)crystal_ref);
+            std::cout << "  [REVERTED atk=" << (int)BASE_ATK << "] "
+                      << "crystal=" << crystal_ref << " enginemon=" << em_rev
+                      << " -> " << (anti_reverted ? "PASS (expected)" : "FAIL (unexpected!)") << "\n";
+        } else {
+            std::cerr << "  anti-confirm Crystal run failed: "
+                      << stop_reason_str(cr.stop_reason) << "\n";
+        }
+    }
+
+    // =========================================================================
+    // SUMMARY
+    // =========================================================================
+    const bool all_pass = (mismatched == 0 && harness_errors == 0
+                           && total_rng == 0
+                           && anti_detected && anti_reverted);
+
+    std::cout << "\n=== Matrix Summary ===\n"
+              << "  Logical cases:      " << logical_cases    << "\n"
+              << "  Crystal executions: " << crystal_execs    << " (x4 poison per case)\n"
+              << "  MATCH:              " << matched          << "\n"
+              << "  MISMATCH:           " << mismatched       << "\n"
+              << "  HARNESS_ERROR:      " << harness_errors   << "\n"
+              << "  RNG consumed:       " << total_rng        << " (expected 0)\n"
+              << "  Poison stable:      " << (harness_errors == 0 ? "yes" : "check errors") << "\n"
+              << "\n  ANTI-CONFIRMATION DETECTED? " << (anti_detected ? "yes" : "no") << "\n"
+              << "  fault reverted?             " << (anti_reverted ? "yes" : "no") << "\n";
+
+    if(!mismatches.empty()){
+        std::cout << "\nMismatch patterns (first " << mismatches.size() << "):\n"
+                  << "  " << std::left
+                  << std::setw(5) << "d" << std::setw(5) << "e"
+                  << std::setw(5) << "b" << std::setw(5) << "c"
+                  << std::setw(6) << "crit"
+                  << std::setw(10) << "crystal" << std::setw(10) << "enginemon" << "\n"
+                  << "  " << std::string(50,'-') << "\n";
+        for(const auto& m : mismatches){
+            std::cout << "  "
+                      << std::setw(5) << (int)m.d << std::setw(5) << (int)m.e
+                      << std::setw(5) << (int)m.b << std::setw(5) << (int)m.c
+                      << std::setw(6) << (m.crit ? "yes" : "no")
+                      << std::setw(10) << m.crystal_val
+                      << std::setw(10) << m.enginemon_val << "\n";
+        }
+    }
+
+    std::cout << "\n  production modified? no\n"
+              << "  Overall: " << (all_pass ? "PASS" : "FAIL") << "\n";
+
+    return all_pass ? 0 : 1;
+}
+
 } // namespace crystal::oracle

@@ -118,4 +118,26 @@ int run_checkhit_pilot(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_damagecalc_pilot(const char* rom_path, const char* sym_path);
 
+// ============================================================================
+// run_damagecalc_matrix
+//
+// Crystal BattleCommand_DamageCalc (0D:5612) vs enginemon::calculate_damage.
+//
+// Sweep A — single-axis exhaustive (all crit=0 and crit=1):
+//   power  1..255 (fixed level=50, atk=110, def=110)
+//   level  1..100 (fixed power=80, atk=110, def=110)
+//   attack 1..255 (fixed power=80, level=50, def=110)
+//   defense 1..255 (fixed power=80, level=50, atk=110)
+//
+// Grid B — boundary interaction (atk × def, representative edge values):
+//   {1,2,3,10,50,100,127,128,254,255} × {1,2,3,10,50,100,127,128,254,255}
+//   fixed power=80, level=50, crit=0 and crit=1
+//
+// Per logical case: 4 Crystal poison executions must agree, then compared
+// against enginemon::calculate_damage with stab=false, type_effectiveness=100.
+//
+// Returns 0 if all logical cases match, 1 on any mismatch/harness error.
+// ============================================================================
+int run_damagecalc_matrix(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle
