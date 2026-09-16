@@ -1302,16 +1302,18 @@ MoveExecutionResult Battle::execute_move_damaging(
     dp.weather            = field_.weather;
     dp.move_type          = effective_move_type;
 
-    // Test-only: fire DamageParams observer before calculate_damage.
-    // damage_params_observer_ is always nullptr in production.
+    // Test-only seam: fire DamageParams observer and/or apply pre-type damage override.
+    // Both are compiled out entirely in normal production builds.
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
     if (damage_params_observer_) damage_params_observer_(dp);
+#endif
 
     int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_) : enginemon::calculate_damage(dp);
-    // Test-only: override the pre-STAB/type damage value when set.
-    // Allows arithmetic sweep to certify STAB/type math for arbitrary input values
-    // without needing stats that produce a specific calculate_damage result.
-    // pre_type_damage_override_ = -1 (default) means disabled; never active in production.
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
+    // Override the pre-STAB/type damage value when set (≥0).
+    // STAB and type-effectiveness code runs on this injected value.
     if (pre_type_damage_override_ >= 0) damage = pre_type_damage_override_;
+#endif
     if (damage == 0) return MoveExecutionResult::Immune;
 
     // Weather modifier
@@ -1345,12 +1347,9 @@ MoveExecutionResult Battle::execute_move_damaging(
         if (damage > 999) damage = 999;
     }
 
-    // Test-only: observe post-STAB/type damage before held-item, secondary, variation.
-    // post_type_observer_ is always nullptr in production — zero runtime cost.
+    // Test-only: observe post-STAB/type damage. Compiled out in normal production builds.
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
     if (post_type_observer_) {
-        // pre_damage = calculate_damage result captured in observer above
-        // Reconstruct: base = dp (already fired). Re-derive pre_damage from dp.
-        // Actually: we can call calculate_damage again since dp is still in scope.
         const int32_t pre_dmg = rules_
             ? enginemon::calculate_damage(dp, *rules_)
             : enginemon::calculate_damage(dp);
@@ -1361,6 +1360,7 @@ MoveExecutionResult Battle::execute_move_damaging(
         obs.post_damage   = damage;
         post_type_observer_(obs);
     }
+#endif // ENGINEMON_ENABLE_TEST_SEAMS
 
     // Type-booster held item (Charcoal, Mystic Water, etc.)
     // Crystal: GetUserItem / TypeBoostItems loop in BattleCommand_DamageCalc.

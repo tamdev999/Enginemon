@@ -420,12 +420,15 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
     // Used to observe DamageParams immediately before calculate_damage in tests.
     // Callback receives the DamageParams about to be passed to calculate_damage.
     // Set to nullptr to disable (default). Never called in production.
+    // Only available when ENGINEMON_ENABLE_TEST_SEAMS is defined (test builds only).
+    // oracle_runner_lib defines this; the engine library and runtime do not.
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
     using DamageParamsObserver = std::function<void(const DamageParams&)>;
     void set_damage_params_observer(DamageParamsObserver obs) {
         damage_params_observer_ = std::move(obs);
     }
 
-    // Test-only: observer that fires immediately after production STAB + type-effectiveness
+    // Observer that fires immediately after production STAB + type-effectiveness
     // application in execute_move_damaging, BEFORE held-item boost, secondary effects,
     // damage variation, and HP application.
     // Receives: {pre_stab_type_damage, stab_applied, combined_eff, post_stab_type_damage}
@@ -440,12 +443,13 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         post_type_observer_ = std::move(obs);
     }
 
-    // Test-only: if set to a value ≥ 0, overrides the calculate_damage(dp) result
-    // in execute_move_damaging. The STAB and type-effectiveness code runs unchanged on
-    // this injected value instead of the stats-derived damage. Use with set_post_type_observer
-    // to certify STAB/type modifier arithmetic for any specific input damage value.
-    // Set to -1 (default) to disable. Never used in production.
+    // If set to a value ≥ 0, overrides the calculate_damage(dp) result in
+    // execute_move_damaging. STAB and type-effectiveness code runs on this injected
+    // value instead of the stats-derived damage. Use with set_post_type_observer to
+    // certify STAB/type modifier arithmetic for any specific input damage value.
+    // Set to -1 (default) to disable.
     void set_pre_type_damage_override(int32_t v) { pre_type_damage_override_ = v; }
+#endif // ENGINEMON_ENABLE_TEST_SEAMS
 
     // Registry access for AI and other consumers
     const Registries& registries() const { return registries_; }
@@ -477,12 +481,14 @@ private:
     // Field state
     FieldState field_;
 
-    // Test-only observer for DamageParams (nullptr in production)
+    // Test-only observer members — only present when ENGINEMON_ENABLE_TEST_SEAMS is defined.
+    // In normal production builds these members do not exist: no extra vtable slots,
+    // no extra object size, no branches in execute_move_damaging.
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
     DamageParamsObserver damage_params_observer_;
-    // Test-only observer for post-STAB/type damage (nullptr in production)
     PostTypeObserver post_type_observer_;
-    // Test-only pre-type damage override (-1 = disabled, production default)
     int32_t pre_type_damage_override_ = -1;
+#endif // ENGINEMON_ENABLE_TEST_SEAMS
 
     // Turn state
     uint16_t turn_number_ = 0;

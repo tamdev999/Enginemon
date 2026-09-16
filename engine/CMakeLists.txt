@@ -55,6 +55,15 @@ target_link_libraries(enginemon_engine PUBLIC
     ${LUA_TARGET}
 )
 
+# Test-only seams: DamageParamsObserver, PostTypeObserver, pre_type_damage_override.
+# Defined when ENGINEMON_BUILD_TESTS is ON so every TU that includes battle.hpp
+# sees the same Battle class layout (no ABI split between engine and its consumers).
+# In shipping builds (-DENGINEMON_BUILD_TESTS=OFF) these members and branches
+# are compiled out entirely.
+if(ENGINEMON_BUILD_TESTS)
+    target_compile_definitions(enginemon_engine PUBLIC ENGINEMON_ENABLE_TEST_SEAMS)
+endif()
+
 # Include directories - vcpkg target handles this, but add for FindLua fallback
 if(LUA_INCLUDE_DIR)
     target_include_directories(enginemon_engine PRIVATE
