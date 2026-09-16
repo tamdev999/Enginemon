@@ -192,4 +192,17 @@ int run_damagecalc_edge_grid(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path);
 
+// ============================================================================
+// run_damagestats_direct_pilot
+//
+// DamageStats direct semantic pilot. Crystal side:
+//   1. Set base stats + stage raw bytes (7=neutral, 1..13 range).
+//   2. Direct-call real CalcPlayerStats/CalcEnemyStats to populate wPlayerStats.
+//   3. Direct-call BattleCommand_DamageStats (0D:52DC).
+//   4. Capture B/C at DamageCalc entry (0D:5612) -- no harness stage math.
+// Enginemon side: observe DamageParams.attack_stat/defense_stat via observer.
+// Returns 0 if all runs succeed (harness error = 1).
+// ============================================================================
+int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle

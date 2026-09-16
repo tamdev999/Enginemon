@@ -428,6 +428,22 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
     # ============================================================================
     # ============================================================================
     # ============================================================================
+    # ============================================================================
+    # damagestats_direct_pilot -- direct semantic DamageStats pilot
+    # Uses real CalcPlayerStats/CalcEnemyStats; no harness stage math.
+    # Usage: damagestats_direct_pilot <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(damagestats_direct_pilot
+        crystal_differential/damagestats_direct_pilot.cpp
+    )
+    target_link_libraries(damagestats_direct_pilot PRIVATE oracle_runner_lib)
+    target_include_directories(damagestats_direct_pilot PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(damagestats_direct_pilot PRIVATE /bigobj)
+    endif()
+
     # damagestats_crit_pilot -- live-proves DamageStats crit-stat divergence
     # Usage: damagestats_crit_pilot <rom_path> <sym_path>
     # ============================================================================
