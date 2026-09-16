@@ -9750,66 +9750,54 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path)
     static thread_local uint16_t g_ds_enemy_mon_def_addr = 0;
 
     static FixtureFn ds_fixture = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
-        // 1. Generic full-script fixture: loads wPlayerMoveStruct from ROM (power, effect, type correct for Return)
-        //    Also sets wBattleMon*, wEnemyMon*, HP, PP, types, misc battle state.
+        // 1. Base: generic full-script fixture (sets wPlayerMoveStruct from ROM,
+        //    wBattleMon*/wEnemyMon* incl. bank-1 WRAM via GB_write_memory/direct, HP, PP, etc.)
         generic_fullscript_fixture_adapter(gb, wram, sym2);
 
         // 2. Stat stage level bytes (Crystal raw: 7 = neutral, 1..13 range)
         {
             uint8_t* psl = wram + wram_off(g_ds_player_stat_lvl_addr);
             uint8_t* esl = wram + wram_off(g_ds_enemy_stat_lvl_addr);
-            for(int i=0;i<8;i++){ psl[i]=7; esl[i]=7; } // reset all to neutral
-            psl[ATK_IDX] = (uint8_t)(7 + g_ds_atk_delta); // player ATK stage
-            esl[DEF_IDX] = (uint8_t)(7 + g_ds_def_delta);  // enemy DEF stage
+            for(int i=0;i<8;i++){ psl[i]=7; esl[i]=7; }
+            psl[ATK_IDX] = (uint8_t)(7 + g_ds_atk_delta);
+            esl[DEF_IDX] = (uint8_t)(7 + g_ds_def_delta);
         }
 
-        // 3. wPlayerStats (=wPlayerAttack region): staged attacker stat
-        //    wEnemyStats (=wEnemyAttack region): staged defender stat
-        //    Crystal DamageStats STAGED path reads these (non-crit, or crit where def<=atk).
+        // 3. wPlayerStats (=wPlayerAttack region): staged attacker stat.
+        //    wEnemyStats  (=wEnemyAttack region):  staged defender stat.
         {
             static constexpr uint16_t kNum[13] = { 25,28,33,40,50,66,  1,15, 2,25, 3,35, 4 };
             static constexpr uint16_t kDen[13] = {100,100,100,100,100,100,1,10,1,10,1,10,1 };
             auto staged = [](uint16_t base, int delta) -> uint16_t {
-                int idx = 6 + delta;
-                if(idx<0) idx=0; if(idx>12) idx=12;
+                int idx = 6 + delta; if(idx<0)idx=0; if(idx>12)idx=12;
                 uint32_t r = ((uint32_t)base * kNum[idx]) / kDen[idx];
-                return (uint16_t)(r==0?1:r);
-            };
+                return (uint16_t)(r==0?1:r); };
             auto be16 = [](uint8_t* d, uint16_t v){ d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF); };
-            // wPlayerStats = wPlayerAttack region (0xC6B6): staged attack
             uint8_t* ps = wram + wram_off(g_ds_player_stats_addr);
-            be16(ps+0, staged(P_ATK, g_ds_atk_delta)); // ATK staged
-            be16(ps+2, P_DEF);
-            be16(ps+4, P_SPD);
-            be16(ps+6, P_SATK);
-            be16(ps+8, P_SDEF);
-            // wEnemyStats = wEnemyAttack region (0xC6C1): staged defense
+            be16(ps+0, staged(P_ATK, g_ds_atk_delta));
+            be16(ps+2, P_DEF); be16(ps+4, P_SPD); be16(ps+6, P_SATK); be16(ps+8, P_SDEF);
             uint8_t* es = wram + wram_off(g_ds_enemy_stats_addr);
             be16(es+0, E_ATK);
-            be16(es+2, staged(E_DEF, g_ds_def_delta)); // DEF staged
-            be16(es+4, E_SPD);
-            be16(es+6, E_SATK);
-            be16(es+8, E_SDEF);
+            be16(es+2, staged(E_DEF, g_ds_def_delta));
+            be16(es+4, E_SPD); be16(es+6, E_SATK); be16(es+8, E_SDEF);
         }
 
-        // 4. wEnemyMonDefense (bank-1, 0xD21C): RAW unstaged defender defense
-        //    Crystal UNSTAGED crit path reads this (def_stage < atk_stage).
-        {
-            auto be16 = [](uint8_t* d, uint16_t v){ d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF); };
-            be16(wram + wram_off(g_ds_enemy_mon_def_addr), E_DEF);
-        }
+        // 4. wEnemyMonDefense (bank-1): RAW unstaged defender defense (for UNSTAGED crit path).
+        //    Use GB_write_memory to go through the MMU exactly as Crystal will read it.
+        //    This is the critical fix: direct wram[] writes to bank-1 addresses may not be
+        //    visible through MMU reads during execution if rSVBK was changed. GB_write_memory
+        //    always writes to the currently-mapped bank-1 physical slot.
+        GB_write_memory(gb, g_ds_enemy_mon_def_addr,     (uint8_t)(E_DEF >> 8));
+        GB_write_memory(gb, (uint16_t)(g_ds_enemy_mon_def_addr + 1), (uint8_t)(E_DEF & 0xFF));
 
-        // 5. Screen: Reflect on enemy's side (enemy is defending, player is attacking)
+        // 5. Screen and player types
         wram[wram_off(sym2.wEnemyScreens.addr)] = g_ds_screen_on ? SCREENS_REFLECT_BIT : 0;
         wram[wram_off(sym2.wPlayerScreens.addr)] = 0;
+        wram[wram_off(sym2.wBattleMonType1.addr)] = 0x03; // Poison -- no STAB
+        wram[wram_off(sym2.wBattleMonType2.addr)] = 0x03;
 
-        // 6. Player types = Normal (0x00) — no STAB for Normal-type Return
-        wram[wram_off(sym2.wBattleMonType1.addr)] = 0x00;
-        wram[wram_off(sym2.wBattleMonType2.addr)] = 0x00;
-
-        // 7. wCriticalHit is set by the RNG tape (0x10 < 17 = crit, 0x80 >= 17 = no-crit).
-        //    We also pre-set it to force the correct path in CheckDamageStatsCritical.
-        //    This overrides any stale value left from fixture.
+        // 6. wCriticalHit pre-set (RNG tape drives the crit roll; this ensures
+        //    CheckDamageStatsCritical sees the correct wCriticalHit value.)
         wram[wram_off(g_ds_crit_addr)] = g_ds_crit ? 1 : 0;
     };
     // ---- Test cases ---------------------------------------------------------
