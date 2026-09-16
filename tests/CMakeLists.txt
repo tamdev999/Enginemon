@@ -566,6 +566,21 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(stab_type_sweep PRIVATE /bigobj)
     endif()
 
+    # stab_arithmetic_sweep -- STAB/type arithmetic over input damage 1..255
+    # 11 structural type configs × 255 inputs = 2805 logical cases, 11220 Crystal execs.
+    # Usage: stab_arithmetic_sweep <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(stab_arithmetic_sweep
+        crystal_differential/stab_arithmetic_sweep.cpp
+    )
+    target_link_libraries(stab_arithmetic_sweep PRIVATE oracle_runner_lib)
+    target_include_directories(stab_arithmetic_sweep PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(stab_arithmetic_sweep PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

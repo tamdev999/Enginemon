@@ -280,4 +280,15 @@ int run_stab_modifier_pilot(const char* rom_path, const char* sym_path);
 // Enginemon: calculate_damage(dp) in observer + HP delta with variation=100%.
 // ============================================================================
 int run_dual_type_floor_proof(const char* rom_path, const char* sym_path);
+// run_stab_arithmetic_sweep
+//
+// Certifies STAB/type-effectiveness arithmetic over every input damage value
+// 1..255 for 11 structural type configurations (neutral, ×0.5, ×2, immune,
+// STAB+neutral, STAB+×0.5, STAB+×2, dual-cancel, dual-NVE×NVE, dual-SE×SE,
+// dual-cancel-SE×NVE). ROM-derived TypeChart. Direct wCurDamage seeding.
+// PostTypeObserver for Enginemon. 4 poison patterns.
+// Returns 0 all match, 1 mismatches (harness healthy), 2 harness error.
+// ============================================================================
+int run_stab_arithmetic_sweep(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle

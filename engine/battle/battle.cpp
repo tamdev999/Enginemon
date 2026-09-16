@@ -1307,6 +1307,11 @@ MoveExecutionResult Battle::execute_move_damaging(
     if (damage_params_observer_) damage_params_observer_(dp);
 
     int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_) : enginemon::calculate_damage(dp);
+    // Test-only: override the pre-STAB/type damage value when set.
+    // Allows arithmetic sweep to certify STAB/type math for arbitrary input values
+    // without needing stats that produce a specific calculate_damage result.
+    // pre_type_damage_override_ = -1 (default) means disabled; never active in production.
+    if (pre_type_damage_override_ >= 0) damage = pre_type_damage_override_;
     if (damage == 0) return MoveExecutionResult::Immune;
 
     // Weather modifier

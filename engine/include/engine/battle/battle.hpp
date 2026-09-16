@@ -440,6 +440,13 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         post_type_observer_ = std::move(obs);
     }
 
+    // Test-only: if set to a value ≥ 0, overrides the calculate_damage(dp) result
+    // in execute_move_damaging. The STAB and type-effectiveness code runs unchanged on
+    // this injected value instead of the stats-derived damage. Use with set_post_type_observer
+    // to certify STAB/type modifier arithmetic for any specific input damage value.
+    // Set to -1 (default) to disable. Never used in production.
+    void set_pre_type_damage_override(int32_t v) { pre_type_damage_override_ = v; }
+
     // Registry access for AI and other consumers
     const Registries& registries() const { return registries_; }
 
@@ -474,6 +481,8 @@ private:
     DamageParamsObserver damage_params_observer_;
     // Test-only observer for post-STAB/type damage (nullptr in production)
     PostTypeObserver post_type_observer_;
+    // Test-only pre-type damage override (-1 = disabled, production default)
+    int32_t pre_type_damage_override_ = -1;
 
     // Turn state
     uint16_t turn_number_ = 0;
