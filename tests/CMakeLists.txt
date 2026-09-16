@@ -581,6 +581,21 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(stab_arithmetic_sweep PRIVATE /bigobj)
     endif()
 
+    # weather_damage_sweep -- Crystal DoWeatherModifiers vs Enginemon apply_weather_modifier
+    # 7 configs × 255 inputs = 1785 logical cases, 7140 Crystal executions.
+    # Usage: weather_damage_sweep <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(weather_damage_sweep
+        crystal_differential/weather_damage_sweep.cpp
+    )
+    target_link_libraries(weather_damage_sweep PRIVATE oracle_runner_lib)
+    target_include_directories(weather_damage_sweep PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(weather_damage_sweep PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

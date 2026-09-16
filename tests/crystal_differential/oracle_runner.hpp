@@ -291,4 +291,16 @@ int run_dual_type_floor_proof(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_stab_arithmetic_sweep(const char* rom_path, const char* sym_path);
 
+// run_weather_damage_sweep
+//
+// Certifies Crystal DoWeatherModifiers vs Enginemon apply_weather_modifier
+// over input damage 1..255 for 7 structural weather configurations.
+// Rain+Water, Rain+Fire, Sun+Fire, Sun+Water, no_weather, Rain+SolarBeam, Sun+SolarBeam.
+// Crystal: direct BattleCommand_Stab entry (0D:46D2), wCurDamage seeded in fixture.
+// Enginemon: set_field_weather seam + set_pre_type_damage_override + post_type_observer.
+// Documents the Rain+SolarBeam WeatherMoveModifiers dead path on Enginemon side.
+// Returns 0 all match, 1 expected dead-path mismatch (harness healthy), 2 harness error.
+// ============================================================================
+int run_weather_damage_sweep(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle

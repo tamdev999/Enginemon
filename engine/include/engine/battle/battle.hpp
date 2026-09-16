@@ -449,6 +449,14 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
     // certify STAB/type modifier arithmetic for any specific input damage value.
     // Set to -1 (default) to disable.
     void set_pre_type_damage_override(int32_t v) { pre_type_damage_override_ = v; }
+
+    // Directly set the field weather state.
+    // weather_turns=0 means indefinite (won't expire during the sweep).
+    // Used by weather_damage_sweep to inject weather without executing a weather move.
+    void set_field_weather(Weather w, uint8_t weather_turns = 0) {
+        field_.weather       = w;
+        field_.weather_turns = weather_turns;
+    }
 #endif // ENGINEMON_ENABLE_TEST_SEAMS
 
     // Registry access for AI and other consumers
