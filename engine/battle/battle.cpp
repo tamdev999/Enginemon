@@ -1340,6 +1340,23 @@ MoveExecutionResult Battle::execute_move_damaging(
         if (damage > 999) damage = 999;
     }
 
+    // Test-only: observe post-STAB/type damage before held-item, secondary, variation.
+    // post_type_observer_ is always nullptr in production — zero runtime cost.
+    if (post_type_observer_) {
+        // pre_damage = calculate_damage result captured in observer above
+        // Reconstruct: base = dp (already fired). Re-derive pre_damage from dp.
+        // Actually: we can call calculate_damage again since dp is still in scope.
+        const int32_t pre_dmg = rules_
+            ? enginemon::calculate_damage(dp, *rules_)
+            : enginemon::calculate_damage(dp);
+        PostTypeObservation obs{};
+        obs.pre_damage    = pre_dmg;
+        obs.stab          = stab;
+        obs.combined_eff  = type_eff;
+        obs.post_damage   = damage;
+        post_type_observer_(obs);
+    }
+
     // Type-booster held item (Charcoal, Mystic Water, etc.)
     // Crystal: GetUserItem / TypeBoostItems loop in BattleCommand_DamageCalc.
     // Applies after STAB and type effectiveness, before crit multiplier.

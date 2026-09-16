@@ -425,6 +425,21 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         damage_params_observer_ = std::move(obs);
     }
 
+    // Test-only: observer that fires immediately after production STAB + type-effectiveness
+    // application in execute_move_damaging, BEFORE held-item boost, secondary effects,
+    // damage variation, and HP application.
+    // Receives: {pre_stab_type_damage, stab_applied, combined_eff, post_stab_type_damage}
+    struct PostTypeObservation {
+        int32_t  pre_damage;     // calculate_damage(dp) result, before weather/STAB/type
+        bool     stab;           // whether STAB was applied
+        uint16_t combined_eff;   // type_eff (per-100 notation: 100=×1, 200=×2, 50=×0.5, 0=immune)
+        int32_t  post_damage;    // damage after STAB and type-eff multiplications
+    };
+    using PostTypeObserver = std::function<void(const PostTypeObservation&)>;
+    void set_post_type_observer(PostTypeObserver obs) {
+        post_type_observer_ = std::move(obs);
+    }
+
     // Registry access for AI and other consumers
     const Registries& registries() const { return registries_; }
 
@@ -457,6 +472,8 @@ private:
 
     // Test-only observer for DamageParams (nullptr in production)
     DamageParamsObserver damage_params_observer_;
+    // Test-only observer for post-STAB/type damage (nullptr in production)
+    PostTypeObserver post_type_observer_;
 
     // Turn state
     uint16_t turn_number_ = 0;

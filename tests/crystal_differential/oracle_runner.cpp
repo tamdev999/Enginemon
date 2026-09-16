@@ -13298,6 +13298,9 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
     uint32_t n_match_stab_off=0, n_mm_stab_off=0;
     uint32_t n_match_stab_on=0, n_mm_stab_on=0;
     uint32_t n_match_imm=0, n_mm_imm=0;
+    // Crystal type-pass-count breakdown
+    uint32_t n_pass0=0, n_pass1=0, n_pass2=0;  // total cases by pass count
+    uint32_t n_mm_pass0=0, n_mm_pass1=0, n_mm_pass2=0; // mismatches by pass count
 
     struct MismatchEntry {
         uint8_t  at, d1, d2;
@@ -13306,6 +13309,9 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
         uint16_t cr_in, cr_out;
         int32_t  eng_pre, eng_post;
         uint16_t combined_eff;
+        int      cr_pass_count;     // Crystal type_pass_count (0,1,2)
+        uint8_t  cr_mult[2];        // per-pass multipliers (5,10,15,20)
+        uint16_t cr_dmg_after[2];   // per-pass wCurDamage after each pass
     };
     std::vector<MismatchEntry> mismatches;
 
@@ -13326,9 +13332,12 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
         sw_def1 = tc.def_type1;
         sw_def2 = tc.def_type2;
 
-        // Crystal 4-poison
+        // Crystal 4-poison — also record pass counts from pi=0
         uint16_t cr_in[4]={},cr_out[4]={};
         uint8_t  cr_miss[4]={};
+        int      cr_npass=0;
+        uint8_t  cr_mult_arr[2]={};
+        uint16_t cr_dmg_after_arr[2]={};
         bool cok=true;
 
         for(int pi=0;pi<4;++pi){
@@ -13350,6 +13359,14 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
             cr_in[pi]=r.stab_entry.cur_damage;
             cr_out[pi]=r.stab_exit.cur_damage;
             cr_miss[pi]=r.stab_exit.attack_missed;
+            // Record pass count and per-pass data from pi=0 (all poisons give same pass structure)
+            if(pi==0){
+                cr_npass=r.type_pass_count;
+                for(int i=0;i<ExecCtx::MAX_TYPE_PASSES&&i<r.type_pass_count;++i){
+                    cr_mult_arr[i]    = r.type_passes[i].multiplier;
+                    cr_dmg_after_arr[i] = r.type_passes[i].cur_damage;
+                }
+            }
         }
         if(!cok) continue;
 
@@ -13392,38 +13409,42 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
                 b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
                 b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP; return b; };
 
-            // For STAB-off: use a non-matching attacker type (same logic as Crystal fixture)
             auto no_stab_eng = [](uint8_t mt) -> uint8_t {
                 return (mt != 21u) ? uint8_t{21} : uint8_t{20};
             };
             uint8_t eng_atk1 = tc.stab_on ? tc.atk_type : no_stab_eng(tc.atk_type);
             uint8_t eng_atk2 = tc.stab_on ? tc.atk_type : no_stab_eng(tc.atk_type);
 
-            if(tc.special){
-                bat.player_pokemon()  =mk((enginemon::MoveId)tc.move_id,
-                    P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,eng_atk1,eng_atk2);
-                bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,
-                    E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,tc.def_type1,tc.def_type2);
-            } else {
-                bat.player_pokemon()  =mk((enginemon::MoveId)tc.move_id,
-                    P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,eng_atk1,eng_atk2);
-                bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,
-                    E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,tc.def_type1,tc.def_type2);
-            }
+            bat.player_pokemon()  =mk((enginemon::MoveId)tc.move_id,
+                P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,eng_atk1,eng_atk2);
+            bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,
+                E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,tc.def_type1,tc.def_type2);
 
             const enginemon::BattleRules& rr=ed.rules;
+            // pre-mod: base damage from calculate_damage (pre-STAB, pre-type)
             bat.set_damage_params_observer([&](const enginemon::DamageParams& dp){
                 eng_pre=enginemon::calculate_damage(dp,rr);
                 eok=true;
             });
-            static constexpr uint8_t ET[]={0xFF,0xFF,0x00,0xFF};
+            // post-STAB/type: use the new test-only observer that fires AFTER
+            // production STAB+type_eff application, BEFORE held-item/secondary/variation.
+            // This cleanly isolates the modifier boundary without HP-delta contamination.
+            bat.set_post_type_observer([&](const enginemon::Battle::PostTypeObservation& obs){
+                eng_post=obs.post_damage;
+                // Sanity: verify pre_damage matches eng_pre (same dp→calculate_damage)
+                (void)obs.pre_damage; // cross-check done via eng_pre already
+            });
+            // RNG: 3 bytes needed: crit(no)=0xFF, variation(100%)=0xFF, accuracy(pass)=0x00.
+            // eng_post is observed AFTER accuracy roll but BEFORE variation is applied, so
+            // variation byte must be pre-rolled (execute_move pre-rolls before accuracy check).
+            // Accuracy byte must be 0x00 to guarantee hit for moves like METAL_CLAW (acc=95%).
+            static constexpr uint8_t ET[]={0xFF, 0xFF, 0x00};
             size_t ri=0;
-            bat.set_rng_callback([&ri]()->uint32_t{return (uint32_t)ET[ri<4?ri++:3];});
+            bat.set_rng_callback([&ri]()->uint32_t{return (uint32_t)ET[ri<3?ri++:2];});
             bat.set_player_action(enginemon::ActionFight{0,0});
             bat.set_opponent_action(enginemon::ActionFight{0,0});
-            int32_t hp_b=(int32_t)bat.opponent_pokemon().stats.hp;
             bat.execute_turn();
-            eng_post=hp_b-(int32_t)bat.opponent_pokemon().stats.hp;
+            // eng_post is now set by post_type_observer (or remains 0 for immunity)
         }
 
         // Pre-type damage identity check
@@ -13434,10 +13455,19 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
             ++n_harness_error; continue;
         }
 
-        // Compare
+        // Accumulate pass-count stats
+        if(cr_npass==0) ++n_pass0;
+        else if(cr_npass==1) ++n_pass1;
+        else ++n_pass2;
+
+        // Compare: Crystal stab_exit vs Enginemon post_type_observer
+        // For immunity: Crystal wAttackMissed=1 AND Enginemon observer never fires (type_eff=0 → Immune early return)
         bool match;
-        if(cr_miss[0]!=0) match=(eng_post==0&&!eok);
-        else               match=((int32_t)cr_out[0]==eng_post);
+        if(cr_miss[0]!=0){
+            match=(!eok && eng_post==0); // Crystal missed (immune) + Enginemon immune (observer not called)
+        } else {
+            match=((int32_t)cr_out[0]==eng_post);
+        }
 
         bool is_single=(tc.def_type1==tc.def_type2);
         bool is_imm=(cr_miss[0]!=0 || combined_eff==0);
@@ -13452,8 +13482,17 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
             if(is_single) ++n_mm_single; else ++n_mm_dual;
             if(tc.stab_on) ++n_mm_stab_on; else ++n_mm_stab_off;
             if(is_imm) ++n_mm_imm;
-            mismatches.push_back({tc.atk_type,tc.def_type1,tc.def_type2,tc.stab_on,
-                                   tc.move_id,cr_in[0],cr_out[0],eng_pre,eng_post,combined_eff});
+            if(cr_npass==0) ++n_mm_pass0;
+            else if(cr_npass==1) ++n_mm_pass1;
+            else ++n_mm_pass2;
+            MismatchEntry me{};
+            me.at=tc.atk_type; me.d1=tc.def_type1; me.d2=tc.def_type2;
+            me.stab=tc.stab_on; me.move_id=tc.move_id;
+            me.cr_in=cr_in[0]; me.cr_out=cr_out[0];
+            me.eng_pre=eng_pre; me.eng_post=eng_post;
+            me.combined_eff=combined_eff; me.cr_pass_count=cr_npass;
+            for(int i=0;i<2;++i){me.cr_mult[i]=cr_mult_arr[i];me.cr_dmg_after[i]=cr_dmg_after_arr[i];}
+            mismatches.push_back(me);
         }
     }
 
@@ -13470,19 +13509,26 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
              <<"  STAB OFF: match="<<n_match_stab_off<<" mismatch="<<n_mm_stab_off<<"\n"
              <<"  STAB ON:  match="<<n_match_stab_on <<" mismatch="<<n_mm_stab_on <<"\n\n"
              <<"  IMMUNITY: match="<<n_match_imm<<" mismatch="<<n_mm_imm<<"\n\n"
+             <<"  CRYSTAL PASS COUNTS (all "<<N_LOGICAL<<" cases):\n"
+             <<"    0 passes (neutral/no matchup): "<<n_pass0<<"\n"
+             <<"    1 pass (single matchup):       "<<n_pass1<<"\n"
+             <<"    2 passes (dual matchup):       "<<n_pass2<<"\n\n"
+             <<"  DUAL MISMATCHES BY PASS COUNT:\n"
+             <<"    0-pass mismatch: "<<n_mm_pass0<<"\n"
+             <<"    1-pass mismatch: "<<n_mm_pass1<<"\n"
+             <<"    2-pass mismatch: "<<n_mm_pass2<<"\n\n"
              <<std::flush;
 
     // Classify mismatches
+    // Sequential-flooring: dual type (d1!=d2) AND Crystal performed 2 type-passes.
+    // Crystal applies two sequential integer-multiply-divide passes; Enginemon applies
+    // one combined rational multiply. Any dual-type case with 2 Crystal passes is a floor
+    // candidate regardless of combined_eff value (covers both ×2/×0.5=100 cancellations
+    // AND ×0.5/×0.5=20 cases).
     uint32_t mm_floor=0, mm_other=0;
     for(const auto& m:mismatches){
-        // Determine if this is a sequential-flooring mismatch:
-        // A sequential floor mismatch occurs when:
-        //   - dual type (d1 != d2)
-        //   - combined_eff == 100 (cancelling effects)
-        //   - Crystal output != Enginemon output
-        //   - The difference is exactly the integer floor error
         bool is_dual=(m.d1!=m.d2);
-        bool is_floor_candidate=(is_dual && m.combined_eff==100);
+        bool is_floor_candidate=(is_dual && m.cr_pass_count==2);
         if(is_floor_candidate) ++mm_floor;
         else ++mm_other;
     }
@@ -13502,7 +13548,7 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
                  <<std::setw(6)<<"CmbEff"<<"\n"
                  <<"  "<<std::string(52,'-')<<"\n";
         for(const auto& m:mismatches){
-            bool is_floor=(m.d1!=m.d2 && m.combined_eff==100);
+            bool is_floor=(m.d1!=m.d2 && m.cr_pass_count==2);
             if(!is_floor) continue;
             std::cout<<"  "<<std::left<<std::setw(5)<<(int)m.at
                      <<std::setw(5)<<(int)m.d1<<std::setw(5)<<(int)m.d2<<std::setw(5)<<m.stab
@@ -13513,7 +13559,7 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
         if(mm_other>0){
             std::cout<<"\n  Other mismatches:\n";
             for(const auto& m:mismatches){
-                bool is_floor=(m.d1!=m.d2 && m.combined_eff==100);
+                bool is_floor=(m.d1!=m.d2 && m.cr_pass_count==2);
                 if(is_floor) continue;
                 std::cout<<"  "<<std::left<<std::setw(5)<<(int)m.at
                          <<std::setw(5)<<(int)m.d1<<std::setw(5)<<(int)m.d2<<std::setw(5)<<m.stab
@@ -13546,7 +13592,7 @@ int run_stab_type_sweep(const char* rom_path, const char* sym_path)
         std::set<uint16_t> floor_inputs;
         std::set<std::pair<uint8_t,uint8_t>> floor_pairs;
         for(const auto& m:mismatches){
-            if(m.d1!=m.d2 && m.combined_eff==100){
+            if(m.d1!=m.d2 && m.cr_pass_count==2){
                 floor_inputs.insert(m.cr_in);
                 floor_pairs.insert({m.at,m.d1});
             }
