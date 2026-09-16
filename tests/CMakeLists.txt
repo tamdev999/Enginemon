@@ -506,6 +506,21 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(stab_boundary_pilot PRIVATE /bigobj)
     endif()
 
+    # type_effectiveness_diagnostic -- diagnoses a77b0c3 type_eff=100 bug
+    # No Crystal execution. Direct TypeChart lookup observation.
+    # Usage: type_effectiveness_diagnostic <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(type_effectiveness_diagnostic
+        crystal_differential/type_effectiveness_diagnostic.cpp
+    )
+    target_link_libraries(type_effectiveness_diagnostic PRIVATE oracle_runner_lib)
+    target_include_directories(type_effectiveness_diagnostic PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(type_effectiveness_diagnostic PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

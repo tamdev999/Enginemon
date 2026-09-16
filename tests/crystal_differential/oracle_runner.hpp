@@ -249,4 +249,12 @@ int run_damagestats_boundary_sweep_special_with_bases(
 // Returns 0 on success (harness healthy), 2 on harness error.
 // ============================================================================
 int run_stab_boundary_pilot(const char* rom_path, const char* sym_path);
+// run_type_effectiveness_diagnostic
+//
+// Diagnoses why type effectiveness was not applied in a77b0c3.
+// Observes move type, attacker/defender types, TypeChart lookup results,
+// pre/post-type damage for neutral, 2x, 0.5x, and immunity cases.
+// No Crystal execution. No harness formulas.
+// ============================================================================
+int run_type_effectiveness_diagnostic(const char* rom_path, const char* sym_path);
 } // namespace crystal::oracle
