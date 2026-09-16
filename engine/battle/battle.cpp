@@ -1302,6 +1302,10 @@ MoveExecutionResult Battle::execute_move_damaging(
     dp.weather            = field_.weather;
     dp.move_type          = effective_move_type;
 
+    // Test-only: fire DamageParams observer before calculate_damage.
+    // damage_params_observer_ is always nullptr in production.
+    if (damage_params_observer_) damage_params_observer_(dp);
+
     int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_) : enginemon::calculate_damage(dp);
     if (damage == 0) return MoveExecutionResult::Immune;
 

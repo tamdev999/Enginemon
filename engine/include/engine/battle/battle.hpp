@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // engine/battle/battle.hpp
 // Battle system - turn-based Pokemon battles
 //
@@ -13,6 +13,7 @@
 #include "engine/core/registry.hpp"
 #include "engine/battle/battle_rules.hpp"
 #include "engine/battle/semantic_program.hpp"
+#include "engine/battle/calculator.hpp"
 #include <memory>
 #include <vector>
 #include <optional>
@@ -416,6 +417,14 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         field_.light_screen_opponent = light_screen_opponent;
     }
 
+    // Used to observe DamageParams immediately before calculate_damage in tests.
+    // Callback receives the DamageParams about to be passed to calculate_damage.
+    // Set to nullptr to disable (default). Never called in production.
+    using DamageParamsObserver = std::function<void(const DamageParams&)>;
+    void set_damage_params_observer(DamageParamsObserver obs) {
+        damage_params_observer_ = std::move(obs);
+    }
+
     // Registry access for AI and other consumers
     const Registries& registries() const { return registries_; }
 
@@ -445,6 +454,9 @@ private:
 
     // Field state
     FieldState field_;
+
+    // Test-only observer for DamageParams (nullptr in production)
+    DamageParamsObserver damage_params_observer_;
 
     // Turn state
     uint16_t turn_number_ = 0;

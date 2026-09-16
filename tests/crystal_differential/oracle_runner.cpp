@@ -1451,10 +1451,14 @@ static CrystalRunResult execute_crystal_run_loop(
         // inputs for the direct-call path; no harness formula may substitute them.
         if(!exec_ctx.damage_calc_entry.sampled && pc == 0x5612 && bank == 0x0D){
             exec_ctx.damage_calc_entry.sampled      = true;
-            exec_ctx.damage_calc_entry.d            = (uint8_t)(r->de >> 8);   // power
-            exec_ctx.damage_calc_entry.e            = (uint8_t)(r->de & 0xFF); // level
-            exec_ctx.damage_calc_entry.b            = (uint8_t)(r->bc >> 8);   // attack
-            exec_ctx.damage_calc_entry.c            = (uint8_t)(r->bc & 0xFF); // defense
+            // Use the named byte fields (r->b, r->c) directly rather than
+            // bit-shifting r->bc, to avoid any endianness ambiguity in the union.
+            // On little-endian: GB_REGISTER_ORDER = f,a,c,b,e,d,l,h so the named
+            // fields r->b and r->c are the actual SM83 B and C registers.
+            exec_ctx.damage_calc_entry.d            = r->d;  // SM83 D = power
+            exec_ctx.damage_calc_entry.e            = r->e;  // SM83 E = level
+            exec_ctx.damage_calc_entry.b            = r->b;  // SM83 B = attack  (named field)
+            exec_ctx.damage_calc_entry.c            = r->c;  // SM83 C = defense (named field)
             exec_ctx.damage_calc_entry.wCriticalHit =
                 GB_safe_read_memory(&gb, sym.wCriticalHit.addr);
             {
@@ -9508,6 +9512,79 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path)
     static constexpr uint8_t TAPE_CRIT_FULLVAR[] = { 0x10, 0xB2, 0xFF };
     static constexpr uint8_t TAPE_NOCRIT_FULLVAR[] = { 0x80, 0xB2, 0xFF };
 
+    // ---- Register snapshot canary ----------------------------------------------
+    // Prove the r->b / r->c snapshot reads the ACTUAL SM83 B and C registers.
+    // Direct DamageCalc entry with force_reg_b=0x5A, force_reg_c=0xA5.
+    // Snapshot must read exactly B=0x5A, C=0xA5.
+    {
+        static constexpr uint8_t CANARY_B = 0x5A;
+        static constexpr uint8_t CANARY_C = 0xA5;
+
+        // Minimal fixture: present_extra_fixture sets valid battle state
+        static FixtureFn canary_fx = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
+            present_extra_fixture(gb, wram, sym2);
+            // Normal types (no STAB), no screen, crit=0, wCurDamage=0
+            wram[wram_off(sym2.wBattleMonType1.addr)] = 0x03;
+            wram[wram_off(sym2.wBattleMonType2.addr)] = 0x03;
+            wram[wram_off(sym2.wEnemyScreens.addr)] = 0;
+            wram[wram_off(sym2.wCriticalHit.addr)] = 0;
+            wram[wram_off(sym2.wCurDamage.addr)] = 0;
+            wram[wram_off(sym2.wCurDamage.addr)+1] = 0;
+            // Power=80, effect=0x79, type=Normal
+            wram[wram_off((uint16_t)(sym2.wPlayerMoveStruct.addr+1))] = 0x79;
+            wram[wram_off((uint16_t)(sym2.wPlayerMoveStruct.addr+2))] = 80;
+            wram[wram_off((uint16_t)(sym2.wPlayerMoveStruct.addr+3))] = 0x00;
+        };
+
+        CrystalRunConfig ccfg{};
+        ccfg.entry = sym.BattleCommand_DamageCalc;  // direct entry
+        ccfg.sink_pcs[0] = sym.EndMoveEffect.addr;
+        ccfg.sink_names[0] = "EndMoveEffect";
+        ccfg.num_sinks = 1;
+        ccfg.insn_cap = 100000;
+        ccfg.rng_tape = nullptr; ccfg.rng_tape_len = 0;
+        ccfg.extra_fixture = canary_fx;
+        ccfg.force_reg_b = CANARY_B;  // inject known distinct B
+        ccfg.force_reg_c = CANARY_C;  // inject known distinct C
+        ccfg.force_reg_d = 80;        // power (non-zero so DamageCalc proceeds)
+        ccfg.force_reg_e = 50;        // level
+
+        struct CanFxGuard{ ~CanFxGuard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; } } cfg_g;
+        g_generic_rom_bytes_ptr = &rom_bytes; g_generic_move_id = RETURN_MOVE_ID; g_generic_pp = P_PP;
+
+        std::atomic<bool> canary_stop{false};
+        CrystalRunResult cr = run_crystal_case(rom_bytes, sym, 0x00, ccfg, &canary_stop);
+        bool canary_pass = false;
+        std::string canary_detail;
+        if(cr.stop_reason != StopReason::SINK_HIT){
+            canary_detail = "HARNESS_ERROR: stop=" + std::string(stop_reason_str(cr.stop_reason));
+        } else if(!cr.damage_calc_entry.sampled){
+            canary_detail = "snapshot not fired at 0D:5612";
+        } else {
+            uint8_t got_b = cr.damage_calc_entry.b;
+            uint8_t got_c = cr.damage_calc_entry.c;
+            if(got_b == CANARY_B && got_c == CANARY_C){
+                canary_pass = true;
+                canary_detail = "B=" + std::to_string(got_b) + " C=" + std::to_string(got_c);
+            } else {
+                canary_detail = "MISMATCH: expected B=0x5A,C=0xA5 got B="
+                    + std::to_string(got_b) + ",C=" + std::to_string(got_c);
+            }
+        }
+
+        std::cout << "\nRegister snapshot canary (force_reg_b=0x5A, force_reg_c=0xA5):\n"
+                  << "  B expected=0x5A(" << (int)CANARY_B << ")  read=" << (int)cr.damage_calc_entry.b << "\n"
+                  << "  C expected=0xA5(" << (int)CANARY_C << ")  read=" << (int)cr.damage_calc_entry.c << "\n"
+                  << "  CANARY: " << (canary_pass ? "PASS" : "FAIL -- " + canary_detail) << "\n\n";
+
+        if(!canary_pass){
+            std::cerr << "STOP: register snapshot canary failed -- " << canary_detail << "\n"
+                      << "Cannot proceed without reliable B/C capture.\n";
+            return 1;
+        }
+    }
+    // --- END CANARY ---
+
     // Stage multiplier table (Crystal raw index = raw - 1, 0-indexed, raw 1..13)
     // Crystal StatLevelMultipliers: pairs {num, den} for stages -6..+6
     auto crystal_staged_stat = [](uint16_t base, int delta) -> uint16_t {
@@ -9642,14 +9719,14 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path)
 
     int passed = 0, mismatched = 0, harness_errors = 0;
 
-    std::cout << "\n  " << std::left << std::setw(30) << "Case"
+    std::cout << "\n  " << std::left << std::setw(26) << "Case"
               << std::right
-              << std::setw(8) << "CrysBC"
-              << std::setw(8) << "CrDmg"
-              << std::setw(8) << "EngDmg"
+              << std::setw(7)  << "CrysBC"
+              << std::setw(9)  << "EngAtkDef"
+              << std::setw(6)  << "CrDmg"
+              << std::setw(6)  << "EngDmg"
               << "  match\n"
               << "  " << std::string(62,'-') << "\n";
-
     std::atomic<bool> no_stop{false};
     const MoveSpec* ms = find_move(RETURN_MOVE_ID);
     if(!ms){ std::cerr << "Return not registered\n"; return 1; }
@@ -9725,9 +9802,10 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path)
         const uint8_t  cr_c      = crystal_c_vals[0];
 
         // ---- Enginemon run ----
-        // Build stages matching the Crystal fixture: ATK at atk_delta, DEF at def_delta, rest neutral.
-        int8_t p_stages[7] = { tc.atk_delta, 0, 0, 0, 0, 0, 0 };  // [ATK DEF SPD SATK SDEF ACC EVA]
+        // Capture the real production DamageParams via the observer seam.
+        int8_t p_stages[7] = { tc.atk_delta, 0, 0, 0, 0, 0, 0 };
         int8_t e_stages[7] = { 0, tc.def_delta, 0, 0, 0, 0, 0 };
+        enginemon::DamageParams captured_dp{}; bool dp_captured = false;
 
         auto eng_opt = [&]() -> std::optional<uint16_t> {
             enginemon::Registries reg{}; reg.moves = ed.moves;
@@ -9735,12 +9813,11 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path)
             { enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
               pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm); }
             enginemon::Battle bat(enginemon::BattleType::Wild, party, reg, ed.rules);
-
-            auto make_bp = [&](enginemon::MoveId mid, uint16_t atk, uint16_t def,
-                                uint16_t spd, uint16_t satk, uint16_t sdef,
-                                uint16_t hp, uint8_t lvl, const int8_t* sd){
+            auto make_bp=[&](enginemon::MoveId mid,uint16_t atk,uint16_t def,
+                              uint16_t spd,uint16_t satk,uint16_t sdef,
+                              uint16_t hp,uint8_t lvl,const int8_t* sd){
                 enginemon::BattlePokemon bp{};
-                bp.species=1; bp.type1=0; bp.type2=0; bp.level=lvl; // Normal types
+                bp.species=1; bp.type1=0; bp.type2=0; bp.level=lvl;
                 bp.stats.hp=bp.stats.max_hp=hp; bp.base_stats.hp=bp.base_stats.max_hp=hp;
                 bp.stats.attack=bp.base_stats.attack=atk;
                 bp.stats.defense=bp.base_stats.defense=def;
@@ -9752,57 +9829,40 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path)
                 bp.stages.attack=sd[0]; bp.stages.defense=sd[1]; bp.stages.speed=sd[2];
                 bp.stages.special_attack=sd[3]; bp.stages.special_defense=sd[4];
                 bp.stages.accuracy=sd[5]; bp.stages.evasion=sd[6];
-                return bp;
-            };
-
-            bat.player_pokemon()   = make_bp(eng_move_id, P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF, P_HP, P_LEVEL, p_stages);
-            bat.opponent_pokemon() = make_bp(enginemon::MOVE_NONE, E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF, E_HP, E_LEVEL, e_stages);
-
-            // Screen: Reflect on opponent's side (enemy is defending)
-            if(tc.screen_on){
-                bat.set_field_screens(0, 0, 5, 0); // reflect_opponent=5 turns
-            }
-
-            // Feed RNG tape
-            const uint8_t* tape     = tc.crit ? TAPE_CRIT_FULLVAR : TAPE_NOCRIT_FULLVAR;
-            size_t         tape_len = 3;
-            size_t rng_idx = 0;
-            bat.set_rng_callback([tape, tape_len, &rng_idx]()->uint32_t{
-                if(rng_idx >= tape_len) return 0xFF;
-                return (uint32_t)tape[rng_idx++];
-            });
-
-            bat.set_player_action(enginemon::ActionFight{0, 0});
-            bat.set_opponent_action(enginemon::ActionFight{0, 0});
+                return bp; };
+            bat.player_pokemon()   = make_bp(eng_move_id,P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,p_stages);
+            bat.opponent_pokemon() = make_bp(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,e_stages);
+            if(tc.screen_on) bat.set_field_screens(0,0,5,0);
+            // Wire DamageParams observer: directly observes inputs to calculate_damage
+            bat.set_damage_params_observer([&](const enginemon::DamageParams& dp){
+                captured_dp=dp; dp_captured=true; });
+            const uint8_t* tape=tc.crit?TAPE_CRIT_FULLVAR:TAPE_NOCRIT_FULLVAR;
+            size_t rng_idx=0;
+            bat.set_rng_callback([tape,&rng_idx]()->uint32_t{ return (uint32_t)tape[rng_idx++]; });
+            bat.set_player_action(enginemon::ActionFight{0,0});
+            bat.set_opponent_action(enginemon::ActionFight{0,0});
             bat.execute_turn();
-
-            const uint16_t opp_hp   = (uint16_t)bat.opponent_pokemon().stats.hp;
-            const uint16_t opp_max  = E_HP;
-            if(opp_hp >= opp_max) return (uint16_t)0; // no damage
-            return (uint16_t)(opp_max - opp_hp);
+            const uint16_t ohp=(uint16_t)bat.opponent_pokemon().stats.hp;
+            return (ohp<(uint16_t)E_HP) ? std::optional<uint16_t>((uint16_t)(E_HP-ohp)) : std::optional<uint16_t>(0u);
         }();
 
-        if(!eng_opt){
-            std::cerr << "  Enginemon run failed for " << tc.name << "\n";
-            ++harness_errors;
-            continue;
-        }
+        if(!eng_opt){ std::cerr << "  Enginemon HARNESS for "<<tc.name<<"\n"; ++harness_errors; continue; }
         const uint16_t eng_damage = *eng_opt;
 
         const bool match = (cr_damage == eng_damage);
-        if(match) ++passed;
-        else       ++mismatched;
+        if(match) ++passed; else ++mismatched;
 
-        // Print: B,C as "B=xx,C=yy"
-        char bc_str[16]; snprintf(bc_str, sizeof(bc_str), "%3d,%3d", (int)cr_b, (int)cr_c);
+        // Output: CrysBC | EngAtkDef | Crystal/Eng damage | match
+        char bc_str[20]; snprintf(bc_str,sizeof(bc_str),"%3d,%3d",(int)cr_b,(int)cr_c);
+        char ea_str[20];
+        if(dp_captured) snprintf(ea_str,sizeof(ea_str),"%4d,%4d",(int)captured_dp.attack_stat,(int)captured_dp.defense_stat);
+        else            snprintf(ea_str,sizeof(ea_str),"   ?,   ?");
+        std::cout << "  " << std::left<<std::setw(26)<<tc.name
+                  << std::right<<std::setw(7)<<bc_str<<std::setw(9)<<ea_str
+                  << std::setw(6)<<cr_damage<<std::setw(6)<<eng_damage
+                  << "  "<<(match?"PASS":"MISMATCH")<<"\n";
 
-        std::cout << "  " << std::left << std::setw(30) << tc.name
-                  << std::right
-                  << std::setw(8) << bc_str
-                  << std::setw(8) << cr_damage
-                  << std::setw(8) << eng_damage
-                  << "  " << (match ? "PASS" : "MISMATCH") << "\n";
-    }
+    }  // end for(tc : cases)
 
     const int crit_cases    = 12;
     const int control_cases = 2;
