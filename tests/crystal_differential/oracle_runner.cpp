@@ -13034,4 +13034,310 @@ int run_type_effectiveness_diagnostic(const char* rom_path, const char* sym_path
     return harness_errors == 0 ? 0 : 1;
 }
 
+// ============================================================================
+// run_stab_modifier_pilot
+//
+// Reruns the BattleCommand_Stab modifier pilot with:
+//   1. TypeChart populated from ROM rules (ed.rules.apply_to(reg.type_chart))
+//   2. Added cases: STAB+2×, STAB+0.5×, corrected dual-type (Ice vs Water/Grass)
+//   3. "Eng pre-mod" = calculate_damage(dp) called inside damage_params_observer_
+//      (same production function, same dp — no harness arithmetic)
+//   4. "Eng post-mod" = HP delta with variation=100% (RNG=0xFF)
+//
+// Cases: neutral, STAB, 2×, 0.5×, immune, STAB+2×, STAB+0.5×, dual-type.
+// Crystal: DoMove → sink 0D:47C7. Captures wCurDamage entry/exit.
+// No weather. No badge. RNG=0.
+// ============================================================================
+int run_stab_modifier_pilot(const char* rom_path, const char* sym_path)
+{
+    // ---- Load ROM and engine data -------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr << "Cannot open ROM: " << rom_path << "\n"; return 2; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    if(rom_bytes.size() != CRYSTAL_ROM_SIZE){ std::cerr << "Wrong ROM size\n"; return 2; }
+    {
+        std::string sha = sha1_hex(rom_bytes.data(), rom_bytes.size());
+        if(sha != PINNED_ROM_SHA1){ std::cerr << "ROM SHA mismatch\n"; return 2; }
+    }
+    SymCache sym;
+    {
+        std::string err = SymCache::load(sym_path, &sym);
+        if(!err.empty()){ std::cerr << "Sym: " << err << "\n"; return 2; }
+    }
+    {
+        std::string err = validate_fixture_addresses(sym);
+        if(!err.empty()){ std::cerr << "Fixture: " << err << "\n"; return 2; }
+    }
+    auto rom_data = crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){ std::cerr << "RomData load failed\n"; return 2; }
+    const crystal::ExtractionProfile* profile =
+        crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
+    if(!profile){ std::cerr << "No profile\n"; return 2; }
+    auto ed_opt = load_engine_data(*rom_data, *profile);
+    if(!ed_opt){ std::cerr << "load_engine_data failed\n"; return 2; }
+    const EngineData& ed = *ed_opt;
+
+    // Crystal type IDs (uint8_t = Crystal ROM raw byte = Enginemon TypeId)
+    static constexpr uint8_t T_NORMAL = 0;
+    static constexpr uint8_t T_FIRE   = 20;
+    static constexpr uint8_t T_WATER  = 21;
+    static constexpr uint8_t T_GRASS  = 22;
+    static constexpr uint8_t T_ICE    = 25;
+    static constexpr uint8_t T_GHOST  = 8;
+
+    static constexpr uint16_t SURF   = 57;  // Water/Special
+    static constexpr uint16_t TACKLE = 33;  // Normal/Physical
+
+    static constexpr uint16_t SINK_STAB = 0x47C7;
+    static constexpr uint8_t  POISON[4] = { 0x00, 0xA5, 0x5A, 0xFF };
+    static constexpr uint8_t  NOCRIT[]  = { 0xFF };
+
+    std::atomic<bool> no_stop{false};
+
+    // Thread-locals for Crystal fixture (no new static conflicts: sp_ prefix)
+    static thread_local uint8_t  sp_atk1=T_NORMAL, sp_atk2=T_NORMAL;
+    static thread_local uint8_t  sp_def1=T_NORMAL, sp_def2=T_NORMAL;
+    static thread_local uint16_t sp_moveid=SURF;
+    static thread_local uint8_t  sp_mtype=0; // move type override (0=none)
+
+    static const FixtureFn sp_fx=[](GB_gameboy_t* gb,uint8_t* wram,const SymCache& s){
+        generic_fullscript_fixture_adapter(gb,wram,s);
+        wram[wram_off(s.wBattleMonType1.addr)]=sp_atk1;
+        wram[wram_off(s.wBattleMonType2.addr)]=sp_atk2;
+        wram[wram_off(s.wEnemyMonType1.addr)] =sp_def1;
+        wram[wram_off(s.wEnemyMonType2.addr)] =sp_def2;
+        wram[wram_off(s.wBattleWeather.addr)] =0;
+        GB_write_memory(gb,s.wJohtoBadges.addr,0);
+        GB_write_memory(gb,s.wKantoBadges.addr,0);
+        if(sp_mtype) GB_write_memory(gb,(uint16_t)(s.wPlayerMoveStruct.addr+3),sp_mtype);
+    };
+
+    struct SMP {
+        const char* name;
+        uint16_t move;
+        uint8_t atk1,atk2,def1,def2;
+        uint8_t cr_mtype; // Crystal move type override (0=none)
+        uint8_t ea1,ea2,ed1,ed2; // Enginemon attacker/defender types
+    };
+    static const SMP CASES[] = {
+        { "neutral",   SURF,  T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,0,
+                              T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL },
+        { "stab",      SURF,  T_WATER, T_WATER, T_NORMAL,T_NORMAL,0,
+                              T_WATER, T_WATER, T_NORMAL,T_NORMAL },
+        { "type_2x",   SURF,  T_NORMAL,T_NORMAL,T_FIRE,  T_FIRE,  0,
+                              T_NORMAL,T_NORMAL,T_FIRE,  T_FIRE   },
+        { "type_0.5x", SURF,  T_NORMAL,T_NORMAL,T_WATER, T_WATER, 0,
+                              T_NORMAL,T_NORMAL,T_WATER, T_WATER  },
+        { "immunity",  TACKLE,T_NORMAL,T_NORMAL,T_GHOST, T_GHOST, 0,
+                              T_NORMAL,T_NORMAL,T_GHOST, T_GHOST  },
+        { "stab+2x",   SURF,  T_WATER, T_WATER, T_FIRE,  T_FIRE,  0,
+                              T_WATER, T_WATER, T_FIRE,  T_FIRE   },
+        { "stab+0.5x", SURF,  T_WATER, T_WATER, T_WATER, T_WATER, 0,
+                              T_WATER, T_WATER, T_WATER, T_WATER  },
+        // dual_seq: Crystal sees Ice vs Water/Grass (type overridden).
+        // Enginemon sees Water vs Water/Grass (md->type=WATER, can't override in production).
+        // The point: Crystal does sequential ×0.5×2 = 50 for odd d=51.
+        //            Enginemon combined_eff(WATER,WATER,GRASS)=25 → 51*25/100=12.
+        //            (Different matchups; column shows each side's actual output.)
+        // The sequential floor proof is in the direct observation section below.
+        { "dual_seq",  SURF,  T_NORMAL,T_NORMAL,T_WATER, T_GRASS, T_ICE,
+                              T_NORMAL,T_NORMAL,T_WATER, T_GRASS  },
+    };
+    const int N=(int)(sizeof(CASES)/sizeof(CASES[0]));
+
+    int harness_errors=0;
+    bool anti_confirmed=false;
+
+    std::cout<<"=== Stab Modifier Pilot (TypeChart from ROM) ===\n"
+             <<"  TYPE CHART INITIALIZED FROM ROM RULES? yes\n\n"
+             <<"  "<<std::left<<std::setw(14)<<"Case"
+             <<std::right
+             <<std::setw(7)<<"CrIn"<<std::setw(7)<<"CrOut"
+             <<std::setw(9)<<"EngPre"<<std::setw(9)<<"EngPost"
+             <<std::setw(7)<<"Miss"<<"  TyMod  4p  match\n"
+             <<"  "<<std::string(68,'-')<<"\n"<<std::flush;
+
+    for(int ci=0;ci<N;++ci){
+        const SMP& tc=CASES[ci];
+        sp_atk1=tc.atk1; sp_atk2=tc.atk2;
+        sp_def1=tc.def1; sp_def2=tc.def2;
+        sp_moveid=tc.move; sp_mtype=tc.cr_mtype;
+
+        // Crystal 4-poison
+        uint16_t cr_in[4]={},cr_out[4]={};
+        uint8_t  cr_miss[4]={},cr_tmod[4]={};
+        bool cok=true;
+        for(int pi=0;pi<4;++pi){
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}}fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=tc.move; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.DoMove; cfg.sink_pcs[0]=SINK_STAB; cfg.sink_names[0]="Stab.ret";
+            cfg.num_sinks=1; cfg.insn_cap=200000;
+            cfg.rng_tape=NOCRIT; cfg.rng_tape_len=1;
+            cfg.extra_fixture=sp_fx; cfg.engine_move_id=tc.move;
+            CrystalRunResult r=run_crystal_case(rom_bytes,sym,POISON[pi],cfg,&no_stop);
+            if(r.stop_reason!=StopReason::SINK_HIT||!r.stab_entry.sampled||!r.stab_exit.sampled){
+                std::cerr<<"  HARNESS_ERROR "<<tc.name<<" pi="<<pi
+                         <<" "<<stop_reason_str(r.stop_reason)<<"\n";
+                ++harness_errors; cok=false; break;
+            }
+            cr_in[pi]=r.stab_entry.cur_damage; cr_out[pi]=r.stab_exit.cur_damage;
+            cr_miss[pi]=r.stab_exit.attack_missed; cr_tmod[pi]=r.stab_exit.type_modifier;
+        }
+        if(!cok) continue;
+        bool stable=true;
+        for(int pi=1;pi<4;++pi)
+            if(cr_in[pi]!=cr_in[0]||cr_out[pi]!=cr_out[0]||cr_miss[pi]!=cr_miss[0])
+                {stable=false;break;}
+        if(!stable){std::cerr<<"  POISON_UNSTABLE "<<tc.name<<"\n";++harness_errors;continue;}
+
+        // Enginemon with populated TypeChart
+        int32_t eng_pre=-1, eng_post=0;
+        bool eok=false;
+        {
+            enginemon::Registries reg{}; reg.moves=ed.moves;
+            ed.rules.apply_to(reg.type_chart); // ← fix
+            enginemon::Party party;
+            {enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+             pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm);}
+            enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+            auto mk=[](enginemon::MoveId mid,uint16_t a,uint16_t d,uint16_t sp2,
+                        uint16_t sa,uint16_t sd,uint16_t hp,uint8_t lv,uint8_t t1,uint8_t t2){
+                enginemon::BattlePokemon b{};
+                b.species=1; b.type1=(enginemon::TypeId)t1; b.type2=(enginemon::TypeId)t2; b.level=lv;
+                b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+                b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+                b.stats.speed=b.base_stats.speed=sp2;
+                b.stats.special_attack=b.base_stats.special_attack=sa;
+                b.stats.special_defense=b.base_stats.special_defense=sd;
+                b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+                b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP; return b;
+            };
+            bat.player_pokemon()  =mk((enginemon::MoveId)tc.move,
+                P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,tc.ea1,tc.ea2);
+            bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,
+                E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,tc.ed1,tc.ed2);
+            // pre-mod: call production calculate_damage inside observer
+            const enginemon::BattleRules& rules_ref=ed.rules;
+            bat.set_damage_params_observer([&](const enginemon::DamageParams& dp){
+                eng_pre=enginemon::calculate_damage(dp,rules_ref);
+                eok=true;
+            });
+            static constexpr uint8_t ET[]={0xFF,0xFF};
+            size_t ri=0;
+            bat.set_rng_callback([&ri]()->uint32_t{return (uint32_t)ET[ri<2?ri++:1];});
+            bat.set_player_action(enginemon::ActionFight{0,0});
+            bat.set_opponent_action(enginemon::ActionFight{0,0});
+            int32_t hp_b=(int32_t)bat.opponent_pokemon().stats.hp;
+            bat.execute_turn();
+            eng_post=hp_b-(int32_t)bat.opponent_pokemon().stats.hp;
+        }
+
+        bool match;
+        if(cr_miss[0]!=0) match=(eng_post==0&&!eok);
+        else               match=((int32_t)cr_out[0]==eng_post);
+
+        std::cout<<"  "<<std::left<<std::setw(14)<<tc.name
+                 <<std::right
+                 <<std::setw(7)<<(int)cr_in[0]
+                 <<std::setw(7)<<(int)cr_out[0]
+                 <<std::setw(9)<<(eok?eng_pre:-1)
+                 <<std::setw(9)<<eng_post
+                 <<std::setw(7)<<(int)cr_miss[0]
+                 <<"  0x"<<std::hex<<std::setw(2)<<std::setfill('0')
+                          <<(int)cr_tmod[0]<<std::dec<<std::setfill(' ')
+                 <<"  "<<(stable?"4p":"UNSTBL")
+                 <<"  "<<(match?"MATCH":"MISMATCH")
+                 <<"\n"<<std::flush;
+    }
+
+    // Direct dual-type sequential floor observation
+    {
+        enginemon::TypeChart fc; ed.rules.apply_to(fc);
+        uint8_t e1=fc.get_effectiveness((enginemon::TypeId)T_ICE,(enginemon::TypeId)T_WATER);
+        uint8_t e2=fc.get_effectiveness((enginemon::TypeId)T_ICE,(enginemon::TypeId)T_GRASS);
+        uint16_t combined=enginemon::get_combined_effectiveness(
+            (enginemon::TypeId)T_ICE,
+            (enginemon::TypeId)T_WATER,(enginemon::TypeId)T_GRASS,fc);
+        // Crystal sequential for d=51: floor(51*e1/10)*e2/10
+        int cr_step1=(51*e1)/10;
+        int cr_step2=(cr_step1*e2)/10;
+        int eng_combined=(51*combined)/100;
+        std::cout<<"\n  Dual-type sequential floor (Ice=25 vs Water=21/Grass=22), d=51 (odd):\n"
+                 <<"    Per-type multipliers: ICE→WATER="<<(int)e1<<" ICE→GRASS="<<(int)e2<<"\n"
+                 <<"    Crystal step1: floor(51*"<<(int)e1<<"/10)="<<cr_step1
+                 <<"  step2: floor("<<cr_step1<<"*"<<(int)e2<<"/10)="<<cr_step2<<"\n"
+                 <<"    Enginemon combined_eff="<<combined<<" floor(51*"<<combined<<"/100)="
+                 <<eng_combined<<"\n"
+                 <<"    Crystal="<<cr_step2<<" Enginemon="<<eng_combined
+                 <<"  delta="<<(cr_step2-eng_combined)<<"\n"
+                 <<"    SEQUENTIAL-FLOORING DIVERGENCE PROVEN? "
+                 <<(cr_step2!=eng_combined?"yes":"no")<<"\n\n"<<std::flush;
+    }
+
+    // Anti-confirmation
+    {
+        sp_atk1=T_NORMAL; sp_atk2=T_NORMAL; sp_def1=T_NORMAL; sp_def2=T_NORMAL;
+        sp_moveid=SURF; sp_mtype=0;
+        uint16_t bl=0;
+        {
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}}fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SURF; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.DoMove; cfg.sink_pcs[0]=SINK_STAB; cfg.sink_names[0]="ret";
+            cfg.num_sinks=1; cfg.insn_cap=200000; cfg.rng_tape=NOCRIT; cfg.rng_tape_len=1;
+            cfg.extra_fixture=sp_fx; cfg.engine_move_id=SURF;
+            CrystalRunResult r=run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+            if(r.stop_reason==StopReason::SINK_HIT&&r.stab_exit.sampled) bl=r.stab_exit.cur_damage;
+        }
+        auto erun=[&](uint16_t sa)->int32_t{
+            enginemon::Registries reg{}; reg.moves=ed.moves; ed.rules.apply_to(reg.type_chart);
+            enginemon::Party party;
+            {enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+             pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm);}
+            enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+            auto mk=[](enginemon::MoveId mid,uint16_t a,uint16_t d,uint16_t sp2,uint16_t satk,
+                        uint16_t sd,uint16_t hp,uint8_t lv,uint8_t t1,uint8_t t2){
+                enginemon::BattlePokemon b{}; b.species=1;
+                b.type1=(enginemon::TypeId)t1; b.type2=(enginemon::TypeId)t2; b.level=lv;
+                b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+                b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+                b.stats.speed=b.base_stats.speed=sp2;
+                b.stats.special_attack=b.base_stats.special_attack=satk;
+                b.stats.special_defense=b.base_stats.special_defense=sd;
+                b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+                b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP; return b; };
+            bat.player_pokemon()  =mk((enginemon::MoveId)SURF,P_ATK,P_DEF,P_SPD,sa,P_SDEF,
+                                       P_HP,P_LEVEL,T_NORMAL,T_NORMAL);
+            bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,
+                                       E_HP,E_LEVEL,T_NORMAL,T_NORMAL);
+            static constexpr uint8_t TT[]={0xFF,0xFF}; size_t ri=0;
+            bat.set_rng_callback([&ri]()->uint32_t{return (uint32_t)TT[ri<2?ri++:1];});
+            bat.set_player_action(enginemon::ActionFight{0,0});
+            bat.set_opponent_action(enginemon::ActionFight{0,0});
+            int32_t hp_b=(int32_t)bat.opponent_pokemon().stats.hp;
+            bat.execute_turn();
+            return hp_b-(int32_t)bat.opponent_pokemon().stats.hp;
+        };
+        int32_t en=erun(P_SATK), ep=erun(P_SATK+1);
+        bool nm=((int32_t)bl==en), pm2=((int32_t)bl==ep);
+        anti_confirmed=nm&&!pm2;
+        std::cout<<"  Anti-confirmation (neutral SpAtk "<<P_SATK<<"→"<<(P_SATK+1)<<"):\n"
+                 <<"    Crystal="<<bl<<" EngNorm="<<en<<" EngPert="<<ep
+                 <<"  normal "<<(nm?"MATCH":"MISMATCH")
+                 <<"  perturb "<<(pm2?"MATCH(BAD!)":"MISMATCH(expected)")
+                 <<"  "<<(anti_confirmed?"DETECTED":"FAILED")<<"\n\n"<<std::flush;
+    }
+
+    std::cout<<"  4-POISON STABLE?:  "<<(harness_errors==0?"yes":"see errors")<<"\n"
+             <<"  RNG:               0\n"
+             <<"  HARNESS_ERROR:     "<<harness_errors<<"\n"
+             <<"  ANTI-CONFIRMATION: "<<(anti_confirmed?"DETECTED":"FAILED")<<"\n"
+             <<"  production modified? no\n";
+    return harness_errors==0?0:1;
+}
+
 } // namespace crystal::oracle

@@ -521,6 +521,21 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(type_effectiveness_diagnostic PRIVATE /bigobj)
     endif()
 
+    # stab_modifier_pilot -- modifier boundary with correct TypeChart initialization
+    # Crystal: DoMove → sink 0D:47C7. Enginemon: pre-mod + post-mod observed.
+    # Usage: stab_modifier_pilot <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(stab_modifier_pilot
+        crystal_differential/stab_modifier_pilot.cpp
+    )
+    target_link_libraries(stab_modifier_pilot PRIVATE oracle_runner_lib)
+    target_include_directories(stab_modifier_pilot PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(stab_modifier_pilot PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

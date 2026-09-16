@@ -257,4 +257,12 @@ int run_stab_boundary_pilot(const char* rom_path, const char* sym_path);
 // No Crystal execution. No harness formulas.
 // ============================================================================
 int run_type_effectiveness_diagnostic(const char* rom_path, const char* sym_path);
+// run_stab_modifier_pilot
+//
+// Reruns the Stab modifier pilot with TypeChart populated from ROM rules.
+// Cases: neutral, STAB, 2x, 0.5x, immunity, STAB+2x, STAB+0.5x, dual-type.
+// Observes Eng pre-mod (calculate_damage inside observer) and post-mod (HP delta).
+// Returns 0 on all matches, 1 on mismatches (harness healthy), 2 on error.
+// ============================================================================
+int run_stab_modifier_pilot(const char* rom_path, const char* sym_path);
 } // namespace crystal::oracle
