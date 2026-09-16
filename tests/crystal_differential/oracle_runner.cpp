@@ -10362,16 +10362,12 @@ int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path)
                         (uint8_t)(g_p2_real_edef_staged & 0xFF));
 
         // Raw base attack in wPlayerStats[ATK] — for DamageStats unboosted crit path
+        // (crit carry-CLEAR reads wPlayerAttack = wPlayerStats[0])
         be16(wram + wram_off(sym2.wPlayerStats.addr), P_ATK);
 
-        // Raw base defense in wEnemyStats[DEF]
+        // Raw base defense in wEnemyStats[DEF] = wEnemyDefense (0xC6C3)
+        // DamageStats crit carry-CLEAR path reads wEnemyDefense, NOT wEnemyMonDefense.
         be16(wram + wram_off(sym2.wEnemyStats.addr) + 2, E_DEF);
-
-        // wEnemyMonDefense (bank-1) = raw base defense for unboosted crit path
-        GB_write_memory(gb, sym2.wEnemyMonDefense.addr,
-                        (uint8_t)(E_DEF >> 8));
-        GB_write_memory(gb, (uint16_t)(sym2.wEnemyMonDefense.addr + 1),
-                        (uint8_t)(E_DEF & 0xFF));
 
         // Stage bytes (DamageStats reads these for CheckDamageStatsCritical)
         {
