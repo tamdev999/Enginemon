@@ -474,6 +474,22 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(damagestats_boundary_sweep PRIVATE /bigobj)
     endif()
 
+    # damagestats_special_sweep -- exhaustive SPECIAL DamageStats stat-selection
+    # 676 logical cases (13x13 SpAtk/SpDef stages x crit x LightScreen), 2704 executions.
+    # Move: Surf (id=57, Water type). Pre-TruncateHL_BC capture. No harness formula.
+    # Usage: damagestats_special_sweep <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(damagestats_special_sweep
+        crystal_differential/damagestats_special_sweep.cpp
+    )
+    target_link_libraries(damagestats_special_sweep PRIVATE oracle_runner_lib)
+    target_include_directories(damagestats_special_sweep PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(damagestats_special_sweep PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

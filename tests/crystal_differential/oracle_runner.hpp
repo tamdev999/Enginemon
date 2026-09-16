@@ -225,4 +225,19 @@ int run_damagestats_boundary_sweep_with_bases(
 // Returns 0 all match, 1 mismatches found (harness healthy), 2 harness error.
 // ============================================================================
 int run_damagestats_boundary_sweep(const char* rom_path, const char* sym_path);
+// run_damagestats_boundary_sweep_special
+// run_damagestats_boundary_sweep_special_with_bases
+//
+// Same sweep structure as the physical variants but exercising the SPECIAL
+// stat-selection path in PlayerAttackDamage:
+//   wEnemyMonSpclDef → BC (with Light Screen bit 3 doubling)
+//   wBattleMonSpclAtk → HL (via CheckDamageStatsCritical, wPlayerSAtkLevel/wEnemySDefLevel)
+// Move: Surf (id=57), Water type → triggers special path (type >= SPECIAL=20).
+// SpAtk stage index 3 (wPlayerSAtkLevel = wPlayerStatLevels+3 = 0xC6CF).
+// SpDef stage index 4 (wEnemySDefLevel  = wEnemyStatLevels+4  = 0xC6D8).
+// ============================================================================
+int run_damagestats_boundary_sweep_special(const char* rom_path, const char* sym_path);
+int run_damagestats_boundary_sweep_special_with_bases(
+    const char* rom_path, const char* sym_path,
+    uint16_t base_spatk, uint16_t base_spdef);
 } // namespace crystal::oracle

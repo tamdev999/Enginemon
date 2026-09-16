@@ -11736,4 +11736,480 @@ int run_damagestats_boundary_sweep_with_bases(
     return 0;
 }
 
+// ============================================================================
+// run_damagestats_boundary_sweep_special / _special_with_bases
+//
+// Exercises the SPECIAL stat-selection path in PlayerAttackDamage.
+// Move: Surf (id=57), Water type → type ≥ SPECIAL(20) → special branch.
+// Crystal special path at .special:
+//   ld hl, wEnemyMonSpclDef  ; BC = staged enemy SpDef (from CalcEnemyStats)
+//   bit SCREENS_LIGHT_SCREEN (bit 3) → doubles BC if active
+//   ld hl, wBattleMonSpclAtk ; HL ptr for CheckDamageStatsCritical
+//   CheckDamageStatsCritical reads wPlayerSAtkLevel / wEnemySDefLevel
+//   carry SET  (SpDef_raw < SpAtk_raw): keep staged SpAtk/SpDef (+screen)
+//   carry CLEAR (SpDef_raw ≥ SpAtk_raw): replace with raw base SpDef/SpAtk
+//
+// sw3_ prefixed thread-locals throughout.
+// ============================================================================
+
+// Hardcoded WRAM addresses not yet in SymCache:
+static constexpr uint16_t ADDR_wBattleMonSpclAtk = 0xC646; // wBattleMonAttack + 6
+static constexpr uint16_t ADDR_wPlayerSAtkLevel   = 0xC6CF; // wPlayerStatLevels + 3
+static constexpr uint16_t ADDR_wEnemySDefLevel    = 0xC6D8; // wEnemyStatLevels + 4
+// wEnemyMonSpclDef = wEnemyMonAttack + 8 = 0xD222 (bank-1), use sym.wEnemyMonSpclDef
+
+// Run the special sweep with caller-supplied base SpAtk and SpDef.
+static int run_special_sweep_impl(
+    const std::vector<uint8_t>& rom_bytes,
+    const SymCache& sym,
+    const EngineData& ed,
+    uint16_t base_spatk,
+    uint16_t base_spdef)
+{
+    static constexpr uint16_t SW3_MOVE_ID  = 57;   // Surf — Water type → special path
+    const enginemon::MoveId eng_move_id    = (enginemon::MoveId)SW3_MOVE_ID;
+    static constexpr uint32_t SW3_INSN_CAP = 100000;
+    static constexpr uint16_t SW3_SENTINEL  = 0x0001;
+    static constexpr uint8_t  SW3_POISON[4] = { 0x00, 0xA5, 0x5A, 0xFF };
+    static constexpr uint8_t  SW3_TAPE_NOCRIT[] = { 0xFF, 0xB2, 0xFF };
+    static constexpr uint8_t  SW3_TAPE_CRIT[]   = { 0x00, 0xB2, 0xFF };
+    static constexpr uint8_t  SW3_LIGHT_SCREEN   = 0x08; // wEnemyScreens bit 3
+
+    std::atomic<bool> no_stop{false};
+
+    // Phase 1a: CalcPlayerStats with wPlayerStats[SpAtk=index3, offset+6] = base_spatk
+    static thread_local uint8_t  sw3_p1a_stage     = 7;
+    static thread_local uint16_t sw3_p1a_base_spatk = 110;
+
+    static const FixtureFn sw3_p1a_fx = [](GB_gameboy_t* gb, uint8_t* wram,
+                                            const SymCache& s)
+    {
+        generic_fullscript_fixture_adapter(gb, wram, s);
+        auto be16=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
+        // Write base SpAtk to wPlayerStats[index 3] = wPlayerStats.addr + 6
+        be16(wram + wram_off((uint16_t)(s.wPlayerStats.addr + 6)), sw3_p1a_base_spatk);
+        uint8_t* psl = wram + wram_off(s.wPlayerStatLevels.addr);
+        for(int i=0;i<8;i++) psl[i]=7;
+        psl[3] = sw3_p1a_stage;  // SpAtk stage = index 3
+    };
+
+    // Phase 1b: CalcEnemyStats with wEnemyStats[SpDef=index4, offset+8] = base_spdef
+    static thread_local uint8_t  sw3_p1b_stage     = 7;
+    static thread_local uint16_t sw3_p1b_base_spdef = 110;
+
+    static const FixtureFn sw3_p1b_fx = [](GB_gameboy_t* gb, uint8_t* wram,
+                                            const SymCache& s)
+    {
+        generic_fullscript_fixture_adapter(gb, wram, s);
+        auto be16=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
+        // Write base SpDef to wEnemyStats[index 4] = wEnemyStats.addr + 8
+        be16(wram + wram_off((uint16_t)(s.wEnemyStats.addr + 8)), sw3_p1b_base_spdef);
+        uint8_t* esl = wram + wram_off(s.wEnemyStatLevels.addr);
+        for(int i=0;i<8;i++) esl[i]=7;
+        esl[4] = sw3_p1b_stage;  // SpDef stage = index 4
+    };
+
+    // Phase 2 fixture thread-locals
+    static thread_local uint16_t sw3_p2_pspatk  = 0;   // from Phase 1a
+    static thread_local uint16_t sw3_p2_espdef  = 0;   // from Phase 1b
+    static thread_local uint8_t  sw3_p2_satk_raw = 7;  // wPlayerSAtkLevel raw byte
+    static thread_local uint8_t  sw3_p2_sdef_raw = 7;  // wEnemySDefLevel raw byte
+    static thread_local uint8_t  sw3_p2_screen  = 0;   // 0x08 for Light Screen
+    static thread_local uint8_t  sw3_p2_crit    = 0;
+    static thread_local uint16_t sw3_p2_b_spatk = 110; // raw base SpAtk for carry-CLEAR path
+    static thread_local uint16_t sw3_p2_b_spdef = 110; // raw base SpDef for carry-CLEAR path
+
+    static const FixtureFn sw3_p2_fx = [](GB_gameboy_t* gb, uint8_t* wram,
+                                           const SymCache& s)
+    {
+        generic_fullscript_fixture_adapter(gb, wram, s);
+        auto be16=[](uint8_t* d,uint16_t v){d[0]=(uint8_t)(v>>8);d[1]=(uint8_t)(v&0xFF);};
+
+        // Inject staged SpAtk → wBattleMonSpclAtk (wBattleMonAttack+6)
+        be16(wram + wram_off(ADDR_wBattleMonSpclAtk), sw3_p2_pspatk);
+
+        // Inject staged SpDef → wEnemyMonSpclDef (bank-1, wEnemyMonAttack+8)
+        GB_write_memory(gb, s.wEnemyMonSpclDef.addr,
+                        (uint8_t)(sw3_p2_espdef >> 8));
+        GB_write_memory(gb, (uint16_t)(s.wEnemyMonSpclDef.addr + 1),
+                        (uint8_t)(sw3_p2_espdef & 0xFF));
+
+        // Raw base SpAtk in wPlayerSpAtk = wPlayerStats+6 — for carry-CLEAR path
+        be16(wram + wram_off(s.wPlayerSpAtk.addr), sw3_p2_b_spatk);
+
+        // Raw base SpDef in wEnemySpDef = wEnemyStats+8 — for carry-CLEAR path
+        be16(wram + wram_off(s.wEnemySpDef.addr), sw3_p2_b_spdef);
+
+        // Stage bytes for CheckDamageStatsCritical
+        {
+            uint8_t* psl = wram + wram_off(s.wPlayerStatLevels.addr);
+            uint8_t* esl = wram + wram_off(s.wEnemyStatLevels.addr);
+            for(int i=0;i<8;i++){ psl[i]=7; esl[i]=7; }
+            psl[3] = sw3_p2_satk_raw;  // SpAtk stage index 3
+            esl[4] = sw3_p2_sdef_raw;  // SpDef stage index 4
+        }
+
+        // Light Screen (bit 3 = 0x08) or clear
+        wram[wram_off(s.wEnemyScreens.addr)]  = sw3_p2_screen;
+        wram[wram_off(s.wPlayerScreens.addr)] = 0u;
+
+        // Move type: Water (type ID 21 = SPECIAL+1) — ensures special branch
+        // Player type: Normal (0) — no STAB
+        wram[wram_off(s.wBattleMonType1.addr)] = 0x00u;
+        wram[wram_off(s.wBattleMonType2.addr)] = 0x00u;
+
+        // Critical hit flag
+        wram[wram_off(s.wCriticalHit.addr)] = sw3_p2_crit;
+    };
+
+    // Set thread-local bases
+    sw3_p1a_base_spatk = base_spatk;
+    sw3_p1b_base_spdef = base_spdef;
+    sw3_p2_b_spatk     = base_spatk;
+    sw3_p2_b_spdef     = base_spdef;
+
+    uint32_t n_logical=0, n_ds_ex=0, n_cp_ex=0, n_ce_ex=0;
+    uint32_t n_match=0, n_mismatch=0, n_harness_error=0;
+
+    struct MM3 { uint8_t ar,dr,cr,sc; uint16_t cra,crd; int32_t ea,ed; };
+    std::vector<MM3> mismatches;
+
+    std::cout << "=== Special DamageStats Boundary Sweep"
+              << " (base_spatk=" << base_spatk << " base_spdef=" << base_spdef << ") ===\n"
+              << "  Move: Surf (id=57, Water type) → special path\n"
+              << "  SpAtk stage raw 1..13 x SpDef stage raw 1..13 x crit {0,1} x LightScreen {OFF,ON}\n"
+              << std::flush;
+
+    for(int satk_raw=1;satk_raw<=13;++satk_raw){
+    for(int sdef_raw=1;sdef_raw<=13;++sdef_raw){
+    for(int crit=0;crit<=1;++crit){
+    for(int screen=0;screen<=1;++screen){
+        ++n_logical;
+
+        // Phase 1a: CalcPlayerStats populates wBattleMonSpclAtk[index3]
+        uint16_t real_pspatk = 0;
+        {
+            sw3_p1a_stage = (uint8_t)satk_raw;
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW3_MOVE_ID; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.CalcPlayerStats; cfg.sink_pcs[0]=SW3_SENTINEL;
+            cfg.sink_names[0]="CalcPlayerStats.ret"; cfg.num_sinks=1;
+            cfg.insn_cap=200000; cfg.rng_tape=nullptr; cfg.rng_tape_len=0;
+            cfg.extra_fixture=sw3_p1a_fx; cfg.engine_move_id=SW3_MOVE_ID;
+            CrystalRunResult r=run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+            ++n_cp_ex;
+            if(r.stop_reason!=StopReason::SINK_HIT){
+                std::cerr<<"  Phase1a HARNESS_ERROR satk="<<satk_raw<<" "<<stop_reason_str(r.stop_reason)<<"\n";
+                ++n_harness_error; goto sw3_next;
+            }
+            real_pspatk = r.player_stats[3];  // wBattleMonAttack[index3] = wBattleMonSpclAtk
+        }
+
+        // Phase 1b: CalcEnemyStats populates wEnemyMonSpclDef[index4]
+        {
+            uint16_t real_espdef = 0;
+            sw3_p1b_stage = (uint8_t)sdef_raw;
+            {
+                struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+                g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW3_MOVE_ID; g_generic_pp=P_PP;
+                CrystalRunConfig cfg{};
+                cfg.entry=sym.CalcEnemyStats; cfg.sink_pcs[0]=SW3_SENTINEL;
+                cfg.sink_names[0]="CalcEnemyStats.ret"; cfg.num_sinks=1;
+                cfg.insn_cap=200000; cfg.rng_tape=nullptr; cfg.rng_tape_len=0;
+                cfg.extra_fixture=sw3_p1b_fx; cfg.engine_move_id=SW3_MOVE_ID;
+                CrystalRunResult r=run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+                ++n_ce_ex;
+                if(r.stop_reason!=StopReason::SINK_HIT){
+                    std::cerr<<"  Phase1b HARNESS_ERROR sdef="<<sdef_raw<<" "<<stop_reason_str(r.stop_reason)<<"\n";
+                    ++n_harness_error; goto sw3_next;
+                }
+                real_espdef = r.enemy_stats[4];  // wEnemyMonAttack[index4] = wEnemyMonSpclDef
+            }
+
+            // Phase 2: DoMove x4 poison
+            sw3_p2_pspatk  = real_pspatk;
+            sw3_p2_espdef  = real_espdef;
+            sw3_p2_satk_raw= (uint8_t)satk_raw;
+            sw3_p2_sdef_raw= (uint8_t)sdef_raw;
+            sw3_p2_screen  = screen ? SW3_LIGHT_SCREEN : 0u;
+            sw3_p2_crit    = (uint8_t)crit;
+
+            uint16_t cra[4]={}, crd[4]={};
+            bool all_ok = true;
+
+            for(int pi=0;pi<4;++pi){
+                struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+                g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW3_MOVE_ID; g_generic_pp=P_PP;
+                CrystalRunConfig cfg{};
+                cfg.entry=sym.DoMove; cfg.sink_pcs[0]=sym.EndMoveEffect.addr;
+                cfg.sink_names[0]="EndMoveEffect"; cfg.num_sinks=1;
+                cfg.insn_cap=SW3_INSN_CAP;
+                cfg.rng_tape=crit?SW3_TAPE_CRIT:SW3_TAPE_NOCRIT; cfg.rng_tape_len=3;
+                cfg.extra_fixture=sw3_p2_fx; cfg.engine_move_id=SW3_MOVE_ID;
+                CrystalRunResult r=run_crystal_case(rom_bytes,sym,SW3_POISON[pi],cfg,&no_stop);
+                ++n_ds_ex;
+                if(r.stop_reason!=StopReason::SINK_HIT||!r.pre_trunc.sampled){
+                    std::cerr<<"  Phase2 HARNESS_ERROR satk="<<satk_raw<<" sdef="<<sdef_raw
+                             <<" crit="<<crit<<" scr="<<screen<<" pi="<<pi
+                             <<" "<<stop_reason_str(r.stop_reason)
+                             <<" pt="<<r.pre_trunc.sampled<<"\n";
+                    ++n_harness_error; all_ok=false; goto sw3_next;
+                }
+                cra[pi]=r.pre_trunc.attack(); crd[pi]=r.pre_trunc.defense();
+            }
+            if(!all_ok) goto sw3_next;
+
+            // 4-poison stability
+            for(int pi=1;pi<4;++pi){
+                if(cra[pi]!=cra[0]||crd[pi]!=crd[0]){
+                    std::cerr<<"  POISON_UNSTABLE satk="<<satk_raw<<" sdef="<<sdef_raw
+                             <<" crit="<<crit<<" scr="<<screen<<"\n";
+                    ++n_harness_error; goto sw3_next;
+                }
+            }
+
+            // Enginemon
+            int8_t ps[7]={}, es[7]={};
+            ps[3]=(int8_t)(satk_raw-7);  // SpAtk stage index 3
+            es[4]=(int8_t)(sdef_raw-7);  // SpDef stage index 4
+            enginemon::DamageParams eng{}; bool eng_ok=false;
+
+            {
+                enginemon::Registries reg{}; reg.moves=ed.moves;
+                enginemon::Party party;
+                { enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+                  pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm); }
+                enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+
+                auto mk=[&](enginemon::MoveId mid,uint16_t a,uint16_t d,uint16_t sp,
+                             uint16_t sa,uint16_t sd,uint16_t hp,uint8_t lv,const int8_t* s){
+                    enginemon::BattlePokemon b{}; b.species=1; b.type1=0; b.type2=0; b.level=lv;
+                    b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+                    b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+                    b.stats.speed=b.base_stats.speed=sp;
+                    b.stats.special_attack=b.base_stats.special_attack=sa;
+                    b.stats.special_defense=b.base_stats.special_defense=sd;
+                    b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+                    b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP;
+                    b.stages.attack=s[0]; b.stages.defense=s[1]; b.stages.speed=s[2];
+                    b.stages.special_attack=s[3]; b.stages.special_defense=s[4];
+                    b.stages.accuracy=s[5]; b.stages.evasion=s[6]; return b; };
+
+                // Player: base_spatk as special_attack; Normal type (no STAB with Water move)
+                bat.player_pokemon()  =mk(eng_move_id,
+                    P_ATK, P_DEF, P_SPD, base_spatk, P_SDEF, P_HP, P_LEVEL, ps);
+                // Opponent: base_spdef as special_defense
+                bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,
+                    E_ATK, E_DEF, E_SPD, E_SATK, base_spdef, E_HP, E_LEVEL, es);
+
+                // Light Screen on opponent side
+                if(screen) bat.set_field_screens(0, 0, 0, 5);
+
+                bat.set_damage_params_observer(
+                    [&](const enginemon::DamageParams& dp){ eng=dp; eng_ok=true; });
+
+                size_t ri=0;
+                const uint8_t* tape=crit?SW3_TAPE_CRIT:SW3_TAPE_NOCRIT;
+                bat.set_rng_callback([tape,&ri]()->uint32_t{ return (uint32_t)tape[ri++]; });
+                bat.set_player_action(enginemon::ActionFight{0,0});
+                bat.set_opponent_action(enginemon::ActionFight{0,0});
+                bat.execute_turn();
+            }
+
+            if(!eng_ok){ ++n_harness_error; goto sw3_next; }
+
+            if((int32_t)cra[0]==eng.attack_stat && (int32_t)crd[0]==eng.defense_stat)
+                ++n_match;
+            else {
+                ++n_mismatch;
+                mismatches.push_back({(uint8_t)satk_raw,(uint8_t)sdef_raw,
+                    (uint8_t)crit,(uint8_t)screen,cra[0],crd[0],
+                    eng.attack_stat,eng.defense_stat});
+            }
+        }
+        sw3_next:;
+    }}}}
+
+    // Anti-confirmation: neutral 7/7 noncrit screen-OFF
+    bool anti_conf=false;
+    {
+        sw3_p1a_stage=7;
+        uint16_t a_pspatk=base_spatk, a_espdef=base_spdef;
+        {
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW3_MOVE_ID; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.CalcPlayerStats; cfg.sink_pcs[0]=SW3_SENTINEL;
+            cfg.sink_names[0]="ret"; cfg.num_sinks=1; cfg.insn_cap=200000;
+            cfg.rng_tape=nullptr; cfg.rng_tape_len=0;
+            cfg.extra_fixture=sw3_p1a_fx; cfg.engine_move_id=SW3_MOVE_ID;
+            CrystalRunResult r=run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+            if(r.stop_reason==StopReason::SINK_HIT) a_pspatk=r.player_stats[3];
+        }
+        sw3_p1b_stage=7;
+        {
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW3_MOVE_ID; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.CalcEnemyStats; cfg.sink_pcs[0]=SW3_SENTINEL;
+            cfg.sink_names[0]="ret"; cfg.num_sinks=1; cfg.insn_cap=200000;
+            cfg.rng_tape=nullptr; cfg.rng_tape_len=0;
+            cfg.extra_fixture=sw3_p1b_fx; cfg.engine_move_id=SW3_MOVE_ID;
+            CrystalRunResult r=run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+            if(r.stop_reason==StopReason::SINK_HIT) a_espdef=r.enemy_stats[4];
+        }
+        sw3_p2_pspatk=a_pspatk; sw3_p2_espdef=a_espdef;
+        sw3_p2_satk_raw=7; sw3_p2_sdef_raw=7; sw3_p2_screen=0; sw3_p2_crit=0;
+        uint16_t anti_cra=0, anti_crd=0;
+        {
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW3_MOVE_ID; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.DoMove; cfg.sink_pcs[0]=sym.EndMoveEffect.addr;
+            cfg.sink_names[0]="EndMoveEffect"; cfg.num_sinks=1;
+            cfg.insn_cap=SW3_INSN_CAP;
+            cfg.rng_tape=SW3_TAPE_NOCRIT; cfg.rng_tape_len=3;
+            cfg.extra_fixture=sw3_p2_fx; cfg.engine_move_id=SW3_MOVE_ID;
+            CrystalRunResult r=run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+            if(r.stop_reason==StopReason::SINK_HIT&&r.pre_trunc.sampled){
+                anti_cra=r.pre_trunc.attack(); anti_crd=r.pre_trunc.defense();
+            }
+        }
+        if(anti_cra>0||anti_crd>0){
+            int8_t ps7[7]={}, es7[7]={};
+            enginemon::DamageParams eng_anti{}; bool aok=false;
+            {
+                enginemon::Registries reg{}; reg.moves=ed.moves;
+                enginemon::Party party;
+                { enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+                  pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm); }
+                enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+                auto mk=[&](enginemon::MoveId mid,uint16_t a,uint16_t d,uint16_t sp,uint16_t sa,uint16_t sd,uint16_t hp,uint8_t lv,const int8_t* s){
+                    enginemon::BattlePokemon b{}; b.species=1; b.type1=0; b.type2=0; b.level=lv;
+                    b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+                    b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+                    b.stats.speed=b.base_stats.speed=sp; b.stats.special_attack=b.base_stats.special_attack=sa;
+                    b.stats.special_defense=b.base_stats.special_defense=sd;
+                    b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+                    b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP;
+                    b.stages.attack=s[0]; b.stages.defense=s[1]; return b; };
+                bat.player_pokemon()  =mk(eng_move_id,P_ATK,P_DEF,P_SPD,base_spatk,P_SDEF,P_HP,P_LEVEL,ps7);
+                bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,base_spdef,E_HP,E_LEVEL,es7);
+                bat.set_damage_params_observer([&](const enginemon::DamageParams& dp){eng_anti=dp;aok=true;});
+                size_t ri=0;
+                bat.set_rng_callback([&ri]()->uint32_t{return (uint32_t)SW3_TAPE_NOCRIT[ri++];});
+                bat.set_player_action(enginemon::ActionFight{0,0});
+                bat.set_opponent_action(enginemon::ActionFight{0,0});
+                bat.execute_turn();
+            }
+            if(aok){
+                bool nm=((int32_t)anti_cra==eng_anti.attack_stat&&(int32_t)anti_crd==eng_anti.defense_stat);
+                bool pm=((int32_t)anti_cra==eng_anti.attack_stat+1&&(int32_t)anti_crd==eng_anti.defense_stat);
+                anti_conf=nm&&!pm;
+                std::cout<<"  Anti-confirm neutral 7/7 noncrit screen-OFF:\n"
+                         <<"    Cr atk="<<anti_cra<<" def="<<anti_crd
+                         <<"  Eng atk="<<eng_anti.attack_stat<<" def="<<eng_anti.defense_stat
+                         <<"  normal "<<(nm?"MATCH":"MISMATCH")
+                         <<"  perturb "<<(pm?"MATCH(BAD!)":"MISMATCH(expected)")
+                         <<"  anti-confirm "<<(anti_conf?"DETECTED":"FAILED")<<"\n\n"<<std::flush;
+            }
+        }
+    }
+
+    // Results
+    std::cout << "=== Results (base_spatk="<<base_spatk<<" base_spdef="<<base_spdef<<") ===\n"
+              << "  LOGICAL CASES:                  " << n_logical << "\n"
+              << "  ACTUAL DAMAGESTATS EXECUTIONS:  " << n_ds_ex << "\n"
+              << "  ACTUAL CALCPLAYERSTATS EXECS:   " << n_cp_ex << "\n"
+              << "  ACTUAL CALCENEMYSTATS EXECS:    " << n_ce_ex << "\n"
+              << "  MATCH:                          " << n_match << "\n"
+              << "  MISMATCH:                       " << n_mismatch << "\n"
+              << "  HARNESS_ERROR:                  " << n_harness_error << "\n"
+              << "  4-POISON STABLE?:               " << (n_harness_error==0?"yes":"see errors") << "\n"
+              << "  ANTI-CONFIRMATION DETECTED?:    " << (anti_conf?"yes":"NO") << "\n";
+
+    if(!mismatches.empty()){
+        uint32_t nc_mm=0, cr_mm=0;
+        for(const auto& m:mismatches){ if(m.cr) ++cr_mm; else ++nc_mm; }
+        std::cout << "  NON-CRIT: match=" << (13*13-nc_mm) << " mismatch=" << nc_mm << "\n"
+                  << "  CRIT:     match=" << ((int)(13*13*2)-nc_mm-cr_mm-(int)n_harness_error)
+                  << " mismatch=" << cr_mm << "\n\n";
+
+        std::cout << "  Mismatch map:\n"
+                  << "  " << std::left<<std::setw(7)<<"satkRaw"
+                  << std::setw(7)<<"sdefRaw"<<std::setw(6)<<"crit"<<std::setw(6)<<"scr"
+                  << std::right<<std::setw(7)<<"CrAtk"<<std::setw(7)<<"CrDef"
+                  << std::setw(8)<<"EngAtk"<<std::setw(8)<<"EngDef"<<"\n"
+                  << "  " << std::string(58,'-') << "\n";
+        for(const auto& m:mismatches){
+            std::cout << "  " << std::left<<std::setw(7)<<(int)m.ar
+                      << std::setw(7)<<(int)m.dr<<std::setw(6)<<(int)m.cr<<std::setw(6)<<(int)m.sc
+                      << std::right<<std::setw(7)<<(int)m.cra<<std::setw(7)<<(int)m.crd
+                      << std::setw(8)<<(int)m.ea<<std::setw(8)<<(int)m.ed<<"\n";
+        }
+        std::cout<<"\n"<<std::flush;
+    } else {
+        std::cout << "  NON-CRIT: match=169 mismatch=0\n  CRIT: all match\n\n";
+    }
+
+    if(n_harness_error>0) return 2;
+    if(n_mismatch>0)      return 1;
+    return 0;
+}
+
+int run_damagestats_boundary_sweep_special(const char* rom_path, const char* sym_path)
+{
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr<<"Cannot open ROM: "<<rom_path<<"\n"; return 2; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f),{});
+    }
+    if(rom_bytes.size()!=CRYSTAL_ROM_SIZE){ std::cerr<<"Wrong ROM size\n"; return 2; }
+    { std::string s=sha1_hex(rom_bytes.data(),rom_bytes.size());
+      if(s!=PINNED_ROM_SHA1){ std::cerr<<"ROM SHA mismatch\n"; return 2; } }
+    SymCache sym;
+    { std::string e=SymCache::load(sym_path,&sym);
+      if(!e.empty()){ std::cerr<<"Sym: "<<e<<"\n"; return 2; } }
+    { std::string e=validate_fixture_addresses(sym);
+      if(!e.empty()){ std::cerr<<"Fixture: "<<e<<"\n"; return 2; } }
+    auto rom_data=crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){ std::cerr<<"RomData load failed\n"; return 2; }
+    const crystal::ExtractionProfile* profile=
+        crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
+    if(!profile){ std::cerr<<"No profile\n"; return 2; }
+    auto ed_opt=load_engine_data(*rom_data,*profile);
+    if(!ed_opt){ std::cerr<<"load_engine_data failed\n"; return 2; }
+    return run_special_sweep_impl(rom_bytes, sym, *ed_opt, 110, 110);
+}
+
+int run_damagestats_boundary_sweep_special_with_bases(
+    const char* rom_path, const char* sym_path,
+    uint16_t base_spatk, uint16_t base_spdef)
+{
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr<<"Cannot open ROM: "<<rom_path<<"\n"; return 2; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f),{});
+    }
+    if(rom_bytes.size()!=CRYSTAL_ROM_SIZE){ std::cerr<<"Wrong ROM size\n"; return 2; }
+    { std::string s=sha1_hex(rom_bytes.data(),rom_bytes.size());
+      if(s!=PINNED_ROM_SHA1){ std::cerr<<"ROM SHA mismatch\n"; return 2; } }
+    SymCache sym;
+    { std::string e=SymCache::load(sym_path,&sym);
+      if(!e.empty()){ std::cerr<<"Sym: "<<e<<"\n"; return 2; } }
+    { std::string e=validate_fixture_addresses(sym);
+      if(!e.empty()){ std::cerr<<"Fixture: "<<e<<"\n"; return 2; } }
+    auto rom_data=crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){ std::cerr<<"RomData load failed\n"; return 2; }
+    const crystal::ExtractionProfile* profile=
+        crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
+    if(!profile){ std::cerr<<"No profile\n"; return 2; }
+    auto ed_opt=load_engine_data(*rom_data,*profile);
+    if(!ed_opt){ std::cerr<<"load_engine_data failed\n"; return 2; }
+    return run_special_sweep_impl(rom_bytes, sym, *ed_opt, base_spatk, base_spdef);
+}
+
 } // namespace crystal::oracle
