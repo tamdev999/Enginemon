@@ -206,9 +206,14 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path);
 int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path);
 
 // ============================================================================
-// run_damagestats_boundary_sweep
+// run_damagestats_boundary_sweep_with_bases
 //
-// Exhaustive physical DamageStats stat-selection boundary sweep.
+// Same sweep as run_damagestats_boundary_sweep but with caller-specified
+// base attack and defense stats. Used for base-stat coincidence audit.
+// ============================================================================
+int run_damagestats_boundary_sweep_with_bases(
+    const char* rom_path, const char* sym_path,
+    uint16_t base_atk, uint16_t base_def);
 // For every attacker ATK stage raw 1..13 × defender DEF stage raw 1..13
 // × crit {0,1} × Reflect {OFF,ON} = 676 logical cases.
 // 4 poison patterns per DamageStats execution = 2704 Crystal executions.
