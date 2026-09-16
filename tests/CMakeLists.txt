@@ -536,6 +536,21 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(stab_modifier_pilot PRIVATE /bigobj)
     endif()
 
+    # dual_type_floor_proof -- proves sequential floor divergence via real Ice Beam
+    # Crystal: per-type-pass at 0D:47AB. Enginemon: combined_eff + HP delta.
+    # Usage: dual_type_floor_proof <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(dual_type_floor_proof
+        crystal_differential/dual_type_floor_proof.cpp
+    )
+    target_link_libraries(dual_type_floor_proof PRIVATE oracle_runner_lib)
+    target_include_directories(dual_type_floor_proof PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(dual_type_floor_proof PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

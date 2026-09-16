@@ -265,4 +265,11 @@ int run_type_effectiveness_diagnostic(const char* rom_path, const char* sym_path
 // Returns 0 on all matches, 1 on mismatches (harness healthy), 2 on error.
 // ============================================================================
 int run_stab_modifier_pilot(const char* rom_path, const char* sym_path);
+// run_dual_type_floor_proof
+//
+// Proves dual-type sequential-flooring divergence using real Ice Beam (id=58).
+// Crystal: per-type-pass snapshots at 0D:47AB (.ok label).
+// Enginemon: calculate_damage(dp) in observer + HP delta with variation=100%.
+// ============================================================================
+int run_dual_type_floor_proof(const char* rom_path, const char* sym_path);
 } // namespace crystal::oracle
