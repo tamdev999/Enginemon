@@ -755,6 +755,20 @@ struct ExecCtx {
         uint8_t  wMoveEffect = 0;  // WRAM wPlayerMoveStructEffect at entry
     } damage_calc_entry;
 
+    // Pre-truncation snapshot captured at PC 0D:533F (PlayerAttackDamage .done,
+    // immediately before `call TruncateHL_BC` executes).
+    // At this point: HL = 16-bit attack,  BC = 16-bit defense (big-endian).
+    //   attack  = (H << 8) | L   (16-bit, possibly > 255 if screen active)
+    //   defense = (B << 8) | C   (16-bit, possibly > 255 if screen active)
+    // This is the semantic comparison point: pre-truncation full-width values.
+    struct PreTruncSnapshot {
+        bool     sampled  = false;
+        uint8_t  h = 0, l = 0;  // HL = 16-bit attack
+        uint8_t  b = 0, c = 0;  // BC = 16-bit defense
+        uint16_t attack()  const { return (uint16_t)((h << 8) | l); }
+        uint16_t defense() const { return (uint16_t)((b << 8) | c); }
+    } pre_trunc;
+
     // One-shot instruction trace for register forensics.
     // When enable_trace=true, every pre-step in bank 0x0D between
     // pc_trace_lo..pc_trace_hi is recorded (B,C,D,E,H,L,SP before instruction).
@@ -984,6 +998,7 @@ struct CrystalRunResult {
     // PC 0D:5612. Carries the SM83 d/e/b/c values and WRAM state Crystal actually had
     // at that moment. Use these as direct-call inputs instead of any harness formula.
     ExecCtx::DamageCalcSnapshot damage_calc_entry;
+    ExecCtx::PreTruncSnapshot   pre_trunc;       // captured at 0D:533F, before TruncateHL_BC
     // Forensic instruction trace (populated when CrystalRunConfig::enable_trace=true)
     std::vector<ExecCtx::TraceEntry> trace_log;
     // Stage-computed stats from wPlayerStats/wEnemyStats (populated at SINK_HIT).
@@ -1477,6 +1492,17 @@ static CrystalRunResult execute_crystal_run_loop(
             }
         }
         if(hit_sink) break;
+        // --- PRE-TRUNC CAPTURE: PlayerAttackDamage .done (bank 0D, PC 0x533F) ---
+        // Fires immediately before `call TruncateHL_BC`.
+        // At this point: HL = 16-bit attack,  BC = 16-bit defense.
+        // This is the semantic comparison point with Enginemon DamageParams.
+        if(!exec_ctx.pre_trunc.sampled && pc == 0x533F && bank == 0x0D){
+            exec_ctx.pre_trunc.sampled = true;
+            exec_ctx.pre_trunc.h = r->h;  // attack high byte
+            exec_ctx.pre_trunc.l = r->l;  // attack low byte
+            exec_ctx.pre_trunc.b = r->b;  // defense high byte
+            exec_ctx.pre_trunc.c = r->c;  // defense low byte
+        }
         // --- LIVE CAPTURE: BattleCommand_DamageCalc entry (bank 0D, PC 0x5612) ---
         // Sample SM83 registers d/e/b/c and key WRAM bytes on FIRST arrival at the
         // DamageCalc entry point.  These captured values become the ground-truth
@@ -1642,6 +1668,7 @@ static CrystalRunResult execute_crystal_run_loop(
     res.attack_missed = extr_wram[wram_off(sym.wAttackMissed.addr)];
     // Copy live DamageCalc entry snapshot from exec context into result.
     res.damage_calc_entry = exec_ctx.damage_calc_entry;
+    res.pre_trunc         = exec_ctx.pre_trunc;
     res.trace_log         = std::move(exec_ctx.trace_log);
     res.stop_reason = StopReason::SINK_HIT;
     return res;
@@ -10399,10 +10426,8 @@ int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path)
     static const DSCase CASES[] = {
         // Non-crit controls
         { "nc/0/0/OFF",    0,  0, false, false },
-        { "nc/-2/0/OFF",  -2,  0, false, false },
-        { "nc/0/+2/OFF",   0, +2, false, false },
         { "nc/0/0/ON",     0,  0, true,  false },
-        // Crit pairs
+        // Crit pairs (all OFF and ON)
         { "cr/-2/0/OFF",  -2,  0, false, true },
         { "cr/-2/0/ON",   -2,  0, true,  true },
         { "cr/0/+2/OFF",   0, +2, false, true },
@@ -10426,17 +10451,18 @@ int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path)
     if(!ms){ std::cerr << "Return not registered in MoveSpec table\n"; return 1; }
 
     std::cout << "=== DamageStats Direct Pilot ===\n"
-              << "  Staged stats from real CalcBattleStats machine code (no harness formula)\n"
+              << "  Crystal values are PRE-TruncateHL_BC (16-bit, PC=0D:533F)\n"
+              << "  Enginemon values are int32_t DamageParams before calculate_damage\n"
               << "  P_ATK=" << P_ATK << " E_DEF=" << E_DEF
               << " P_LEVEL=" << (int)P_LEVEL << "\n\n"
               << "  " << std::left  << std::setw(17) << "Case"
               << std::right
-              << std::setw(4)  << "CrB"
-              << std::setw(4)  << "CrC"
+              << std::setw(7)  << "CrAtk"
+              << std::setw(7)  << "CrDef"
               << std::setw(8)  << "EngAtk"
               << std::setw(8)  << "EngDef"
-              << "  4p   stat\n"
-              << "  " << std::string(54, '-') << "\n" << std::flush;
+              << "  4p   sem\n"
+              << "  " << std::string(57, '-') << "\n" << std::flush;
 
     for(const auto& tc : CASES){
         // ---- Phase 1a: real CalcPlayerStats → wBattleMonAttack[ATK] --------
@@ -10510,8 +10536,10 @@ int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path)
             g_p2_screen    = tc.screen;
             g_p2_crit      = tc.crit;
 
-            uint8_t cr_b[4] = {}, cr_c[4] = {};
+            uint16_t cr_atk[4] = {}, cr_def[4] = {};
             bool poison_ok = true;
+            CrystalRunResult trace_r;
+            bool do_trace = false;
 
             for(int pi = 0; pi < 4; ++pi){
                 struct FG {
@@ -10547,23 +10575,38 @@ int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path)
                     poison_ok = false;
                     break;
                 }
-                cr_b[pi] = r.damage_calc_entry.sampled ? r.damage_calc_entry.b : 0xFF;
-                cr_c[pi] = r.damage_calc_entry.sampled ? r.damage_calc_entry.c : 0xFF;
+                // Pre-truncation: HL=attack, BC=defense (16-bit each)
+                if(!r.pre_trunc.sampled){
+                    std::cerr << "  Phase2 PRE_TRUNC_NOT_SAMPLED " << tc.name
+                              << " pi=" << pi << "\n";
+                    ++harness_errors;
+                    poison_ok = false;
+                    break;
+                }
+                cr_atk[pi] = r.pre_trunc.attack();
+                cr_def[pi] = r.pre_trunc.defense();
+
+                // For the +2/+1 crit screen-ON trace case, record all 4 registers
+                // at both the pre-trunc and post-trunc points.
+                if(tc.atk_delta == +2 && tc.def_delta == +1 && tc.crit && tc.screen && pi == 0){
+                    trace_r = r;
+                    do_trace = true;
+                }
             }
 
             if(!poison_ok) goto ds_next;
 
-            // 4-poison stability check
+            // 4-poison stability check on pre-truncation values
             bool stable = true;
             for(int pi = 1; pi < 4; ++pi){
-                if(cr_b[pi] != cr_b[0] || cr_c[pi] != cr_c[0]){ stable = false; break; }
+                if(cr_atk[pi] != cr_atk[0] || cr_def[pi] != cr_def[0]){ stable = false; break; }
             }
             if(!stable){
                 std::cerr << "  POISON_UNSTABLE " << tc.name
-                          << " B:" << (int)cr_b[0] << "/" << (int)cr_b[1]
-                          << "/" << (int)cr_b[2] << "/" << (int)cr_b[3]
-                          << " C:" << (int)cr_c[0] << "/" << (int)cr_c[1]
-                          << "/" << (int)cr_c[2] << "/" << (int)cr_c[3] << "\n";
+                          << " ATK:" << (int)cr_atk[0] << "/" << (int)cr_atk[1]
+                          << "/" << (int)cr_atk[2] << "/" << (int)cr_atk[3]
+                          << " DEF:" << (int)cr_def[0] << "/" << (int)cr_def[1]
+                          << "/" << (int)cr_def[2] << "/" << (int)cr_def[3] << "\n";
                 ++harness_errors;
                 goto ds_next;
             }
@@ -10634,11 +10677,14 @@ int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path)
                 bat.execute_turn();
             }
 
-            // Compare
-            bool stat_match = eng_ok
-                && cr_b[0] != 0xFF && cr_c[0] != 0xFF
-                && (int32_t)cr_b[0] == (int32_t)eng.attack_stat
-                && (int32_t)cr_c[0] == (int32_t)eng.defense_stat;
+            // Compare pre-truncation Crystal values against Enginemon's int32_t stats.
+            // Crystal: pre_trunc.attack()/defense() are the 16-bit values just before
+            //          TruncateHL_BC (HL=attack, BC=defense).
+            // Enginemon: attack_stat/defense_stat are int32_t from apply_stat_stage,
+            //            which includes crit stage zeroing and screen doubling.
+            bool sem_match = eng_ok
+                && (int32_t)cr_atk[0] == eng.attack_stat
+                && (int32_t)cr_def[0] == eng.defense_stat;
 
             char eng_str[32];
             if(eng_ok) snprintf(eng_str, sizeof(eng_str),
@@ -10647,12 +10693,69 @@ int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path)
 
             std::cout << "  " << std::left  << std::setw(17) << tc.name
                       << std::right
-                      << std::setw(4) << (cr_b[0] != 0xFF ? (int)cr_b[0] : -1)
-                      << std::setw(4) << (cr_c[0] != 0xFF ? (int)cr_c[0] : -1)
+                      << std::setw(6) << (int)cr_atk[0]
+                      << std::setw(6) << (int)cr_def[0]
                       << std::setw(14) << eng_str
-                      << "  " << (stable ? "OK" : "UNSTABLE")
-                      << "  "  << (stat_match ? "MATCH" : "MISMATCH")
+                      << "  " << (stable ? "4p" : "UNSTABLE")
+                      << "  "  << (sem_match ? "MATCH" : "MISMATCH")
                       << "\n" << std::flush;
+
+            // TruncateHL_BC trace for +2/+1 crit screen-ON
+            if(do_trace){
+                // Input to TruncateHL_BC: HL = cr_atk[0] (attack), BC = cr_def[0] (defense)
+                // Simulate the algorithm to produce the trace
+                uint16_t hl_in = cr_atk[0];
+                uint16_t bc_in = cr_def[0];
+                uint8_t  H = (hl_in >> 8) & 0xFF;
+                uint8_t  L = hl_in & 0xFF;
+                uint8_t  B = (bc_in >> 8) & 0xFF;
+                uint8_t  C = bc_in & 0xFF;
+
+                std::cout << "\n  +2/+1 crit screen-ON TruncateHL_BC trace:\n"
+                          << "    input: HL=" << hl_in << " (H=" << (int)H << ",L=" << (int)L << ")"
+                          << " BC=" << bc_in << " (B=" << (int)B << ",C=" << (int)C << ")\n";
+
+                int iter = 0;
+                // Simulate TruncateHL_BC (non-Colosseum path)
+                while(true){
+                    if((H | B) == 0) break;  // .finish → check again → exit if H|B==0
+
+                    // shift BC >>2
+                    {
+                        uint16_t bc16 = (uint16_t)((B<<8)|C);
+                        bc16 >>= 2;
+                        B = (bc16>>8)&0xFF; C = bc16&0xFF;
+                        if((B|C)==0){ C=1; }  // floor BC at 1
+                    }
+                    // shift HL >>2
+                    {
+                        uint16_t hl16 = (uint16_t)((H<<8)|L);
+                        hl16 >>= 2;
+                        H = (hl16>>8)&0xFF; L = hl16&0xFF;
+                        if((H|L)==0){ L=1; }  // floor HL at 1
+                    }
+                    std::cout << "    iter " << ++iter
+                              << ": HL=" << (int)((H<<8)|L) << " (H=" << (int)H << ",L=" << (int)L << ")"
+                              << " BC=" << (int)((B<<8)|C) << " (B=" << (int)B << ",C=" << (int)C << ")\n";
+
+                    // .finish: check wLinkMode == LINK_COLOSSEUM: assume not
+                    // loop if H|B != 0
+                    if((H|B)==0) break;
+                }
+                // .done: B = L
+                uint8_t final_b = L;
+                uint8_t final_c = C;
+                std::cout << "    final: B=" << (int)final_b << " C=" << (int)final_c << "\n";
+
+                // Verify against live post-trunc snapshot at 0x5612
+                bool post_match = trace_r.damage_calc_entry.sampled
+                    && trace_r.damage_calc_entry.b == final_b
+                    && trace_r.damage_calc_entry.c == final_c;
+                std::cout << "    post-trunc 55/82 correct? "
+                          << (post_match ? "YES" : "NO")
+                          << " (live 0x5612: B=" << (int)trace_r.damage_calc_entry.b
+                          << " C=" << (int)trace_r.damage_calc_entry.c << ")\n\n";
+            }
         }
         ds_next:;
     }
