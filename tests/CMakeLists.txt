@@ -551,6 +551,21 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(dual_type_floor_proof PRIVATE /bigobj)
     endif()
 
+    # stab_type_sweep -- exhaustive STAB/type-effectiveness certification
+    # All 17 types, all matchup pairs, STAB on/off. ROM-derived TypeChart.
+    # Usage: stab_type_sweep <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(stab_type_sweep
+        crystal_differential/stab_type_sweep.cpp
+    )
+    target_link_libraries(stab_type_sweep PRIVATE oracle_runner_lib)
+    target_include_directories(stab_type_sweep PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(stab_type_sweep PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

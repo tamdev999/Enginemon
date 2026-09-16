@@ -257,6 +257,14 @@ int run_stab_boundary_pilot(const char* rom_path, const char* sym_path);
 // No Crystal execution. No harness formulas.
 // ============================================================================
 int run_type_effectiveness_diagnostic(const char* rom_path, const char* sym_path);
+// run_stab_type_sweep
+//
+// Exhaustive STAB/type-effectiveness certification over all 17 combat types,
+// all non-neutral matchup pairs, dual-type combos, STAB on/off.
+// ROM-derived TypeChart. Real supported moves per type. No harness formulas.
+// ============================================================================
+int run_stab_type_sweep(const char* rom_path, const char* sym_path);
+
 // run_stab_modifier_pilot
 //
 // Reruns the Stab modifier pilot with TypeChart populated from ROM rules.
