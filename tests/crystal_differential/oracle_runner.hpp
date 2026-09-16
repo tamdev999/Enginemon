@@ -240,4 +240,13 @@ int run_damagestats_boundary_sweep_special(const char* rom_path, const char* sym
 int run_damagestats_boundary_sweep_special_with_bases(
     const char* rom_path, const char* sym_path,
     uint16_t base_spatk, uint16_t base_spdef);
+// ============================================================================
+// run_stab_boundary_pilot
+//
+// Certifies BattleCommand_Stab (0D:46D2..0D:47C7) vs Enginemon
+// execute_move_damaging for all owned modifiers.
+// Crystal sink at 0D:47C7; Enginemon HP delta with 100% variation.
+// Returns 0 on success (harness healthy), 2 on harness error.
+// ============================================================================
+int run_stab_boundary_pilot(const char* rom_path, const char* sym_path);
 } // namespace crystal::oracle

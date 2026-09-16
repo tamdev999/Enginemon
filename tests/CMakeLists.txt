@@ -490,6 +490,22 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(damagestats_special_sweep PRIVATE /bigobj)
     endif()
 
+    # stab_boundary_pilot -- certifies BattleCommand_Stab vs Enginemon production
+    # Crystal sink at 0D:47C7, captures wCurDamage input+output.
+    # Enginemon HP delta with variation=100% (RNG=0xFF).
+    # Usage: stab_boundary_pilot <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(stab_boundary_pilot
+        crystal_differential/stab_boundary_pilot.cpp
+    )
+    target_link_libraries(stab_boundary_pilot PRIVATE oracle_runner_lib)
+    target_include_directories(stab_boundary_pilot PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(stab_boundary_pilot PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>
