@@ -205,4 +205,19 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path);
 
+// ============================================================================
+// run_damagestats_boundary_sweep
+//
+// Exhaustive physical DamageStats stat-selection boundary sweep.
+// For every attacker ATK stage raw 1..13 × defender DEF stage raw 1..13
+// × crit {0,1} × Reflect {OFF,ON} = 676 logical cases.
+// 4 poison patterns per DamageStats execution = 2704 Crystal executions.
+// Per logical case: runs real CalcPlayerStats, real CalcEnemyStats, then
+// real DoMove (full script) for each of the 4 poison patterns.
+// Captures pre-TruncateHL_BC values at 0D:533F (HL=attack, BC=defense)
+// and compares against Enginemon DamageParams.attack_stat/defense_stat.
+// No harness stage/screen/crit formula.
+// Returns 0 all match, 1 mismatches found (harness healthy), 2 harness error.
+// ============================================================================
+int run_damagestats_boundary_sweep(const char* rom_path, const char* sym_path);
 } // namespace crystal::oracle

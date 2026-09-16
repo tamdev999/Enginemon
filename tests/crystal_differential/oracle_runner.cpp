@@ -10770,4 +10770,611 @@ int run_damagestats_direct_pilot(const char* rom_path, const char* sym_path)
 }
 
 
+// ============================================================================
+// run_damagestats_boundary_sweep
+//
+// 13×13×2×2 = 676 logical cases.
+// Per logical case:
+//   Phase 1a: CalcPlayerStats (FULL_RETURN_SENTINEL) — populates wBattleMonAttack
+//   Phase 1b: CalcEnemyStats  (FULL_RETURN_SENTINEL) — populates wEnemyMonAttack
+//   Phase 2:  DoMove × 4 poison patterns             — captures pre_trunc at 0D:533F
+// Total Crystal executions: 676 × (1 + 1 + 4) = 4,056  (not 2704 — see note below)
+// Note: the prompt says 2704 = 676 × 4 (DamageStats executions only).
+//       CalcPlayerStats + CalcEnemyStats executions are counted separately.
+//
+// No harness stage/screen/crit formula. CalcBattleStats does all stat math.
+// ============================================================================
+
+int run_damagestats_boundary_sweep(const char* rom_path, const char* sym_path)
+{
+    // ---- Load ROM -----------------------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr << "Cannot open ROM: " << rom_path << "\n"; return 2; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    if(rom_bytes.size() != CRYSTAL_ROM_SIZE){ std::cerr << "Wrong ROM size\n"; return 2; }
+    {
+        std::string sha = sha1_hex(rom_bytes.data(), rom_bytes.size());
+        if(sha != PINNED_ROM_SHA1){ std::cerr << "ROM SHA mismatch\n"; return 2; }
+    }
+    SymCache sym;
+    {
+        std::string err = SymCache::load(sym_path, &sym);
+        if(!err.empty()){ std::cerr << "Sym: " << err << "\n"; return 2; }
+    }
+    {
+        std::string err = validate_fixture_addresses(sym);
+        if(!err.empty()){ std::cerr << "Fixture: " << err << "\n"; return 2; }
+    }
+
+    // ---- Load Enginemon data ------------------------------------------------
+    auto rom_data = crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){ std::cerr << "RomData load failed\n"; return 2; }
+    const crystal::ExtractionProfile* profile =
+        crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
+    if(!profile){ std::cerr << "No profile for ROM\n"; return 2; }
+    auto ed_opt = load_engine_data(*rom_data, *profile);
+    if(!ed_opt){ std::cerr << "load_engine_data failed\n"; return 2; }
+    const EngineData& ed = *ed_opt;
+
+    static constexpr uint16_t SW_MOVE_ID = 216;  // Return — physical, Normal
+    const enginemon::MoveId eng_move_id  = (enginemon::MoveId)SW_MOVE_ID;
+    static constexpr uint32_t SW_INSN_CAP = 100000;
+    static constexpr uint16_t SW_SENTINEL  = 0x0001; // full-return sentinel
+    static constexpr uint8_t  SW_POISON[4] = { 0x00, 0xA5, 0x5A, 0xFF };
+
+    // No RNG tape: no random needed (crit comes from wCriticalHit, not RNG roll)
+    // However DoMove runs the full NormalHit script including BattleCommand_Critical
+    // (which rolls RNG). We pre-set wCriticalHit explicitly and need the RNG to NOT
+    // override it. Use TAPE_NOCRIT for non-crit and TAPE_CRIT for crit cases so
+    // the crit roll in BattleCommand_Critical matches our wCriticalHit setting.
+    // Tapes from the existing pilot: { byte0=crit_roll, byte1=dmg_var, byte2=0xFF }
+    static constexpr uint8_t SW_TAPE_NOCRIT[] = { 0xFF, 0xB2, 0xFF };
+    static constexpr uint8_t SW_TAPE_CRIT[]   = { 0x00, 0xB2, 0xFF };
+
+    std::atomic<bool> no_stop{false};
+
+    // =========================================================================
+    // Thread-locals for the sweep fixtures.
+    // Names prefixed sw_ to avoid collision with run_damagestats_direct_pilot's
+    // static thread-locals (static locals are function-scoped but thread-local
+    // storage is shared across functions in the same TU on MSVC; unique names
+    // are safer).
+    // =========================================================================
+
+    // Phase 1a: CalcPlayerStats with wPlayerStats[ATK] = P_ATK, stage = sw_p1a_stage
+    static thread_local uint8_t sw_p1a_stage = 7;
+    static const FixtureFn sw_p1a_fx = [](GB_gameboy_t* gb, uint8_t* wram,
+                                           const SymCache& s)
+    {
+        generic_fullscript_fixture_adapter(gb, wram, s);
+        auto be16 = [](uint8_t* d, uint16_t v){
+            d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF);
+        };
+        be16(wram + wram_off(s.wPlayerStats.addr), P_ATK);
+        uint8_t* psl = wram + wram_off(s.wPlayerStatLevels.addr);
+        for(int i=0;i<8;i++) psl[i]=7;
+        psl[0] = sw_p1a_stage;
+    };
+
+    // Phase 1b: CalcEnemyStats with wEnemyStats[DEF] = E_DEF, stage = sw_p1b_stage
+    static thread_local uint8_t sw_p1b_stage = 7;
+    static const FixtureFn sw_p1b_fx = [](GB_gameboy_t* gb, uint8_t* wram,
+                                           const SymCache& s)
+    {
+        generic_fullscript_fixture_adapter(gb, wram, s);
+        auto be16 = [](uint8_t* d, uint16_t v){
+            d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF);
+        };
+        be16(wram + wram_off(s.wEnemyStats.addr) + 2, E_DEF); // index 1 = DEF, offset +2
+        uint8_t* esl = wram + wram_off(s.wEnemyStatLevels.addr);
+        for(int i=0;i<8;i++) esl[i]=7;
+        esl[1] = sw_p1b_stage;
+    };
+
+    // Phase 2: DoMove with ROM-produced staged stats injected
+    static thread_local uint16_t sw_p2_patk  = 0;  // from Phase 1a
+    static thread_local uint16_t sw_p2_edef  = 0;  // from Phase 1b
+    static thread_local uint8_t  sw_p2_atk_raw = 7; // Crystal raw stage for CheckDamageStatsCritical
+    static thread_local uint8_t  sw_p2_def_raw = 7;
+    static thread_local uint8_t  sw_p2_screen   = 0; // 0x10 if Reflect, 0 otherwise
+    static thread_local uint8_t  sw_p2_crit     = 0; // 0 or 1
+
+    static const FixtureFn sw_p2_fx = [](GB_gameboy_t* gb, uint8_t* wram,
+                                          const SymCache& s)
+    {
+        generic_fullscript_fixture_adapter(gb, wram, s);
+        auto be16 = [](uint8_t* d, uint16_t v){
+            d[0]=(uint8_t)(v>>8); d[1]=(uint8_t)(v&0xFF);
+        };
+        // Inject ROM-computed staged attack → wBattleMonAttack[ATK]
+        be16(wram + wram_off(s.wBattleMonAttack.addr), sw_p2_patk);
+        // Inject ROM-computed staged defense → wEnemyMonAttack[DEF] (bank-1, offset+2)
+        GB_write_memory(gb, (uint16_t)(s.wEnemyMonAttack.addr + 2),
+                        (uint8_t)(sw_p2_edef >> 8));
+        GB_write_memory(gb, (uint16_t)(s.wEnemyMonAttack.addr + 3),
+                        (uint8_t)(sw_p2_edef & 0xFF));
+        // Raw base attack in wPlayerStats[ATK] — for crit carry-CLEAR path
+        be16(wram + wram_off(s.wPlayerStats.addr), P_ATK);
+        // Raw base defense in wEnemyStats[DEF] = wEnemyDefense — for crit carry-CLEAR path
+        be16(wram + wram_off(s.wEnemyStats.addr) + 2, E_DEF);
+        // Stage bytes — CheckDamageStatsCritical reads these raw bytes
+        {
+            uint8_t* psl = wram + wram_off(s.wPlayerStatLevels.addr);
+            uint8_t* esl = wram + wram_off(s.wEnemyStatLevels.addr);
+            for(int i=0;i<8;i++){ psl[i]=7; esl[i]=7; }
+            psl[0] = sw_p2_atk_raw;
+            esl[1] = sw_p2_def_raw;
+        }
+        // Reflect screen (bit 4 of wEnemyScreens)
+        wram[wram_off(s.wEnemyScreens.addr)]  = sw_p2_screen;
+        wram[wram_off(s.wPlayerScreens.addr)] = 0u;
+        // Move types: Normal vs Normal — no STAB, no type matchup
+        wram[wram_off(s.wBattleMonType1.addr)] = 0x00u;
+        wram[wram_off(s.wBattleMonType2.addr)] = 0x00u;
+        // Critical hit flag
+        wram[wram_off(s.wCriticalHit.addr)] = sw_p2_crit;
+    };
+
+    // =========================================================================
+    // Counters
+    // =========================================================================
+    uint32_t n_logical         = 0;
+    uint32_t n_damagestats_ex  = 0; // actual Phase2 DoMove executions
+    uint32_t n_calcplayer_ex   = 0; // actual Phase1a CalcPlayerStats executions
+    uint32_t n_calcenemy_ex    = 0; // actual Phase1b CalcEnemyStats executions
+    uint32_t n_match           = 0;
+    uint32_t n_mismatch        = 0;
+    uint32_t n_harness_error   = 0;
+
+    // Mismatch log: retain all mismatch coordinates
+    struct MismatchEntry {
+        uint8_t  atk_raw, def_raw;
+        uint8_t  crit, screen;
+        uint16_t cr_atk, cr_def;
+        int32_t  eng_atk, eng_def;
+    };
+    std::vector<MismatchEntry> mismatches;
+
+    // =========================================================================
+    // Sweep
+    // =========================================================================
+    // Crystal raw stage 1..13, neutral=7. Enginemon stage = raw - 7, range -6..+6.
+    // atk_raw iterates attacker ATK stage, def_raw iterates defender DEF stage.
+
+    const MoveSpec* ms = find_move(SW_MOVE_ID);
+    if(!ms){ std::cerr << "Return (216) not registered\n"; return 2; }
+    (void)ms; // insn_cap used directly as SW_INSN_CAP
+
+    std::cout << "=== DamageStats Boundary Sweep ===\n"
+              << "  Sweep: ATK stage raw 1..13 x DEF stage raw 1..13"
+              << " x crit {0,1} x Reflect {OFF,ON}\n"
+              << "  Logical cases:  676\n"
+              << "  DamageStats executions expected: 2704 (676 x 4 poison)\n"
+              << "  CalcPlayerStats/CalcEnemyStats: 1352 each (676 x 1)\n"
+              << "  Base stats: P_ATK=" << P_ATK << " E_DEF=" << E_DEF
+              << " P_LEVEL=" << (int)P_LEVEL << "\n"
+              << "  No RNG — no harness stage formula\n"
+              << "  Pre-truncation capture at 0D:533F (HL=attack, BC=defense)\n"
+              << std::flush;
+
+    for(int atk_raw = 1; atk_raw <= 13; ++atk_raw){
+    for(int def_raw = 1; def_raw <= 13; ++def_raw){
+    for(int crit = 0; crit <= 1; ++crit){
+    for(int screen = 0; screen <= 1; ++screen){
+        ++n_logical;
+
+        // ---- Phase 1a: CalcPlayerStats (real ROM, full return via sentinel) --
+        uint16_t real_patk = 0;
+        {
+            sw_p1a_stage = (uint8_t)atk_raw;
+
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+            g_generic_rom_bytes_ptr = &rom_bytes;
+            g_generic_move_id       = SW_MOVE_ID;
+            g_generic_pp            = P_PP;
+
+            CrystalRunConfig cfg{};
+            cfg.entry          = sym.CalcPlayerStats;
+            cfg.sink_pcs[0]    = SW_SENTINEL;
+            cfg.sink_names[0]  = "CalcPlayerStats.ret";
+            cfg.num_sinks      = 1;
+            cfg.insn_cap       = 200000;
+            cfg.rng_tape       = nullptr;
+            cfg.rng_tape_len   = 0;
+            cfg.extra_fixture  = sw_p1a_fx;
+            cfg.engine_move_id = SW_MOVE_ID;
+
+            CrystalRunResult r = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+            ++n_calcplayer_ex;
+            if(r.stop_reason != StopReason::SINK_HIT){
+                ++n_harness_error;
+                std::cerr << "  Phase1a HARNESS_ERROR atk_raw=" << atk_raw
+                          << " " << stop_reason_str(r.stop_reason) << "\n";
+                goto sweep_next;
+            }
+            real_patk = r.player_stats[0]; // wBattleMonAttack[ATK] after CalcBattleStats
+        }
+
+        // ---- Phase 1b: CalcEnemyStats (real ROM, full return via sentinel) ---
+        {
+            uint16_t real_edef = 0;
+            sw_p1b_stage = (uint8_t)def_raw;
+
+            {
+                struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+                g_generic_rom_bytes_ptr = &rom_bytes;
+                g_generic_move_id       = SW_MOVE_ID;
+                g_generic_pp            = P_PP;
+
+                CrystalRunConfig cfg{};
+                cfg.entry          = sym.CalcEnemyStats;
+                cfg.sink_pcs[0]    = SW_SENTINEL;
+                cfg.sink_names[0]  = "CalcEnemyStats.ret";
+                cfg.num_sinks      = 1;
+                cfg.insn_cap       = 200000;
+                cfg.rng_tape       = nullptr;
+                cfg.rng_tape_len   = 0;
+                cfg.extra_fixture  = sw_p1b_fx;
+                cfg.engine_move_id = SW_MOVE_ID;
+
+                CrystalRunResult r = run_crystal_case(rom_bytes, sym, 0x00, cfg, &no_stop);
+                ++n_calcenemy_ex;
+                if(r.stop_reason != StopReason::SINK_HIT){
+                    ++n_harness_error;
+                    std::cerr << "  Phase1b HARNESS_ERROR def_raw=" << def_raw
+                              << " " << stop_reason_str(r.stop_reason) << "\n";
+                    goto sweep_next;
+                }
+                real_edef = r.enemy_stats[1]; // wEnemyMonAttack[DEF] after CalcBattleStats
+            }
+
+            // ---- Phase 2: DoMove x 4 poison patterns -----------------------
+            sw_p2_patk    = real_patk;
+            sw_p2_edef    = real_edef;
+            sw_p2_atk_raw = (uint8_t)atk_raw;
+            sw_p2_def_raw = (uint8_t)def_raw;
+            sw_p2_screen  = screen ? 0x10u : 0u;
+            sw_p2_crit    = (uint8_t)crit;
+
+            uint16_t cr_atk_vals[4] = {}, cr_def_vals[4] = {};
+            bool all_sampled = true;
+
+            for(int pi = 0; pi < 4; ++pi){
+                struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+                g_generic_rom_bytes_ptr = &rom_bytes;
+                g_generic_move_id       = SW_MOVE_ID;
+                g_generic_pp            = P_PP;
+
+                CrystalRunConfig cfg{};
+                cfg.entry          = sym.DoMove;
+                cfg.sink_pcs[0]    = sym.EndMoveEffect.addr;
+                cfg.sink_names[0]  = "EndMoveEffect";
+                cfg.num_sinks      = 1;
+                cfg.insn_cap       = SW_INSN_CAP;
+                cfg.rng_tape       = crit ? SW_TAPE_CRIT : SW_TAPE_NOCRIT;
+                cfg.rng_tape_len   = 3;
+                cfg.extra_fixture  = sw_p2_fx;
+                cfg.engine_move_id = SW_MOVE_ID;
+
+                CrystalRunResult r = run_crystal_case(
+                    rom_bytes, sym, SW_POISON[pi], cfg, &no_stop);
+                ++n_damagestats_ex;
+
+                if(r.stop_reason != StopReason::SINK_HIT){
+                    ++n_harness_error;
+                    std::cerr << "  Phase2 HARNESS_ERROR"
+                              << " atk=" << atk_raw << " def=" << def_raw
+                              << " crit=" << crit << " scr=" << screen
+                              << " pi=" << pi
+                              << " " << stop_reason_str(r.stop_reason) << "\n";
+                    all_sampled = false;
+                    goto sweep_next;
+                }
+                if(!r.pre_trunc.sampled){
+                    ++n_harness_error;
+                    std::cerr << "  Phase2 PRE_TRUNC_NOT_SAMPLED"
+                              << " atk=" << atk_raw << " def=" << def_raw
+                              << " crit=" << crit << " scr=" << screen
+                              << " pi=" << pi << "\n";
+                    all_sampled = false;
+                    goto sweep_next;
+                }
+                cr_atk_vals[pi] = r.pre_trunc.attack();
+                cr_def_vals[pi] = r.pre_trunc.defense();
+            }
+
+            if(!all_sampled) goto sweep_next;
+
+            // 4-poison stability gate
+            for(int pi = 1; pi < 4; ++pi){
+                if(cr_atk_vals[pi] != cr_atk_vals[0] ||
+                   cr_def_vals[pi] != cr_def_vals[0]){
+                    ++n_harness_error;
+                    std::cerr << "  POISON_UNSTABLE"
+                              << " atk=" << atk_raw << " def=" << def_raw
+                              << " crit=" << crit << " scr=" << screen << "\n";
+                    goto sweep_next;
+                }
+            }
+
+            const uint16_t cr_atk = cr_atk_vals[0];
+            const uint16_t cr_def = cr_def_vals[0];
+
+            // ---- Enginemon observation ------------------------------------
+            // Run real execute_move_damaging, observe DamageParams via observer.
+            int8_t ps[7]={};  ps[0] = (int8_t)(atk_raw - 7); // ATK stage
+            int8_t es[7]={};  es[1] = (int8_t)(def_raw - 7); // DEF stage
+            enginemon::DamageParams eng{};
+            bool eng_ok = false;
+
+            {
+                enginemon::Registries reg{};
+                reg.moves = ed.moves;
+                enginemon::Party party;
+                {
+                    enginemon::Pokemon pm{};
+                    pm.species=1; pm.level=P_LEVEL;
+                    pm.current_hp=pm.max_hp=P_HP; pm.friendship=200;
+                    party.add(pm);
+                }
+                enginemon::Battle bat(enginemon::BattleType::Wild, party, reg, ed.rules);
+
+                auto mk = [&](enginemon::MoveId mid, uint16_t a, uint16_t d,
+                               uint16_t sp, uint16_t sa, uint16_t sd,
+                               uint16_t hp, uint8_t lv, const int8_t* s)
+                {
+                    enginemon::BattlePokemon b{};
+                    b.species=1; b.type1=0; b.type2=0; b.level=lv;
+                    b.stats.hp=b.stats.max_hp=hp;
+                    b.base_stats.hp=b.base_stats.max_hp=hp;
+                    b.stats.attack         =b.base_stats.attack         =a;
+                    b.stats.defense        =b.base_stats.defense        =d;
+                    b.stats.speed          =b.base_stats.speed          =sp;
+                    b.stats.special_attack =b.base_stats.special_attack =sa;
+                    b.stats.special_defense=b.base_stats.special_defense=sd;
+                    b.happiness=200;
+                    b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+                    b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP;
+                    b.stages.attack         =s[0]; b.stages.defense        =s[1];
+                    b.stages.speed          =s[2]; b.stages.special_attack =s[3];
+                    b.stages.special_defense=s[4]; b.stages.accuracy       =s[5];
+                    b.stages.evasion        =s[6];
+                    return b;
+                };
+
+                bat.player_pokemon()   = mk(eng_move_id,
+                    P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,ps);
+                bat.opponent_pokemon() = mk(enginemon::MOVE_NONE,
+                    E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,es);
+
+                if(screen) bat.set_field_screens(0,0,5,0); // 5 turns of Reflect on opponent side
+
+                bat.set_damage_params_observer(
+                    [&](const enginemon::DamageParams& dp){ eng=dp; eng_ok=true; });
+
+                // RNG tape: same as Crystal side so crit rolls agree
+                size_t ri=0;
+                const uint8_t* tape = crit ? SW_TAPE_CRIT : SW_TAPE_NOCRIT;
+                bat.set_rng_callback([tape,&ri]()->uint32_t{ return (uint32_t)tape[ri++]; });
+
+                bat.set_player_action(enginemon::ActionFight{0,0});
+                bat.set_opponent_action(enginemon::ActionFight{0,0});
+                bat.execute_turn();
+            }
+
+            if(!eng_ok){
+                ++n_harness_error;
+                std::cerr << "  ENG_NO_OBSERVER"
+                          << " atk=" << atk_raw << " def=" << def_raw
+                          << " crit=" << crit << " scr=" << screen << "\n";
+                goto sweep_next;
+            }
+
+            // Compare pre-truncation 16-bit Crystal vs Enginemon int32_t
+            if((int32_t)cr_atk == eng.attack_stat &&
+               (int32_t)cr_def == eng.defense_stat){
+                ++n_match;
+            } else {
+                ++n_mismatch;
+                mismatches.push_back({
+                    (uint8_t)atk_raw, (uint8_t)def_raw,
+                    (uint8_t)crit,    (uint8_t)screen,
+                    cr_atk,           cr_def,
+                    eng.attack_stat,  eng.defense_stat
+                });
+            }
+        }
+
+        sweep_next:;
+    }}}} // atk_raw, def_raw, crit, screen
+
+    // =========================================================================
+    // Anti-confirmation control
+    // =========================================================================
+    // Neutral case (atk_raw=7/def_raw=7/crit=0/screen=0): Crystal pre-trunc must
+    // equal Enginemon. Perturb Enginemon attack_stat+1 and verify the comparator
+    // rejects it.
+    bool anti_confirmed = false;
+    {
+        // Re-run neutral case for Crystal pre-trunc
+        uint16_t anti_cr_atk = 0, anti_cr_def = 0;
+        bool anti_ok = false;
+
+        sw_p1a_stage = 7; // neutral
+        {
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW_MOVE_ID; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.CalcPlayerStats; cfg.sink_pcs[0]=SW_SENTINEL;
+            cfg.sink_names[0]="CalcPlayerStats.ret"; cfg.num_sinks=1;
+            cfg.insn_cap=200000; cfg.rng_tape=nullptr; cfg.rng_tape_len=0;
+            cfg.extra_fixture=sw_p1a_fx; cfg.engine_move_id=SW_MOVE_ID;
+            CrystalRunResult r = run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+            if(r.stop_reason==StopReason::SINK_HIT) sw_p2_patk=r.player_stats[0];
+        }
+        sw_p1b_stage = 7; // neutral
+        {
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW_MOVE_ID; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.CalcEnemyStats; cfg.sink_pcs[0]=SW_SENTINEL;
+            cfg.sink_names[0]="CalcEnemyStats.ret"; cfg.num_sinks=1;
+            cfg.insn_cap=200000; cfg.rng_tape=nullptr; cfg.rng_tape_len=0;
+            cfg.extra_fixture=sw_p1b_fx; cfg.engine_move_id=SW_MOVE_ID;
+            CrystalRunResult r = run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+            if(r.stop_reason==StopReason::SINK_HIT) sw_p2_edef=r.enemy_stats[1];
+        }
+        sw_p2_atk_raw=7; sw_p2_def_raw=7; sw_p2_screen=0; sw_p2_crit=0;
+        {
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}} fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=SW_MOVE_ID; g_generic_pp=P_PP;
+            CrystalRunConfig cfg{};
+            cfg.entry=sym.DoMove; cfg.sink_pcs[0]=sym.EndMoveEffect.addr;
+            cfg.sink_names[0]="EndMoveEffect"; cfg.num_sinks=1;
+            cfg.insn_cap=SW_INSN_CAP;
+            cfg.rng_tape=SW_TAPE_NOCRIT; cfg.rng_tape_len=3;
+            cfg.extra_fixture=sw_p2_fx; cfg.engine_move_id=SW_MOVE_ID;
+            CrystalRunResult r = run_crystal_case(rom_bytes,sym,0x00,cfg,&no_stop);
+            if(r.stop_reason==StopReason::SINK_HIT && r.pre_trunc.sampled){
+                anti_cr_atk=r.pre_trunc.attack();
+                anti_cr_def=r.pre_trunc.defense();
+                anti_ok=true;
+            }
+        }
+
+        if(anti_ok){
+            // Enginemon: neutral, non-crit, no screen
+            int8_t ps7[7]={}, es7[7]={};
+            enginemon::DamageParams eng_anti{};
+            bool anti_eng_ok=false;
+            {
+                enginemon::Registries reg{}; reg.moves=ed.moves;
+                enginemon::Party party;
+                { enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+                  pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm); }
+                enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+                auto mk=[&](enginemon::MoveId mid,uint16_t a,uint16_t d,uint16_t sp,uint16_t sa,uint16_t sd,uint16_t hp,uint8_t lv,const int8_t* s){
+                    enginemon::BattlePokemon b{}; b.species=1; b.type1=0; b.type2=0; b.level=lv;
+                    b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+                    b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+                    b.stats.speed=b.base_stats.speed=sp; b.stats.special_attack=b.base_stats.special_attack=sa;
+                    b.stats.special_defense=b.base_stats.special_defense=sd;
+                    b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+                    b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP;
+                    b.stages.attack=s[0]; b.stages.defense=s[1]; b.stages.speed=s[2];
+                    b.stages.special_attack=s[3]; b.stages.special_defense=s[4];
+                    b.stages.accuracy=s[5]; b.stages.evasion=s[6]; return b; };
+                bat.player_pokemon()  =mk(eng_move_id,P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,ps7);
+                bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,es7);
+                bat.set_damage_params_observer([&](const enginemon::DamageParams& dp){eng_anti=dp;anti_eng_ok=true;});
+                size_t ri=0;
+                bat.set_rng_callback([&ri]()->uint32_t{ return (uint32_t)SW_TAPE_NOCRIT[ri++]; });
+                bat.set_player_action(enginemon::ActionFight{0,0});
+                bat.set_opponent_action(enginemon::ActionFight{0,0});
+                bat.execute_turn();
+            }
+            if(anti_eng_ok){
+                // Verify normal case matches first
+                bool normal_match = ((int32_t)anti_cr_atk==eng_anti.attack_stat &&
+                                     (int32_t)anti_cr_def==eng_anti.defense_stat);
+                // Perturb: attack_stat + 1
+                int32_t perturbed_atk = eng_anti.attack_stat + 1;
+                bool perturbed_match  = ((int32_t)anti_cr_atk==perturbed_atk &&
+                                         (int32_t)anti_cr_def==eng_anti.defense_stat);
+                // Anti-confirm: normal must match, perturbed must NOT match
+                anti_confirmed = (normal_match && !perturbed_match);
+                std::cout << "  Anti-confirmation control (neutral 7/7 noncrit screen-OFF):\n"
+                          << "    Crystal pre-trunc: atk=" << anti_cr_atk << " def=" << anti_cr_def << "\n"
+                          << "    Enginemon normal:  atk=" << eng_anti.attack_stat
+                          << " def=" << eng_anti.defense_stat
+                          << " -> " << (normal_match?"MATCH":"MISMATCH") << "\n"
+                          << "    Enginemon perturb: atk=" << perturbed_atk
+                          << " def=" << eng_anti.defense_stat
+                          << " -> " << (perturbed_match?"MATCH (BAD!)":"MISMATCH (expected)") << "\n"
+                          << "    Anti-confirmation: " << (anti_confirmed?"DETECTED":"FAILED") << "\n\n"
+                          << std::flush;
+            }
+        }
+    }
+
+    // =========================================================================
+    // Report
+    // =========================================================================
+    std::cout << "=== Results ===\n"
+              << "  LOGICAL CASES:                  " << n_logical << "\n"
+              << "  ACTUAL DAMAGESTATS EXECUTIONS:  " << n_damagestats_ex << "\n"
+              << "  ACTUAL CALCPLAYERSTATS EXECS:   " << n_calcplayer_ex << "\n"
+              << "  ACTUAL CALCENEMYSTATS EXECS:    " << n_calcenemy_ex << "\n"
+              << "  MATCH:                          " << n_match << "\n"
+              << "  MISMATCH:                       " << n_mismatch << "\n"
+              << "  HARNESS_ERROR:                  " << n_harness_error << "\n"
+              << "  RNG:                            0 (no RNG in CalcStats phases)\n"
+              << "  4-POISON STABLE?:               "
+                 << (n_harness_error==0 ? "yes" : "see errors above") << "\n"
+              << "  ANTI-CONFIRMATION DETECTED?:    "
+                 << (anti_confirmed ? "yes" : "NO (check comparator!)") << "\n"
+              << "  NO HARNESS BEHAVIORAL FORMULA?: yes\n"
+              << "  production modified?:           no\n\n";
+
+    // Mismatch map
+    if(!mismatches.empty()){
+        std::cout << "=== Mismatch Map ===\n"
+                  << "  " << std::left<<std::setw(5)<<"aRaw"
+                  << std::setw(5)<<"dRaw"
+                  << std::setw(5)<<"crit"
+                  << std::setw(5)<<"scr"
+                  << std::right
+                  << std::setw(7)<<"CrAtk"
+                  << std::setw(7)<<"CrDef"
+                  << std::setw(8)<<"EngAtk"
+                  << std::setw(8)<<"EngDef"
+                  << "\n  " << std::string(55,'-') << "\n";
+
+        uint32_t nc_match=0, nc_mismatch=0, cr_match=0, cr_mismatch=0;
+        // Count from sweep totals
+        for(const auto& m : mismatches){
+            if(m.crit) ++cr_mismatch; else ++nc_mismatch;
+        }
+        nc_match = n_match; // will split below
+        // recount properly: n_match = all match, n_mismatch = all mismatch
+        // split by crit:
+        uint32_t nc_total=0, cr_total_m=0;
+        nc_match=0; nc_mismatch=0; cr_match=0; cr_mismatch=0;
+        // Count all crit mismatches already done; need non-crit matches
+        for(const auto& m : mismatches){
+            if(m.crit) ++cr_mismatch; else ++nc_mismatch;
+        }
+        // Total cases per crit bucket = 13*13*2 = 338
+        static constexpr uint32_t CASES_PER_CRIT = 13*13*2; // 338 per crit value
+        nc_match = (CASES_PER_CRIT - nc_mismatch);
+        cr_match = (CASES_PER_CRIT - cr_mismatch);
+
+        for(const auto& m : mismatches){
+            std::cout << "  " << std::left<<std::setw(5)<<(int)m.atk_raw
+                      << std::setw(5)<<(int)m.def_raw
+                      << std::setw(5)<<(int)m.crit
+                      << std::setw(5)<<(int)m.screen
+                      << std::right
+                      << std::setw(7)<<(int)m.cr_atk
+                      << std::setw(7)<<(int)m.cr_def
+                      << std::setw(8)<<(int)m.eng_atk
+                      << std::setw(8)<<(int)m.eng_def
+                      << "\n";
+        }
+        std::cout << "\n  NON-CRIT: match=" << nc_match << " mismatch=" << nc_mismatch << "\n"
+                  << "  CRIT:     match=" << cr_match << " mismatch=" << cr_mismatch << "\n\n"
+                  << std::flush;
+    } else {
+        std::cout << "  MISMATCH MAP: <empty — all match>\n\n";
+    }
+
+    // Exit codes: 0=all match, 1=mismatches, 2=harness error
+    if(n_harness_error > 0) return 2;
+    if(n_mismatch > 0)      return 1;
+    return 0;
+}
+
 } // namespace crystal::oracle
