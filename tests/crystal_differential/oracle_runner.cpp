@@ -747,6 +747,20 @@ struct ExecCtx {
         uint16_t wCurDamage  = 0;  // WRAM wCurDamage at entry (should be 0)
         uint8_t  wMoveEffect = 0;  // WRAM wPlayerMoveStructEffect at entry
     } damage_calc_entry;
+
+    // One-shot instruction trace for register forensics.
+    // When enable_trace=true, every pre-step in bank 0x0D between
+    // pc_trace_lo..pc_trace_hi is recorded (B,C,D,E,H,L,SP before instruction).
+    bool enable_trace = false;
+    uint16_t pc_trace_lo = 0;
+    uint16_t pc_trace_hi = 0;
+    struct TraceEntry {
+        uint16_t pc;
+        uint8_t  b, c, d, e, h, l;
+        uint16_t sp;
+        uint16_t stack_top;   // word at SP (return address on stack)
+    };
+    std::vector<TraceEntry> trace_log;
 };
 
 static void exec_cb(GB_gameboy_t* gb, uint16_t /*pc*/, uint8_t){
@@ -963,6 +977,8 @@ struct CrystalRunResult {
     // PC 0D:5612. Carries the SM83 d/e/b/c values and WRAM state Crystal actually had
     // at that moment. Use these as direct-call inputs instead of any harness formula.
     ExecCtx::DamageCalcSnapshot damage_calc_entry;
+    // Forensic instruction trace (populated when CrystalRunConfig::enable_trace=true)
+    std::vector<ExecCtx::TraceEntry> trace_log;
 };
 
 static bool crystal_run_results_equal(const CrystalRunResult& a, const CrystalRunResult& b){
@@ -1330,6 +1346,11 @@ struct CrystalRunConfig {
     // without per-combination fixture functions or thread-local state.
     uint8_t     init_player_acc_stage_raw = 0xFF; // 0xFF = no override; 0-13 = Crystal raw stage
     uint8_t     init_enemy_eva_stage_raw  = 0xFF; // 0xFF = no override; 0-13 = Crystal raw stage
+    // Forensic trace: when set, records every pre-step in bank 0x0D
+    // between pc_trace_lo and pc_trace_hi into ExecCtx::trace_log.
+    bool     enable_trace  = false;
+    uint16_t pc_trace_lo   = 0;
+    uint16_t pc_trace_hi   = 0;
 };
 
 
@@ -1471,6 +1492,23 @@ static CrystalRunResult execute_crystal_run_loop(
         }
         // --- END LIVE CAPTURE ---
 
+        // --- INSTRUCTION TRACE (forensics, disabled by default) ---
+        if(exec_ctx.enable_trace && bank == 0x0D &&
+           pc >= exec_ctx.pc_trace_lo && pc <= exec_ctx.pc_trace_hi){
+            ExecCtx::TraceEntry te;
+            te.pc = pc;
+            te.b  = r->b; te.c = r->c;
+            te.d  = r->d; te.e = r->e;
+            te.h  = r->h; te.l = r->l;
+            te.sp = r->sp;
+            // Read top-of-stack word (little-endian: lo byte first)
+            uint8_t slo = GB_safe_read_memory(&gb, r->sp);
+            uint8_t shi = GB_safe_read_memory(&gb, (uint16_t)(r->sp + 1));
+            te.stack_top = (uint16_t)(slo | (shi << 8));
+            exec_ctx.trace_log.push_back(te);
+        }
+        // --- END INSTRUCTION TRACE ---
+
 
         if(pc == 0x3041 && r->de < 0x8000){
             static char bytefill_err[128];
@@ -1590,6 +1628,7 @@ static CrystalRunResult execute_crystal_run_loop(
     res.attack_missed = extr_wram[wram_off(sym.wAttackMissed.addr)];
     // Copy live DamageCalc entry snapshot from exec context into result.
     res.damage_calc_entry = exec_ctx.damage_calc_entry;
+    res.trace_log         = std::move(exec_ctx.trace_log);
     res.stop_reason = StopReason::SINK_HIT;
     return res;
 }
@@ -1642,6 +1681,9 @@ static CrystalRunResult run_crystal_case(
     exec_ctx.insn_count    = 0;
     exec_ctx.stop_flag     = stop_flag;
     exec_ctx.rng_ctx       = rng_ctx.get(); // for exhaustion tracking only
+    exec_ctx.enable_trace  = cfg.enable_trace;
+    exec_ctx.pc_trace_lo   = cfg.pc_trace_lo;
+    exec_ctx.pc_trace_hi   = cfg.pc_trace_hi;
 
     GB_set_user_data(&gb,&exec_ctx);
     GB_set_execution_callback(&gb,exec_cb);
@@ -9584,6 +9626,91 @@ int run_damagestats_crit_pilot(const char* rom_path, const char* sym_path)
         }
     }
     // --- END CANARY ---
+
+    // ---- Instruction trace: resolve C=0 mystery ----------------------------
+    // Run one neutral non-crit physical case with per-instruction logging
+    // in bank 0x0D between 0x52B0 (pre-DamageStats) and 0x5660 (into DamageCalc).
+    // Also trace 0x7840..0x7870 to catch HappinessPower.
+    // This fires poison=0x00 only (deterministic) and prints the full log.
+    {
+        // Reuse the neutral ds_fixture (stages=0, no screen, crit=0, power=80)
+        static FixtureFn trace_fx = [](GB_gameboy_t* gb, uint8_t* wram, const SymCache& sym2){
+            generic_fullscript_fixture_adapter(gb, wram, sym2);
+            wram[wram_off(sym2.wBattleMonType1.addr)] = 0x03;
+            wram[wram_off(sym2.wBattleMonType2.addr)] = 0x03;
+            { uint8_t* psl=wram+wram_off(sym2.wPlayerStatLevels.addr);
+              uint8_t* esl=wram+wram_off(sym2.wEnemyStatLevels.addr);
+              for(int i=0;i<8;i++){psl[i]=7;esl[i]=7;} }
+            { static constexpr uint16_t kNum[13]={25,28,33,40,50,66,1,15,2,25,3,35,4};
+              static constexpr uint16_t kDen[13]={100,100,100,100,100,100,1,10,1,10,1,10,1};
+              auto be16=[](uint8_t*d,uint16_t v){d[0]=v>>8;d[1]=v&0xFF;};
+              uint8_t* ps=wram+wram_off(sym2.wPlayerStats.addr);
+              be16(ps+0,P_ATK);be16(ps+2,P_DEF);be16(ps+4,P_SPD);be16(ps+6,P_SATK);be16(ps+8,P_SDEF);
+              uint8_t* es=wram+wram_off(sym2.wEnemyStats.addr);
+              be16(es+0,E_ATK);be16(es+2,E_DEF);be16(es+4,E_SPD);be16(es+6,E_SATK);be16(es+8,E_SDEF); }
+            { auto be16=[](uint8_t*d,uint16_t v){d[0]=v>>8;d[1]=v&0xFF;};
+              be16(wram+wram_off(sym2.wEnemyMonDefense.addr), E_DEF); }
+            wram[wram_off(sym2.wEnemyScreens.addr)] = 0;
+            wram[wram_off(sym2.wPlayerScreens.addr)] = 0;
+            wram[wram_off(sym2.wCriticalHit.addr)] = 0;
+        };
+
+        struct TFxGuard{ ~TFxGuard(){ g_generic_rom_bytes_ptr=nullptr; g_generic_move_id=0; g_generic_pp=0; } } tg;
+        g_generic_rom_bytes_ptr = &rom_bytes; g_generic_move_id = RETURN_MOVE_ID; g_generic_pp = P_PP;
+
+        CrystalRunConfig tcfg{};
+        tcfg.entry         = sym.DoMove;
+        tcfg.sink_pcs[0]   = sym.EndMoveEffect.addr;
+        tcfg.sink_names[0] = "EndMoveEffect";
+        tcfg.num_sinks     = 1;
+        tcfg.insn_cap      = 200000;
+        tcfg.rng_tape      = TAPE_NOCRIT_FULLVAR;
+        tcfg.rng_tape_len  = 3;
+        tcfg.extra_fixture = trace_fx;
+        tcfg.engine_move_id = RETURN_MOVE_ID;
+        // Trace all bank-0D instructions from before DamageStats through DamageCalc+
+        tcfg.enable_trace = true;
+        tcfg.pc_trace_lo  = 0x52A0;  // before DittoMetalPowder
+        tcfg.pc_trace_hi  = 0x5670;  // well into DamageCalc
+
+        std::atomic<bool> trace_stop{false};
+        CrystalRunResult tr = run_crystal_case(rom_bytes, sym, 0x00, tcfg, &trace_stop);
+
+        std::cout << "\n=== INSTRUCTION TRACE (neutral non-crit, bank 0x0D, 0x52A0..0x5670) ===\n";
+        if(tr.stop_reason != StopReason::SINK_HIT){
+            std::cout << "  HARNESS_ERROR: " << stop_reason_str(tr.stop_reason) << "\n";
+        } else {
+            std::cout << "  "
+                      << std::left << std::setw(8) << "PC"
+                      << std::right
+                      << std::setw(5) << "B"
+                      << std::setw(5) << "C"
+                      << std::setw(5) << "D"
+                      << std::setw(5) << "E"
+                      << std::setw(5) << "H"
+                      << std::setw(5) << "L"
+                      << std::setw(7) << "SP"
+                      << std::setw(7) << "StkTop"
+                      << "\n  " << std::string(55,'-') << "\n";
+            for(const auto& te : tr.trace_log){
+                char pcs[10]; snprintf(pcs,sizeof(pcs),"0D:%04X",te.pc);
+                std::cout << "  "
+                          << std::left << std::setw(8) << pcs
+                          << std::right
+                          << std::setw(5) << (int)te.b
+                          << std::setw(5) << (int)te.c
+                          << std::setw(5) << (int)te.d
+                          << std::setw(5) << (int)te.e
+                          << std::setw(5) << (int)te.h
+                          << std::setw(5) << (int)te.l
+                          << "  SP=" << std::hex << te.sp
+                          << " [" << te.stack_top << "]" << std::dec << "\n";
+            }
+            std::cout << "  (" << tr.trace_log.size() << " entries)\n";
+        }
+        std::cout << "\n";
+    }
+    // --- END INSTRUCTION TRACE ---
 
     // Stage multiplier table (Crystal raw index = raw - 1, 0-indexed, raw 1..13)
     // Crystal StatLevelMultipliers: pairs {num, den} for stages -6..+6
