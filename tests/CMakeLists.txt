@@ -626,6 +626,20 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(type_item_sweep PRIVATE /bigobj)
     endif()
 
+    # type_item_full_sweep -- full type-boost item cert: arithmetic 1..255 + ordering
+    # Usage: type_item_full_sweep <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(type_item_full_sweep
+        crystal_differential/type_item_full_sweep.cpp
+    )
+    target_link_libraries(type_item_full_sweep PRIVATE oracle_runner_lib)
+    target_include_directories(type_item_full_sweep PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(type_item_full_sweep PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

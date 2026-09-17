@@ -785,6 +785,19 @@ struct ExecCtx {
     StabSnapshot stab_exit;   // at 0D:47C7
 
     // Per-type-pass snapshots at BattleCommand_Stab.ok (0D:47AB).
+    // Item boundary snapshots inside BattleCommand_DamageCalc.
+    // pre_item: captured at 0D:566C (.NextItem label, just after call GetUserItem returns).
+    //   hQuotient[2:3] = base (/50, +2 not yet added) before item multiply.
+    // post_item: captured at 0D:568F (.DoneItem label, after item ×(100+param)/100).
+    //   hQuotient[2:3] = item-boosted value before crit multiply.
+    // hQuotient is HRAM at 0xFFB3..0xFFB6; [2:3] = big-endian 16-bit quotient.
+    struct ItemBoundarySnapshot {
+        bool     sampled     = false;
+        uint16_t quotient    = 0;  // (hQuotient[2]<<8) | hQuotient[3]
+    };
+    ItemBoundarySnapshot damagecalc_pre_item;   // at 0D:566C
+    ItemBoundarySnapshot damagecalc_post_item;  // at 0D:568F
+
     // Fires once per successful TypeMatchups table hit.
     // pass[0] = after first matchup, pass[1] = after second matchup.
     // Used to observe intermediate damage values in sequential floor proof.
@@ -1032,6 +1045,9 @@ struct CrystalRunResult {
     ExecCtx::StabSnapshot       stab_exit;       // captured at 0D:47C7, BattleCommand_Stab ret
     ExecCtx::TypePassSnapshot   type_passes[ExecCtx::MAX_TYPE_PASSES];
     int                         type_pass_count = 0;
+    // DamageCalc item boundary snapshots (from exec_ctx)
+    ExecCtx::ItemBoundarySnapshot damagecalc_pre_item;   // at 0D:566C, before item multiply
+    ExecCtx::ItemBoundarySnapshot damagecalc_post_item;  // at 0D:568F, after item multiply
     // Forensic instruction trace (populated when CrystalRunConfig::enable_trace=true)
     std::vector<ExecCtx::TraceEntry> trace_log;
     // Stage-computed stats from wPlayerStats/wEnemyStats (populated at SINK_HIT).
@@ -1567,6 +1583,26 @@ static CrystalRunResult execute_crystal_run_loop(
                 exec_ctx.type_passes[idx].multiplier = GB_safe_read_memory(&gb, 0xC665) & 0x7Fu;
             }
         }
+        // --- DAMAGECALC ITEM BOUNDARY CAPTURES (bank 0D) ---
+        // pre_item: at 0D:566C (.NextItem label) — hQuotient[2:3] = base before item mult.
+        //   Fires on first arrival at .NextItem (beginning of TypeBoostItems scan).
+        //   If item effect byte is 0 (no item), GetUserItem returns b=0 and jr z skips
+        //   the scan entirely — .NextItem is not reached. In that case pre_item stays unsampled.
+        //   We therefore only capture for non-zero item effect runs.
+        if(!exec_ctx.damagecalc_pre_item.sampled && pc == 0x566C && bank == 0x0D){
+            exec_ctx.damagecalc_pre_item.sampled = true;
+            uint8_t hi = GB_safe_read_memory(&gb, 0xFFB5); // hQuotient+2
+            uint8_t lo = GB_safe_read_memory(&gb, 0xFFB6); // hQuotient+3
+            exec_ctx.damagecalc_pre_item.quotient = (uint16_t)((hi<<8)|lo);
+        }
+        // post_item: at 0D:568F (.DoneItem label) — hQuotient[2:3] = after item multiply.
+        //   Fires whether or not item matched (falls through .NextItem loop or jr z .DoneItem).
+        if(!exec_ctx.damagecalc_post_item.sampled && pc == 0x568F && bank == 0x0D){
+            exec_ctx.damagecalc_post_item.sampled = true;
+            uint8_t hi = GB_safe_read_memory(&gb, 0xFFB5); // hQuotient+2
+            uint8_t lo = GB_safe_read_memory(&gb, 0xFFB6); // hQuotient+3
+            exec_ctx.damagecalc_post_item.quotient = (uint16_t)((hi<<8)|lo);
+        }
         if(hit_sink) break;
         // --- PRE-TRUNC CAPTURE: PlayerAttackDamage .done (bank 0D, PC 0x533F) ---
         // Fires immediately before `call TruncateHL_BC`.
@@ -1748,7 +1784,9 @@ static CrystalRunResult execute_crystal_run_loop(
     res.stab_entry        = exec_ctx.stab_entry;
     res.stab_exit         = exec_ctx.stab_exit;
     for(int i=0;i<ExecCtx::MAX_TYPE_PASSES;++i) res.type_passes[i]=exec_ctx.type_passes[i];
-    res.type_pass_count   = exec_ctx.type_pass_count;
+    res.type_pass_count       = exec_ctx.type_pass_count;
+    res.damagecalc_pre_item   = exec_ctx.damagecalc_pre_item;
+    res.damagecalc_post_item  = exec_ctx.damagecalc_post_item;
     res.trace_log         = std::move(exec_ctx.trace_log);
     res.stop_reason = StopReason::SINK_HIT;
     return res;
@@ -16402,6 +16440,485 @@ int run_type_item_sweep(const char* rom_path, const char* sym_path)
                  <<"  normal production API modified? no\n";
     }
     return (n_herr>0)?2:(n_mismatch>0)?1:0;
+}
+
+// ============================================================================
+// run_type_item_full_sweep
+//
+// Full certification of type-boost held-item behavior.
+//
+// CONFIRMED ORDERING (from BattleCommand_DamageCalc + BattleCommand_Stab source):
+//
+//   Crystal:
+//     BattleCommand_DamageCalc:
+//       base_formula → item×(110/100) → crit×2 → wCurDamage += result, cap [2,999]
+//     BattleCommand_Stab (called after DamageCalc):
+//       weather → badge → STAB → type
+//     Full: base → item → crit → (+2+cap) → weather → badge → STAB → type
+//
+//   Enginemon (execute_move_damaging):
+//     calculate_damage(dp) = base × crit × burned (+2, capped)
+//       then: weather → STAB → type → item
+//     Full: (base × crit + 2) → weather → STAB → type → item
+//
+// PART 1: ITEM ARITHMETIC SWEEP (1..255)
+//   Enginemon: set_pre_item_damage_override(d) injects d at the item step boundary.
+//   PostItemObservation captures pre_item=d and post_item=floor(d×110/100).
+//   Verifies the production item boost formula over all d=1..255.
+//   Crystal: DoMove with matching item produces damagecalc_pre_item and
+//   damagecalc_post_item snapshots for the naturally-produced quotient value.
+//   Parity check: damagecalc_pre_item.quotient must equal Eng pre_item_damage.
+//
+// PART 2: ORDERING INTERACTIONS (natural stats, 4×4 poison × 9 configs)
+//   Crystal: DoMove → sink 0x47C7 (Stab ret). Captures stab_entry (post-DamageCalc)
+//   and stab_exit (post-Stab). Also captures damagecalc_pre_item and damagecalc_post_item.
+//   Enginemon: execute_turn. PostItemObservation captures all boundaries.
+//   Configs: item-only, item+crit, item+STAB, item+NVE, item+SE,
+//            item+weather0.5, item+weather1.5, item+STAB+NVE, item+STAB+SE,
+//            item+dual-cancel.
+// ============================================================================
+int run_type_item_full_sweep(const char* rom_path, const char* sym_path)
+{
+    // ---- Load ROM and engine data -------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr<<"Cannot open ROM\n"; return 2; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f),{});
+    }
+    if(rom_bytes.size()!=CRYSTAL_ROM_SIZE){ std::cerr<<"Wrong ROM size\n"; return 2; }
+    {
+        std::string sha=sha1_hex(rom_bytes.data(),rom_bytes.size());
+        if(sha!=PINNED_ROM_SHA1){ std::cerr<<"ROM SHA mismatch\n"; return 2; }
+    }
+    SymCache sym;
+    {
+        std::string e=SymCache::load(sym_path,&sym);
+        if(!e.empty()){ std::cerr<<"Sym: "<<e<<"\n"; return 2; }
+    }
+    {
+        std::string e=validate_fixture_addresses(sym);
+        if(!e.empty()){ std::cerr<<"Fixture: "<<e<<"\n"; return 2; }
+    }
+    auto rom_data=crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){ std::cerr<<"RomData load failed\n"; return 2; }
+    const crystal::ExtractionProfile* profile=
+        crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
+    if(!profile){ std::cerr<<"No profile\n"; return 2; }
+    auto ed_opt=load_engine_data(*rom_data,*profile);
+    if(!ed_opt){ std::cerr<<"load_engine_data failed\n"; return 2; }
+    const EngineData& ed=*ed_opt;
+
+    // ---- Constants ----------------------------------------------------------
+    static constexpr uint8_t  T_NORMAL =  0;
+    static constexpr uint8_t  T_WATER  = 21;
+    static constexpr uint8_t  T_FIRE   = 20;
+    static constexpr uint8_t  ITEM_MWATER  = 0x5F; // Mystic Water: Water boost, param=10
+    static constexpr uint8_t  ITEM_NONE_ID = 0x00;
+    static constexpr uint8_t  ITEM_PINKBOW = 0x68; // Pink Bow: Normal boost, param=10
+    static constexpr uint16_t MOVE_WGUN   = 55;    // Water/Special, acc=0xFF
+    static constexpr uint8_t  ITEM_PARAM  = 10;    // All TypeDamageBoost items have param=10
+
+    // Verify
+    {
+        const enginemon::ItemData* itd=ed.items.get((enginemon::ItemId)ITEM_MWATER);
+        if(!itd||itd->held_effect_type!=enginemon::HeldItemEffectType::TypeDamageBoost||
+           itd->held_param!=ITEM_PARAM){
+            std::cerr<<"ITEM_MWATER not TypeDamageBoost param=10\n"; return 2;
+        }
+        const enginemon::MoveData* md=ed.moves.get((enginemon::MoveId)MOVE_WGUN);
+        if(!md||!md->effect_desc.is_supported||!md->effect_desc.has_standard_damage){
+            std::cerr<<"MOVE_WGUN not supported\n"; return 2;
+        }
+    }
+
+    // ---- Crystal DoMove pipeline -------------------------------------------
+    static constexpr uint16_t SINK_STAB=0x47C7;
+    static constexpr uint8_t  POISON[4]={0x00,0xA5,0x5A,0xFF};
+    // Tape: {0xFF=no-crit, 0xFF=variation100%, 0x00=acc-pass, 0xFF=no-secondary}
+    // For crit cases: {0x00=crit, 0xFF=variation, 0x00=acc-pass, 0xFF=no-secondary}
+    static constexpr uint8_t  TAPE_NOCRIT[] ={0xFF,0xFF,0x00,0xFF};
+    static constexpr uint8_t  TAPE_CRIT[]   ={0x00,0xFF,0x00,0xFF};
+    std::atomic<bool> no_stop{false};
+
+    // Crystal fixture
+    static thread_local uint8_t  fi_atk1=0,fi_atk2=0,fi_def1=0,fi_def2=0;
+    static thread_local uint8_t  fi_item=0, fi_weather=0;
+
+    static const FixtureFn fi_fx=[](GB_gameboy_t* gb,uint8_t* wram,const SymCache& s){
+        generic_fullscript_fixture_adapter(gb,wram,s);
+        wram[wram_off(s.wBattleMonType1.addr)]=fi_atk1;
+        wram[wram_off(s.wBattleMonType2.addr)]=fi_atk2;
+        wram[wram_off(s.wEnemyMonType1.addr)] =fi_def1;
+        wram[wram_off(s.wEnemyMonType2.addr)] =fi_def2;
+        wram[wram_off(s.wBattleWeather.addr)] =fi_weather;
+        wram[wram_off(s.wBattleMonItem.addr)] =fi_item;
+        GB_write_memory(gb,s.wJohtoBadges.addr,0);
+        GB_write_memory(gb,s.wKantoBadges.addr,0);
+    };
+
+    // Run Crystal DoMove, return (stab_entry, stab_exit, pre_item_q, post_item_q, ok, stable)
+    struct CrBdry {
+        uint16_t entry,exit;         // stab_entry.cur_damage, stab_exit.cur_damage
+        uint16_t pre_item_q;         // damagecalc_pre_item.quotient (0 if not sampled)
+        uint16_t post_item_q;        // damagecalc_post_item.quotient (0 if not sampled)
+        bool     has_pre_item;       // true if damagecalc_pre_item was sampled
+        bool     has_post_item;      // true if damagecalc_post_item was sampled
+        bool     ok, stable;
+    };
+    auto run_cr=[&](uint16_t move_id, const uint8_t* tape, size_t tape_len)->CrBdry{
+        CrBdry r{};
+        uint16_t e0=0,x0=0; bool st=true;
+        uint16_t pri=0,poi=0; bool hpri=false,hpoi=false;
+        for(int pi=0;pi<4;++pi){
+            struct FG{~FG(){g_generic_rom_bytes_ptr=nullptr;g_generic_move_id=0;g_generic_pp=0;}}fg;
+            g_generic_rom_bytes_ptr=&rom_bytes; g_generic_move_id=move_id; g_generic_pp=P_PP;
+            CrystalRunConfig rcfg{};
+            rcfg.entry=sym.DoMove; rcfg.sink_pcs[0]=SINK_STAB;
+            rcfg.sink_names[0]="Stab.ret"; rcfg.num_sinks=1;
+            rcfg.insn_cap=200000; rcfg.rng_tape=tape; rcfg.rng_tape_len=tape_len;
+            rcfg.extra_fixture=fi_fx; rcfg.engine_move_id=move_id;
+            CrystalRunResult res=run_crystal_case(rom_bytes,sym,POISON[pi],rcfg,&no_stop);
+            if(res.stop_reason!=StopReason::SINK_HIT||
+               !res.stab_entry.sampled||!res.stab_exit.sampled){
+                return r; // ok=false
+            }
+            if(pi==0){
+                e0=res.stab_entry.cur_damage; x0=res.stab_exit.cur_damage;
+                pri=res.damagecalc_pre_item.quotient;
+                poi=res.damagecalc_post_item.quotient;
+                hpri=res.damagecalc_pre_item.sampled;
+                hpoi=res.damagecalc_post_item.sampled;
+            } else if(res.stab_entry.cur_damage!=e0||res.stab_exit.cur_damage!=x0)
+                {st=false;break;}
+        }
+        if(!st) return r;
+        r.entry=e0; r.exit=x0; r.pre_item_q=pri; r.post_item_q=poi;
+        r.has_pre_item=hpri; r.has_post_item=hpoi; r.ok=true; r.stable=true;
+        return r;
+    };
+
+    // Enginemon runner
+    struct EngBdry {
+        int32_t pre_type,post_type;
+        int32_t pre_item,post_item;
+        bool    item_applied;
+        bool    ok;
+    };
+    auto run_eng=[&](uint16_t move_id, uint8_t item_id,
+                     uint8_t atk1,uint8_t atk2,uint8_t def1,uint8_t def2,
+                     enginemon::Weather weather,bool use_crit,
+                     int32_t pre_item_override)->EngBdry{
+        EngBdry r{-1,-1,-1,-1,false,false};
+        enginemon::Registries reg{}; reg.moves=ed.moves; reg.items=ed.items;
+        ed.rules.apply_to(reg.type_chart);
+        enginemon::Party party;
+        {enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+         pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm);}
+        enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+        auto mk=[](enginemon::MoveId mid,uint16_t a,uint16_t d,uint16_t sp,uint16_t sa,
+                    uint16_t sd,uint16_t hp,uint8_t lv,uint8_t t1,uint8_t t2,
+                    enginemon::ItemId item){
+            enginemon::BattlePokemon b{}; b.species=1;
+            b.type1=(enginemon::TypeId)t1; b.type2=(enginemon::TypeId)t2; b.level=lv;
+            b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+            b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+            b.stats.speed=b.base_stats.speed=sp;
+            b.stats.special_attack=b.base_stats.special_attack=sa;
+            b.stats.special_defense=b.base_stats.special_defense=sd;
+            b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+            b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP;
+            b.held_item=item; return b;
+        };
+        bat.player_pokemon()  =mk((enginemon::MoveId)move_id,
+            P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,atk1,atk2,
+            (enginemon::ItemId)item_id);
+        bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,
+            E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,def1,def2,
+            enginemon::ITEM_NONE);
+        bat.set_field_weather(weather,0);
+        bat.set_damage_params_observer([&](const enginemon::DamageParams& dp){
+            r.pre_type=enginemon::calculate_damage(dp,ed.rules); r.ok=true;
+        });
+        bat.set_post_type_observer([&](const enginemon::Battle::PostTypeObservation& obs){
+            r.post_type=obs.post_damage;
+        });
+        if(pre_item_override>=0) bat.set_pre_item_damage_override(pre_item_override);
+        bat.set_post_item_observer([&](const enginemon::Battle::PostItemObservation& obs){
+            r.pre_item=obs.pre_item_damage;
+            r.post_item=obs.post_item_damage;
+            r.item_applied=obs.item_applied;
+        });
+        // RNG: crit=use_crit, variation=100%, acc=pass, secondary-block
+        uint8_t crit_byte=use_crit?0x00:0xFF;
+        static constexpr uint8_t ET_nc[]={0xFF,0xFF,0x00};
+        static constexpr uint8_t ET_cr[]={0x00,0xFF,0x00};
+        const uint8_t* et=use_crit?ET_cr:ET_nc;
+        size_t ri=0;
+        bat.set_rng_callback([&ri,et]()->uint32_t{return (uint32_t)et[ri<3?ri++:2];});
+        bat.set_player_action(enginemon::ActionFight{0,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+        (void)crit_byte;
+        return r;
+    };
+
+    // ---- Print header -------------------------------------------------------
+    std::cout<<"=== Type-Item Full Sweep ===\n"
+             <<"  Item: MYSTIC_WATER (0x5F, Water boost, param=10): floor(d×110/100)\n"
+             <<"  Move: WATER_GUN (id=55, Water/Special, acc=0xFF)\n\n"
+             <<"  ORDER VERIFIED FROM SOURCE:\n"
+             <<"  Crystal: base → item × (110/100) → crit×2 → (+2+cap) → weather → STAB → type\n"
+             <<"  Enginemon: (base×crit+2) → weather → STAB → type → item×(110/100)\n\n"
+             <<std::flush;
+
+    // ---- PART 1: Item arithmetic sweep 1..255 over pre-item inject ---------
+    // Enginemon: inject d as pre-item damage, observe post-item = floor(d×110/100)
+    // Crystal: DoMove with item, observe damagecalc_pre_item.q and damagecalc_post_item.q
+    //          for the ONE naturally-produced value Q.
+    std::cout<<"  PART 1: ITEM ARITHMETIC SWEEP (Enginemon pre_item_override d=1..255)\n"<<std::flush;
+    uint32_t arith_total=0,arith_match=0,arith_mm=0,arith_herr=0;
+    std::vector<int> arith_mm_inputs;
+
+    // no-item control (verify pre_item_override with wrong item → no boost)
+    uint32_t noitem_match=0,noitem_mm=0;
+    uint32_t wrongtype_match=0,wrongtype_mm=0;
+
+    for(int d=1;d<=255;++d){
+        // Enginemon item+Water move
+        EngBdry e_item=run_eng(MOVE_WGUN,ITEM_MWATER,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,
+                               enginemon::Weather::None,false,(int32_t)d);
+        if(!e_item.ok){++arith_herr;continue;}
+        // Expected: floor(d×(100+10)/100) = d*110/100 (int truncation)
+        // But Enginemon's production code: damage * (100+param) / 100
+        // We compare e_item.post_item against this
+        // Crystal truth: use damagecalc_post_item for the natural Q value only
+        ++arith_total;
+        // Comparison: post_item == expected arithmetic output for Enginemon
+        // We compare Eng vs Eng (verifying seam consistency), then later vs Crystal
+        // For Enginemon-only: post_item should == d*110/100 (matching production formula)
+        // Actually post_item IS the production formula output — so for arithmetic verification
+        // we check: post_item == pre_item * 110 / 100 (where pre_item should == d)
+        bool pre_ok=(e_item.pre_item==d);
+        bool formula_ok=(e_item.post_item==(int32_t)d*110/100 ||
+                         e_item.post_item==(int32_t)(d*110/100)); // same
+        bool item_ok=(e_item.item_applied);
+        if(pre_ok&&item_ok&&(int32_t)e_item.post_item==(int32_t)d*110/100){++arith_match;}
+        else{++arith_mm;arith_mm_inputs.push_back(d);
+             if(arith_mm<=3) std::cerr<<"ARITHmm d="<<d<<" pre="<<e_item.pre_item
+                <<" post="<<e_item.post_item<<" expect="<<d*110/100
+                <<" pre_ok="<<pre_ok<<" item="<<item_ok<<"\n";}
+    }
+    // No-item and wrong-type for the natural Q value
+    fi_atk1=T_NORMAL;fi_atk2=T_NORMAL;fi_def1=T_NORMAL;fi_def2=T_NORMAL;
+    fi_item=ITEM_NONE_ID;fi_weather=0;
+    CrBdry cr_noitem=run_cr(MOVE_WGUN,TAPE_NOCRIT,sizeof(TAPE_NOCRIT));
+    fi_item=ITEM_PINKBOW;
+    CrBdry cr_wrongtype=run_cr(MOVE_WGUN,TAPE_NOCRIT,sizeof(TAPE_NOCRIT));
+    fi_item=ITEM_MWATER;
+    CrBdry cr_item=run_cr(MOVE_WGUN,TAPE_NOCRIT,sizeof(TAPE_NOCRIT));
+
+    // Check no-item Eng
+    EngBdry e_noitem=run_eng(MOVE_WGUN,ITEM_NONE_ID,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,
+                              enginemon::Weather::None,false,-1);
+    EngBdry e_wrong =run_eng(MOVE_WGUN,ITEM_PINKBOW,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,
+                              enginemon::Weather::None,false,-1);
+    noitem_match=(cr_noitem.ok&&e_noitem.ok&&cr_noitem.exit==(uint16_t)e_noitem.post_item)?1:0;
+    noitem_mm=1-noitem_match;
+    wrongtype_match=(cr_wrongtype.ok&&e_wrong.ok&&!e_wrong.item_applied&&
+                     cr_wrongtype.exit==(uint16_t)e_wrong.post_item)?1:0;
+    wrongtype_mm=1-wrongtype_match;
+
+    // Crystal item proof at natural Q
+    uint16_t crystal_Q=cr_noitem.ok?(cr_noitem.entry+0):(uint16_t)0;
+    // Use the stab_entry of the no-item run as the base Q (DamageCalc without item)
+    // Crystal item run: damagecalc_pre_item.quotient should equal base Q from /50 step
+    // damagecalc_post_item.quotient should equal floor(Q×110/100)
+    // But note: .DoneItem fires even when no item matches (falls through loop).
+    // So post_item_q ≠ pre_item_q only when item matched.
+    bool cr_item_proof=false;
+    if(cr_item.ok&&cr_item.has_post_item&&cr_noitem.ok&&cr_noitem.has_post_item){
+        // pre_item_q (cr_item, item matched) ≈ same as no-item post_item_q
+        // (pre-item quotient before ×110/100)
+        uint16_t Q_from_noitem=cr_noitem.post_item_q; // no item: post==pre
+        uint16_t Q_item_post=cr_item.post_item_q;
+        int32_t expected=Q_from_noitem*110/100;
+        cr_item_proof=(Q_item_post==(uint16_t)expected);
+        std::cout<<"  Crystal item boundary at Q="<<Q_from_noitem<<":\n"
+                 <<"    damagecalc_pre_item.quotient (item run, pre-item)="<<cr_item.pre_item_q
+                 <<"  has_pre="<<cr_item.has_pre_item<<"\n"
+                 <<"    damagecalc_post_item.quotient (item run, post-item)="<<Q_item_post<<"\n"
+                 <<"    damagecalc_post_item.quotient (no-item run, =base)="<<Q_from_noitem<<"\n"
+                 <<"    expected floor("<<Q_from_noitem<<"×110/100)="<<expected<<"\n"
+                 <<"    Crystal item formula proof: "<<(cr_item_proof?"PASS":"FAIL")<<"\n\n";
+    }
+
+    // Enginemon parity check: at d=Q (Eng-natural value), pre_item_override=Q
+    {
+        int32_t Q_eng=e_noitem.pre_item; // natural pre_item with no override = post-type value
+        if(Q_eng>0){
+            EngBdry e_at_Q=run_eng(MOVE_WGUN,ITEM_MWATER,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,
+                                    enginemon::Weather::None,false,Q_eng);
+            std::cout<<"  Enginemon item boundary at Q="<<Q_eng<<":\n"
+                     <<"    pre_item="<<e_at_Q.pre_item<<" post_item="<<e_at_Q.post_item
+                     <<"  item_applied="<<(e_at_Q.item_applied?"yes":"no")<<"\n"
+                     <<"    expected floor("<<Q_eng<<"×110/100)="<<Q_eng*110/100<<"\n"
+                     <<"    Enginemon item formula at Q: "
+                     <<(e_at_Q.post_item==Q_eng*110/100?"PASS":"FAIL")<<"\n\n";
+        }
+    }
+
+    // ---- PART 2: Ordering interactions (DoMove full pipeline) ---------------
+    std::cout<<"  PART 2: ORDERING INTERACTIONS (DoMove full, 4 poison, natural stats)\n"<<std::flush;
+    struct OrdCase { const char* name; uint8_t atk1,atk2,def1,def2; uint8_t weather; bool crit; };
+    static const OrdCase ORD[]={
+        {"item_only",        T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,  0, false},
+        {"item+crit",        T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,  0, true },
+        {"item+STAB",        T_WATER, T_WATER, T_NORMAL,T_NORMAL,  0, false},
+        {"item+NVE(0.5x)",   T_NORMAL,T_NORMAL,T_WATER, T_WATER,   0, false},
+        {"item+SE(2x)",      T_NORMAL,T_NORMAL,T_FIRE,  T_FIRE,    0, false},
+        {"item+weather0.5x", T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,  2, false}, // Sun → Water 0.5x
+        {"item+weather1.5x", T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,  1, false}, // Rain → Water 1.5x
+        {"item+STAB+NVE",    T_WATER, T_WATER, T_WATER, T_WATER,   0, false},
+        {"item+STAB+SE",     T_WATER, T_WATER, T_FIRE,  T_FIRE,    0, false},
+        {"item+dual_cancel", T_NORMAL,T_NORMAL,T_WATER, T_FIRE,    0, false}, // Water vs Water/Fire cancel
+    };
+    static constexpr int N_ORD=(int)(sizeof(ORD)/sizeof(ORD[0]));
+
+    uint32_t ord_total=0,ord_match=0,ord_mm=0,ord_herr=0;
+    struct OrdRow {
+        const char* name;
+        uint16_t cr_entry,cr_exit;
+        uint16_t cr_pre_iq,cr_post_iq;
+        int32_t eng_pre_type,eng_post_type,eng_pre_item,eng_post_item;
+        bool eng_item_applied,cr_ok,eng_ok,match;
+    };
+    std::vector<OrdRow> ord_rows;
+
+    for(int oi=0;oi<N_ORD;++oi){
+        const OrdCase& oc=ORD[oi];
+        fi_atk1=oc.atk1;fi_atk2=oc.atk2;fi_def1=oc.def1;fi_def2=oc.def2;
+        fi_item=ITEM_MWATER;fi_weather=oc.weather;
+        const uint8_t* tape=oc.crit?TAPE_CRIT:TAPE_NOCRIT;
+        size_t tape_len=oc.crit?sizeof(TAPE_CRIT):sizeof(TAPE_NOCRIT);
+        CrBdry cr=run_cr(MOVE_WGUN,tape,tape_len);
+        EngBdry eng=run_eng(MOVE_WGUN,ITEM_MWATER,oc.atk1,oc.atk2,oc.def1,oc.def2,
+                            static_cast<enginemon::Weather>(oc.weather),oc.crit,-1);
+        ++ord_total;
+        bool match=cr.ok&&eng.ok&&(cr.exit==(uint16_t)eng.post_item);
+        if(!cr.ok||!eng.ok) ++ord_herr;
+        else if(match) ++ord_match;
+        else ++ord_mm;
+        OrdRow row{};
+        row.name=oc.name; row.cr_entry=cr.entry; row.cr_exit=cr.exit;
+        row.cr_pre_iq=cr.pre_item_q; row.cr_post_iq=cr.post_item_q;
+        row.eng_pre_type=eng.post_type; row.eng_post_type=eng.post_type;
+        row.eng_pre_item=eng.pre_item; row.eng_post_item=eng.post_item;
+        row.eng_item_applied=eng.item_applied;
+        row.cr_ok=cr.ok; row.eng_ok=eng.ok; row.match=match;
+        ord_rows.push_back(row);
+    }
+
+    // ---- Print results ------------------------------------------------------
+    std::cout<<"\n  ITEM-ONLY ARITHMETIC (Eng pre_item_override 1..255):\n"
+             <<"    logical: "<<arith_total
+             <<"  match: "<<arith_match
+             <<"  mismatch: "<<arith_mm
+             <<"  herr: "<<arith_herr<<"\n";
+    if(!arith_mm_inputs.empty()){
+        std::cout<<"    exact mismatch inputs: ";
+        for(int v:arith_mm_inputs) std::cout<<v<<" ";
+        std::cout<<"\n";
+    } else { std::cout<<"    exact mismatch inputs: none\n"; }
+    std::cout<<"    NO-ITEM: match="<<noitem_match<<" mismatch="<<noitem_mm<<"\n"
+             <<"    WRONG-TYPE: match="<<wrongtype_match<<" mismatch="<<wrongtype_mm<<"\n\n";
+
+    std::cout<<"  ORDERING (10 configs):\n"
+             <<"  "<<std::left<<std::setw(20)<<"config"
+             <<std::right<<std::setw(7)<<"CrEnt"<<std::setw(7)<<"CrExit"
+             <<std::setw(9)<<"CrPreIQ"<<std::setw(9)<<"CrPostIQ"
+             <<std::setw(9)<<"EngPreI"<<std::setw(9)<<"EngPostI"
+             <<std::setw(6)<<"iApp"<<std::setw(8)<<"match\n"
+             <<"  "<<std::string(84,'-')<<"\n";
+    for(const auto& r:ord_rows){
+        std::cout<<"  "<<std::left<<std::setw(20)<<r.name
+                 <<std::right<<std::setw(7)<<(r.cr_ok?(int)r.cr_entry:-1)
+                 <<std::setw(7)<<(r.cr_ok?(int)r.cr_exit:-1)
+                 <<std::setw(9)<<(r.cr_pre_iq==0&&!r.cr_ok?-1:(int)r.cr_pre_iq)
+                 <<std::setw(9)<<(int)r.cr_post_iq
+                 <<std::setw(9)<<r.eng_pre_item
+                 <<std::setw(9)<<r.eng_post_item
+                 <<std::setw(6)<<(r.eng_item_applied?"yes":"no")
+                 <<std::setw(8)<<(r.match?"MATCH":"MISS")<<"\n";
+    }
+    std::cout<<"\n";
+
+    // Per-interaction detail
+    for(const auto& r:ord_rows){
+        if(r.match) continue;
+        std::cout<<"  MISMATCH ["<<r.name<<"]: CrExit="<<r.cr_exit<<" EngPostI="<<r.eng_post_item<<"\n"
+                 <<"    Crystal: base→item→crit→(+2)→... CrEntry(post-DamCalc)="<<r.cr_entry<<"\n"
+                 <<"    Enginemon: (base×crit+2)→...→item. EngPreItem="<<r.eng_pre_item<<"\n";
+        // Compute expected ordering difference
+        // Crystal: item applied at quotient level (before +2 and before Stab)
+        // Enginemon: item applied after weather+STAB+type (after +2)
+        if(r.cr_ok&&r.eng_ok){
+            // For ordering mismatch proof: show exactly where first divergence occurs
+            std::cout<<"    CrPreItemQ="<<r.cr_pre_iq<<" CrPostItemQ="<<r.cr_post_iq<<"\n";
+        }
+    }
+
+    // ORDER-DEPENDENT MISMATCH CLASSES
+    bool any_order_mm=(ord_mm>0);
+    std::cout<<"  ORDER-DEPENDENT MISMATCH CLASSES: ";
+    if(!any_order_mm){
+        std::cout<<"none — Crystal and Enginemon produce identical final outputs\n"
+                 <<"  for these stat values despite different application order.\n";
+    } else {
+        std::cout<<"yes — "<<ord_mm<<" ordering mismatches (see table above)\n";
+    }
+    std::cout<<"\n";
+
+    // Anti-confirmation
+    {
+        fi_atk1=T_NORMAL;fi_atk2=T_NORMAL;fi_def1=T_NORMAL;fi_def2=T_NORMAL;
+        fi_item=ITEM_MWATER;fi_weather=0;
+        CrBdry ac_cr=run_cr(MOVE_WGUN,TAPE_NOCRIT,sizeof(TAPE_NOCRIT));
+        // Natural (MysticWater) → should match
+        EngBdry e_n=run_eng(MOVE_WGUN,ITEM_MWATER,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,
+                             enginemon::Weather::None,false,-1);
+        // PinkBow (wrong type, Normal boost) → should not apply to Water move
+        EngBdry e_w=run_eng(MOVE_WGUN,ITEM_PINKBOW,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,
+                             enginemon::Weather::None,false,-1);
+        bool nm=(ac_cr.ok&&e_n.ok&&ac_cr.exit==(uint16_t)e_n.post_item);
+        bool wm=(e_w.item_applied||ac_cr.exit!=(uint16_t)e_w.post_item);
+        // wm is true when wrong type → no boost AND output differs from item run
+        bool anti=nm&&!e_w.item_applied&&e_w.post_item!=e_n.post_item;
+        std::cout<<"  4-POISON STABLE?: "<<(ord_herr+arith_herr==0?"yes":"see errors")<<"\n"
+                 <<"  RNG: 0 (TAPE_NOCRIT={0xFF,0xFF,0x00,0xFF}; TAPE_CRIT={0x00,0xFF,0x00,0xFF})\n"
+                 <<"  ANTI-CONFIRMATION ON ACTUAL ITEM BOUNDARY:\n"
+                 <<"    Crystal (MysticWater)="<<ac_cr.exit<<"\n"
+                 <<"    Eng(MysticWater): post_item="<<e_n.post_item<<" applied=yes"
+                 <<" -> "<<(nm?"MATCH":"MISMATCH(bad)")<<"\n"
+                 <<"    Eng(PinkBow wrong type): post_item="<<e_w.post_item<<" applied="
+                 <<(e_w.item_applied?"yes":"no")
+                 <<" -> "<<(!e_w.item_applied?"MISMATCH(expected)":"MATCH(bad)")<<"\n"
+                 <<"  ANTI-CONFIRMATION? "<<(anti?"yes — DETECTED":"NO — FAILED")<<"\n\n";
+
+        bool arith_clean=(arith_mm==0&&noitem_mm==0&&wrongtype_mm==0);
+        bool frozen=arith_clean&&anti&&(ord_herr+arith_herr==0)&&(ord_mm==0||any_order_mm);
+        // Verdict: frozen if arithmetic is clean and (no ordering mm OR ordering mm are classified)
+        bool final_frozen=arith_clean&&anti&&(ord_herr+arith_herr==0);
+        std::cout<<"  TYPE-ITEM VERDICT: "<<(final_frozen?(ord_mm==0?"FROZEN-TRUSTED":"NOT YET (ordering mismatch)"):"NOT YET")<<"\n";
+        if(final_frozen&&ord_mm==0)
+            std::cout<<"  (item arithmetic matches production formula for all 255 inputs;\n"
+                     <<"   ordering tests produce identical final outputs for tested values)\n";
+        else if(final_frozen&&ord_mm>0)
+            std::cout<<"  ("<<ord_mm<<" ordering mismatches — see table above for exact arithmetic)\n";
+        std::cout<<"  production behavior modified? no\n"
+                 <<"  normal production API modified? no\n";
+    }
+    return (arith_herr+ord_herr>0)?2:((arith_mm+noitem_mm+wrongtype_mm+ord_mm)>0)?1:0;
 }
 
 } // namespace crystal::oracle

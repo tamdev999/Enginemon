@@ -470,6 +470,13 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
     // Set to -1 (default) to disable.
     void set_pre_type_damage_override(int32_t v) { pre_type_damage_override_ = v; }
 
+    // If set to a value ≥ 0, overrides the damage value immediately BEFORE the
+    // type-boost item step in execute_move_damaging (after weather+STAB+type have
+    // already been applied). Use with set_post_item_observer to certify item boost
+    // arithmetic for any specific input value at the item step.
+    // Set to -1 (default) to disable.
+    void set_pre_item_damage_override(int32_t v) { pre_item_damage_override_ = v; }
+
     // Directly set the field weather state.
     // weather_turns=0 means indefinite (won't expire during the sweep).
     // Used by weather_damage_sweep to inject weather without executing a weather move.
@@ -528,6 +535,7 @@ private:
     PostTypeObserver post_type_observer_;
     PostItemObserver post_item_observer_;
     int32_t pre_type_damage_override_ = -1;
+    int32_t pre_item_damage_override_  = -1; // injects before the type-item boost step
 #endif // ENGINEMON_ENABLE_TEST_SEAMS
 
     // Turn state

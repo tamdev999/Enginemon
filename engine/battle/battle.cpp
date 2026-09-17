@@ -1368,6 +1368,7 @@ MoveExecutionResult Battle::execute_move_damaging(
     // Arithmetic: floor(damage * (100 + param) / 100), e.g. param=10 -> +10%.
     // Source: data/types/type_boost_items.asm + BattleCommand_Stab dispatch.
 #ifdef ENGINEMON_ENABLE_TEST_SEAMS
+    if (pre_item_damage_override_ >= 0) damage = pre_item_damage_override_;
     const int32_t pre_item_damage = damage;
 #endif
     bool item_applied = false;

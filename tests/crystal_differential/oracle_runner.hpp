@@ -324,4 +324,12 @@ int run_badge_boost_sweep(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_type_item_sweep(const char* rom_path, const char* sym_path);
 
+// run_type_item_full_sweep
+//
+// Full certification of type-boost held-item: item arithmetic 1..255 + ordering.
+// Verifies Crystal order (item before crit) vs Enginemon (item after STAB/type).
+// Uses pre_item_damage_override seam for arithmetic sweep, natural stats for ordering.
+// ============================================================================
+int run_type_item_full_sweep(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle
