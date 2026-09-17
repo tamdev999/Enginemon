@@ -1367,6 +1367,10 @@ MoveExecutionResult Battle::execute_move_damaging(
     // Applies after STAB and type effectiveness, before crit multiplier.
     // Arithmetic: floor(damage * (100 + param) / 100), e.g. param=10 -> +10%.
     // Source: data/types/type_boost_items.asm + BattleCommand_Stab dispatch.
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
+    const int32_t pre_item_damage = damage;
+#endif
+    bool item_applied = false;
     if (user.held_item != ITEM_NONE) {
         const ItemData* ti = registries_.items.get(user.held_item);
         if (ti && ti->held_effect_type == HeldItemEffectType::TypeDamageBoost
@@ -1374,8 +1378,19 @@ MoveExecutionResult Battle::execute_move_damaging(
             damage = damage * (100 + static_cast<int32_t>(ti->held_param)) / 100;
             if (damage < 1)   damage = 1;
             if (damage > 999) damage = 999;
+            item_applied = true;
         }
     }
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
+    if (post_item_observer_) {
+        PostItemObservation obs{};
+        obs.pre_item_damage  = pre_item_damage;
+        obs.item_applied     = item_applied;
+        obs.post_item_damage = damage;
+        post_item_observer_(obs);
+    }
+#endif // ENGINEMON_ENABLE_TEST_SEAMS
+    (void)item_applied;
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ Conditional double damage Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if (effective_desc.conditional_double != ConditionalDoubleCondition::None) {

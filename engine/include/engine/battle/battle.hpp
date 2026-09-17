@@ -450,6 +450,19 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         post_type_observer_ = std::move(obs);
     }
 
+    // Observer that fires immediately after the type-boost held-item step in
+    // execute_move_damaging, BEFORE damage variation and HP application.
+    // Used to certify type-item boost arithmetic without variation contamination.
+    struct PostItemObservation {
+        int32_t pre_item_damage;   // damage entering the item step (post weather+STAB+type)
+        bool    item_applied;      // true if a TypeDamageBoost item matched and was applied
+        int32_t post_item_damage;  // damage after the item step (or same as pre if no match)
+    };
+    using PostItemObserver = std::function<void(const PostItemObservation&)>;
+    void set_post_item_observer(PostItemObserver obs) {
+        post_item_observer_ = std::move(obs);
+    }
+
     // If set to a value ≥ 0, overrides the calculate_damage(dp) result in
     // execute_move_damaging. STAB and type-effectiveness code runs on this injected
     // value instead of the stats-derived damage. Use with set_post_type_observer to
@@ -513,6 +526,7 @@ private:
 #ifdef ENGINEMON_ENABLE_TEST_SEAMS
     DamageParamsObserver damage_params_observer_;
     PostTypeObserver post_type_observer_;
+    PostItemObserver post_item_observer_;
     int32_t pre_type_damage_override_ = -1;
 #endif // ENGINEMON_ENABLE_TEST_SEAMS
 

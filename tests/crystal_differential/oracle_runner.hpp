@@ -314,4 +314,14 @@ int run_weather_damage_sweep(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_badge_boost_sweep(const char* rom_path, const char* sym_path);
 
+// run_type_item_sweep
+//
+// Certifies Crystal type-boost held-item behavior vs Enginemon production path.
+// Documents that Crystal applies item inside BattleCommand_DamageCalc (BEFORE Stab),
+// while Enginemon applies item after weather+STAB+type in execute_move_damaging.
+// Runs 11 structural cases: 5 item-only + 6 ordering tests.
+// Returns 0 all match, 1 on ordering mismatch (harness healthy), 2 on harness error.
+// ============================================================================
+int run_type_item_sweep(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle
