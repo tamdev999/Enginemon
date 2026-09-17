@@ -1306,6 +1306,9 @@ MoveExecutionResult Battle::execute_move_damaging(
     // Both are compiled out entirely in normal production builds.
 #ifdef ENGINEMON_ENABLE_TEST_SEAMS
     if (damage_params_observer_) damage_params_observer_(dp);
+    // Wire the pre-crit quotient override into dp so calculate_damage injects it
+    // at the correct semantic boundary (after /50, before crit ×2, before +2).
+    if (pre_crit_quotient_override_ >= 0) dp.pre_crit_quotient_override = pre_crit_quotient_override_;
 #endif
 
     int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_) : enginemon::calculate_damage(dp);

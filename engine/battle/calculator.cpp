@@ -279,6 +279,14 @@ int32_t calculate_damage(const DamageParams& params) {
     n = n / def;
     n = n / 50;
 
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
+    // Inject the canonical pre-crit quotient Q.
+    // Replaces the /50 result BEFORE crit, burn, type, stab, +2, clamp.
+    // This makes Enginemon and Crystal start from the same Q at the same
+    // pipeline point. All downstream production code runs unchanged.
+    if (params.pre_crit_quotient_override >= 0) n = params.pre_crit_quotient_override;
+#endif
+
     // Critical hit: ×2 to the raw formula result (before any other modifiers)
     if (params.critical) {
         n *= 2;
@@ -355,6 +363,10 @@ int32_t calculate_damage(const DamageParams& params, const BattleRules& rules) {
     n = n * atk;
     n = n / def;
     n = n / static_cast<int32_t>(damage_div);
+
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
+    if (params.pre_crit_quotient_override >= 0) n = params.pre_crit_quotient_override;
+#endif
 
     if (params.critical) {
         n *= 2;

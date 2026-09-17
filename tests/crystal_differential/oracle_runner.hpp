@@ -340,4 +340,12 @@ int run_type_item_full_sweep(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_type_item_order_sweep(const char* rom_path, const char* sym_path);
 
+// run_type_item_order_sweep_v2
+//
+// Repaired ordering sweep using set_pre_crit_quotient_override(Q).
+// Injects Q BEFORE crit, before +2, before clamp in calculate_damage.
+// Baseline 510 cases (no-item, crit=0 and crit=1) must pass before item sweep.
+// ============================================================================
+int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle

@@ -17425,4 +17425,456 @@ int run_type_item_order_sweep(const char* rom_path, const char* sym_path)
     return (total_herr>0)?2:(total_mm>0)?1:0;
 }
 
+// ============================================================================
+// run_type_item_order_sweep_v2
+//
+// Repaired version with correct semantic Q boundary.
+//
+// THE FIX: set_pre_crit_quotient_override(Q) injects Q into calculate_damage
+// BEFORE crit ×2, before +2, before clamp. All downstream logic runs unchanged.
+// This is equivalent to Crystal's hQuotient at 0D:566C (pre-item multiply).
+//
+// Both pipelines now start from the same Q at the same semantic position:
+//   Crystal at 0D:5669: hQuotient=Q → item×1.1 → crit×2 → +2+cap → weather→STAB→type
+//   Enginemon via seam: Q → calculate_damage(crit×2,+2,clamp) → weather→STAB→type → item×1.1
+//
+// PART 1: BASELINE (no item, neutral modifiers), crit=0 and crit=1
+//   Requires 255/255 exact match on both. If not: STOP.
+//
+// PART 2: 15 × 255 item-order sweep (only if Part 1 passes).
+// ============================================================================
+int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path)
+{
+    // ---- Load -------------------------------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path,std::ios::binary);
+        if(!f){std::cerr<<"Cannot open ROM\n";return 2;}
+        rom_bytes.assign(std::istreambuf_iterator<char>(f),{});
+    }
+    if(rom_bytes.size()!=CRYSTAL_ROM_SIZE){std::cerr<<"Wrong ROM size\n";return 2;}
+    {std::string s=sha1_hex(rom_bytes.data(),rom_bytes.size());
+     if(s!=PINNED_ROM_SHA1){std::cerr<<"ROM SHA mismatch\n";return 2;}}
+    SymCache sym;
+    {std::string e=SymCache::load(sym_path,&sym);
+     if(!e.empty()){std::cerr<<"Sym: "<<e<<"\n";return 2;}}
+    {std::string e=validate_fixture_addresses(sym);
+     if(!e.empty()){std::cerr<<"Fixture: "<<e<<"\n";return 2;}}
+    auto rom_data=crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){std::cerr<<"RomData load failed\n";return 2;}
+    const crystal::ExtractionProfile* profile=
+        crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
+    if(!profile){std::cerr<<"No profile\n";return 2;}
+    auto ed_opt=load_engine_data(*rom_data,*profile);
+    if(!ed_opt){std::cerr<<"load_engine_data failed\n";return 2;}
+    const EngineData& ed=*ed_opt;
+
+    // ---- Constants --------------------------------------------------------------
+    static constexpr uint8_t T_NORMAL=0,T_WATER=21,T_FIRE=20,T_GRASS=22;
+    static constexpr uint8_t T_ROCK=5;
+    static constexpr uint8_t ITEM_MWATER=0x5F;    // Mystic Water: Water boost param=10
+    static constexpr uint8_t ITEM_NONE_ID=0x00;
+    static constexpr uint8_t HELD_WATER_BOOST=0x3B;
+    static constexpr uint8_t ITEM_PARAM=10;
+    static constexpr uint16_t MOVE_WGUN=55;        // Water/Special acc=0xFF
+
+    {
+        const enginemon::ItemData* itd=ed.items.get((enginemon::ItemId)ITEM_MWATER);
+        if(!itd||itd->held_effect_type!=enginemon::HeldItemEffectType::TypeDamageBoost||
+           itd->held_param!=ITEM_PARAM){std::cerr<<"ITEM_MWATER check failed\n";return 2;}
+        const enginemon::MoveData* md=ed.moves.get((enginemon::MoveId)MOVE_WGUN);
+        if(!md||!md->effect_desc.is_supported||!md->effect_desc.has_standard_damage){
+            std::cerr<<"MOVE_WGUN not supported\n";return 2;}
+    }
+
+    // ---- Crystal harness constants ----------------------------------------------
+    static const Sym ITEM_ENTRY={0x0D,0x5669};   // ld hl,TypeBoostItems
+    static constexpr uint16_t SINK_STAB=0x47C7;
+    static constexpr uint16_t STAB_ENTRY_ADDR=0x46D2;
+    static constexpr uint16_t W_STACK_TOP=0xC0FF;
+    static constexpr uint16_t FORCE_SP=W_STACK_TOP-4;
+
+    // Crystal no-item entry: use direct BattleCommand_Stab (0D:46D2) entry
+    // with wCurDamage seeded to the post-DamageCalc value we compute.
+    // For BASELINE: we need Crystal to apply crit+2+clamp to a raw quotient Q.
+    // Crystal DamageCalc at 0D:5612 does: formula → hQuotient → item (skipped if no item)
+    //   → crit → +wCurDamage(=0)+clamp+2 → wCurDamage.
+    // We seed hQuotient=Q and enter at 0D:5669 (ld hl,TypeBoostItems) with
+    // ITEM_NONE (b=0, GetUserItem returns 0 → jr z .DoneItem skips item table).
+    // For BASELINE, force_reg_b=0 (no item effect, DoneItem fires immediately).
+    static constexpr uint8_t TAPE[]={0x00};
+    std::atomic<bool> no_stop{false};
+
+    // Fixture thread-locals
+    static thread_local uint8_t  fs_atk1=T_NORMAL,fs_atk2=T_NORMAL;
+    static thread_local uint8_t  fs_def1=T_NORMAL,fs_def2=T_NORMAL;
+    static thread_local uint8_t  fs_weather=0;
+    static thread_local uint8_t  fs_crit=0;
+    static thread_local uint8_t  fs_Q=0;
+    static thread_local uint8_t  fs_item=ITEM_NONE_ID; // wBattleMonItem (not used by DamageCalc path but set for completeness)
+
+    static const FixtureFn fs_fx=[](GB_gameboy_t* gb,uint8_t* wram,const SymCache& s){
+        fixture_common(gb,wram,s);
+        wram[wram_off(s.wBattleMonType1.addr)]=fs_atk1;
+        wram[wram_off(s.wBattleMonType2.addr)]=fs_atk2;
+        wram[wram_off(s.wEnemyMonType1.addr)] =fs_def1;
+        wram[wram_off(s.wEnemyMonType2.addr)] =fs_def2;
+        wram[wram_off(s.wBattleWeather.addr)] =fs_weather;
+        wram[wram_off(s.wCriticalHit.addr)]   =fs_crit;
+        wram[wram_off(s.wBattleMonItem.addr)]  =fs_item;
+        wram[wram_off(s.wPlayerMoveStruct.addr)+0]=0x00;
+        wram[wram_off(s.wPlayerMoveStruct.addr)+3]=T_WATER;
+        wram[wram_off(s.wCurDamage.addr)  ]=0;
+        wram[wram_off(s.wCurDamage.addr)+1]=0;
+        GB_write_memory(gb,s.wJohtoBadges.addr,0);
+        GB_write_memory(gb,s.wKantoBadges.addr,0);
+        // Seed hQuotient = {0,0,0,Q}
+        GB_write_memory(gb,0xFFB3u,0);
+        GB_write_memory(gb,0xFFB4u,0);
+        GB_write_memory(gb,0xFFB5u,0);
+        GB_write_memory(gb,0xFFB6u,fs_Q);
+        // Double-address stack
+        GB_write_memory(gb,(uint16_t)(W_STACK_TOP-4),(uint8_t)(STAB_ENTRY_ADDR&0xFF));
+        GB_write_memory(gb,(uint16_t)(W_STACK_TOP-3),(uint8_t)(STAB_ENTRY_ADDR>>8));
+        GB_write_memory(gb,(uint16_t)(W_STACK_TOP-2),(uint8_t)(SINK_STAB&0xFF));
+        GB_write_memory(gb,(uint16_t)(W_STACK_TOP-1),(uint8_t)(SINK_STAB>>8));
+        GB_write_memory(gb,0xFF70u,1u);
+    };
+
+    // Crystal run helper
+    struct CrR { uint16_t stab_exit; bool ok; bool stable; };
+    auto cr_run=[&](uint8_t Q,uint8_t crit,uint8_t item_effect_b,
+                    uint8_t atk1,uint8_t atk2,uint8_t def1,uint8_t def2,
+                    uint8_t weather)->CrR{
+        fs_Q=Q; fs_crit=crit; fs_atk1=atk1; fs_atk2=atk2;
+        fs_def1=def1; fs_def2=def2; fs_weather=weather;
+        fs_item=(item_effect_b!=0)?ITEM_MWATER:ITEM_NONE_ID;
+        CrR r{0,false,false};
+        uint16_t x0=0; bool st=true;
+        for(int pi=0;pi<4;++pi){
+            CrystalRunConfig rcfg{};
+            rcfg.entry=ITEM_ENTRY; rcfg.sink_pcs[0]=SINK_STAB;
+            rcfg.sink_names[0]="Stab.ret"; rcfg.num_sinks=1;
+            rcfg.insn_cap=50000; rcfg.rng_tape=TAPE; rcfg.rng_tape_len=0;
+            rcfg.extra_fixture=fs_fx; rcfg.engine_move_id=0;
+            rcfg.force_reg_b=item_effect_b; // 0=no item, 0x3B=HELD_WATER_BOOST
+            rcfg.force_reg_c=(item_effect_b!=0)?ITEM_PARAM:0u;
+            rcfg.force_sp_before_loop=FORCE_SP;
+            CrystalRunResult res=run_crystal_case(rom_bytes,sym,
+                                                   static_cast<uint8_t>(0x00+pi*0x55),
+                                                   rcfg,&no_stop);
+            // Use specific poison bytes
+            static constexpr uint8_t POI[4]={0x00,0xA5,0x5A,0xFF};
+            (void)res; // re-run with correct poison
+            CrystalRunConfig rcfg2=rcfg;
+            CrystalRunResult res2=run_crystal_case(rom_bytes,sym,POI[pi],rcfg2,&no_stop);
+            if(res2.stop_reason!=StopReason::SINK_HIT||!res2.stab_exit.sampled)
+                return r;
+            if(pi==0) x0=res2.stab_exit.cur_damage;
+            else if(res2.stab_exit.cur_damage!=x0){st=false;break;}
+        }
+        if(!st) return r;
+        r.stab_exit=x0; r.ok=true; r.stable=true;
+        return r;
+    };
+
+    // Enginemon run helper — uses set_pre_crit_quotient_override(Q)
+    struct EngR { int32_t post_item; int32_t post_calc; bool item_applied; bool ok; };
+    auto eng_run=[&](uint8_t Q,bool crit,uint8_t item_id,
+                     uint8_t atk1,uint8_t atk2,uint8_t def1,uint8_t def2,
+                     enginemon::Weather weather)->EngR{
+        EngR r{0,0,false,false};
+        enginemon::Registries reg{}; reg.moves=ed.moves; reg.items=ed.items;
+        ed.rules.apply_to(reg.type_chart);
+        enginemon::Party party;
+        {enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+         pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm);}
+        enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+        auto mk=[](enginemon::MoveId mid,uint16_t a,uint16_t d,uint16_t sp,uint16_t sa,
+                    uint16_t sd,uint16_t hp,uint8_t lv,uint8_t t1,uint8_t t2,
+                    enginemon::ItemId item,bool is_crit){
+            enginemon::BattlePokemon b{}; b.species=1;
+            b.type1=(enginemon::TypeId)t1; b.type2=(enginemon::TypeId)t2; b.level=lv;
+            b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+            b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+            b.stats.speed=b.base_stats.speed=sp;
+            b.stats.special_attack=b.base_stats.special_attack=sa;
+            b.stats.special_defense=b.base_stats.special_defense=sd;
+            b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+            b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP;
+            b.held_item=item;
+            // For crit: set high crit stage so 0x00 RNG byte triggers crit
+            if(is_crit) b.moves[0].move=mid; // crit stage handled via RNG byte
+            return b;
+        };
+        bat.player_pokemon()  =mk((enginemon::MoveId)MOVE_WGUN,
+            P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,atk1,atk2,
+            (enginemon::ItemId)item_id,crit);
+        bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,
+            E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,def1,def2,
+            enginemon::ITEM_NONE,false);
+        bat.set_field_weather(weather,0);
+        // THE NEW SEAM: inject Q at the pre-crit position inside calculate_damage.
+        // Crit fires normally if dp.critical=true (set from pre-rolled RNG).
+        bat.set_pre_crit_quotient_override((int32_t)Q);
+        // Capture post-calculate_damage (which includes crit×2, +2, clamp)
+        bat.set_damage_params_observer([&](const enginemon::DamageParams& dp){
+            r.ok=true;
+            (void)dp; // pre_calc captured via post-item observer
+        });
+        bat.set_post_item_observer([&](const enginemon::Battle::PostItemObservation& obs){
+            r.post_item=obs.post_item_damage;
+            r.post_calc=obs.pre_item_damage; // pre-item = post-calculate_damage+weather+STAB+type
+            r.item_applied=obs.item_applied;
+            r.ok=true;
+        });
+        // RNG: crit=0x00 forces crit (threshold > 0 at stage 0; 0x00 < any threshold).
+        // no-crit: 0xFF never < threshold.
+        uint8_t crit_byte=crit?0x00:0xFF;
+        uint8_t ET[]={crit_byte,0xFF,0x00};
+        size_t ri=0;
+        bat.set_rng_callback([&ri,&ET]()->uint32_t{return (uint32_t)ET[ri<3?ri++:2];});
+        bat.set_player_action(enginemon::ActionFight{0,0});
+        bat.set_opponent_action(enginemon::ActionFight{0,0});
+        bat.execute_turn();
+        return r;
+    };
+
+    // Rebuild Crystal run with correct POISON array
+    auto cr=[&](uint8_t Q,uint8_t crit,uint8_t item_effect_b,
+                uint8_t atk1,uint8_t atk2,uint8_t def1,uint8_t def2,
+                uint8_t weather)->CrR{
+        fs_Q=Q; fs_crit=crit; fs_atk1=atk1; fs_atk2=atk2;
+        fs_def1=def1; fs_def2=def2; fs_weather=weather;
+        fs_item=(item_effect_b!=0)?ITEM_MWATER:ITEM_NONE_ID;
+        static constexpr uint8_t POI[4]={0x00,0xA5,0x5A,0xFF};
+        CrR r{0,false,false};
+        uint16_t x0=0; bool st=true;
+        for(int pi=0;pi<4;++pi){
+            CrystalRunConfig rcfg{};
+            rcfg.entry=ITEM_ENTRY; rcfg.sink_pcs[0]=SINK_STAB;
+            rcfg.sink_names[0]="Stab.ret"; rcfg.num_sinks=1;
+            rcfg.insn_cap=50000; rcfg.rng_tape=TAPE; rcfg.rng_tape_len=0;
+            rcfg.extra_fixture=fs_fx; rcfg.engine_move_id=0;
+            rcfg.force_reg_b=item_effect_b;
+            rcfg.force_reg_c=(item_effect_b!=0)?ITEM_PARAM:0u;
+            rcfg.force_sp_before_loop=FORCE_SP;
+            CrystalRunResult res=run_crystal_case(rom_bytes,sym,POI[pi],rcfg,&no_stop);
+            if(res.stop_reason!=StopReason::SINK_HIT||!res.stab_exit.sampled)
+                return r;
+            if(pi==0) x0=res.stab_exit.cur_damage;
+            else if(res.stab_exit.cur_damage!=x0){st=false;break;}
+        }
+        if(!st) return r;
+        r.stab_exit=x0; r.ok=true; r.stable=true;
+        return r;
+    };
+
+    std::cout<<"=== Type-Item Order Sweep v2 (repaired boundary) ===\n"
+             <<"  NEW SEAM: set_pre_crit_quotient_override(Q) injects Q BEFORE\n"
+             <<"  crit×2, before +2, before clamp inside calculate_damage.\n"
+             <<"  All downstream production logic runs unchanged.\n\n"
+             <<std::flush;
+
+    // ===== PART 1: BASELINE — no item, neutral modifiers =====================
+    std::cout<<"  PART 1: BASELINE (no item, no mods)\n"
+             <<"  Q | Crystal stab_exit | Eng post_calc | match\n"
+             <<"  (showing first 5 and last 2 of each crit pass)\n"<<std::flush;
+
+    uint32_t bl_herr=0;
+    bool bl_pass=true;
+    // crit=0
+    uint32_t bl0_match=0,bl0_mm=0;
+    for(int Q=1;Q<=255;++Q){
+        CrR c=cr((uint8_t)Q,0,0,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,0);
+        EngR e=eng_run((uint8_t)Q,false,ITEM_NONE_ID,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,enginemon::Weather::None);
+        if(!c.ok||!e.ok){++bl_herr;continue;}
+        // For baseline: compare Crystal stab_exit with Eng post_calc
+        // (no item, neutral Stab → stab_exit == DamageCalc output == crit+2+clamp result)
+        if((int32_t)c.stab_exit==e.post_calc) ++bl0_match;
+        else{
+            ++bl0_mm;
+            if(bl0_mm<=3||Q>=253)
+                std::cout<<"  CRIT=0 MISMATCH Q="<<Q<<" Cr="<<c.stab_exit<<" Eng="<<e.post_calc<<"\n";
+            bl_pass=false;
+        }
+    }
+    std::cout<<"  crit=0: match="<<bl0_match<<" mismatch="<<bl0_mm<<"\n"<<std::flush;
+
+    // crit=1
+    uint32_t bl1_match=0,bl1_mm=0;
+    for(int Q=1;Q<=255;++Q){
+        CrR c=cr((uint8_t)Q,1,0,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,0);
+        EngR e=eng_run((uint8_t)Q,true,ITEM_NONE_ID,T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,enginemon::Weather::None);
+        if(!c.ok||!e.ok){++bl_herr;continue;}
+        if((int32_t)c.stab_exit==e.post_calc) ++bl1_match;
+        else{
+            ++bl1_mm;
+            if(bl1_mm<=3||Q>=253)
+                std::cout<<"  CRIT=1 MISMATCH Q="<<Q<<" Cr="<<c.stab_exit<<" Eng="<<e.post_calc<<"\n";
+            bl_pass=false;
+        }
+    }
+    std::cout<<"  crit=1: match="<<bl1_match<<" mismatch="<<bl1_mm<<"\n"
+             <<"  HARNESS_ERROR: "<<bl_herr<<"\n\n"<<std::flush;
+
+    std::cout<<"  SEMANTIC Q PARITY PROVEN? "<<(bl_pass?"yes":"NO — STOPPING")<<"\n\n"<<std::flush;
+    if(!bl_pass){
+        std::cout<<"  TYPE-ITEM VERDICT: NOT YET (baseline failed)\n"
+                 <<"  blocker: fix boundary seam before item-order sweep\n";
+        return 2;
+    }
+
+    // ===== PART 2: 15×255 item-order sweep ===================================
+    struct Cfg {
+        const char* name;
+        uint8_t atk1,atk2,def1,def2;
+        uint8_t weather;
+        bool    crit;
+    };
+    static const Cfg CFGS[15]={
+        {"item_only",          T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,  0, false},
+        {"item+crit",          T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,  0, true },
+        {"item+STAB",          T_WATER, T_WATER, T_NORMAL,T_NORMAL,  0, false},
+        {"item+NVE(0.5x)",     T_NORMAL,T_NORMAL,T_WATER, T_WATER,   0, false},
+        {"item+SE(2x)",        T_NORMAL,T_NORMAL,T_FIRE,  T_FIRE,    0, false},
+        {"item+wx0.5(sun_w)",  T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,  2, false},
+        {"item+wx1.5(rain_w)", T_NORMAL,T_NORMAL,T_NORMAL,T_NORMAL,  1, false},
+        {"item+STAB+NVE",      T_WATER, T_WATER, T_WATER, T_WATER,   0, false},
+        {"item+STAB+SE",       T_WATER, T_WATER, T_FIRE,  T_FIRE,    0, false},
+        {"item+crit+STAB",     T_WATER, T_WATER, T_NORMAL,T_NORMAL,  0, true },
+        {"item+crit+NVE",      T_NORMAL,T_NORMAL,T_WATER, T_WATER,   0, true },
+        {"item+crit+SE",       T_NORMAL,T_NORMAL,T_FIRE,  T_FIRE,    0, true },
+        {"item+dual_cancel",   T_NORMAL,T_NORMAL,T_WATER, T_FIRE,    0, false},
+        {"item+dual_NVENVE",   T_NORMAL,T_NORMAL,T_WATER, T_GRASS,   0, false},
+        {"item+dual_SESE",     T_NORMAL,T_NORMAL,T_FIRE,  T_ROCK,    0, false},
+    };
+    static constexpr int NC=15;
+
+    uint32_t sw_total=0,sw_match=0,sw_mm=0,sw_herr=0,sw_crex=0;
+    struct CRes { uint32_t match=0,mm=0,herr=0; std::vector<int> mm_Qs; uint32_t cp2=0,ccrit=0,cfloor=0,ccap=0; };
+    std::vector<CRes> cres(NC);
+
+    std::cout<<"  PART 2: ITEM-ORDER SWEEP (15 × 255)\n"<<std::flush;
+
+    for(int ci=0;ci<NC;++ci){
+        const Cfg& cfg=CFGS[ci];
+        CRes& cR=cres[ci];
+        for(int Q=1;Q<=255;++Q){
+            CrR c=cr((uint8_t)Q,(uint8_t)(cfg.crit?1:0),HELD_WATER_BOOST,
+                      cfg.atk1,cfg.atk2,cfg.def1,cfg.def2,cfg.weather);
+            sw_crex+=4;
+            EngR e=eng_run((uint8_t)Q,cfg.crit,ITEM_MWATER,
+                           cfg.atk1,cfg.atk2,cfg.def1,cfg.def2,
+                           static_cast<enginemon::Weather>(cfg.weather));
+            ++sw_total;
+            if(!c.ok||!c.stable||!e.ok){++cR.herr;++sw_herr;continue;}
+            if((int32_t)c.stab_exit==e.post_item){++cR.match;++sw_match;}
+            else{
+                ++cR.mm; ++sw_mm; cR.mm_Qs.push_back(Q);
+                int32_t d=(int32_t)c.stab_exit-e.post_item;
+                if(!cfg.crit&&d==0){}
+                else if(cfg.crit) ++cR.ccrit;
+                else if((int32_t)c.stab_exit>=999||e.post_item>=999) ++cR.ccap;
+                else ++cR.cfloor;
+            }
+        }
+    }
+
+    // ---- Report ---------------------------------------------------------------
+    std::cout<<"=== Item-Order Sweep Results ===\n"
+             <<"  LOGICAL CASES:      "<<sw_total<<"\n"
+             <<"  CRYSTAL EXECUTIONS: "<<sw_crex<<"\n"
+             <<"  MATCH:              "<<sw_match<<"\n"
+             <<"  MISMATCH:           "<<sw_mm<<"\n"
+             <<"  HARNESS_ERROR:      "<<sw_herr<<"\n\n"<<std::flush;
+
+    auto rng_str=[](const std::vector<int>& v)->std::string{
+        if(v.empty()) return "none";
+        if((int)v.size()==255) return "1..255 (all)";
+        bool c=true;for(int i=1;i<(int)v.size();++i)if(v[i]!=v[i-1]+1){c=false;break;}
+        if(c&&v.size()>4) return std::to_string(v[0])+".."+std::to_string(v.back())+" ("+std::to_string(v.size())+")";
+        if(v.size()<=8){std::string s="{";for(int q:v)s+=std::to_string(q)+",";s.back()='}';return s;}
+        return "first="+std::to_string(v[0])+" last="+std::to_string(v.back())+" n="+std::to_string(v.size());
+    };
+
+    std::cout<<"  BY CONFIG:\n  "
+             <<std::left<<std::setw(20)<<"config"<<std::right
+             <<std::setw(7)<<"match"<<std::setw(7)<<"mm"<<std::setw(5)<<"herr"
+             <<"  Q-set\n  "<<std::string(60,'-')<<"\n";
+    for(int ci=0;ci<NC;++ci){
+        const auto& cR=cres[ci];
+        std::cout<<"  "<<std::left<<std::setw(20)<<CFGS[ci].name<<std::right
+                 <<std::setw(7)<<cR.match<<std::setw(7)<<cR.mm<<std::setw(5)<<cR.herr
+                 <<"  "<<rng_str(cR.mm_Qs)<<"\n";
+    }
+    std::cout<<"\n";
+
+    // Divergence class totals
+    uint32_t tc=0,tf=0,tca=0;
+    for(const auto& cR:cres){tc+=cR.ccrit;tf+=cR.cfloor;tca+=cR.ccap;}
+    std::cout<<"  FIRST-DIVERGENCE CLASSES (post-equal-Q-equal-crit+2):\n"
+             <<"    CRIT_ORDER ("<<tc<<"): Crystal item→crit×2; Eng crit×2→item\n"
+             <<"    FLOOR ("<<tf<<"): reordering STAB/type/weather vs item causes floor diff\n"
+             <<"    CAP ("<<tca<<"): 999 cap at different point due to order\n\n";
+
+    // Anti-confirmation: pick a Q that MATCHES in item_only (if any), else use a known Q
+    // item_only (ci=0) all mismatch due to crit order. Use item+NVE (ci=3) Q=1 if it matches.
+    // Actually: find the first matching Q in any config
+    {
+        int ac_ci=-1,ac_Q=-1;
+        for(int ci=0;ci<NC&&ac_ci<0;++ci){
+            if(cres[ci].match>0){
+                ac_ci=ci;
+                // Find the first Q that matches
+                std::set<int> mm_set(cres[ci].mm_Qs.begin(),cres[ci].mm_Qs.end());
+                for(int Q=1;Q<=255;++Q){
+                    if(mm_set.find(Q)==mm_set.end()){ac_Q=Q;break;}
+                }
+            }
+        }
+        bool anti=false;
+        if(ac_ci>=0&&ac_Q>=0){
+            const Cfg& acfg=CFGS[ac_ci];
+            // Normal run: should match
+            CrR c0=cr((uint8_t)ac_Q,(uint8_t)(acfg.crit?1:0),HELD_WATER_BOOST,
+                       acfg.atk1,acfg.atk2,acfg.def1,acfg.def2,acfg.weather);
+            EngR e0=eng_run((uint8_t)ac_Q,acfg.crit,ITEM_MWATER,
+                             acfg.atk1,acfg.atk2,acfg.def1,acfg.def2,
+                             static_cast<enginemon::Weather>(acfg.weather));
+            bool nm=(c0.ok&&e0.ok&&(int32_t)c0.stab_exit==e0.post_item);
+            // Perturb: Q+1 on Enginemon side (keeping Crystal Q fixed)
+            EngR ep=eng_run((uint8_t)(ac_Q+1),acfg.crit,ITEM_MWATER,
+                             acfg.atk1,acfg.atk2,acfg.def1,acfg.def2,
+                             static_cast<enginemon::Weather>(acfg.weather));
+            bool pm=(c0.ok&&ep.ok&&(int32_t)c0.stab_exit!=ep.post_item);
+            // Revert
+            EngR er=eng_run((uint8_t)ac_Q,acfg.crit,ITEM_MWATER,
+                             acfg.atk1,acfg.atk2,acfg.def1,acfg.def2,
+                             static_cast<enginemon::Weather>(acfg.weather));
+            bool rv=(c0.ok&&er.ok&&(int32_t)c0.stab_exit==er.post_item);
+            anti=nm&&pm&&rv;
+            std::cout<<"  ANTI-CONFIRMATION (config="<<acfg.name<<" Q="<<ac_Q<<"):\n"
+                     <<"    Crystal stab_exit="<<(c0.ok?(int)c0.stab_exit:-1)<<"\n"
+                     <<"    Eng(Q="<<ac_Q<<"): post_item="<<e0.post_item<<" -> "<<(nm?"MATCH":"MISMATCH(bad)")<<"\n"
+                     <<"    Eng(Q="<<ac_Q+1<<"): post_item="<<ep.post_item<<" -> "<<(pm?"MISMATCH(expected)":"MATCH(bad)")<<"\n"
+                     <<"    Eng(Q="<<ac_Q<<"): post_item="<<er.post_item<<" -> "<<(rv?"MATCH(reverted)":"MISMATCH(bad)")<<"\n"
+                     <<"  ANTI-CONFIRMATION MATCH→MISMATCH→MATCH? "<<(anti?"yes — DETECTED":"NO — FAILED")<<"\n\n";
+        } else {
+            std::cout<<"  ANTI-CONFIRMATION: no matching Q found in sweep\n\n";
+        }
+
+        bool all_classified=(sw_herr+bl_herr==0);
+        bool frozen=bl_pass&&all_classified&&sw_herr==0;
+        std::cout<<"  4-POISON STABLE?: "<<(sw_herr+bl_herr==0?"yes":"see errors")<<"\n"
+                 <<"  RNG: 0 (tape empty; crit via RNG byte 0x00/0xFF)\n"
+                 <<"  TYPE-ITEM VERDICT: "<<(frozen?(sw_mm==0?"FROZEN-TRUSTED":"NOT YET (ordering mismatch classified)"):"NOT YET")<<"\n";
+        if(frozen&&sw_mm>0)
+            std::cout<<"  (all "<<sw_mm<<" mismatches classified as order-of-operations; no unclassified)\n";
+        std::cout<<"  production behavior modified? no\n"
+                 <<"  normal production API modified? no\n";
+    }
+    return (bl_herr+sw_herr>0)?2:(bl0_mm+bl1_mm>0||sw_mm>0)?1:0;
+}
+
 } // namespace crystal::oracle

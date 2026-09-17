@@ -86,6 +86,16 @@ struct DamageParams {
     bool light_screen_active; // Caller must double defense_stat if true
     Weather weather;        // Informational; caller applies weather via apply_weather_modifier()
     TypeId move_type;       // Informational; used by caller for weather lookup
+
+#ifdef ENGINEMON_ENABLE_TEST_SEAMS
+    // Test-only: if ≥ 0, replaces the base quotient (result of the /divisor step)
+    // BEFORE critical multiplier, BEFORE +2, BEFORE min/max clamp.
+    // This gives both pipelines an identical semantic Q at the same point
+    // Crystal observes hQuotient BEFORE the item multiply (0D:566C capture).
+    // Downstream production logic (crit ×2, burned, type, stab, +2, clamp) all run unchanged.
+    // Set to -1 (default = disabled). Never used in production.
+    int32_t pre_crit_quotient_override = -1;
+#endif
 };
 int32_t calculate_damage(const DamageParams& params);
 int32_t calculate_damage(const DamageParams& params, const BattleRules& rules);

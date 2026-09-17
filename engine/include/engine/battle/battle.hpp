@@ -470,6 +470,13 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
     // Set to -1 (default) to disable.
     void set_pre_type_damage_override(int32_t v) { pre_type_damage_override_ = v; }
 
+    // Sets dp.pre_crit_quotient_override inside calculate_damage so that Q replaces
+    // the base formula result BEFORE crit ×2, burn, +2, clamp. All downstream
+    // production logic (crit, burn, type, stab, +2, clamp) runs unchanged.
+    // This is the correct semantic boundary that matches Crystal's 0D:566C capture.
+    // Set to -1 (default) to disable.
+    void set_pre_crit_quotient_override(int32_t v) { pre_crit_quotient_override_ = v; }
+
     // If set to a value ≥ 0, overrides the damage value immediately BEFORE the
     // type-boost item step in execute_move_damaging (after weather+STAB+type have
     // already been applied). Use with set_post_item_observer to certify item boost
@@ -536,6 +543,7 @@ private:
     PostItemObserver post_item_observer_;
     int32_t pre_type_damage_override_ = -1;
     int32_t pre_item_damage_override_  = -1; // injects before the type-item boost step
+    int32_t pre_crit_quotient_override_ = -1; // injects into dp before calculate_damage
 #endif // ENGINEMON_ENABLE_TEST_SEAMS
 
     // Turn state

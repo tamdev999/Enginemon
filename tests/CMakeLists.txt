@@ -655,6 +655,20 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(type_item_order_sweep PRIVATE /bigobj)
     endif()
 
+    # type_item_order_sweep_v2 -- repaired boundary, baseline 510 + 15×255 sweep
+    # Usage: type_item_order_sweep_v2 <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(type_item_order_sweep_v2
+        crystal_differential/type_item_order_sweep_v2.cpp
+    )
+    target_link_libraries(type_item_order_sweep_v2 PRIVATE oracle_runner_lib)
+    target_include_directories(type_item_order_sweep_v2 PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(type_item_order_sweep_v2 PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>
