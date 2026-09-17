@@ -17541,8 +17541,16 @@ int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path)
         GB_write_memory(gb,0xFF70u,1u);
     };
 
-    // Crystal run helper
-    struct CrR { uint16_t stab_exit; bool ok; bool stable; };
+    // Crystal run helper — captures stab_exit AND stab_entry (post-DamageCalc, pre-Stab)
+    // and damagecalc_post_item.quotient (post-item inside DamageCalc, pre-crit).
+    struct CrR {
+        uint16_t stab_exit;          // wCurDamage at Stab ret (0D:47C7) — final output
+        uint16_t stab_entry_dmg;     // wCurDamage at Stab entry (0D:46D2) — post-DamageCalc
+        uint16_t dc_post_item_q;     // hQuotient[2:3] at DamageCalc.DoneItem (0D:568F)
+        bool     has_stab_entry;     // true if stab_entry was sampled
+        bool     has_dc_post_item;   // true if damagecalc_post_item was sampled
+        bool     ok; bool stable;
+    };
     auto cr_run=[&](uint8_t Q,uint8_t crit,uint8_t item_effect_b,
                     uint8_t atk1,uint8_t atk2,uint8_t def1,uint8_t def2,
                     uint8_t weather)->CrR{
@@ -17579,11 +17587,17 @@ int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path)
     };
 
     // Enginemon run helper — uses set_pre_crit_quotient_override(Q)
-    struct EngR { int32_t post_item; int32_t post_calc; bool item_applied; bool ok; };
+    struct EngR {
+        int32_t post_item;      // after item step (PostItemObservation::post_item_damage)
+        int32_t post_calc_only; // after calculate_damage only — post-crit, post-+2, pre-weather
+        int32_t post_calc;      // pre-item = post-weather+STAB+type (PostItemObservation::pre_item_damage)
+        bool item_applied;
+        bool ok;
+    };
     auto eng_run=[&](uint8_t Q,bool crit,uint8_t item_id,
                      uint8_t atk1,uint8_t atk2,uint8_t def1,uint8_t def2,
                      enginemon::Weather weather)->EngR{
-        EngR r{0,0,false,false};
+        EngR r{0,0,0,false,false};
         enginemon::Registries reg{}; reg.moves=ed.moves; reg.items=ed.items;
         ed.rules.apply_to(reg.type_chart);
         enginemon::Party party;
@@ -17622,6 +17636,9 @@ int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path)
             r.ok=true;
             (void)dp; // pre_calc captured via post-item observer
         });
+        bat.set_post_calc_observer([&](const enginemon::Battle::PostCalcObservation& obs){
+            r.post_calc_only=obs.calc_damage; // post-crit/+2/clamp, pre-weather/STAB/type
+        });
         bat.set_post_item_observer([&](const enginemon::Battle::PostItemObservation& obs){
             r.post_item=obs.post_item_damage;
             r.post_calc=obs.pre_item_damage; // pre-item = post-calculate_damage+weather+STAB+type
@@ -17648,7 +17665,7 @@ int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path)
         fs_def1=def1; fs_def2=def2; fs_weather=weather;
         fs_item=(item_effect_b!=0)?ITEM_MWATER:ITEM_NONE_ID;
         static constexpr uint8_t POI[4]={0x00,0xA5,0x5A,0xFF};
-        CrR r{0,false,false};
+        CrR r{0,0,0,false,false,false,false};
         uint16_t x0=0; bool st=true;
         for(int pi=0;pi<4;++pi){
             CrystalRunConfig rcfg{};
@@ -17662,7 +17679,13 @@ int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path)
             CrystalRunResult res=run_crystal_case(rom_bytes,sym,POI[pi],rcfg,&no_stop);
             if(res.stop_reason!=StopReason::SINK_HIT||!res.stab_exit.sampled)
                 return r;
-            if(pi==0) x0=res.stab_exit.cur_damage;
+            if(pi==0){
+                x0=res.stab_exit.cur_damage;
+                r.stab_entry_dmg    = res.stab_entry.sampled ? res.stab_entry.cur_damage : 0;
+                r.dc_post_item_q    = res.damagecalc_post_item.sampled ? res.damagecalc_post_item.quotient : 0;
+                r.has_stab_entry    = res.stab_entry.sampled;
+                r.has_dc_post_item  = res.damagecalc_post_item.sampled;
+            }
             else if(res.stab_exit.cur_damage!=x0){st=false;break;}
         }
         if(!st) return r;
@@ -17772,11 +17795,25 @@ int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path)
             if((int32_t)c.stab_exit==e.post_item){++cR.match;++sw_match;}
             else{
                 ++cR.mm; ++sw_mm; cR.mm_Qs.push_back(Q);
-                int32_t d=(int32_t)c.stab_exit-e.post_item;
-                if(!cfg.crit&&d==0){}
-                else if(cfg.crit) ++cR.ccrit;
-                else if((int32_t)c.stab_exit>=999||e.post_item>=999) ++cR.ccap;
-                else ++cR.cfloor;
+                // Classification from OBSERVED intermediates:
+                // c.stab_entry_dmg = Crystal wCurDamage at Stab entry (0D:46D2):
+                //   post-DamageCalc-complete = post-(item×1.1)×crit+2+cap
+                // e.post_calc_only = Enginemon post-calculate_damage:
+                //   post-crit×2,+2,clamp — pre-weather/STAB/type/item
+                //
+                // FIRST_DIVERGENCE_AT_DAMAGECALC: c.stab_entry_dmg ≠ e.post_calc_only
+                //   Crystal DamageCalc applied item then crit; Enginemon applied crit only.
+                //   For crit cases: CLASS_CRIT_ORDER
+                //   For non-crit cases: Crystal applied item (floor(Q×1.1)), Eng didn't:
+                //     c.stab_entry_dmg=floor(Q×1.1)+2, e.post_calc_only=Q+2 → CLASS_FLOOR_DAMAGECALC
+                //
+                // CAP: either side at 999 — ORDER changed when 999 is hit
+                bool dc_diverged = (c.has_stab_entry && (int32_t)c.stab_entry_dmg != e.post_calc_only);
+                bool at_cap = ((int32_t)c.stab_exit>=999 || e.post_item>=999);
+                if(at_cap && !dc_diverged)   ++cR.ccap;   // cap happens in Stab modifiers
+                else if(at_cap)              ++cR.ccap;   // cap regardless of where it started
+                else if(cfg.crit&&dc_diverged) ++cR.ccrit; // first diverge at DamageCalc due to crit order
+                else                           ++cR.cfloor;// first diverge: non-crit floor from item order
             }
         }
     }
@@ -17813,12 +17850,87 @@ int run_type_item_order_sweep_v2(const char* rom_path, const char* sym_path)
     // Divergence class totals
     uint32_t tc=0,tf=0,tca=0;
     for(const auto& cR:cres){tc+=cR.ccrit;tf+=cR.cfloor;tca+=cR.ccap;}
-    std::cout<<"  FIRST-DIVERGENCE CLASSES (post-equal-Q-equal-crit+2):\n"
-             <<"    CRIT_ORDER ("<<tc<<"): Crystal item→crit×2; Eng crit×2→item\n"
-             <<"    FLOOR ("<<tf<<"): reordering STAB/type/weather vs item causes floor diff\n"
-             <<"    CAP ("<<tca<<"): 999 cap at different point due to order\n\n";
+    std::cout<<"  FIRST-DIVERGENCE CLASSES (observed intermediates):\n"
+             <<"    CRIT_ORDER ("<<tc<<"): first diverge at DamageCalc exit;\n"
+             <<"      Crystal item→crit→+2: c.stab_entry_dmg = floor(Q×1.1)×2+2\n"
+             <<"      Enginemon crit→+2→item: e.post_calc_only = Q×2+2\n"
+             <<"    FLOOR ("<<tf<<"): first diverge at DamageCalc exit (non-crit) or in Stab;\n"
+             <<"      Crystal item inside DamageCalc: c.stab_entry_dmg = floor(Q×1.1)+2\n"
+             <<"      Enginemon item after Stab: e.post_calc_only = Q+2\n"
+             <<"    CAP ("<<tca<<"): 999 cap observed on at least one side\n\n";
+
+    // Representative examples for each class (3 per class from first occurrence)
+    std::cout<<"  REPRESENTATIVE EXAMPLES:\n";
+    for(int ci=0;ci<NC;++ci){
+        const Cfg& cfg=CFGS[ci];
+        const auto& cR=cres[ci];
+        if(cR.mm==0) continue;
+        // Show first 3 mismatches with full intermediates
+        int shown=0;
+        for(int Q : cR.mm_Qs){
+            if(shown>=3) break;
+            CrR c=cr((uint8_t)Q,(uint8_t)(cfg.crit?1:0),HELD_WATER_BOOST,
+                      cfg.atk1,cfg.atk2,cfg.def1,cfg.def2,cfg.weather);
+            EngR e=eng_run((uint8_t)Q,cfg.crit,ITEM_MWATER,
+                            cfg.atk1,cfg.atk2,cfg.def1,cfg.def2,
+                            static_cast<enginemon::Weather>(cfg.weather));
+            if(!c.ok||!e.ok) continue;
+            // Classify this case
+            bool at_cap=((int32_t)c.stab_exit>=999||e.post_item>=999);
+            bool dc_div=(c.has_stab_entry&&(int32_t)c.stab_entry_dmg!=e.post_calc_only);
+            const char* cls=at_cap?"CAP":(cfg.crit&&dc_div?"CRIT_ORDER":"FLOOR");
+            std::cout<<"  ["<<cfg.name<<"] Q="<<Q<<" class="<<cls<<"\n"
+                     <<"    Crystal: Q="<<Q
+                     <<" -> item_q="<<c.dc_post_item_q
+                     <<"(has="<<c.has_dc_post_item<<")"
+                     <<" -> DamCalc_out(stab_entry)="<<c.stab_entry_dmg
+                     <<"(has="<<c.has_stab_entry<<")"
+                     <<" -> stab_exit="<<c.stab_exit<<"\n"
+                     <<"    Enginemon: Q="<<Q
+                     <<" -> post_calc_only(pre-wx)="<<e.post_calc_only
+                     <<" -> post_calc(pre-item)="<<e.post_calc
+                     <<" -> post_item="<<e.post_item<<"\n"
+                     <<"    first_diverge: Cr_stab_entry="<<c.stab_entry_dmg
+                     <<" vs Eng_post_calc_only="<<e.post_calc_only
+                     <<" ("<<(c.has_stab_entry&&(int32_t)c.stab_entry_dmg!=e.post_calc_only?"DIVERGE":"same")<<")\n";
+            ++shown;
+        }
+    }
 
     // Anti-confirmation: pick a Q that MATCHES in item_only (if any), else use a known Q
+    // CAP verification: show all 30 CAP cases
+    {
+        std::cout<<"\n  CAP VERIFICATION ("<<tca<<" cases):\n"
+                 <<"  Crystal cap: DamageCalc clamps at 997+2=999 INSIDE DamageCalc (before Stab).\n"
+                 <<"  Enginemon cap: calculate_damage clamps at 999 (before weather/STAB/type);\n"
+                 <<"    post-item also capped at 999. Crystal post-DamageCalc ≤999 always.\n"
+                 <<"  BattleCommand_Stab has NO final 999 cap: Crystal stab_exit CAN exceed 999\n"
+                 <<"    when type/STAB modifiers multiply the ≤999 DamageCalc value.\n\n"
+                 <<"  config            Q    Cr_entry Cr_exit Eng_calc Eng_item\n";
+        for(int ci=0;ci<NC;++ci){
+            const Cfg& cfg=CFGS[ci];
+            const auto& cR=cres[ci];
+            if(cR.ccap==0) continue;
+            for(int Q : cR.mm_Qs){
+                CrR c=cr((uint8_t)Q,(uint8_t)(cfg.crit?1:0),HELD_WATER_BOOST,
+                          cfg.atk1,cfg.atk2,cfg.def1,cfg.def2,cfg.weather);
+                EngR e=eng_run((uint8_t)Q,cfg.crit,ITEM_MWATER,
+                                cfg.atk1,cfg.atk2,cfg.def1,cfg.def2,
+                                static_cast<enginemon::Weather>(cfg.weather));
+                if(!c.ok||!e.ok) continue;
+                bool at_cap=((int32_t)c.stab_exit>=999||e.post_item>=999);
+                if(!at_cap) continue;
+                std::cout<<"  "<<std::left<<std::setw(18)<<cfg.name<<std::right
+                         <<std::setw(4)<<Q
+                         <<std::setw(9)<<c.stab_entry_dmg
+                         <<std::setw(8)<<c.stab_exit
+                         <<std::setw(9)<<e.post_calc_only
+                         <<std::setw(9)<<e.post_item<<"\n";
+            }
+        }
+    }
+
+    // Anti-confirmation: find first Q that MATCHES in any config
     // item_only (ci=0) all mismatch due to crit order. Use item+NVE (ci=3) Q=1 if it matches.
     // Actually: find the first matching Q in any config
     {

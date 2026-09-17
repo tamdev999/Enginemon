@@ -1313,6 +1313,13 @@ MoveExecutionResult Battle::execute_move_damaging(
 
     int32_t damage = rules_ ? enginemon::calculate_damage(dp, *rules_) : enginemon::calculate_damage(dp);
 #ifdef ENGINEMON_ENABLE_TEST_SEAMS
+    // Fire post-calc observer: captures result immediately after calculate_damage,
+    // before any subsequent modifier (weather, STAB, type, item).
+    if (post_calc_observer_) {
+        PostCalcObservation obs{};
+        obs.calc_damage = damage;
+        post_calc_observer_(obs);
+    }
     // Override the pre-STAB/type damage value when set (≥0).
     // STAB and type-effectiveness code runs on this injected value.
     if (pre_type_damage_override_ >= 0) damage = pre_type_damage_override_;

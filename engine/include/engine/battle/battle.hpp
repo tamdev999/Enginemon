@@ -435,7 +435,8 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         damage_params_observer_ = std::move(obs);
     }
 
-    // Observer that fires immediately after production STAB + type-effectiveness
+    // Observer that fires immediately after the type-boost held-item step in
+    // execute_move_damaging, BEFORE damage variation and HP application.
     // application in execute_move_damaging, BEFORE held-item boost, secondary effects,
     // damage variation, and HP application.
     // Receives: {pre_stab_type_damage, stab_applied, combined_eff, post_stab_type_damage}
@@ -450,8 +451,18 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
         post_type_observer_ = std::move(obs);
     }
 
-    // Observer that fires immediately after the type-boost held-item step in
-    // execute_move_damaging, BEFORE damage variation and HP application.
+    // Observer that fires immediately after calculate_damage() returns,
+    // BEFORE weather modifier, BEFORE STAB, BEFORE type, BEFORE item.
+    // Captures the raw post-crit/+2/clamp value at the exact point Enginemon
+    // starts applying Stab modifiers — equivalent to Crystal's stab_entry.cur_damage
+    // (wCurDamage at 0D:46D2, after DamageCalc and before BattleCommand_Stab).
+    struct PostCalcObservation {
+        int32_t calc_damage; // result of calculate_damage(dp) — post-crit, post-+2, post-clamp
+    };
+    using PostCalcObserver = std::function<void(const PostCalcObservation&)>;
+    void set_post_calc_observer(PostCalcObserver obs) {
+        post_calc_observer_ = std::move(obs);
+    }
     // Used to certify type-item boost arithmetic without variation contamination.
     struct PostItemObservation {
         int32_t pre_item_damage;   // damage entering the item step (post weather+STAB+type)
@@ -539,6 +550,7 @@ private:
     // no extra object size, no branches in execute_move_damaging.
 #ifdef ENGINEMON_ENABLE_TEST_SEAMS
     DamageParamsObserver damage_params_observer_;
+    PostCalcObserver     post_calc_observer_;
     PostTypeObserver post_type_observer_;
     PostItemObserver post_item_observer_;
     int32_t pre_type_damage_override_ = -1;
