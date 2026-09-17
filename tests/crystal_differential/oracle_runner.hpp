@@ -332,4 +332,12 @@ int run_type_item_sweep(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_type_item_full_sweep(const char* rom_path, const char* sym_path);
 
+// run_type_item_order_sweep
+//
+// Exhaustive ordering sweep: 15 modifier configs × Q=1..255 pre-item quotient.
+// Maps all ordering differences between Crystal (item before crit/STAB/type) and
+// Enginemon (item after STAB/type). 3825 logical cases, 15300 Crystal executions.
+// ============================================================================
+int run_type_item_order_sweep(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle
