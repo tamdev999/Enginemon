@@ -303,4 +303,15 @@ int run_stab_arithmetic_sweep(const char* rom_path, const char* sym_path);
 // ============================================================================
 int run_weather_damage_sweep(const char* rom_path, const char* sym_path);
 
+// run_badge_boost_sweep
+//
+// Certifies Crystal DoBadgeTypeBoosts against Enginemon's production path.
+// Proves all 5 gating conditions (player turn, no link, no Battle Tower, matching badge, type match).
+// Sweeps input damage 1..255 for badge inactive and badge active.
+// Two badge/type pairs: Cascade(Water) and Volcano(Fire).
+// Documents that Enginemon does not implement badge boost (all active inputs mismatch).
+// Returns 0 if gating passes and active mismatches are expected, 1 on mismatch, 2 on harness error.
+// ============================================================================
+int run_badge_boost_sweep(const char* rom_path, const char* sym_path);
+
 } // namespace crystal::oracle

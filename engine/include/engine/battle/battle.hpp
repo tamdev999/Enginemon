@@ -282,6 +282,13 @@ struct FieldState {
     uint8_t safeguard_player = 0;
     uint8_t safeguard_opponent = 0;
 
+    // Badge state — used by DoBadgeTypeBoosts equivalent when implemented.
+    // Mirrors Crystal wJohtoBadges / wKantoBadges byte layout.
+    // Set via set_field_badges() test seam; reserved for production badge-boost
+    // implementation. Zero = no badges (default = no boost).
+    uint8_t johto_badges = 0;
+    uint8_t kanto_badges = 0;
+
     // Architecture B: Future Sight per-side state.
     // In Crystal, wPlayerFutureSightCount/Damage are side-scoped, not mon-scoped.
     // They persist when the caster switches or faints.
@@ -456,6 +463,17 @@ public:    // Production constructor: BattleRules are mandatory and non-nullable
     void set_field_weather(Weather w, uint8_t weather_turns = 0) {
         field_.weather       = w;
         field_.weather_turns = weather_turns;
+    }
+
+    // Directly set the badge state.
+    // Crystal: DoBadgeTypeBoosts reads wJohtoBadges and wKantoBadges to determine
+    // which type boost is active. Enginemon does not yet implement badge boosts;
+    // this seam is used only to inject the intended badge state so the sweep can
+    // document the production gap without harness arithmetic.
+    // Stored in field_ so any future badge-boost implementation can read it from there.
+    void set_field_badges(uint8_t johto_badges, uint8_t kanto_badges) {
+        field_.johto_badges = johto_badges;
+        field_.kanto_badges = kanto_badges;
     }
 #endif // ENGINEMON_ENABLE_TEST_SEAMS
 

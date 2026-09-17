@@ -596,6 +596,21 @@ if(ENGINEMON_ENABLE_ENGINE AND SAMEBOY_ORACLE)
         target_compile_options(weather_damage_sweep PRIVATE /bigobj)
     endif()
 
+    # badge_boost_sweep -- Crystal DoBadgeTypeBoosts vs Enginemon
+    # 5 gating tests + 1020 logical cases (255×2configs×2pairs), 4080 Crystal execs.
+    # Usage: badge_boost_sweep <rom_path> <sym_path>
+    # ============================================================================
+    add_executable(badge_boost_sweep
+        crystal_differential/badge_boost_sweep.cpp
+    )
+    target_link_libraries(badge_boost_sweep PRIVATE oracle_runner_lib)
+    target_include_directories(badge_boost_sweep PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    if(MSVC)
+        target_compile_options(badge_boost_sweep PRIVATE /bigobj)
+    endif()
+
     # damagecalc_edge_grid -- dense 4-D edge grid for DamageCalc
     # 12,000 logical cases, 48,000 Crystal executions.
     # Usage: damagecalc_edge_grid <rom_path> <sym_path>

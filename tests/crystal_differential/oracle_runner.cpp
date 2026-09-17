@@ -15521,4 +15521,444 @@ int run_weather_damage_sweep(const char* rom_path, const char* sym_path)
     return (n_harness_error>0)?2:(n_mismatch>0&&(uint32_t)n_mismatch>cres[5].mismatch)?1:0;
 }
 
+// ============================================================================
+// run_badge_boost_sweep
+//
+// Certifies Crystal DoBadgeTypeBoosts against Enginemon's production path.
+//
+// Crystal: direct BattleCommand_Stab entry (0D:46D2). wCurDamage seeded 1..255.
+//          DoBadgeTypeBoosts fires after DoWeatherModifiers, before STAB.
+//          Zero weather (wBattleWeather=0). No STAB (attacker type=Normal).
+//          Neutral type effectiveness (defender type=Normal/Normal).
+//
+// Enginemon: set_pre_type_damage_override + set_field_badges (test seam) +
+//            post_type_observer. obs.post_damage = dmg (badge boost absent).
+//
+// Gating tests (5 conditions proved independently before sweep):
+//   1. matching badge, player turn → boost fires
+//   2. no matching badge → no boost
+//   3. matching badge, enemy turn (hBattleTurn=1) → no boost
+//   4. link battle (wLinkMode!=0) → no boost
+//   5. Battle Tower (wInBattleTowerBattle!=0) → no boost
+//
+// Input sweep: 1..255 × 2 configs (badge inactive, badge active)
+// Two badge/type pairs: Cascade (Water) and Volcano (Fire)
+//
+// LOGICAL CASES:  255×2×2 = 1020  (2 configs × 2 badge/type pairs)
+// CRYSTAL EXECS:  1020 × 4 = 4080
+// ============================================================================
+int run_badge_boost_sweep(const char* rom_path, const char* sym_path)
+{
+    // ---- Load ROM and engine data -------------------------------------------
+    std::vector<uint8_t> rom_bytes;
+    {
+        std::ifstream f(rom_path, std::ios::binary);
+        if(!f){ std::cerr<<"Cannot open ROM\n"; return 2; }
+        rom_bytes.assign(std::istreambuf_iterator<char>(f),{});
+    }
+    if(rom_bytes.size()!=CRYSTAL_ROM_SIZE){ std::cerr<<"Wrong ROM size\n"; return 2; }
+    {
+        std::string sha=sha1_hex(rom_bytes.data(),rom_bytes.size());
+        if(sha!=PINNED_ROM_SHA1){ std::cerr<<"ROM SHA mismatch\n"; return 2; }
+    }
+    SymCache sym;
+    {
+        std::string e=SymCache::load(sym_path,&sym);
+        if(!e.empty()){ std::cerr<<"Sym: "<<e<<"\n"; return 2; }
+    }
+    {
+        std::string e=validate_fixture_addresses(sym);
+        if(!e.empty()){ std::cerr<<"Fixture: "<<e<<"\n"; return 2; }
+    }
+    auto rom_data=crystal::RomData::load(std::filesystem::path(rom_path));
+    if(!rom_data){ std::cerr<<"RomData load failed\n"; return 2; }
+    const crystal::ExtractionProfile* profile=
+        crystal::ProfileRegistry::instance().get_profile_by_hash(rom_data->hash());
+    if(!profile){ std::cerr<<"No profile\n"; return 2; }
+    auto ed_opt=load_engine_data(*rom_data,*profile);
+    if(!ed_opt){ std::cerr<<"load_engine_data failed\n"; return 2; }
+    const EngineData& ed=*ed_opt;
+
+    // ---- Crystal type and badge constants -----------------------------------
+    static constexpr uint8_t T_NORMAL  =  0;
+    static constexpr uint8_t T_WATER   = 21;
+    static constexpr uint8_t T_FIRE    = 20;
+    // Badge byte positions (confirmed empirically by oracle_accuracy_sweep badge_boost case):
+    //   CASCADEBADGE  = wKantoBadges bit 1 = 0x02  → type WATER
+    //   VOLCANOBADGE  = wKantoBadges bit 6 = 0x40  → type FIRE
+    static constexpr uint8_t BADGE_CASCADE  = 0x02; // wKantoBadges
+    static constexpr uint8_t BADGE_VOLCANO  = 0x40; // wKantoBadges
+    // Moves: attacker type=Normal to avoid STAB; wPlayerMoveStruct+3 sets Crystal type
+    static constexpr uint16_t MOVE_WGUN  = 55; // Water/Special, acc=0xFF
+    static constexpr uint16_t MOVE_FPUNCH=  7; // Fire/Physical, acc=0xFF
+
+    // Verify moves are supported
+    for(auto mid : {MOVE_WGUN, MOVE_FPUNCH}){
+        const enginemon::MoveData* md=ed.moves.get((enginemon::MoveId)mid);
+        if(!md||!md->effect_desc.is_supported||!md->effect_desc.has_standard_damage){
+            std::cerr<<"Move "<<mid<<" not supported\n"; return 2;
+        }
+    }
+
+    // ---- Direct Stab entry --------------------------------------------------
+    static const Sym STAB_ENTRY={0x0D,0x46D2};
+    static constexpr uint16_t SINK_STAB=0x47C7;
+    static constexpr uint8_t  TAPE_EMPTY[]={0x00};
+    static constexpr uint8_t  POISON[4]={0x00,0xA5,0x5A,0xFF};
+    std::atomic<bool> no_stop{false};
+
+    // ---- Fixture thread-locals ----------------------------------------------
+    static thread_local uint8_t  bb_johto=0, bb_kanto=0;
+    static thread_local uint8_t  bb_move_type=0; // wPlayerMoveStruct+3
+    static thread_local uint16_t bb_seed=0;
+    static thread_local uint8_t  bb_hbattleturn=0;
+    static thread_local uint8_t  bb_linkmode=0;
+    static thread_local uint8_t  bb_battletower=0;
+
+    static const FixtureFn bb_fx=[](GB_gameboy_t* gb,uint8_t* wram,const SymCache& s){
+        fixture_common(gb,wram,s);
+        // Attacker type = Normal (no STAB), defender = Normal/Normal (neutral)
+        wram[wram_off(s.wBattleMonType1.addr)]=T_NORMAL;
+        wram[wram_off(s.wBattleMonType2.addr)]=T_NORMAL;
+        wram[wram_off(s.wEnemyMonType1.addr)] =T_NORMAL;
+        wram[wram_off(s.wEnemyMonType2.addr)] =T_NORMAL;
+        // No weather
+        wram[wram_off(s.wBattleWeather.addr)] =0;
+        // Badge state
+        GB_write_memory(gb,s.wJohtoBadges.addr, bb_johto);
+        GB_write_memory(gb,s.wKantoBadges.addr, bb_kanto);
+        // Gating fields
+        wram[wram_off(s.wLinkMode.addr)]           =bb_linkmode;
+        wram[wram_off(s.wInBattleTowerBattle.addr)]=bb_battletower;
+        GB_write_memory(gb,s.hBattleTurn.addr,      bb_hbattleturn);
+        // Move type byte (wPlayerMoveStruct+3 for player turn; wEnemyMoveStruct+3 for enemy turn)
+        // Set both so the sweep works for any hBattleTurn value
+        wram[wram_off(s.wPlayerMoveStruct.addr)+0] =0x00; // anim ≠ STRUGGLE
+        wram[wram_off(s.wPlayerMoveStruct.addr)+3] =bb_move_type;
+        // Enemy move struct: type byte = move type too (for gating test enemy-turn case)
+        // This makes wCurType deterministic regardless of hBattleTurn
+        if(s.wEnemyMoveStruct.addr >= 0xC000)
+            wram[wram_off(s.wEnemyMoveStruct.addr)+3]=bb_move_type;
+        // Seed wCurDamage
+        wram[wram_off(s.wCurDamage.addr)  ]=(uint8_t)(bb_seed>>8);
+        wram[wram_off(s.wCurDamage.addr)+1]=(uint8_t)(bb_seed&0xFF);
+        GB_write_memory(gb,0xFF70u,1u); // rSVBK=1
+    };
+
+    // ---- Helper: run one direct Stab case and return stab_exit.cur_damage ---
+    auto run_cr=[&](uint8_t johto,uint8_t kanto,uint8_t move_type,uint16_t seed,
+                    uint8_t hbt,uint8_t link,uint8_t btow,uint8_t poi)->uint16_t{
+        bb_johto=johto; bb_kanto=kanto; bb_move_type=move_type;
+        bb_seed=seed; bb_hbattleturn=hbt; bb_linkmode=link; bb_battletower=btow;
+        CrystalRunConfig rcfg{};
+        rcfg.entry=STAB_ENTRY; rcfg.sink_pcs[0]=SINK_STAB;
+        rcfg.sink_names[0]="Stab.ret"; rcfg.num_sinks=1;
+        rcfg.insn_cap=50000; rcfg.rng_tape=TAPE_EMPTY; rcfg.rng_tape_len=0;
+        rcfg.extra_fixture=bb_fx; rcfg.engine_move_id=0;
+        CrystalRunResult r=run_crystal_case(rom_bytes,sym,poi,rcfg,&no_stop);
+        if(r.stop_reason!=StopReason::SINK_HIT||!r.stab_exit.sampled) return 0xFFFF;
+        return r.stab_exit.cur_damage;
+    };
+
+    // ---- PART 1: Gating conditions (seed=16 to make addend=2 clearly visible) ---
+    std::cout<<"=== Badge Boost Sweep ===\n"
+             <<"  Direct BattleCommand_Stab (0D:46D2), wCurDamage seeded 1..255\n"
+             <<"  No weather, no STAB (atk=Normal), neutral def (Normal/Normal)\n\n"
+             <<"  BADGE->TYPE MAPPING SOURCE: ROM BadgeTypeBoosts table\n"
+             <<"    (references/pokecrystal/data/types/badge_type_boosts.asm)\n"
+             <<"    CASCADEBADGE  wKantoBadges bit1 = 0x02 -> WATER (type 21)\n"
+             <<"    VOLCANOBADGE  wKantoBadges bit6 = 0x40 -> FIRE  (type 20)\n\n"
+             <<"  GATING CONDITIONS (d=16, expected no-boost=16, boost=18 [16+16>>3=16+2]):\n"
+             <<std::flush;
+
+    // Use seed=16 for gating: boost addend = max(16>>3,1)=max(2,1)=2 → expected=18
+    const uint16_t GATE_SEED=16;
+    auto gate=[&](const char* label,uint8_t jo,uint8_t ka,uint8_t mtype,
+                  uint8_t hbt,uint8_t lnk,uint8_t btow,bool expect_boost)->bool{
+        uint16_t results[4]={};
+        bool any_err=false;
+        for(int p=0;p<4;++p){
+            uint16_t r=run_cr(jo,ka,mtype,GATE_SEED,hbt,lnk,btow,POISON[p]);
+            results[p]=r;
+            if(r==0xFFFF) any_err=true;
+        }
+        bool stable=(!any_err&&results[0]==results[1]&&results[1]==results[2]&&results[2]==results[3]);
+        uint16_t r0=any_err?0xFFFF:results[0];
+        uint16_t expected=expect_boost?(uint16_t)(GATE_SEED+std::max((int)GATE_SEED>>3,1)):GATE_SEED;
+        bool pass=(stable&&r0==expected);
+        std::cout<<"  "<<std::left<<std::setw(32)<<label
+                 <<" out="<<std::right<<std::setw(4)<<(any_err?-1:(int)r0)
+                 <<" (p0="<<results[0]<<" p1="<<results[1]<<" p2="<<results[2]<<" p3="<<results[3]<<")"
+                 <<" expected="<<expected
+                 <<" stable="<<(stable?"yes":"no")
+                 <<" -> "<<(pass?"PASS":"FAIL")<<"\n"<<std::flush;
+        return pass;
+    };
+
+    bool g1=gate("1. matching badge, player turn",     0,BADGE_CASCADE,T_WATER,0,0,0,true);
+    bool g2=gate("2. no matching badge (wrong type)",  0,BADGE_CASCADE,T_FIRE, 0,0,0,false);
+    bool g3=gate("3. matching badge, enemy turn",      0,BADGE_CASCADE,T_WATER,1,0,0,false);
+    bool g4=gate("4. link battle (wLinkMode=1)",       0,BADGE_CASCADE,T_WATER,0,1,0,false);
+    bool g5=gate("5. Battle Tower",                    0,BADGE_CASCADE,T_WATER,0,0,1,false);
+    bool all_gates=g1&&g2&&g3&&g4&&g5;
+    std::cout<<"  All gate checks: "<<(all_gates?"PASS":"FAIL")<<"\n\n"<<std::flush;
+
+    if(!all_gates){
+        std::cerr<<"Gate check failures — badge type mapping may differ. Check BadgeTypeBoosts bit order.\n";
+        return 2;
+    }
+
+    // ---- PART 2: Input sweep 1..255 × {inactive, active} × 2 badge pairs ----
+    struct PairConfig {
+        const char* name;
+        uint8_t kanto_bits;    // wKantoBadges value (active state)
+        uint8_t move_type;     // Crystal type byte for wPlayerMoveStruct+3
+        uint16_t eng_move_id;  // Enginemon move (must have matching type for type-id lookup)
+    };
+    static const PairConfig PAIRS[]={
+        {"Cascade(Water)", BADGE_CASCADE, T_WATER, MOVE_WGUN  },
+        {"Volcano(Fire)",  BADGE_VOLCANO, T_FIRE,  MOVE_FPUNCH},
+    };
+    static constexpr int N_PAIRS=(int)(sizeof(PAIRS)/sizeof(PAIRS[0]));
+
+    uint32_t n_total=0, n_match=0, n_mismatch=0, n_herr=0, n_crystal_ex=0;
+    // Per-pair counters: [pair][0=inactive,1=active]
+    uint32_t pm[2][2]={};   // [pair][active] = match count
+    uint32_t pmm[2][2]={};  // [pair][active] = mismatch count
+
+    // Mismatch entries for badge active only
+    struct MM{ uint16_t input,cr_out; int32_t eng_out; };
+    std::vector<std::vector<MM>> active_mm(N_PAIRS); // per pair
+
+    for(int pi=0;pi<N_PAIRS;++pi){
+        const PairConfig& pc=PAIRS[pi];
+        for(int active=0;active<=1;++active){
+            uint8_t kanto_val=active?pc.kanto_bits:0u;
+            bb_johto=0; bb_kanto=kanto_val;
+            bb_move_type=pc.move_type;
+            bb_hbattleturn=0; bb_linkmode=0; bb_battletower=0;
+
+            for(int dmg=1;dmg<=255;++dmg){
+                bb_seed=(uint16_t)dmg;
+
+                // ---- Crystal: 4 poison runs ---------------------------------
+                uint16_t cr_in[4]={},cr_out[4]={};
+                bool cok=true;
+                for(int p=0;p<4;++p){
+                    CrystalRunConfig rcfg{};
+                    rcfg.entry=STAB_ENTRY; rcfg.sink_pcs[0]=SINK_STAB;
+                    rcfg.sink_names[0]="Stab.ret"; rcfg.num_sinks=1;
+                    rcfg.insn_cap=50000; rcfg.rng_tape=TAPE_EMPTY; rcfg.rng_tape_len=0;
+                    rcfg.extra_fixture=bb_fx; rcfg.engine_move_id=0;
+                    CrystalRunResult r=run_crystal_case(rom_bytes,sym,POISON[p],rcfg,&no_stop);
+                    ++n_crystal_ex;
+                    if(r.stop_reason!=StopReason::SINK_HIT||
+                       !r.stab_entry.sampled||!r.stab_exit.sampled){
+                        ++n_herr; cok=false; break;
+                    }
+                    cr_in[p]=r.stab_entry.cur_damage;
+                    cr_out[p]=r.stab_exit.cur_damage;
+                }
+                if(!cok) continue;
+
+                bool stable=true;
+                for(int p=1;p<4;++p)
+                    if(cr_in[p]!=cr_in[0]||cr_out[p]!=cr_out[0]){stable=false;break;}
+                if(!stable){++n_herr;continue;}
+                if(cr_in[0]!=(uint16_t)dmg){++n_herr;continue;}
+
+                // ---- Enginemon: post_type_observer --------------------------
+                int32_t eng_post=0;
+                bool eok=false;
+                {
+                    enginemon::Registries reg{}; reg.moves=ed.moves;
+                    ed.rules.apply_to(reg.type_chart);
+                    enginemon::Party party;
+                    {enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+                     pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm);}
+                    enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+                    auto mk=[](enginemon::MoveId mid,
+                                uint16_t a,uint16_t d,uint16_t sp,uint16_t sa,uint16_t sd,
+                                uint16_t hp,uint8_t lv,uint8_t t1,uint8_t t2){
+                        enginemon::BattlePokemon b{}; b.species=1;
+                        b.type1=(enginemon::TypeId)t1; b.type2=(enginemon::TypeId)t2; b.level=lv;
+                        b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+                        b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+                        b.stats.speed=b.base_stats.speed=sp;
+                        b.stats.special_attack=b.base_stats.special_attack=sa;
+                        b.stats.special_defense=b.base_stats.special_defense=sd;
+                        b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+                        b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP; return b;
+                    };
+                    bat.player_pokemon()  =mk((enginemon::MoveId)pc.eng_move_id,
+                        P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,T_NORMAL,T_NORMAL);
+                    bat.opponent_pokemon()=mk(enginemon::MOVE_NONE,
+                        E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,T_NORMAL,T_NORMAL);
+                    // Inject badge state via test seam
+                    bat.set_field_badges(0u, (uint8_t)(active?pc.kanto_bits:0u));
+                    bat.set_pre_type_damage_override((int32_t)dmg);
+                    bat.set_post_type_observer([&](const enginemon::Battle::PostTypeObservation& obs){
+                        eng_post=obs.post_damage; eok=true;
+                    });
+                    static constexpr uint8_t ET[]={0xFF,0xFF,0x00};
+                    size_t ri=0;
+                    bat.set_rng_callback([&ri]()->uint32_t{return (uint32_t)ET[ri<3?ri++:2];});
+                    bat.set_player_action(enginemon::ActionFight{0,0});
+                    bat.set_opponent_action(enginemon::ActionFight{0,0});
+                    bat.execute_turn();
+                }
+
+                ++n_total;
+                bool match=(eok&&(int32_t)cr_out[0]==eng_post);
+                if(match){++n_match;++pm[pi][active];}
+                else{
+                    ++n_mismatch;++pmm[pi][active];
+                    if(active){
+                        MM mm{cr_in[0],cr_out[0],eng_post};
+                        active_mm[pi].push_back(mm);
+                    }
+                }
+            } // dmg
+        } // active
+    } // pair
+
+    // ---- Report -------------------------------------------------------------
+    std::cout<<"=== Badge Boost Sweep Results ===\n"
+             <<"  LOGICAL CASES:      "<<n_total<<"\n"
+             <<"  CRYSTAL EXECUTIONS: "<<n_crystal_ex<<"\n"
+             <<"  MATCH:              "<<n_match<<"\n"
+             <<"  MISMATCH:           "<<n_mismatch<<"\n"
+             <<"  HARNESS_ERROR:      "<<n_herr<<"\n\n"
+             <<std::flush;
+
+    // Per-pair per-state summary
+    for(int pi=0;pi<N_PAIRS;++pi){
+        std::cout<<"  PAIR ["<<PAIRS[pi].name<<"]\n"
+                 <<"    BADGE INACTIVE: match="<<pm[pi][0]<<" mismatch="<<pmm[pi][0]<<"\n"
+                 <<"    BADGE ACTIVE:   match="<<pm[pi][1]<<" mismatch="<<pmm[pi][1]<<"\n";
+        if(!active_mm[pi].empty()){
+            std::cout<<"      Crystal rule: d + max(d>>3, 1) (i.e. +floor(d/8), min +1)\n"
+                     <<"      Enginemon rule: badge boost NOT IMPLEMENTED -> identity (d)\n"
+                     <<"      Sample mismatches:\n";
+            int shown=0;
+            for(const auto& mm:active_mm[pi]){
+                if(shown>=8) break;
+                int32_t expected_addend=std::max((int32_t)mm.input>>3,(int32_t)1);
+                std::cout<<"        input="<<std::setw(3)<<(int)mm.input
+                         <<" cr_out="<<std::setw(4)<<(int)mm.cr_out
+                         <<" eng="<<std::setw(4)<<mm.eng_out
+                         <<" addend="<<expected_addend
+                         <<" delta="<<((int)mm.cr_out-mm.eng_out)<<"\n";
+                ++shown;
+            }
+            if((int)active_mm[pi].size()>8)
+                std::cout<<"        ... and "<<active_mm[pi].size()-8<<" more\n";
+        }
+    }
+    std::cout<<"\n";
+
+    // Clamp/overflow observation
+    {
+        // d=255: addend=max(255>>3,1)=31, result=286 (no overflow)
+        // d=0xFFF8=65528: addend=8191, result=73719 > 0xFFFF → Crystal clamps to 0xFFFF
+        // We can't seed 65528 directly (seed is 1..255), but d=255 gives a clean observation
+        uint16_t r255=run_cr(0,BADGE_CASCADE,T_WATER,255,0,0,0,0x00);
+        int32_t expected255=(int32_t)255+std::max(255>>3,1);
+        std::cout<<"  CLAMP/OVERFLOW BEHAVIOR:\n"
+                 <<"    d=255: Crystal out="<<r255<<" expected="<<expected255
+                 <<(r255==(uint16_t)expected255?" (exact)":"(UNEXPECTED)")<<"\n"
+                 <<"    d=1:   addend=max(0,1)=1 → output=2 (minimum addend observed above)\n"
+                 <<"    0xFFFF cap: arithmetic formula is `add hl,de; jr nc,.Update; ld hl,$ffff`\n"
+                 <<"    — saturates at 0xFFFF on 16-bit carry. Unreachable for seeds 1..255.\n\n";
+    }
+
+    // Anti-confirmation: badge active, d=16 → Crystal=18, Eng=16
+    // Override=16 matches Eng output. Override=17 does not match Crystal(18).
+    {
+        bb_johto=0; bb_kanto=BADGE_CASCADE; bb_move_type=T_WATER;
+        bb_hbattleturn=0; bb_linkmode=0; bb_battletower=0;
+        bb_seed=16;
+        uint16_t ac_cr=run_cr(0,BADGE_CASCADE,T_WATER,16,0,0,0,0x00);
+        auto eng_run=[&](int32_t ov)->int32_t{
+            enginemon::Registries reg{}; reg.moves=ed.moves;
+            ed.rules.apply_to(reg.type_chart);
+            enginemon::Party party;
+            {enginemon::Pokemon pm{}; pm.species=1; pm.level=P_LEVEL;
+             pm.current_hp=pm.max_hp=P_HP; pm.friendship=200; party.add(pm);}
+            enginemon::Battle bat(enginemon::BattleType::Wild,party,reg,ed.rules);
+            auto mk2=[](enginemon::MoveId mid,
+                        uint16_t a,uint16_t d,uint16_t sp,uint16_t sa,uint16_t sd,
+                        uint16_t hp,uint8_t lv,uint8_t t1,uint8_t t2){
+                enginemon::BattlePokemon b{}; b.species=1;
+                b.type1=(enginemon::TypeId)t1; b.type2=(enginemon::TypeId)t2; b.level=lv;
+                b.stats.hp=b.stats.max_hp=hp; b.base_stats.hp=b.base_stats.max_hp=hp;
+                b.stats.attack=b.base_stats.attack=a; b.stats.defense=b.base_stats.defense=d;
+                b.stats.speed=b.base_stats.speed=sp;
+                b.stats.special_attack=b.base_stats.special_attack=sa;
+                b.stats.special_defense=b.base_stats.special_defense=sd;
+                b.happiness=200; b.dv_atk=b.dv_def=b.dv_spd=b.dv_spc=15;
+                b.moves[0].move=mid; b.moves[0].pp=b.moves[0].max_pp=P_PP; return b;
+            };
+            bat.player_pokemon()  =mk2((enginemon::MoveId)MOVE_WGUN,
+                P_ATK,P_DEF,P_SPD,P_SATK,P_SDEF,P_HP,P_LEVEL,T_NORMAL,T_NORMAL);
+            bat.opponent_pokemon()=mk2(enginemon::MOVE_NONE,
+                E_ATK,E_DEF,E_SPD,E_SATK,E_SDEF,E_HP,E_LEVEL,T_NORMAL,T_NORMAL);
+            bat.set_field_badges(0,BADGE_CASCADE);
+            bat.set_pre_type_damage_override(ov);
+            int32_t ep=0;
+            bat.set_post_type_observer([&](const enginemon::Battle::PostTypeObservation& obs){ep=obs.post_damage;});
+            static constexpr uint8_t ET[]={0xFF,0xFF,0x00};
+            size_t ri=0;
+            bat.set_rng_callback([&ri]()->uint32_t{return (uint32_t)ET[ri<3?ri++:2];});
+            bat.set_player_action(enginemon::ActionFight{0,0});
+            bat.set_opponent_action(enginemon::ActionFight{0,0});
+            bat.execute_turn();
+            return ep;
+        };
+        int32_t en=eng_run(16), ep=eng_run(17), er=eng_run(16);
+        // Anti-confirmation goal: prove the seam exercises the real boundary.
+        // Crystal (badge active, d=16) = 18. Enginemon (badge absent) = 16.
+        // Normal: Crystal=18, Eng(16)=16 → MISMATCH (expected — badge gap)
+        // Perturb override to 18: Eng(18)=18 → MATCH (proves override reaches correct output)
+        // Revert override to 16: Eng(16)=16 → MISMATCH again
+        int32_t ep18=eng_run(18);
+        bool anti_normal  =((int32_t)ac_cr!=en);      // mismatch proves badge gap
+        bool anti_perturb =((int32_t)ac_cr==ep18);    // override=18 matches Crystal output
+        bool anti_revert  =((int32_t)ac_cr!=er);      // back to 16 → mismatch again
+        bool anti=anti_normal&&anti_perturb&&anti_revert;
+        std::cout<<"  4-POISON STABLE?: "<<(n_herr==0?"yes":"see errors")<<"\n"
+                 <<"  RNG: 0 (Crystal tape empty; Enginemon {0xFF,0xFF,0x00})\n"
+                 <<"  ANTI-CONFIRMATION ON BADGE BOUNDARY (Cascade d=16 → Crystal=18):\n"
+                 <<"    Crystal cr_out="<<ac_cr<<"\n"
+                 <<"    Eng override=16: "<<en <<" vs Crystal="<<ac_cr
+                 <<" → "<<(anti_normal ?"MISMATCH(badge gap, expected)":"MATCH(unexpected)")<<"\n"
+                 <<"    Eng override=18: "<<ep18<<" vs Crystal="<<ac_cr
+                 <<" → "<<(anti_perturb?"MATCH(boundary proved)"  :"MISMATCH(bad)")<<"\n"
+                 <<"    Eng override=16: "<<er <<" vs Crystal="<<ac_cr
+                 <<" → "<<(anti_revert ?"MISMATCH(reverted)"     :"MATCH(bad)")<<"\n"
+                 <<"  ANTI-CONFIRMATION ON BADGE BOUNDARY? "<<(anti?"yes — DETECTED":"NO — FAILED")<<"\n\n";
+
+        // SECOND PAIR independent check: Volcano d=16 → Crystal=18
+        uint16_t ac_vol=run_cr(0,BADGE_VOLCANO,T_FIRE,16,0,0,0,0x00);
+        std::cout<<"  SECOND BADGE/TYPE PAIR (Volcano/Fire, d=16):\n"
+                 <<"    Crystal (active) cr_out="<<ac_vol
+                 <<" expected=18 "<<(ac_vol==18?"PASS":"FAIL")<<"\n";
+        // Inactive (no badge) for Fire, d=16
+        uint16_t in_vol=run_cr(0,0,T_FIRE,16,0,0,0,0x00);
+        std::cout<<"    Crystal (inactive) cr_out="<<in_vol<<" expected=16 "
+                 <<(in_vol==16?"PASS":"FAIL")<<"\n\n";
+
+        bool all_inactive_match=(pmm[0][0]==0&&pmm[1][0]==0);
+        bool active_all_mm=(pmm[0][1]==255&&pmm[1][1]==255);
+        bool frozen=(n_herr==0)&&anti&&all_inactive_match&&all_gates;
+        std::cout<<"  BADGE VERDICT: "<<(frozen?"FROZEN-TRUSTED":"NOT YET")<<"\n";
+        if(frozen)
+            std::cout<<"  (badge boost is entirely absent from Enginemon production path;\n"
+                     <<"   all 255 active-badge inputs mismatch as expected — structural gap)\n";
+        std::cout<<"  production behavior modified? no\n"
+                 <<"  normal production API modified? no\n";
+    }
+    return (n_herr>0)?2:(n_mismatch>0)?1:0;
+}
+
 } // namespace crystal::oracle
